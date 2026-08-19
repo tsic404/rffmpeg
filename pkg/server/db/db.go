@@ -790,6 +790,23 @@ func (d *Database) GetIdleWorkers() ([]*Worker, error) {
 	return d.scanWorkers(rows)
 }
 
+// GetSchedulableWorkers retrieves all workers that are not offline and not evicted.
+// Unlike GetIdleWorkers, busy workers are included so a submitted job can be queued
+// while a worker is currently busy (TSI-2204).
+func (d *Database) GetSchedulableWorkers() ([]*Worker, error) {
+	rows, err := d.db.Query(`
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		FROM workers WHERE status != ? AND evicted = 0
+		ORDER BY last_heartbeat DESC
+	`, protocol.WorkerStatusOffline)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schedulable workers: %w", err)
+	}
+	defer rows.Close()
+
+	return d.scanWorkers(rows)
+}
+
 // GetWorkerActiveJobCount returns the number of active jobs (running or queued) for a worker
 func (d *Database) GetWorkerActiveJobCount(workerID string) (int, error) {
 	var count int
@@ -1037,6 +1054,24 @@ func (d *Database) GetIdleWorkersByEncoder(encoderName string) ([]*Worker, error
 	`, protocol.WorkerStatusIdle, encoderName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get idle workers by encoder: %w", err)
+	}
+	defer rows.Close()
+
+	return d.scanWorkers(rows)
+}
+
+// GetSchedulableWorkersByEncoder retrieves workers that are not offline and not evicted
+// and that have a specific encoder capability. Busy workers are included so a submitted
+// job can be queued while the worker is currently busy (TSI-2204).
+func (d *Database) GetSchedulableWorkersByEncoder(encoderName string) ([]*Worker, error) {
+	rows, err := d.db.Query(`
+		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
+		FROM workers w, json_each(w.encoders) AS enc
+		WHERE w.status != ? AND w.evicted = 0 AND enc.value = ?
+		ORDER BY w.last_heartbeat DESC
+	`, protocol.WorkerStatusOffline, encoderName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get schedulable workers by encoder: %w", err)
 	}
 	defer rows.Close()
 

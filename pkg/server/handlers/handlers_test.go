@@ -1047,6 +1047,92 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	}
 }
 
+// TSI-2204: Test that job submission is accepted (queued) when the only worker is busy,
+// instead of being rejected with 503.
+func TestSubmitJobBusyWorkerQueued(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// Register a single worker
+	workerID := registerTestWorker(t, router, []string{"libx264"})
+
+	// Mark the worker busy via heartbeat
+	heartbeatReq := protocol.WorkerHeartbeatRequest{
+		WorkerID: workerID,
+		Status:   protocol.WorkerStatusBusy,
+	}
+	heartbeatBody, _ := json.Marshal(heartbeatReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Failed to mark worker busy: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	// Upload file
+	fileContent := []byte("test video content")
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.mp4")
+	part.Write(fileContent)
+	writer.Close()
+
+	req = httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Upload failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	var uploadResp protocol.UploadResponse
+	if err := json.NewDecoder(w.Body).Decode(&uploadResp); err != nil {
+		t.Fatalf("Failed to decode upload response: %v", err)
+	}
+
+	// Submit a job while the only worker is busy
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Should succeed (200) and queue the job instead of rejecting with 503
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200 (queued), got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	var jobResp protocol.JobSubmitResponse
+	if err := json.NewDecoder(w.Body).Decode(&jobResp); err != nil {
+		t.Fatalf("Failed to decode job submit response: %v", err)
+	}
+	if jobResp.JobID == "" {
+		t.Fatal("Expected non-empty job ID")
+	}
+
+	// The job should be created in pending state, waiting for the worker to become idle
+	req = httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Failed to get job: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var statusResp protocol.JobStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&statusResp); err != nil {
+		t.Fatalf("Failed to decode job status response: %v", err)
+	}
+	if statusResp.Job.Status != protocol.JobStatusPending {
+		t.Errorf("Expected job status 'pending' (queued waiting for worker), got '%s'", statusResp.Job.Status)
+	}
+}
+
 // TSI-1500: Test that handler allows job submission when compatible encoder is available
 func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 	_, router, cleanup := setupTest(t)

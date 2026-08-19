@@ -341,7 +341,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	// Instead of exact match, check if any worker has an encoder in the same codec family
 	if requestedEncoder != "" {
 		// First try exact match
-		workersWithEncoder, err := h.db.GetIdleWorkersByEncoder(requestedEncoder)
+		workersWithEncoder, err := h.db.GetSchedulableWorkersByEncoder(requestedEncoder)
 		if err != nil {
 			log.Printf("SubmitJob: Failed to check workers by encoder %s: %v", requestedEncoder, err)
 			// Fall through to check compatible encoders
@@ -357,7 +357,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 			if enc == requestedEncoder {
 				continue // Skip the requested encoder (already checked)
 			}
-			workers, err := h.db.GetIdleWorkersByEncoder(enc)
+			workers, err := h.db.GetSchedulableWorkersByEncoder(enc)
 			if err != nil {
 				log.Printf("SubmitJob: Failed to check workers for compatible encoder %s: %v", enc, err)
 				continue
@@ -381,16 +381,18 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 jobCreate:
 
-	// Check for any available idle workers (general availability)
-	idleWorkers, err := h.db.GetIdleWorkers()
+	// Check for any schedulable worker (not offline, not evicted) before creating the job.
+	// Busy workers count as available: the job is created in pending state and the scheduler
+	// queues it until a worker becomes idle (TSI-2204).
+	schedulableWorkers, err := h.db.GetSchedulableWorkers()
 	if err != nil {
-		log.Printf("SubmitJob: Failed to check idle workers: %v", err)
+		log.Printf("SubmitJob: Failed to check schedulable workers: %v", err)
 		// Don't fail the request on database error - let the scheduler handle it
-	} else if len(idleWorkers) == 0 {
+	} else if len(schedulableWorkers) == 0 {
 		// No workers available at all
 		writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
 			protocol.ErrCodeWorkerUnavailable,
-			"No worker available. Please ensure at least one worker is registered and idle.",
+			"No worker available. Please ensure at least one worker is registered and online.",
 			nil,
 		))
 		return
