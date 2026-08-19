@@ -294,6 +294,15 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 
 // SubmitJob handles job submission
 func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
+	// Validate auth token (defense-in-depth; middleware also validates,
+	// but handler-level check ensures protection even if middleware is bypassed)
+	if _, ok := h.validateAuthToken(r); !ok {
+		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
+			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
+		))
+		return
+	}
+
 	var req protocol.JobSubmitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(

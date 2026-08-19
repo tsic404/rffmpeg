@@ -35,7 +35,7 @@ type ChunkUploadHandler struct {
 	db          *db.Database
 	storage     *storage.Storage
 	chunkSize   int64
-	authToken   string         // Non-empty when auth is configured
+	authToken   string        // Non-empty when auth is configured
 	semaphore   chan struct{} // For concurrent upload control
 	cleanupOnce sync.Once
 	wg          sync.WaitGroup // Tracks async cleanup goroutines
@@ -177,6 +177,13 @@ func (h *ChunkUploadHandler) InitChunkUpload(w http.ResponseWriter, r *http.Requ
 
 // UploadChunk handles uploading a single chunk
 func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.validateAuthToken(r); !ok {
+		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
+			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
+		))
+		return
+	}
+
 	uploadID := chi.URLParam(r, "uploadId")
 	chunkIndexStr := chi.URLParam(r, "chunkIndex")
 
@@ -307,6 +314,13 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 
 // GetUploadProgress returns the upload progress
 func (h *ChunkUploadHandler) GetUploadProgress(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.validateAuthToken(r); !ok {
+		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
+			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
+		))
+		return
+	}
+
 	uploadID := chi.URLParam(r, "uploadId")
 
 	session, err := h.db.GetUploadSession(uploadID)
@@ -363,6 +377,13 @@ func (h *ChunkUploadHandler) GetUploadProgress(w http.ResponseWriter, r *http.Re
 
 // CompleteChunkUpload finalizes the chunked upload and assembles the file
 func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.validateAuthToken(r); !ok {
+		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
+			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
+		))
+		return
+	}
+
 	var req protocol.ChunkUploadCompleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
@@ -518,6 +539,13 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 
 // CancelChunkUpload cancels an upload session
 func (h *ChunkUploadHandler) CancelChunkUpload(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.validateAuthToken(r); !ok {
+		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
+			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
+		))
+		return
+	}
+
 	uploadID := chi.URLParam(r, "uploadId")
 
 	// Get upload session
@@ -628,6 +656,13 @@ func (h *ChunkUploadHandler) UploadFileFromReader(filename string, fileSize int6
 
 // ResumeChunkUpload allows resuming an interrupted upload
 func (h *ChunkUploadHandler) ResumeChunkUpload(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.validateAuthToken(r); !ok {
+		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
+			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
+		))
+		return
+	}
+
 	uploadID := chi.URLParam(r, "uploadId")
 
 	session, err := h.db.GetUploadSession(uploadID)
