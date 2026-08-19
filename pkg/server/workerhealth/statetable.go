@@ -176,12 +176,17 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 
 	if len(throughputs) < 2 {
 		// Not enough data to compute a meaningful median; clear eviction on all
+		// active workers. Report previously evicted workers as recovered so the
+		// monitor syncs the DB — otherwise a worker is stuck with its DB eviction
+		// flag set (excluded from scheduling) while showing an idle status.
+		var recovered []string
 		for _, w := range activeWorkers {
-			if st, ok := t.states[w.id]; ok {
+			if st, ok := t.states[w.id]; ok && st.Evicted {
 				st.Evicted = false
+				recovered = append(recovered, w.id)
 			}
 		}
-		return SlowNodeDetectionResult{Median: 0}
+		return SlowNodeDetectionResult{Recovered: recovered, Median: 0}
 	}
 
 	// Compute median

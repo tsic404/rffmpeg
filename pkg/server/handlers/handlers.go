@@ -1416,6 +1416,7 @@ type WorkerInfo struct {
 	ID            string   `json:"id"`
 	Name          string   `json:"name,omitempty"`
 	Status        string   `json:"status"`
+	Evicted       bool     `json:"evicted"`
 	GPUModel      string   `json:"gpu_model,omitempty"`
 	Encoders      []string `json:"encoders"`
 	Decoders      []string `json:"decoders,omitempty"`
@@ -1575,6 +1576,7 @@ func dbWorkerToWorkerInfo(worker *db.Worker) WorkerInfo {
 		ID:            worker.ID,
 		Name:          worker.Name,
 		Status:        string(worker.Status),
+		Evicted:       worker.Evicted,
 		Encoders:      encoders,
 		Decoders:      decoders,
 		FFmpegVersion: worker.FFmpegVersion,

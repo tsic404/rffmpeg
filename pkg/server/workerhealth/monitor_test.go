@@ -659,6 +659,62 @@ func TestSlowNodeRecoveryViaMonitor(t *testing.T) {
 	}
 }
 
+func TestSlowNodeEvictionClearedWhenClusterShrinks(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create 3 workers.
+	for _, w := range []struct {
+		id   string
+		name string
+	}{
+		{"w1", "worker-1"},
+		{"w2", "worker-2"},
+		{"w3", "worker-3"},
+	} {
+		if _, err := database.CreateWorker(w.id, w.name, protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "6.0",
+		}); err != nil {
+			t.Fatalf("Failed to create worker %s: %v", w.id, err)
+		}
+	}
+
+	stateTable := NewWorkerStateTable(30 * time.Second)
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now()})
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w2", Status: "online", ThroughputFPS: 110, Timestamp: time.Now()})
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w3", Status: "online", ThroughputFPS: 10, Timestamp: time.Now()})
+
+	monitor := New(database, Config{
+		HeartbeatTimeout:    30 * time.Second,
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 1 * time.Second,
+		MaxRetryCount:       3,
+	})
+	monitor.SetStateTable(stateTable)
+
+	// First detection: w3 is slow and gets evicted in the DB.
+	monitor.detectSlowWorkers()
+	evicted, _ := database.IsWorkerEvicted("w3")
+	if !evicted {
+		t.Fatal("Expected w3 to be evicted in DB")
+	}
+
+	// Cluster shrinks to a single worker: w1 and w2 leave.
+	stateTable.RemoveWorker("w1")
+	stateTable.RemoveWorker("w2")
+
+	// Second detection must clear w3's DB eviction so it becomes schedulable.
+	monitor.detectSlowWorkers()
+	evicted, err := database.IsWorkerEvicted("w3")
+	if err != nil {
+		t.Fatalf("Failed to check eviction: %v", err)
+	}
+	if evicted {
+		t.Error("Expected w3 to no longer be evicted in DB after cluster shrink")
+	}
+}
+
 // --- Multi-Worker Failover Tests (TSI-1641 Scene 10.1) ---
 
 func TestMultiWorkerHeartbeatTimeout(t *testing.T) {

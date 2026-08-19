@@ -301,6 +301,38 @@ func TestDetectSlowWorkers_SingleWorker(t *testing.T) {
 	}
 }
 
+func TestDetectSlowWorkers_SingleWorkerClearsEviction(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	// Two workers: w2 is slow and gets evicted.
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(),
+	})
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w2", Status: "online", ThroughputFPS: 10, Timestamp: time.Now(),
+	})
+
+	result := table.DetectSlowWorkers()
+	if len(result.NewlyEvicted) != 1 || result.NewlyEvicted[0] != "w2" {
+		t.Fatalf("expected w2 to be evicted, got %v", result.NewlyEvicted)
+	}
+
+	// Cluster shrinks to a single worker (w1 leaves).
+	table.RemoveWorker("w1")
+
+	// The single remaining worker must have its eviction cleared and be
+	// reported as recovered so the monitor can sync the DB.
+	result = table.DetectSlowWorkers()
+	if len(result.Recovered) != 1 || result.Recovered[0] != "w2" {
+		t.Fatalf("expected w2 to be reported recovered, got %v", result.Recovered)
+	}
+
+	state, _ := table.Get("w2")
+	if state.Evicted {
+		t.Error("w2 should no longer be evicted")
+	}
+}
+
 func TestDetectSlowWorkers_Recovery(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 
