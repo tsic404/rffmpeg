@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -434,16 +435,34 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "Waiting for completion...")
 	}
 
-	// Wait for completion with real-time log streaming
+	// Wait for completion with real-time log streaming.
+	// Enforce the client-side timeout so a stuck job (e.g. a worker killed
+	// within the heartbeat window) never leaves the user waiting forever.
+	waitCtx := context.Background()
+	var cancelWait context.CancelFunc
+	if timeout > 0 {
+		waitCtx, cancelWait = context.WithTimeout(context.Background(), timeout)
+		defer cancelWait()
+	}
+
 	var job *protocol.JobInfo
 	if result.StreamingOutput {
 		// Streaming output mode: receive stdout data via WebSocket
-		job, err = cli.WaitForJobWithStreamingOutput(context.Background(), jobID, quiet)
+		job, err = cli.WaitForJobWithStreamingOutput(waitCtx, jobID, quiet)
 	} else {
-		job, err = cli.WaitForJobWithLogs(context.Background(), jobID, quiet)
+		job, err = cli.WaitForJobWithLogs(waitCtx, jobID, quiet)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error waiting for job: %v\n", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			// The job never reached a terminal state. Cancel it server-side so
+			// it doesn't linger, and report a clear timeout instead of hanging.
+			if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
+			}
+			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled (worker may be unavailable)\n", jobID, timeout)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error waiting for job: %v\n", err)
+		}
 		return ExitError
 	}
 

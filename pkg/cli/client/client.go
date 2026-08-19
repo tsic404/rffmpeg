@@ -283,8 +283,12 @@ func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
 	return &statusResp.Job, nil
 }
 
-// WaitForJob waits for job completion and returns exit code
-func (c *Client) WaitForJob(jobID string, showProgress bool) (*protocol.JobInfo, error) {
+// WaitForJob waits for job completion and returns exit code.
+// It polls until the job reaches a terminal status or ctx is cancelled.
+func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool) (*protocol.JobInfo, error) {
+	ticker := time.NewTicker(PollInterval)
+	defer ticker.Stop()
+
 	for {
 		job, err := c.GetJob(jobID)
 		if err != nil {
@@ -299,7 +303,11 @@ func (c *Client) WaitForJob(jobID string, showProgress bool) (*protocol.JobInfo,
 			return job, nil
 		}
 
-		time.Sleep(PollInterval)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -333,7 +341,7 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	if err := wsClient.ConnectWithReconnect(ctx); err != nil {
 		// If WebSocket fails, fall back to HTTP polling
 		fmt.Fprintf(os.Stderr, "Warning: WebSocket connection failed, falling back to HTTP polling: %v\n", err)
-		return c.WaitForJob(jobID, !quiet)
+		return c.WaitForJob(ctx, jobID, !quiet)
 	}
 
 	// Start listening in a goroutine
@@ -369,12 +377,12 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	case err := <-listenDone:
 		if err != nil {
 			// WebSocket failed, fall back to polling
-			return c.WaitForJob(jobID, !quiet)
+			return c.WaitForJob(ctx, jobID, !quiet)
 		}
 		// WebSocket closed normally; poll until terminal status is reached.
 		// A single GetJob call may return a non-terminal status if the
 		// WebSocket closes before the server DB is updated.
-		return c.WaitForJob(jobID, !quiet)
+		return c.WaitForJob(ctx, jobID, !quiet)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -416,7 +424,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	if err := wsClient.ConnectWithReconnect(ctx); err != nil {
 		// If WebSocket fails, fall back to HTTP polling (without streaming output)
 		fmt.Fprintf(os.Stderr, "Warning: WebSocket connection failed, falling back to HTTP polling: %v\n", err)
-		return c.WaitForJob(jobID, !quiet)
+		return c.WaitForJob(ctx, jobID, !quiet)
 	}
 
 	// Start listening in a goroutine
@@ -452,12 +460,12 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	case err := <-listenDone:
 		if err != nil {
 			// WebSocket failed, fall back to polling
-			return c.WaitForJob(jobID, !quiet)
+			return c.WaitForJob(ctx, jobID, !quiet)
 		}
 		// WebSocket closed normally; poll until terminal status is reached.
 		// A single GetJob call may return a non-terminal status if the
 		// WebSocket closes before the server DB is updated.
-		return c.WaitForJob(jobID, !quiet)
+		return c.WaitForJob(ctx, jobID, !quiet)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

@@ -2,9 +2,11 @@ package client_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -864,5 +866,54 @@ func TestSubmitJobBackwardsCompat(t *testing.T) {
 	}
 	if jobID == "" {
 		t.Error("Expected non-empty job ID")
+	}
+}
+
+// TestWaitForJob_ContextCancellation verifies that WaitForJob returns
+// context.DeadlineExceeded promptly when the job never reaches a terminal
+// status (e.g. a worker killed within the heartbeat window leaves the job
+// stuck in "queued"). This is the client-side timeout detection for TSI-2202.
+func TestWaitForJob_ContextCancellation(t *testing.T) {
+	var mu sync.Mutex
+	var polls int
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v1/jobs/") {
+			mu.Lock()
+			polls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(protocol.JobStatusResponse{
+				Job: protocol.JobInfo{
+					ID:     "job-stuck",
+					Status: protocol.JobStatusQueued,
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := client.New(srv.URL, "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.WaitForJob(ctx, "job-stuck", false)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitForJob() error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("WaitForJob() took %v; did not respect context cancellation", elapsed)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if polls == 0 {
+		t.Fatal("WaitForJob() never polled the job endpoint")
 	}
 }
