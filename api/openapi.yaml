@@ -1,0 +1,860 @@
+openapi: 3.0.3
+info:
+  title: rffmpeg API
+  description: Remote ffmpeg transcoding service API
+  version: 1.0.0
+  contact:
+    name: rffmpeg
+    url: https://github.com/tsix404/rffmpeg
+
+servers:
+  - url: /api/v1
+    description: Default server
+
+tags:
+  - name: jobs
+    description: Job management operations
+  - name: files
+    description: File upload and download operations
+  - name: workers
+    description: Worker registration and management
+  - name: health
+    description: Health check endpoints
+
+paths:
+  /upload:
+    post:
+      tags: [files]
+      summary: Upload input file
+      description: Upload an input file for transcoding (simple single-request upload)
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                checksum:
+                  type: string
+                  description: Optional SHA256 checksum
+      responses:
+        '200':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /upload/init:
+    post:
+      tags: [files]
+      summary: Initialize chunked upload
+      description: Initialize a new chunked upload session for large files
+      operationId: initChunkUpload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChunkUploadInitRequest'
+      responses:
+        '200':
+          description: Upload session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChunkUploadInitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /upload/chunk/{uploadId}/{chunkIndex}:
+    post:
+      tags: [files]
+      summary: Upload a chunk
+      description: Upload a single chunk of a chunked upload session
+      operationId: uploadChunk
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: chunkIndex
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [chunk]
+              properties:
+                chunk:
+                  type: string
+                  format: binary
+                checksum:
+                  type: string
+                  description: Optional SHA256 checksum of the chunk
+      responses:
+        '200':
+          description: Chunk uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChunkUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /upload/progress/{uploadId}:
+    get:
+      tags: [files]
+      summary: Get upload progress
+      description: Get the progress of a chunked upload session
+      operationId: getUploadProgress
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Upload progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadProgressResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /upload/complete:
+    post:
+      tags: [files]
+      summary: Complete chunked upload
+      description: Finalize a chunked upload and assemble the file
+      operationId: completeChunkUpload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChunkUploadCompleteRequest'
+      responses:
+        '200':
+          description: File assembled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChunkUploadCompleteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /upload/cancel/{uploadId}:
+    post:
+      tags: [files]
+      summary: Cancel chunked upload
+      description: Cancel a chunked upload session and clean up temporary files
+      operationId: cancelChunkUpload
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Upload cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /upload/resume/{uploadId}:
+    get:
+      tags: [files]
+      summary: Resume chunked upload
+      description: Get information needed to resume an interrupted chunked upload
+      operationId: resumeChunkUpload
+      parameters:
+        - name: uploadId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Upload resume information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResumeResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /jobs:
+    post:
+      tags: [jobs]
+      summary: Submit transcoding job
+      description: Submit a new transcoding job with input files and ffmpeg arguments
+      operationId: submitJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobSubmitRequest'
+      responses:
+        '200':
+          description: Job submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobSubmitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /jobs/{jobId}:
+    get:
+      tags: [jobs]
+      summary: Get job status
+      description: Query the status of a transcoding job
+      operationId: getJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [jobs]
+      summary: Cancel job
+      description: Cancel a pending or running job
+      operationId: cancelJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobCancelResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [jobs]
+      summary: Update job status
+      description: Worker updates job status, stderr, or progress
+      operationId: updateJob
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobUpdateRequest'
+      responses:
+        '200':
+          description: Job updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobUpdateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /jobs/{jobId}/log:
+    get:
+      tags: [jobs]
+      summary: Subscribe to job stderr stream
+      description: WebSocket endpoint for real-time stderr streaming
+      operationId: jobLogStream
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '101':
+          description: WebSocket connection established
+
+  /jobs/{jobId}/output:
+    post:
+      tags: [jobs]
+      summary: Upload output file
+      description: Worker uploads transcoded output file
+      operationId: uploadJobOutput
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                checksum:
+                  type: string
+      responses:
+        '200':
+          description: Output uploaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobOutputUploadResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /output/{fileId}:
+    get:
+      tags: [files]
+      summary: Download output file
+      description: Download transcoded output file
+      operationId: downloadOutput
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Output file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /workers/register:
+    post:
+      tags: [workers]
+      summary: Register worker
+      description: Register a new worker with its capabilities
+      operationId: registerWorker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerRegisterRequest'
+      responses:
+        '200':
+          description: Worker registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerRegisterResponse'
+
+  /workers/heartbeat:
+    post:
+      tags: [workers]
+      summary: Worker heartbeat
+      description: Send heartbeat to maintain registration
+      operationId: workerHeartbeat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkerHeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerHeartbeatResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /workers/{workerId}/jobs:
+    get:
+      tags: [workers]
+      summary: Pull pending jobs
+      description: Worker pulls assigned jobs for processing
+      operationId: pullWorkerJobs
+      parameters:
+        - name: workerId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Jobs to process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerJobPullResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Check server health status
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  schemas:
+    UploadResponse:
+      type: object
+      required: [file_id]
+      properties:
+        file_id:
+          type: string
+          description: Unique identifier for uploaded file
+        message:
+          type: string
+
+    JobSubmitRequest:
+      type: object
+      required: [input_files, args]
+      properties:
+        input_files:
+          type: array
+          items:
+            type: string
+          description: List of input file IDs
+        args:
+          type: array
+          items:
+            type: string
+          description: ffmpeg arguments
+        priority:
+          type: integer
+          default: 0
+        timeout:
+          type: string
+          format: date-time
+        output_filename:
+          type: string
+          description: Desired output filename for the job
+        streaming_output:
+          type: boolean
+          description: Stream output to stdout via WebSocket instead of saving to file
+        auto_hw:
+          type: boolean
+          description: Enable automatic hardware encoder upgrade
+        direct_path:
+          type: string
+          description: Direct output path for pass-through mode (TSI-807). When set, output is written directly to this path without server storage.
+
+    JobSubmitResponse:
+      type: object
+      required: [job_id]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        message:
+          type: string
+
+    JobInfo:
+      type: object
+      required: [id, status, input_files, args, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        input_files:
+          type: array
+          items:
+            type: string
+        args:
+          type: array
+          items:
+            type: string
+        output_files:
+          type: array
+          items:
+            type: string
+        worker_id:
+          type: string
+          format: uuid
+        exit_code:
+          type: integer
+        error:
+          type: string
+        direct_paths:
+          type: array
+          items:
+            type: string
+          description: Direct output paths for pass-through mode (TSI-807). When set, output is written directly to these paths without server storage.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+
+    JobStatus:
+      type: string
+      enum: [pending, queued, running, completed, failed, cancelled]
+
+    JobStatusResponse:
+      type: object
+      required: [job]
+      properties:
+        job:
+          $ref: '#/components/schemas/JobInfo'
+
+    JobCancelResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    JobUpdateRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        exit_code:
+          type: integer
+        error:
+          type: string
+        stderr_chunk:
+          type: string
+        progress:
+          type: number
+          format: double
+
+    JobUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    JobOutputUploadResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    WorkerCapabilities:
+      type: object
+      required: [encoders, ffmpeg_version]
+      properties:
+        gpu_model:
+          type: string
+        encoders:
+          type: array
+          items:
+            type: string
+        decoders:
+          type: array
+          items:
+            type: string
+        ffmpeg_version:
+          type: string
+        max_concurrent:
+          type: integer
+          default: 1
+
+    WorkerRegisterRequest:
+      type: object
+      required: [capabilities]
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        capabilities:
+          $ref: '#/components/schemas/WorkerCapabilities'
+
+    WorkerRegisterResponse:
+      type: object
+      required: [worker_id]
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        message:
+          type: string
+
+    WorkerHeartbeatRequest:
+      type: object
+      required: [worker_id, status]
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/WorkerStatus'
+        active_jobs:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    WorkerStatus:
+      type: string
+      enum: [idle, busy, offline]
+
+    WorkerHeartbeatResponse:
+      type: object
+      properties:
+        message:
+          type: string
+
+    WorkerJobPullResponse:
+      type: object
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobInfo'
+
+    HealthResponse:
+      type: object
+      required: [status, timestamp]
+      properties:
+        status:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+        auth_enabled:
+          type: boolean
+          description: Whether token authentication is configured on the server
+
+    ChunkUploadInitRequest:
+      type: object
+      required: [filename, file_size]
+      properties:
+        filename:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        chunk_size:
+          type: integer
+          format: int64
+          description: Optional chunk size in bytes (default 10MB)
+        total_chunks:
+          type: integer
+          description: Optional total chunk count (calculated from file_size/chunk_size)
+        checksum:
+          type: string
+          description: Optional SHA256 checksum of entire file for final verification
+
+    ChunkUploadInitResponse:
+      type: object
+      required: [upload_id, chunk_size, total_chunks]
+      properties:
+        upload_id:
+          type: string
+        chunk_size:
+          type: integer
+          format: int64
+        total_chunks:
+          type: integer
+        message:
+          type: string
+
+    ChunkUploadResponse:
+      type: object
+      required: [upload_id, chunk_index]
+      properties:
+        upload_id:
+          type: string
+        chunk_index:
+          type: integer
+        message:
+          type: string
+
+    UploadProgressResponse:
+      type: object
+      required: [upload_id, filename, file_size, chunk_size, total_chunks, status]
+      properties:
+        upload_id:
+          type: string
+        filename:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        chunk_size:
+          type: integer
+          format: int64
+        total_chunks:
+          type: integer
+        uploaded_chunks:
+          type: integer
+        uploaded_size:
+          type: integer
+          format: int64
+        completed_chunks:
+          type: array
+          items:
+            type: integer
+        status:
+          type: string
+          enum: [in_progress, completed, expired, cancelled]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ChunkUploadCompleteRequest:
+      type: object
+      required: [upload_id]
+      properties:
+        upload_id:
+          type: string
+        checksum:
+          type: string
+          description: Optional SHA256 checksum for final verification
+
+    ChunkUploadCompleteResponse:
+      type: object
+      required: [file_id]
+      properties:
+        file_id:
+          type: string
+        message:
+          type: string
+
+    UploadResumeResponse:
+      type: object
+      properties:
+        upload_id:
+          type: string
+        filename:
+          type: string
+        chunk_size:
+          type: integer
+          format: int64
+        total_chunks:
+          type: integer
+        completed_chunks:
+          type: array
+          items:
+            type: integer
+        missing_chunks:
+          type: array
+          items:
+            type: integer
+        status:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        detail:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

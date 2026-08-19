@@ -1,0 +1,960 @@
+package scheduler
+
+import (
+	"testing"
+	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsix404/rffmpeg/pkg/server/db"
+)
+
+func TestDefaultConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.JobTimeout != 30*time.Minute {
+		t.Errorf("Expected JobTimeout 30m, got %v", cfg.JobTimeout)
+	}
+	if cfg.ScheduleInterval != 5*time.Second {
+		t.Errorf("Expected ScheduleInterval 5s, got %v", cfg.ScheduleInterval)
+	}
+	if cfg.TimeoutCheckInterval != 30*time.Second {
+		t.Errorf("Expected TimeoutCheckInterval 30s, got %v", cfg.TimeoutCheckInterval)
+	}
+	if cfg.MaxJobsPerWorker != 1 {
+		t.Errorf("Expected MaxJobsPerWorker 1, got %d", cfg.MaxJobsPerWorker)
+	}
+}
+
+func TestSchedulerIdleWorkerPrioritization(t *testing.T) {
+	// Create in-memory database
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create idle worker
+	worker, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	// Create pending job
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Verify worker is idle
+	idleWorkers, err := database.GetIdleWorkers()
+	if err != nil {
+		t.Fatalf("Failed to get idle workers: %v", err)
+	}
+	if len(idleWorkers) != 1 {
+		t.Fatalf("Expected 1 idle worker, got %d", len(idleWorkers))
+	}
+	if idleWorkers[0].ID != worker.ID {
+		t.Errorf("Expected worker ID %s, got %s", worker.ID, idleWorkers[0].ID)
+	}
+
+	// Verify job is pending
+	pendingJobs, err := database.GetPendingJobs(10)
+	if err != nil {
+		t.Fatalf("Failed to get pending jobs: %v", err)
+	}
+	if len(pendingJobs) != 1 {
+		t.Fatalf("Expected 1 pending job, got %d", len(pendingJobs))
+	}
+	if pendingJobs[0].ID != job.ID {
+		t.Errorf("Expected job ID %s, got %s", job.ID, pendingJobs[0].ID)
+	}
+}
+
+func TestSchedulerActiveJobCount(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker
+	worker, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 2,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	// Create and assign job
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	err = database.AssignJobToWorker(job.ID, worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to assign job: %v", err)
+	}
+
+	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to update job status: %v", err)
+	}
+
+	// Check active job count
+	count, err := database.GetWorkerActiveJobCount(worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to get active job count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected 1 active job, got %d", count)
+	}
+}
+
+func TestSchedulerJobTimeout(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker
+	worker, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	// Create and start job with old timestamp
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	err = database.AssignJobToWorker(job.ID, worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to assign job: %v", err)
+	}
+
+	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to update job status: %v", err)
+	}
+
+	// Manually set started_at to past (simulate timeout)
+	_, err = database.GetDB().Exec(`
+		UPDATE jobs SET started_at = ? WHERE id = ?
+	`, time.Now().Add(-2*time.Hour), job.ID)
+	if err != nil {
+		t.Fatalf("Failed to set started_at: %v", err)
+	}
+
+	// Check for timed out jobs
+	timedOutJobs, err := database.GetTimedOutJobs(1 * time.Hour)
+	if err != nil {
+		t.Fatalf("Failed to get timed out jobs: %v", err)
+	}
+	if len(timedOutJobs) != 1 {
+		t.Fatalf("Expected 1 timed out job, got %d", len(timedOutJobs))
+	}
+
+	// Reschedule the job
+	err = database.RescheduleJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to reschedule job: %v", err)
+	}
+
+	// Verify job is back to pending
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusPending {
+		t.Errorf("Expected status pending, got %s", updatedJob.Status)
+	}
+	if updatedJob.WorkerID.Valid {
+		t.Errorf("Expected worker_id to be NULL after reschedule")
+	}
+}
+
+func TestSchedulerWorkerStatusUpdate(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker
+	worker, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	// Worker should start as idle
+	if worker.Status != protocol.WorkerStatusIdle {
+		t.Errorf("Expected worker to be idle, got %s", worker.Status)
+	}
+
+	// Update to busy
+	err = database.UpdateWorkerStatus(worker.ID, protocol.WorkerStatusBusy)
+	if err != nil {
+		t.Fatalf("Failed to update worker status: %v", err)
+	}
+
+	// Verify status
+	updatedWorker, err := database.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to get worker: %v", err)
+	}
+	if updatedWorker.Status != protocol.WorkerStatusBusy {
+		t.Errorf("Expected worker to be busy, got %s", updatedWorker.Status)
+	}
+
+	// Update back to idle
+	err = database.UpdateWorkerStatus(worker.ID, protocol.WorkerStatusIdle)
+	if err != nil {
+		t.Fatalf("Failed to update worker status: %v", err)
+	}
+
+	// Verify status
+	updatedWorker, err = database.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to get worker: %v", err)
+	}
+	if updatedWorker.Status != protocol.WorkerStatusIdle {
+		t.Errorf("Expected worker to be idle, got %s", updatedWorker.Status)
+	}
+}
+
+func TestSchedulerNoJobAssignmentWhenBusy(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with max concurrent 1
+	worker, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	// Create and assign job
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	err = database.AssignJobToWorker(job.ID, worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to assign job: %v", err)
+	}
+
+	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	if err != nil {
+		t.Fatalf("Failed to update job status: %v", err)
+	}
+
+	// Create another job
+	job2, err := database.CreateJob(`["file2.mp4"]`, `["-i", "input.mp4"]`, "output2.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create second job: %v", err)
+	}
+
+	// Verify active job count is 1
+	count, err := database.GetWorkerActiveJobCount(worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to get active job count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected 1 active job, got %d", count)
+	}
+
+	// Second job should still be pending
+	job2Check, err := database.GetJob(job2.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job2: %v", err)
+	}
+	if job2Check.Status != protocol.JobStatusPending {
+		t.Errorf("Expected job2 to be pending, got %s", job2Check.Status)
+	}
+	if job2Check.WorkerID.Valid {
+		t.Errorf("Expected job2 to have no worker assigned")
+	}
+}
+
+func TestExtractEncoderFromArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     string
+		expected string
+	}{
+		{
+			name:     "c:v encoder",
+			args:     `["-i", "input.mp4", "-c:v", "libx264", "output.mp4"]`,
+			expected: "libx264",
+		},
+		{
+			name:     "vcodec encoder",
+			args:     `["-i", "input.mp4", "-vcodec", "h264_nvenc", "output.mp4"]`,
+			expected: "h264_nvenc",
+		},
+		{
+			name:     "codec:v encoder",
+			args:     `["-i", "input.mp4", "-codec:v", "hevc_qsv", "output.mp4"]`,
+			expected: "hevc_qsv",
+		},
+		{
+			name:     "c:v:0 stream encoder",
+			args:     `["-i", "input.mp4", "-c:v:0", "h264_vaapi", "output.mp4"]`,
+			expected: "h264_vaapi",
+		},
+		{
+			name:     "no encoder specified",
+			args:     `["-i", "input.mp4", "-y", "output.mp4"]`,
+			expected: "",
+		},
+		{
+			name:     "audio codec ignored",
+			args:     `["-i", "input.mp4", "-c:a", "aac", "output.mp4"]`,
+			expected: "",
+		},
+		{
+			name:     "c:v copy passthrough",
+			args:     `["-i", "video.mp4", "-i", "audio.mp3", "-c:v", "copy", "-c:a", "aac", "-shortest", "merged.mp4"]`,
+			expected: "",
+		},
+		{
+			name:     "vcodec copy passthrough",
+			args:     `["-i", "video.mp4", "-vcodec", "copy", "output.mp4"]`,
+			expected: "",
+		},
+		{
+			name:     "codec:v copy passthrough",
+			args:     `["-i", "video.mp4", "-codec:v", "copy", "output.mp4"]`,
+			expected: "",
+		},
+		{
+			name:     "c:v:0 copy passthrough",
+			args:     `["-i", "video.mp4", "-c:v:0", "copy", "output.mp4"]`,
+			expected: "",
+		},
+
+		{
+			name:     "invalid JSON",
+			args:     `not valid json`,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ExtractEncoderFromArgs(tt.args)
+			if result != tt.expected {
+				t.Errorf("ExtractEncoderFromArgs(%q) = %q, want %q", tt.args, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsVideoEncoder(t *testing.T) {
+	tests := []struct {
+		name     string
+		encoder  string
+		expected bool
+	}{
+		{"libx264 software", "libx264", true},
+		{"h264_nvenc hardware", "h264_nvenc", true},
+		{"hevc_qsv hardware", "hevc_qsv", true},
+		{"unknown encoder", "unknown_encoder", false},
+		{"audio encoder aac", "aac", false},
+		{"VP9 software", "libvpx-vp9", true},
+		{"AV1 software", "libaom-av1", true},
+		{"AMF hardware", "h264_amf", true},
+		{"VAAPI hardware", "h264_vaapi", true},
+		{"VideoToolbox", "h264_videotoolbox", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isVideoEncoder(tt.encoder)
+			if result != tt.expected {
+				t.Errorf("isVideoEncoder(%q) = %v, want %v", tt.encoder, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestSchedulerCapabilityAwareScheduling(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with h264_nvenc capability
+	worker1, err := database.CreateWorker("worker-1", "gpu-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264", "h264_nvenc"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+
+	// Create worker without h264_nvenc capability
+	_, err = database.CreateWorker("worker-2", "cpu-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker2: %v", err)
+	}
+
+	// Create job requesting h264_nvenc encoder
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4", "-c:v", "h264_nvenc", "output.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Verify that GetIdleWorkersByEncoder returns only worker1
+	workers, err := database.GetIdleWorkersByEncoder("h264_nvenc")
+	if err != nil {
+		t.Fatalf("Failed to get workers by encoder: %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("Expected 1 worker with h264_nvenc, got %d", len(workers))
+	}
+	if workers[0].ID != worker1.ID {
+		t.Errorf("Expected worker1 ID, got %s", workers[0].ID)
+	}
+
+	// Verify that GetIdleWorkers returns both workers
+	allWorkers, err := database.GetIdleWorkers()
+	if err != nil {
+		t.Fatalf("Failed to get idle workers: %v", err)
+	}
+	if len(allWorkers) != 2 {
+		t.Errorf("Expected 2 idle workers, got %d", len(allWorkers))
+	}
+
+	// Verify encoder extraction
+	encoder := ExtractEncoderFromArgs(job.Args)
+	if encoder != "h264_nvenc" {
+		t.Errorf("Expected encoder 'h264_nvenc', got '%s'", encoder)
+	}
+}
+
+func TestGetWorkersByEncoder(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create multiple workers with different capabilities
+	_, err = database.CreateWorker("worker-1", "gpu1", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264", "h264_nvenc", "hevc_nvenc"},
+		FFmpegVersion: "5.0",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+
+	_, err = database.CreateWorker("worker-2", "gpu2", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264", "hevc_nvenc"},
+		FFmpegVersion: "5.0",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker2: %v", err)
+	}
+
+	_, err = database.CreateWorker("worker-3", "cpu", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264", "libx265"},
+		FFmpegVersion: "5.0",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker3: %v", err)
+	}
+
+	// Test GetWorkersByEncoder
+	tests := []struct {
+		encoder       string
+		expectedCount int
+	}{
+		{"h264_nvenc", 1},
+		{"hevc_nvenc", 2},
+		{"libx264", 3},
+		{"libx265", 1},
+		{"nonexistent", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.encoder, func(t *testing.T) {
+			workers, err := database.GetWorkersByEncoder(tt.encoder)
+			if err != nil {
+				t.Fatalf("Failed to get workers by encoder: %v", err)
+			}
+			if len(workers) != tt.expectedCount {
+				t.Errorf("Expected %d workers with %s, got %d", tt.expectedCount, tt.encoder, len(workers))
+			}
+		})
+	}
+}
+
+func TestGetAllEncoders(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create workers with different encoders
+	_, err = database.CreateWorker("worker-1", "", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264", "h264_nvenc"},
+		FFmpegVersion: "5.0",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+
+	_, err = database.CreateWorker("worker-2", "", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264", "hevc_qsv"},
+		FFmpegVersion: "5.0",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker2: %v", err)
+	}
+
+	encoders, err := database.GetAllEncoders()
+	if err != nil {
+		t.Fatalf("Failed to get all encoders: %v", err)
+	}
+
+	// Should have 3 unique encoders: libx264, h264_nvenc, hevc_qsv
+	if len(encoders) != 3 {
+		t.Errorf("Expected 3 unique encoders, got %d: %v", len(encoders), encoders)
+	}
+
+	// Verify all expected encoders are present
+	encoderSet := make(map[string]bool)
+	for _, enc := range encoders {
+		encoderSet[enc] = true
+	}
+	for _, expected := range []string{"libx264", "h264_nvenc", "hevc_qsv"} {
+		if !encoderSet[expected] {
+			t.Errorf("Expected encoder %s not found", expected)
+		}
+	}
+}
+
+func TestUpdateWorkerCapabilities(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with initial capabilities
+	worker, err := database.CreateWorker("worker-1", "", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	// Update capabilities
+	err = database.UpdateWorkerCapabilities(worker.ID, protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264", "h264_nvenc", "hevc_nvenc"},
+		Decoders:      []string{"h264_cuvid", "hevc_cuvid"},
+		GPUModel:      "NVIDIA RTX 3080",
+		FFmpegVersion: "6.0",
+		MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatalf("Failed to update worker capabilities: %v", err)
+	}
+
+	// Verify updated capabilities
+	updatedWorker, err := database.GetWorker(worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to get updated worker: %v", err)
+	}
+
+	if updatedWorker.FFmpegVersion != "6.0" {
+		t.Errorf("Expected FFmpeg version 6.0, got %s", updatedWorker.FFmpegVersion)
+	}
+	if updatedWorker.MaxConcurrent != 4 {
+		t.Errorf("Expected MaxConcurrent 4, got %d", updatedWorker.MaxConcurrent)
+	}
+	if !updatedWorker.GPUModel.Valid || updatedWorker.GPUModel.String != "NVIDIA RTX 3080" {
+		t.Errorf("Expected GPU model 'NVIDIA RTX 3080', got %v", updatedWorker.GPUModel)
+	}
+
+	// Verify encoders
+	encoders, err := database.GetWorkerEncoders(worker.ID)
+	if err != nil {
+		t.Fatalf("Failed to get worker encoders: %v", err)
+	}
+	if len(encoders) != 3 {
+		t.Errorf("Expected 3 encoders, got %d", len(encoders))
+	}
+}
+
+// TSI-1500: Tests for encoder fallback functionality
+
+func TestSchedulerEncoderFallback(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with only software encoder (libx264)
+	worker1, err := database.CreateWorker("worker-1", "cpu-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+
+	// Create a job requesting h264_nvenc (which worker1 doesn't have)
+	job, err := database.CreateJob(
+		`["file1.mp4"]`,
+		`["-i", "input.mp4", "-c:v", "h264_nvenc", "output.mp4"]`,
+		"output.mp4",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Create scheduler
+	scheduler := New(database, DefaultConfig())
+
+	// Schedule the job
+	scheduled := scheduler.scheduleJob(job)
+	if !scheduled {
+		t.Fatalf("Expected job to be scheduled with encoder fallback")
+	}
+
+	// Verify the job was assigned to worker1 (which has libx264, a compatible H.264 encoder)
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+
+	if !updatedJob.WorkerID.Valid {
+		t.Fatalf("Expected job to be assigned to a worker")
+	}
+
+	if updatedJob.WorkerID.String != worker1.ID {
+		t.Errorf("Expected job to be assigned to worker1 (%s), got %s", worker1.ID, updatedJob.WorkerID.String)
+	}
+
+	// Verify the job status is queued
+	if updatedJob.Status != protocol.JobStatusQueued {
+		t.Errorf("Expected job status to be queued, got %s", updatedJob.Status)
+	}
+}
+
+func TestSchedulerEncoderFallbackDifferentCodecFamily(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with only H.264 encoder
+	worker1, err := database.CreateWorker("worker-1", "cpu-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+
+	// Create a job requesting hevc_nvenc (different codec family - HEVC, not H.264)
+	// The scheduler should fall back to regular scheduling since no HEVC encoder is available
+	job, err := database.CreateJob(
+		`["file1.mp4"]`,
+		`["-i", "input.mp4", "-c:v", "hevc_nvenc", "output.mp4"]`,
+		"output.mp4",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Create scheduler
+	scheduler := New(database, DefaultConfig())
+
+	// Schedule the job - should fall back to regular scheduling (any worker)
+	// since no HEVC encoder is available in the same codec family
+	scheduled := scheduler.scheduleJob(job)
+	if !scheduled {
+		t.Fatalf("Expected job to be scheduled via regular scheduling fallback")
+	}
+
+	// Verify the job was assigned
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+
+	if !updatedJob.WorkerID.Valid {
+		t.Fatalf("Expected job to be assigned to a worker")
+	}
+
+	if updatedJob.WorkerID.String != worker1.ID {
+		t.Errorf("Expected job to be assigned to worker1 (%s), got %s", worker1.ID, updatedJob.WorkerID.String)
+	}
+
+	// Verify the job status is queued
+	if updatedJob.Status != protocol.JobStatusQueued {
+		t.Errorf("Expected job status to be queued, got %s", updatedJob.Status)
+	}
+}
+
+func TestSchedulerEncoderFallbackHEVC(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with libx265 (HEVC software encoder)
+	worker1, err := database.CreateWorker("worker-1", "cpu-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx265"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+
+	// Create a job requesting hevc_qsv (HEVC hardware encoder)
+	job, err := database.CreateJob(
+		`["file1.mp4"]`,
+		`["-i", "input.mp4", "-c:v", "hevc_qsv", "output.mp4"]`,
+		"output.mp4",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Create scheduler
+	scheduler := New(database, DefaultConfig())
+
+	// Schedule the job - should fallback to libx265 (same codec family)
+	scheduled := scheduler.scheduleJob(job)
+	if !scheduled {
+		t.Fatalf("Expected job to be scheduled with encoder fallback to libx265")
+	}
+
+	// Verify the job was assigned to worker1
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+
+	if !updatedJob.WorkerID.Valid {
+		t.Fatalf("Expected job to be assigned to a worker")
+	}
+
+	if updatedJob.WorkerID.String != worker1.ID {
+		t.Errorf("Expected job to be assigned to worker1 (%s), got %s", worker1.ID, updatedJob.WorkerID.String)
+	}
+}
+
+func TestSchedulerEncoderFallbackPrioritizesHardware(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with hardware encoder (h264_nvenc)
+	workerNVENC, err := database.CreateWorker("worker-nvenc", "gpu-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"h264_nvenc", "libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create workerNVENC: %v", err)
+	}
+
+	// Create worker with only software encoder (libx264)
+	workerCPU, err := database.CreateWorker("worker-cpu", "cpu-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create workerCPU: %v", err)
+	}
+
+	// Create a job requesting h264_qsv (which neither worker has directly)
+	// But workerNVENC has h264_nvenc which is in the same codec family and is hardware
+	job, err := database.CreateJob(
+		`["file1.mp4"]`,
+		`["-i", "input.mp4", "-c:v", "h264_qsv", "output.mp4"]`,
+		"output.mp4",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Create scheduler
+	scheduler := New(database, DefaultConfig())
+
+	// Schedule the job
+	scheduled := scheduler.scheduleJob(job)
+	if !scheduled {
+		t.Fatalf("Expected job to be scheduled with encoder fallback")
+	}
+
+	// Verify the job was assigned to workerNVENC (has hardware encoder, prioritized over software)
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+
+	if !updatedJob.WorkerID.Valid {
+		t.Fatalf("Expected job to be assigned to a worker")
+	}
+
+	if updatedJob.WorkerID.String != workerNVENC.ID {
+		t.Errorf("Expected job to be assigned to workerNVENC (%s) for hardware encoder priority, got %s", workerNVENC.ID, updatedJob.WorkerID.String)
+	}
+
+	_ = workerCPU // Use workerCPU to avoid unused variable warning
+}
+
+func TestSchedulerEncoderFallbackNoWorkers(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// No workers available
+
+	// Create a job requesting h264_nvenc
+	job, err := database.CreateJob(
+		`["file1.mp4"]`,
+		`["-i", "input.mp4", "-c:v", "h264_nvenc", "output.mp4"]`,
+		"output.mp4",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Create scheduler
+	scheduler := New(database, DefaultConfig())
+
+	// Schedule the job - should NOT be scheduled (no workers)
+	scheduled := scheduler.scheduleJob(job)
+	if scheduled {
+		t.Errorf("Expected job NOT to be scheduled (no workers)")
+	}
+
+	// Verify the job is still pending
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+
+	if updatedJob.Status != protocol.JobStatusPending {
+		t.Errorf("Expected job status to be pending, got %s", updatedJob.Status)
+	}
+}
+
+func TestSchedulerEncoderFallbackExactMatchPreferred(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Create worker with h264_qsv (the exact encoder requested)
+	workerQSV, err := database.CreateWorker("worker-qsv", "intel-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"h264_qsv", "libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create workerQSV: %v", err)
+	}
+
+	// Create worker with h264_nvenc (same codec family, different hardware)
+	workerNVENC, err := database.CreateWorker("worker-nvenc", "nvidia-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"h264_nvenc", "libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create workerNVENC: %v", err)
+	}
+
+	// Create a job requesting h264_qsv
+	job, err := database.CreateJob(
+		`["file1.mp4"]`,
+		`["-i", "input.mp4", "-c:v", "h264_qsv", "output.mp4"]`,
+		"output.mp4",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Create scheduler
+	scheduler := New(database, DefaultConfig())
+
+	// Schedule the job
+	scheduled := scheduler.scheduleJob(job)
+	if !scheduled {
+		t.Fatalf("Expected job to be scheduled")
+	}
+
+	// Verify the job was assigned to workerQSV (exact match, not fallback)
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+
+	if !updatedJob.WorkerID.Valid {
+		t.Fatalf("Expected job to be assigned to a worker")
+	}
+
+	if updatedJob.WorkerID.String != workerQSV.ID {
+		t.Errorf("Expected job to be assigned to workerQSV (%s) for exact match, got %s", workerQSV.ID, updatedJob.WorkerID.String)
+	}
+
+	_ = workerNVENC // Use to avoid unused variable warning
+}

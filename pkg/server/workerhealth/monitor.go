@@ -1,0 +1,350 @@
+package workerhealth
+
+import (
+	"encoding/json"
+	"log"
+	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/server/db"
+	"github.com/tsix404/rffmpeg/pkg/server/migration"
+)
+
+// Config holds the configuration for the worker health monitor
+type Config struct {
+	HeartbeatTimeout    time.Duration
+	OfflineThreshold    time.Duration
+	HealthCheckInterval time.Duration
+	MaxRetryCount       int // Maximum retry count for job migration
+}
+
+// DefaultConfig returns the default configuration
+func DefaultConfig() Config {
+	return Config{
+		HeartbeatTimeout:    30 * time.Second, // 30 seconds as per requirement
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 10 * time.Second, // Check every 10 seconds for faster detection
+		MaxRetryCount:       3,
+	}
+}
+
+// Monitor periodically checks worker health and manages offline workers
+type Monitor struct {
+	db         *db.Database
+	config     Config
+	stop       chan struct{}
+	done       chan struct{}
+	sched      SchedulerInterface
+	stateTable *WorkerStateTable // Optional: enables slow node detection
+}
+
+// SchedulerInterface defines the interface for the scheduler
+// This allows the monitor to trigger job rescheduling after migration
+type SchedulerInterface interface {
+	TriggerReschedule()
+}
+
+// New creates a new worker health monitor
+func New(database *db.Database, config Config) *Monitor {
+	return &Monitor{
+		db:     database,
+		config: config,
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+}
+
+// SetScheduler sets the scheduler for triggering rescheduling
+func (m *Monitor) SetScheduler(scheduler SchedulerInterface) {
+	m.sched = scheduler
+}
+
+// SetStateTable sets the worker state table for slow node detection.
+// When set, the monitor will periodically detect and mark slow workers.
+func (m *Monitor) SetStateTable(st *WorkerStateTable) {
+	m.stateTable = st
+}
+
+// Start begins the health monitoring loop
+func (m *Monitor) Start() {
+	go m.run()
+}
+
+// Stop stops the health monitor
+func (m *Monitor) Stop() {
+	close(m.stop)
+	<-m.done
+}
+
+// run is the main monitoring loop
+func (m *Monitor) run() {
+	defer close(m.done)
+
+	ticker := time.NewTicker(m.config.HealthCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stop:
+			log.Println("Worker health monitor stopped")
+			return
+		case <-ticker.C:
+			m.checkWorkers()
+		}
+	}
+}
+
+// checkWorkers checks all workers and manages offline status
+func (m *Monitor) checkWorkers() {
+	// Mark workers as offline if heartbeat timeout exceeded and get their IDs
+	offlineWorkerIDs, err := m.db.MarkOfflineWorkersWithMigration(m.config.HeartbeatTimeout)
+	if err != nil {
+		log.Printf("Failed to mark offline workers: %v", err)
+		return
+	}
+
+	if len(offlineWorkerIDs) > 0 {
+		log.Printf("Marked %d worker(s) as offline due to heartbeat timeout", len(offlineWorkerIDs))
+
+		// Migrate jobs from each offline worker
+		for _, workerID := range offlineWorkerIDs {
+			m.migrateJobsFromWorker(workerID)
+		}
+	}
+
+	// Remove workers that have been offline longer than threshold
+	removed, err := m.db.RemoveOfflineWorkers(m.config.OfflineThreshold)
+	if err != nil {
+		log.Printf("Failed to remove offline workers: %v", err)
+	} else if removed > 0 {
+		log.Printf("Removed %d offline worker(s) exceeding offline threshold", removed)
+	}
+
+	// Slow node detection (TSI-760)
+	m.detectSlowWorkers()
+}
+
+// detectSlowWorkers runs slow node detection using the WorkerStateTable.
+// Syncs eviction state to DB and records audit events for eviction/recovery.
+func (m *Monitor) detectSlowWorkers() {
+	if m.stateTable == nil {
+		return
+	}
+
+	result := m.stateTable.DetectSlowWorkers()
+
+	// Sync eviction state to DB for newly evicted workers
+	for _, workerID := range result.NewlyEvicted {
+		if err := m.db.MarkWorkerEvicted(workerID); err != nil {
+			log.Printf("Failed to mark worker %s as evicted in DB: %v", workerID, err)
+		}
+		// Get worker state for throughput info
+		state, ok := m.stateTable.Get(workerID)
+		if !ok {
+			continue
+		}
+		// Record audit event
+		reason := "worker EWMA throughput below cluster median threshold"
+		if _, err := m.db.CreateEvictionEvent(
+			workerID,
+			db.EvictionEventEvicted,
+			state.EWMAThroughput,
+			result.Median,
+			reason,
+		); err != nil {
+			log.Printf("Failed to create eviction audit event for worker %s: %v", workerID, err)
+		}
+		log.Printf("Worker %s evicted: EWMA=%.2f, median=%.2f", workerID, state.EWMAThroughput, result.Median)
+	}
+
+	// Sync recovery to DB and record audit events
+	for _, workerID := range result.Recovered {
+		if err := m.db.ClearWorkerEviction(workerID); err != nil {
+			log.Printf("Failed to clear eviction for worker %s in DB: %v", workerID, err)
+		}
+		state, ok := m.stateTable.Get(workerID)
+		if !ok {
+			continue
+		}
+		reason := "worker EWMA throughput recovered within cluster median threshold"
+		if _, err := m.db.CreateEvictionEvent(
+			workerID,
+			db.EvictionEventRecovered,
+			state.EWMAThroughput,
+			result.Median,
+			reason,
+		); err != nil {
+			log.Printf("Failed to create recovery audit event for worker %s: %v", workerID, err)
+		}
+		log.Printf("Worker %s recovered: EWMA=%.2f, median=%.2f", workerID, state.EWMAThroughput, result.Median)
+	}
+
+	if len(result.NewlyEvicted) > 0 || len(result.Recovered) > 0 {
+		log.Printf("Slow node check: %d evicted, %d recovered, median=%.2f",
+			len(result.NewlyEvicted), len(result.Recovered), result.Median)
+		// Trigger scheduler to reschedule after eviction changes
+		if m.sched != nil {
+			m.sched.TriggerReschedule()
+		}
+	}
+}
+
+// migrateJobsFromWorker migrates in-progress jobs from a worker and records the migration event.
+// Jobs that have exceeded MaxRetryCount (previous retries >= MaxRetryCount) are marked as failed
+// instead of being migrated.
+func (m *Monitor) migrateJobsFromWorker(workerID string) {
+	// Get worker info before migration
+	worker, err := m.db.GetWorker(workerID)
+	if err != nil {
+		log.Printf("Failed to get worker %s info for migration: %v", workerID, err)
+		return
+	}
+
+	// Get jobs that will be migrated
+	jobs, err := m.db.GetRunningJobsByWorker(workerID)
+	if err != nil {
+		log.Printf("Failed to get running jobs for worker %s: %v", workerID, err)
+		return
+	}
+
+	if len(jobs) == 0 {
+		log.Printf("Worker %s has no running jobs to migrate", workerID)
+		return
+	}
+
+	workerName := ""
+	if worker.Name != "" {
+		workerName = worker.Name
+	}
+
+	// Process each job individually: fail if previous retries >= MaxRetryCount, otherwise migrate
+	var migratedJobIDs []string
+	var failedJobIDs []string
+	retryCount := 0
+
+	for _, job := range jobs {
+		count, err := m.db.GetJobRetryCount(job.ID)
+		if err != nil {
+			log.Printf("Failed to get retry count for job %s: %v", job.ID, err)
+			continue
+		}
+
+		if count > retryCount {
+			retryCount = count
+		}
+
+		if count >= m.config.MaxRetryCount {
+			// Max retries exceeded: mark job as failed
+			errMsg := "max retry count exceeded after repeated worker failures"
+			if err := m.db.FailJob(job.ID, errMsg); err != nil {
+				log.Printf("Failed to mark job %s as failed: %v", job.ID, err)
+				continue
+			}
+			failedJobIDs = append(failedJobIDs, job.ID)
+			log.Printf("Job %s exceeded max retry count (%d/%d), marked as failed",
+				job.ID, count, m.config.MaxRetryCount)
+		} else {
+			// Reset job to pending for migration
+			if err := m.db.ResetJobToPending(job.ID); err != nil {
+				log.Printf("Failed to reset job %s to pending: %v", job.ID, err)
+				continue
+			}
+			migratedJobIDs = append(migratedJobIDs, job.ID)
+		}
+	}
+
+	// Record migration event for migrated jobs (not failed ones)
+	if len(migratedJobIDs) > 0 {
+		_, err = m.db.CreateMigrationEvent(
+			workerID,
+			workerName,
+			string(migration.ReasonHeartbeatTimeout),
+			retryCount,
+			migratedJobIDs,
+			len(migratedJobIDs),
+		)
+		if err != nil {
+			log.Printf("Failed to create migration event for worker %s: %v", workerID, err)
+		}
+
+		log.Printf("Migrated %d job(s) from offline worker %s (retry count: %d)",
+			len(migratedJobIDs), workerID, retryCount)
+	}
+
+	if len(failedJobIDs) > 0 {
+		log.Printf("Failed %d job(s) from offline worker %s due to exceeding max retry count (%d)",
+			len(failedJobIDs), workerID, m.config.MaxRetryCount)
+	}
+
+	// Trigger scheduler to reschedule migrated jobs
+	if len(migratedJobIDs) > 0 && m.sched != nil {
+		m.sched.TriggerReschedule()
+	}
+}
+
+// GetMigrationEvents retrieves migration events with pagination
+func (m *Monitor) GetMigrationEvents(limit int, offset int) ([]migration.EventInfo, error) {
+	events, err := m.db.GetMigrationEvents(limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]migration.EventInfo, len(events))
+	for i, event := range events {
+		var jobIDs []string
+		if err := json.Unmarshal([]byte(event.JobIDs), &jobIDs); err != nil {
+			jobIDs = []string{}
+		}
+
+		workerName := ""
+		if event.WorkerName.Valid {
+			workerName = event.WorkerName.String
+		}
+
+		result[i] = migration.EventInfo{
+			ID:           event.ID,
+			Timestamp:    event.Timestamp,
+			WorkerID:     event.WorkerID,
+			WorkerName:   workerName,
+			Reason:       migration.Reason(event.Reason),
+			RetryCount:   event.RetryCount,
+			JobIDs:       jobIDs,
+			JobsMigrated: event.JobsMigrated,
+		}
+	}
+
+	return result, nil
+}
+
+// GetMigrationEventsByWorker retrieves migration events for a specific worker
+func (m *Monitor) GetMigrationEventsByWorker(workerID string, limit int) ([]migration.EventInfo, error) {
+	events, err := m.db.GetMigrationEventsByWorker(workerID, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]migration.EventInfo, len(events))
+	for i, event := range events {
+		var jobIDs []string
+		if err := json.Unmarshal([]byte(event.JobIDs), &jobIDs); err != nil {
+			jobIDs = []string{}
+		}
+
+		workerName := ""
+		if event.WorkerName.Valid {
+			workerName = event.WorkerName.String
+		}
+
+		result[i] = migration.EventInfo{
+			ID:           event.ID,
+			Timestamp:    event.Timestamp,
+			WorkerID:     event.WorkerID,
+			WorkerName:   workerName,
+			Reason:       migration.Reason(event.Reason),
+			RetryCount:   event.RetryCount,
+			JobIDs:       jobIDs,
+			JobsMigrated: event.JobsMigrated,
+		}
+	}
+
+	return result, nil
+}
