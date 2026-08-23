@@ -987,6 +987,117 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 	_ = h // handler kept for state table wiring via setupTest
 }
 
+// TestWorkerHealthStatusTracksJobLifecycle (TSI-2347) verifies health.status
+// reflects a running job as "busy" without requiring a busy heartbeat: the
+// scheduler and the job-pull path keep the DB status current, and health must
+// derive its status from that record rather than from the heartbeat-fed state
+// table, which only refreshes every heartbeat interval.
+func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// Register a worker; it stays idle (no busy heartbeat is ever sent).
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "test-worker-health-busy",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	var regResp protocol.WorkerRegisterResponse
+	if err := json.NewDecoder(rec.Body).Decode(&regResp); err != nil {
+		t.Fatalf("Failed to decode register response: %v", err)
+	}
+
+	getHealth := func() *WorkerHealth {
+		req := httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Get worker failed with status %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Worker struct {
+				Status string        `json:"status"`
+				Health *WorkerHealth `json:"health"`
+			} `json:"worker"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("Failed to decode get worker response: %v", err)
+		}
+		return resp.Worker.Health
+	}
+
+	if h := getHealth(); h == nil || h.Status != string(protocol.WorkerStatusIdle) {
+		t.Fatalf("Expected idle health before any job, got %+v", h)
+	}
+
+	// Submit a job and let the worker pull it. The pull path assigns the job
+	// and must mark the worker busy in the same transaction.
+	fileContent := []byte("test content")
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.mp4")
+	part.Write(fileContent)
+	writer.Close()
+
+	req = httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var uploadResp protocol.UploadResponse
+	json.NewDecoder(w.Body).Decode(&uploadResp)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var jobResp protocol.JobSubmitResponse
+	if w.Code != http.StatusOK {
+		t.Fatalf("Job submission failed with status %d: %s", w.Code, w.Body.String())
+	}
+	json.NewDecoder(w.Body).Decode(&jobResp)
+
+	pullReq := httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID+"/jobs", nil)
+	router.ServeHTTP(w, pullReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Pull jobs failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	// While the job is queued/running on the worker, health.status must be busy.
+	if h := getHealth(); h == nil || h.Status != string(protocol.WorkerStatusBusy) {
+		t.Errorf("Expected health status 'busy' while a job is active, got %+v", h)
+	}
+
+	// Terminal status report flips the worker back to idle via the UpdateJob hook.
+	updateReq := protocol.JobUpdateRequest{
+		Status:   protocol.JobStatusCompleted,
+		ExitCode: 0,
+	}
+	updateBody, _ := json.Marshal(updateReq)
+	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Update job failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	if h := getHealth(); h == nil || h.Status != string(protocol.WorkerStatusIdle) {
+		t.Errorf("Expected health status 'idle' after job completion, got %+v", h)
+	}
+}
+
 func TestCancelCompletedJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()

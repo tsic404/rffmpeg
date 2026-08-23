@@ -728,6 +728,23 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 		job.Status = protocol.JobStatusQueued
 	}
 
+	// TSI-2347: mark the worker busy atomically with the assignment so
+	// health.status reflects activity immediately instead of waiting for the
+	// next heartbeat. The idle guard keeps an offline worker offline.
+	//
+	// Side effect: refreshing last_heartbeat here is deliberate. Assignment is
+	// proof of liveness (the worker pulled this job), so bumping the timestamp
+	// in the same transaction prevents the health monitor from racing us and
+	// marking a just-assigned worker offline mid-transaction. It does not fake
+	// a heartbeat: no state-table entry or GPU metrics are produced.
+	if len(newJobs) > 0 {
+		if _, err := tx.Exec(`
+			UPDATE workers SET status = ?, last_heartbeat = ? WHERE id = ? AND status = ?
+		`, protocol.WorkerStatusBusy, now, workerID, protocol.WorkerStatusIdle); err != nil {
+			return nil, fmt.Errorf("failed to mark worker busy: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}

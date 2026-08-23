@@ -1629,8 +1629,9 @@ func writeInfoFlagText(w http.ResponseWriter, header string, items []string) {
 }
 
 // dbWorkerToWorkerInfo converts database Worker to WorkerInfo.
-// states may be nil; when provided, live health metrics come from the worker
-// state table, otherwise they are derived from the database record.
+// states may be nil; when provided, sampled live metrics (GPU, throughput,
+// active jobs) come from the worker state table, while health.status always
+// reflects the authoritative database state (TSI-2347).
 func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerState) WorkerInfo {
 	var encoders, decoders []string
 	if err := json.Unmarshal([]byte(worker.Encoders), &encoders); err != nil {
@@ -1662,18 +1663,26 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 		info.GPUModel = worker.GPUModel.String
 	}
 
+	// TSI-2347: health.status must track the worker's authoritative DB state,
+	// which the scheduler, the terminal-status hook and heartbeats all keep
+	// current. The state table only refreshes on periodic heartbeats, so
+	// reading status from it left health stuck at "idle" between beats while a
+	// job was running. The state table still supplies sampled live metrics.
 	health := WorkerHealth{
 		Status:     string(worker.Status),
 		LastSeen:   worker.LastHeartbeat.Format(time.RFC3339),
 		ActiveJobs: []string{},
 	}
 	if state, ok := states[worker.ID]; ok && state != nil {
-		health.Status = state.Status
 		health.GPUUtilPct = state.GPUUtilPct
 		health.GPUMemUsedMB = state.GPUMemUsedMB
 		health.ThroughputFPS = state.ThroughputFPS
 		health.ActiveJobs = state.ActiveJobs
-		health.LastSeen = state.LastSeen.Format(time.RFC3339)
+		// !Before (not After): when the two timestamps are equal, prefer the
+		// fresher state-table sample instead of falling back to the DB record.
+		if !state.LastSeen.Before(worker.LastHeartbeat) {
+			health.LastSeen = state.LastSeen.Format(time.RFC3339)
+		}
 	}
 	info.Health = &health
 
