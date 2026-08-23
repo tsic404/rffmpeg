@@ -1,14 +1,20 @@
-package job
+package worker
 
 import (
-	"context"
 	"strings"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/worker"
 )
 
-// ClassifyFailure categorizes a job failure into one of 6 FailureType values.
+// ClassifyFailure categorizes an ffmpeg execution failure into one of 6
+// FailureType values. stderr must be ffmpeg output — generic error text is
+// never matched against input/encoder patterns.
+//
+// exitCode and errorMessage are currently unused by the matching rules but
+// retained in the signature for API stability; callers pass the execution
+// exit code and the Go error from running ffmpeg. Classification relies on
+// stderr plus the isTimeout/isWorkerCrash flags only.
+//
 // Priority (highest first): WORKER_CRASH > TIMEOUT > DISK_FULL > INPUT_UNREACHABLE > ENCODER_UNSUPPORTED > FFMPEG_ERROR
 func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout bool, isWorkerCrash bool) (protocol.FailureType, string) {
 	// Check worker crash first — highest priority
@@ -26,8 +32,10 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 		return protocol.FailureDiskFull, "No space left on device"
 	}
 
-	// Check input unreachable
-	if isInputUnreachable(stderr, errorMessage) {
+	// Check input unreachable — only against ffmpeg-style stderr. Generic
+	// error text (infra failures) must not match these patterns, or a
+	// worker↔server "connection refused" would be misread as an input problem.
+	if isInputUnreachable(stderr) {
 		return protocol.FailureInputUnreachable, "Input file or stream cannot be reached"
 	}
 
@@ -38,32 +46,6 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 
 	// Fallback: FFmpeg error
 	return protocol.FailureFFmpegError, extractFFmpegSummary(stderr)
-}
-
-// ClassifyFromInterceptedResult uses an intercepted result for classification.
-func ClassifyFromInterceptedResult(ctx context.Context, result *worker.InterceptedResult, isWorkerCrash bool) (protocol.FailureType, string, bool) {
-	if result == nil {
-		return protocol.FailureWorkerCrash, "No execution result available", true
-	}
-
-	if result.IsSuccess {
-		return "", "", false
-	}
-
-	errMsg := ""
-	if result.Error != nil {
-		errMsg = result.Error.Error()
-	}
-
-	failureType, detail := ClassifyFailure(
-		result.ExitCode,
-		result.Stderr,
-		errMsg,
-		result.IsTimeout,
-		isWorkerCrash,
-	)
-
-	return failureType, detail, failureType.Retryable()
 }
 
 // isDiskFull checks stderr for disk-full patterns.
@@ -84,7 +66,8 @@ func isDiskFull(stderr string) bool {
 }
 
 // isInputUnreachable checks if the error indicates input file/stream cannot be reached.
-func isInputUnreachable(stderr string, errorMessage string) bool {
+// Only matches ffmpeg-style stderr output (e.g. "file.mp4: No such file or directory").
+func isInputUnreachable(stderr string) bool {
 	patterns := []string{
 		"No such file",
 		"No such device",
@@ -102,9 +85,8 @@ func isInputUnreachable(stderr string, errorMessage string) bool {
 		"Immediate exit requested",
 		"end of file",
 	}
-	combined := stderr + "\n" + errorMessage
 	for _, p := range patterns {
-		if strings.Contains(combined, p) {
+		if strings.Contains(stderr, p) {
 			return true
 		}
 	}
@@ -117,6 +99,8 @@ func isEncoderUnsupported(stderr string) bool {
 		"No such encoder",
 		"Unknown encoder",
 		"Encoder not found",
+		"Encoder not recognized",
+		"is not recognized",
 		"not found in encoder list",
 		"Requested encoder",
 		"Selected encoder not available",

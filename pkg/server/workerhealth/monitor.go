@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/server/db"
 	"github.com/tsix404/rffmpeg/pkg/server/migration"
 )
@@ -235,7 +236,7 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 		if count >= m.config.MaxRetryCount {
 			// Max retries exceeded: mark job as failed
 			errMsg := "max retry count exceeded after repeated worker failures"
-			if err := m.db.FailJob(job.ID, errMsg); err != nil {
+			if err := m.db.FailJob(job.ID, errMsg, string(protocol.FailureWorkerCrash)); err != nil {
 				log.Printf("Failed to mark job %s as failed: %v", job.ID, err)
 				continue
 			}

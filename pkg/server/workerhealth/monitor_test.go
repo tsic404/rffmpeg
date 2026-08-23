@@ -99,10 +99,10 @@ func TestMonitorJobMigration(t *testing.T) {
 
 	// Assign jobs to worker and set to running/queued
 	_ = database.AssignJobToWorker(job1.ID, "worker-1")
-	_ = database.UpdateJobStatus(job1.ID, protocol.JobStatusRunning, nil, nil)
+	_ = database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	_ = database.AssignJobToWorker(job2.ID, "worker-1")
-	_ = database.UpdateJobStatus(job2.ID, protocol.JobStatusQueued, nil, nil)
+	_ = database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Make the worker's heartbeat stale
 	_, err = database.GetDB().Exec(`
@@ -247,7 +247,7 @@ func TestMonitorRetryCount(t *testing.T) {
 
 	// Assign job to worker and set to running
 	_ = database.AssignJobToWorker(job1.ID, "worker-1")
-	_ = database.UpdateJobStatus(job1.ID, protocol.JobStatusRunning, nil, nil)
+	_ = database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Create a previous migration event for this job (simulating previous retry)
 	_, err = database.CreateMigrationEvent("worker-old", "old-worker", string(migration.ReasonHeartbeatTimeout), 0, []string{job1.ID}, 1)
@@ -805,16 +805,16 @@ func TestMultiWorkerJobMigration(t *testing.T) {
 	job2, _ := database.CreateJob(`["input_1b.mkv"]`, `["-c:v","libx264"]`, "output_1b.mkv", false)
 	database.AssignJobToWorker(job1.ID, "worker-1")
 	database.AssignJobToWorker(job2.ID, "worker-1")
-	database.UpdateJobStatus(job1.ID, protocol.JobStatusRunning, nil, nil)
-	database.UpdateJobStatus(job2.ID, protocol.JobStatusQueued, nil, nil)
+	database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	job3, _ := database.CreateJob(`["input_2a.mkv"]`, `["-c:v","libx264"]`, "output_2a.mkv", false)
 	database.AssignJobToWorker(job3.ID, "worker-2")
-	database.UpdateJobStatus(job3.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(job3.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	job4, _ := database.CreateJob(`["input_3a.mkv"]`, `["-c:v","libx264"]`, "output_3a.mkv", false)
 	database.AssignJobToWorker(job4.ID, "worker-3")
-	database.UpdateJobStatus(job4.ID, protocol.JobStatusQueued, nil, nil)
+	database.UpdateJobStatusWithFailure(job4.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Make all 3 workers' heartbeats stale
 	for _, wid := range []string{"worker-1", "worker-2", "worker-3"} {
@@ -899,7 +899,7 @@ func TestMultiWorkerPartialFailure(t *testing.T) {
 			t.Fatalf("Failed to create job for %s: %v", wid, err)
 		}
 		database.AssignJobToWorker(job.ID, wid)
-		database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+		database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 		jobs[i] = job
 	}
 
@@ -988,14 +988,14 @@ func TestMultiWorkerMixedJobStates(t *testing.T) {
 	database.AssignJobToWorker(jobRun.ID, "worker-A")
 	database.AssignJobToWorker(jobQueue.ID, "worker-A")
 	database.AssignJobToWorker(jobDone.ID, "worker-A")
-	database.UpdateJobStatus(jobRun.ID, protocol.JobStatusRunning, nil, nil)
-	database.UpdateJobStatus(jobQueue.ID, protocol.JobStatusQueued, nil, nil)
-	database.UpdateJobStatus(jobDone.ID, protocol.JobStatusCompleted, nil, nil)
+	database.UpdateJobStatusWithFailure(jobRun.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	database.UpdateJobStatusWithFailure(jobQueue.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	database.UpdateJobStatusWithFailure(jobDone.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
 
 	// worker-B: one queued job
 	jobQ2, _ := database.CreateJob(`["q2.mkv"]`, `["-c:v","libx264"]`, "out_q2.mkv", false)
 	database.AssignJobToWorker(jobQ2.ID, "worker-B")
-	database.UpdateJobStatus(jobQ2.ID, protocol.JobStatusQueued, nil, nil)
+	database.UpdateJobStatusWithFailure(jobQ2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Both workers go offline
 	for _, wid := range []string{"worker-A", "worker-B"} {
@@ -1061,7 +1061,7 @@ func TestMultiWorkerRetryCountTracking(t *testing.T) {
 	// worker-A: job with 2 previous migrations
 	job1, _ := database.CreateJob(`["retry.mkv"]`, `["-c:v","libx264"]`, "out_retry.mkv", false)
 	database.AssignJobToWorker(job1.ID, "worker-A")
-	database.UpdateJobStatus(job1.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	database.CreateMigrationEvent("old-w1", "old-1", string(migration.ReasonHeartbeatTimeout), 0, []string{job1.ID}, 1)
 	database.CreateMigrationEvent("old-w2", "old-2", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID}, 1)
@@ -1069,7 +1069,7 @@ func TestMultiWorkerRetryCountTracking(t *testing.T) {
 	// worker-B: fresh job, no prior migrations
 	job2, _ := database.CreateJob(`["fresh.mkv"]`, `["-c:v","libx264"]`, "out_fresh.mkv", false)
 	database.AssignJobToWorker(job2.ID, "worker-B")
-	database.UpdateJobStatus(job2.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Both workers go offline
 	for _, wid := range []string{"worker-A", "worker-B"} {
@@ -1149,7 +1149,7 @@ func TestWorkerFailoverE2E(t *testing.T) {
 		t.Fatalf("Failed to assign job to worker-A: %v", err)
 	}
 
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
@@ -1239,7 +1239,7 @@ func TestWorkerFailoverE2E(t *testing.T) {
 		t.Fatalf("Failed to assign job to worker-B: %v", err)
 	}
 
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusQueued, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job queued: %v", err)
 	}
@@ -1302,7 +1302,7 @@ func TestWorkerFailoverRetryLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to assign job to worker-A: %v", err)
 	}
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}

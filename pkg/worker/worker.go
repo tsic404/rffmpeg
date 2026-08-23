@@ -319,7 +319,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// Create job-specific temp directory
 			jobDir := filepath.Join(w.tempDir, job.ID)
 			if err := os.MkdirAll(jobDir, 0755); err != nil {
-				w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err), false)
+				w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err))
 				return
 			}
 			defer w.cleanupJobDir(jobDir)
@@ -343,7 +343,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				// Upload cached output
 				if _, err := os.Stat(outputPath); err == nil {
 					if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
-						w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to upload cached output: %v", err), false)
+						w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to upload cached output: %v", err))
 						return
 					}
 					log.Printf("Uploaded cached output for job %s", job.ID)
@@ -372,7 +372,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Create job-specific temp directory
 	jobDir := filepath.Join(w.tempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err))
 		return
 	}
 	defer w.cleanupJobDir(jobDir)
@@ -380,7 +380,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Update job status to running
 	if err := w.client.UpdateJob(job.ID, protocol.JobStatusRunning, 0, "", false); err != nil {
 		log.Printf("Failed to update job status to running: %v", err)
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to update job status to running: %v", err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to update job status to running: %v", err))
 		return
 	}
 
@@ -405,7 +405,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				inputPath = filepath.Join(jobDir, "input-"+fileID)
 			}
 			if err := w.client.DownloadInput(fileID, inputPath); err != nil {
-				w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to download input file %s: %v", fileID, err), false)
+				w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to download input file %s: %v", fileID, err))
 				return
 			}
 			inputPaths = append(inputPaths, inputPath)
@@ -552,7 +552,14 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Check for timeout
 	if result.IsTimeout {
 		log.Printf("Job %s timed out", job.ID)
-		w.client.UpdateJob(job.ID, protocol.JobStatusTimeout, result.ExitCode, result.Error.Error(), false)
+		errMsg := ""
+		if result.Error != nil {
+			errMsg = result.Error.Error()
+		}
+		failureType, details := ClassifyFailure(result.ExitCode, result.Stderr, errMsg, true, false)
+		if err := w.client.UpdateJobWithFailure(job.ID, protocol.JobStatusTimeout, result.ExitCode, errMsg, false, string(failureType), details); err != nil {
+			log.Printf("Failed to report job timeout: %v", err)
+		}
 		return
 	}
 
@@ -667,7 +674,7 @@ uploadOutput:
 	if !job.StreamingOutput && !directMode && !isNetOutput {
 		if _, err := os.Stat(outputPath); err == nil {
 			if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
-				w.reportFailure(job.ID, result.ExitCode, fmt.Sprintf("Failed to upload output: %v", err), false)
+				w.reportInfraFailure(job.ID, result.ExitCode, fmt.Sprintf("Failed to upload output: %v", err))
 				return
 			}
 			log.Printf("Uploaded output file for job %s", job.ID)
@@ -697,9 +704,23 @@ uploadOutput:
 	}
 }
 
-// reportFailure reports a job failure to the server
+// reportFailure classifies an ffmpeg execution failure and reports it to the
+// server. errMsg must be ffmpeg stderr or a Go error from running ffmpeg —
+// never generic infrastructure text (see reportInfraFailure).
 func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached bool) {
-	if err := w.client.UpdateJob(jobID, protocol.JobStatusFailed, exitCode, errMsg, cached); err != nil {
+	failureType, failureDetails := ClassifyFailure(exitCode, errMsg, errMsg, false, false)
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, cached, string(failureType), failureDetails); err != nil {
+		log.Printf("Failed to report job failure: %v", err)
+	}
+}
+
+// reportInfraFailure reports a worker-side infrastructure failure that happened
+// outside ffmpeg execution (job directory creation, server communication,
+// output upload, probe plumbing). Pattern-matching this text would misclassify
+// it as INPUT_UNREACHABLE etc., so it is always FFMPEG_ERROR with the raw
+// message as details.
+func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, string(protocol.FailureFFmpegError), errMsg); err != nil {
 		log.Printf("Failed to report job failure: %v", err)
 	}
 }
@@ -719,7 +740,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 	// Create job-specific temp directory
 	jobDir := filepath.Join(w.tempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err))
 		return
 	}
 	defer w.cleanupJobDir(jobDir)
@@ -732,7 +753,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 
 	// Download input files
 	if len(job.InputFiles) == 0 {
-		w.reportFailure(job.ID, 1, "no input files for probe job", false)
+		w.reportInfraFailure(job.ID, 1, "no input files for probe job")
 		return
 	}
 
@@ -750,7 +771,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 		inputPath = filepath.Join(jobDir, "input-"+fileID)
 	}
 	if err := w.client.DownloadInput(fileID, inputPath); err != nil {
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to download input file %s: %v", fileID, err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to download input file %s: %v", fileID, err))
 		return
 	}
 	log.Printf("Downloaded probe input file %s to %s", fileID, inputPath)
@@ -759,7 +780,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 	prober := NewFFprobeExecutor("")
 	result, err := prober.Probe(ctx, inputPath)
 	if err != nil {
-		w.reportFailure(job.ID, 1, fmt.Sprintf("ffprobe failed: %v", err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("ffprobe failed: %v", err))
 		return
 	}
 
@@ -767,17 +788,17 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 	outputPath := filepath.Join(jobDir, "probe_result.json")
 	outputBytes, err := json.Marshal(result)
 	if err != nil {
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to marshal probe result: %v", err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to marshal probe result: %v", err))
 		return
 	}
 	if err := os.WriteFile(outputPath, outputBytes, 0644); err != nil {
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to write probe result: %v", err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to write probe result: %v", err))
 		return
 	}
 
 	// Upload output file
 	if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Failed to upload probe output: %v", err), false)
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to upload probe output: %v", err))
 		return
 	}
 	log.Printf("Uploaded probe output for job %s", job.ID)

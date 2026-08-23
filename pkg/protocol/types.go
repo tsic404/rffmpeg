@@ -271,6 +271,16 @@ const (
 	FailureFFmpegError        FailureType = "FFMPEG_ERROR"
 )
 
+func (f FailureType) IsValid() bool {
+	switch f {
+	case FailureInputUnreachable, FailureEncoderUnsupported, FailureDiskFull,
+		FailureTimeout, FailureWorkerCrash, FailureFFmpegError:
+		return true
+	default:
+		return false
+	}
+}
+
 func (f FailureType) Retryable() bool {
 	switch f {
 	case FailureTimeout, FailureWorkerCrash:

@@ -298,7 +298,7 @@ func TestRecoverState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to assign job2: %v", err)
 	}
-	err = database.UpdateJobStatus(job2.ID, protocol.JobStatusRunning, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job2 as running: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestRecoverState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create job4: %v", err)
 	}
-	err = database.UpdateJobStatus(job4.ID, protocol.JobStatusCompleted, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job4.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job4 as completed: %v", err)
 	}
@@ -517,13 +517,13 @@ func TestGetJobsByStatus(t *testing.T) {
 	}
 
 	// Mark one as completed
-	err = database.UpdateJobStatus(job2.ID, protocol.JobStatusCompleted, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job2: %v", err)
 	}
 
 	// Mark one as failed
-	err = database.UpdateJobStatus(job3.ID, protocol.JobStatusFailed, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job3.ID, protocol.JobStatusFailed, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job3: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestAssignPendingJobsToWorkerWithSchedulerRaceCondition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to assign job to worker: %v", err)
 	}
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusQueued, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status to queued: %v", err)
 	}

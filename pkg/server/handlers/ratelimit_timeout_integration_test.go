@@ -448,7 +448,7 @@ func TestIntegration_Timeout_BasicDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestIntegration_Timeout_ConcurrentTimeouts(t *testing.T) {
 		oldJobIDs[i] = job.ID
 
 		database.AssignJobToWorker(job.ID, "worker-1")
-		database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+		database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 		database.GetDB().Exec(
 			`UPDATE jobs SET started_at = ? WHERE id = ?`,
 			time.Now().Add(-2*time.Hour), job.ID,
@@ -538,7 +538,7 @@ func TestIntegration_Timeout_ConcurrentTimeouts(t *testing.T) {
 	// Create 1 recent running job (should NOT be timed out)
 	recentJob, _ := database.CreateJob(`["recent.mp4"]`, `["args"]`, "recent_out.mp4", false)
 	database.AssignJobToWorker(recentJob.ID, "worker-1")
-	database.UpdateJobStatus(recentJob.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(recentJob.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	// recentJob's started_at is set by UpdateJobStatus to now
 
 	// Detect timed-out jobs
@@ -599,7 +599,7 @@ func TestIntegration_Timeout_NonTimedOutJobsUntouched(t *testing.T) {
 
 	job, _ := database.CreateJob(`["f.mp4"]`, `["args"]`, "o.mp4", false)
 	database.AssignJobToWorker(job.ID, "w1")
-	database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// 1 hour timeout — job just started, should not be timed out
 	timedOut, err := database.GetTimedOutJobs(1 * time.Hour)
@@ -627,7 +627,7 @@ func TestIntegration_Timeout_MixedJobsInPool(t *testing.T) {
 	// Old job (timed out)
 	oldJob, _ := database.CreateJob(`["old.mp4"]`, `["args"]`, "old_o.mp4", false)
 	database.AssignJobToWorker(oldJob.ID, "w1")
-	database.UpdateJobStatus(oldJob.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(oldJob.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	database.GetDB().Exec(
 		`UPDATE jobs SET started_at = ? WHERE id = ?`,
 		time.Now().Add(-2*time.Hour), oldJob.ID,
@@ -636,7 +636,7 @@ func TestIntegration_Timeout_MixedJobsInPool(t *testing.T) {
 	// New job (within timeout)
 	newJob, _ := database.CreateJob(`["new.mp4"]`, `["args"]`, "new_o.mp4", false)
 	database.AssignJobToWorker(newJob.ID, "w1")
-	database.UpdateJobStatus(newJob.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(newJob.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Detect and reschedule timed-out jobs
 	timedOut, _ := database.GetTimedOutJobs(1 * time.Hour)
@@ -677,7 +677,7 @@ func TestIntegration_Timeout_SchedulerDetectionAndReschedule(t *testing.T) {
 		"output.mp4", false, false, nil, "[]",
 	)
 	database.AssignJobToWorker(job.ID, "worker-1")
-	database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	database.GetDB().Exec(
 		`UPDATE jobs SET started_at = ? WHERE id = ?`,
 		time.Now().Add(-2*time.Hour), job.ID,
@@ -753,14 +753,14 @@ func TestIntegration_Timeout_CompletedJobsIgnored(t *testing.T) {
 
 	job, _ := database.CreateJob(`["f.mp4"]`, `["args"]`, "o.mp4", false)
 	database.AssignJobToWorker(job.ID, "w1")
-	database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	// Set old started_at
 	database.GetDB().Exec(
 		`UPDATE jobs SET started_at = ? WHERE id = ?`,
 		time.Now().Add(-2*time.Hour), job.ID,
 	)
 	// Now complete the job
-	database.UpdateJobStatus(job.ID, protocol.JobStatusCompleted, nil, nil)
+	database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
 
 	timedOut, err := database.GetTimedOutJobs(1 * time.Hour)
 	if err != nil {
@@ -788,7 +788,7 @@ func TestIntegration_Timeout_ConcurrentSchedulerAccess(t *testing.T) {
 			fmt.Sprintf("o%d.mp4", i), false, false, nil, "[]",
 		)
 		database.AssignJobToWorker(job.ID, "worker-1")
-		database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+		database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 		database.GetDB().Exec(
 			`UPDATE jobs SET started_at = ? WHERE id = ?`,
 			time.Now().Add(-2*time.Hour), job.ID,

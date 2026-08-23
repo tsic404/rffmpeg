@@ -210,7 +210,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 	}
 
 	// Update job status to queued
-	err = s.db.UpdateJobStatus(job.ID, protocol.JobStatusQueued, nil, nil)
+	err = s.db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 	if err != nil {
 		log.Printf("Scheduler: Failed to update job %s status: %v", job.ID, err)
 		return false

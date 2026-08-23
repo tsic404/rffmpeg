@@ -101,7 +101,7 @@ func TestSchedulerActiveJobCount(t *testing.T) {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
 
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestSchedulerJobTimeout(t *testing.T) {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
 
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestSchedulerNoJobAssignmentWhenBusy(t *testing.T) {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
 
-	err = database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status: %v", err)
 	}

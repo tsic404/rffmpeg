@@ -167,12 +167,12 @@ func TestGetRunningJobsByWorker(t *testing.T) {
 
 	// Assign job1 to worker and set to running
 	_ = db.AssignJobToWorker(job1.ID, "worker-1")
-	_ = db.UpdateJobStatus(job1.ID, protocol.JobStatusQueued, nil, nil)
-	_ = db.UpdateJobStatus(job1.ID, protocol.JobStatusRunning, nil, nil)
+	_ = db.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	_ = db.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Assign job2 to worker and set to queued
 	_ = db.AssignJobToWorker(job2.ID, "worker-1")
-	_ = db.UpdateJobStatus(job2.ID, protocol.JobStatusQueued, nil, nil)
+	_ = db.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Get running jobs
 	jobs, err := db.GetRunningJobsByWorker("worker-1")
@@ -211,10 +211,10 @@ func TestMigrateJobsFromWorker(t *testing.T) {
 
 	// Assign jobs to worker and set to running/queued
 	_ = db.AssignJobToWorker(job1.ID, "worker-1")
-	_ = db.UpdateJobStatus(job1.ID, protocol.JobStatusRunning, nil, nil)
+	_ = db.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	_ = db.AssignJobToWorker(job2.ID, "worker-1")
-	_ = db.UpdateJobStatus(job2.ID, protocol.JobStatusQueued, nil, nil)
+	_ = db.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Migrate jobs
 	migratedJobIDs, err := db.MigrateJobsFromWorker("worker-1")
@@ -434,10 +434,10 @@ func TestFailJob(t *testing.T) {
 
 	// Assign and set running
 	_ = db.AssignJobToWorker(job.ID, "worker-1")
-	_ = db.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	_ = db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Fail the job
-	err = db.FailJob(job.ID, "test failure reason")
+	err = db.FailJob(job.ID, "test failure reason", string(protocol.FailureWorkerCrash))
 	if err != nil {
 		t.Fatalf("Failed to fail job: %v", err)
 	}
@@ -459,13 +459,17 @@ func TestFailJob(t *testing.T) {
 	if !updatedJob.ExitCode.Valid || updatedJob.ExitCode.Int32 != -1 {
 		t.Errorf("Expected exit_code -1, got %v", updatedJob.ExitCode)
 	}
+	if updatedJob.FailureType != string(protocol.FailureWorkerCrash) {
+		t.Errorf("Expected failure_type %q, got %q",
+			protocol.FailureWorkerCrash, updatedJob.FailureType)
+	}
 }
 
 func TestFailJobNotFound(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	err := db.FailJob("non-existent", "reason")
+	err := db.FailJob("non-existent", "reason", string(protocol.FailureWorkerCrash))
 	if err == nil {
 		t.Error("Expected error for non-existent job")
 	}
@@ -491,7 +495,7 @@ func TestResetJobToPending(t *testing.T) {
 
 	// Assign and set running
 	_ = db.AssignJobToWorker(job.ID, "worker-1")
-	_ = db.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil)
+	_ = db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Reset to pending
 	err = db.ResetJobToPending(job.ID)

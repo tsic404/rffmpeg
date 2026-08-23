@@ -322,8 +322,9 @@ func (d *Database) JobExists(id string) (bool, error) {
 	return exists, nil
 }
 
-// UpdateJobStatus updates the job status
-func (d *Database) UpdateJobStatus(id string, status protocol.JobStatus, exitCode *int, errMsg *string) error {
+// UpdateJobStatusWithFailure updates the job status along with failure
+// classification fields. Non-failure fields are ignored when the pointers are nil.
+func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
 	now := time.Now()
 
 	var startedAt, finishedAt *time.Time
@@ -336,9 +337,11 @@ func (d *Database) UpdateJobStatus(id string, status protocol.JobStatus, exitCod
 
 	_, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
+		                failure_type = COALESCE(?, failure_type),
+		                failure_details = COALESCE(?, failure_details),
 		                started_at = COALESCE(started_at, ?), finished_at = ?
 		WHERE id = ?
-	`, status, now, exitCode, errMsg, startedAt, finishedAt, id)
+	`, status, now, exitCode, errMsg, failureType, failureDetails, startedAt, finishedAt, id)
 
 	if err != nil {
 		return fmt.Errorf("failed to update job status: %w", err)
@@ -390,7 +393,7 @@ func (d *Database) CancelJob(id string) error {
 		return fmt.Errorf("cannot cancel job in status %s", job.Status)
 	}
 
-	return d.UpdateJobStatus(id, protocol.JobStatusCancelled, nil, nil)
+	return d.UpdateJobStatusWithFailure(id, protocol.JobStatusCancelled, nil, nil, nil, nil)
 }
 
 // AssignJobToWorker assigns a job to a worker
@@ -879,14 +882,19 @@ func (d *Database) RescheduleJob(id string) error {
 
 // FailJob marks a job as failed with the given error message.
 // The worker assignment is cleared and timestamps are updated.
-func (d *Database) FailJob(id string, errMsg string) error {
+// failureType is the machine-readable classification (e.g.
+// protocol.FailureWorkerCrash when repeated worker crashes exhausted
+// retries); pass "" to keep any existing classification.
+func (d *Database) FailJob(id, errMsg string, failureType string) error {
 	now := time.Now()
 	exitCode := -1
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL,
-		                exit_code = ?, error = ?, finished_at = ?, updated_at = ?
+		                exit_code = ?, error = ?,
+		                failure_type = COALESCE(NULLIF(?, ''), failure_type),
+		                finished_at = ?, updated_at = ?
 		WHERE id = ?
-	`, protocol.JobStatusFailed, exitCode, errMsg, now, now, id)
+	`, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now, id)
 	if err != nil {
 		return fmt.Errorf("failed to fail job: %w", err)
 	}

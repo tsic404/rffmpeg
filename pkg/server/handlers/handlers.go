@@ -564,7 +564,30 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 
 	// Only update status if provided
 	if req.Status != "" {
-		err := h.db.UpdateJobStatus(jobID, req.Status, exitCode, errMsg)
+		// Validate failure classification against the documented enum
+		// (openapi.yaml JobUpdateRequest.failure_type).
+		if req.FailureType != "" && !protocol.FailureType(req.FailureType).IsValid() {
+			writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+				protocol.ErrCodeInvalidRequest, "Invalid failure_type: "+req.FailureType, nil,
+			))
+			return
+		}
+
+		var failureType, failureDetails *string
+		if req.Status == protocol.JobStatusCompleted {
+			// Success clears any stale failure metadata left over from a
+			// previous failed attempt (e.g. after migration/retry).
+			empty := ""
+			failureType, failureDetails = &empty, &empty
+		} else {
+			if req.FailureType != "" {
+				failureType = &req.FailureType
+			}
+			if req.FailureDetails != "" {
+				failureDetails = &req.FailureDetails
+			}
+		}
+		err := h.db.UpdateJobStatusWithFailure(jobID, req.Status, exitCode, errMsg, failureType, failureDetails)
 		if err != nil {
 			if errors.Is(err, protocol.ErrJobNotFound) {
 				writeError(w, http.StatusNotFound, protocol.NewProtocolError(

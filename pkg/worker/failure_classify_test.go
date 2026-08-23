@@ -1,4 +1,4 @@
-package job
+package worker
 
 import (
 	"testing"
@@ -127,5 +127,56 @@ func TestFailureType_Retryable(t *testing.T) {
 	}
 	if protocol.FailureFFmpegError.Retryable() != false {
 		t.Error("FFMPEG_ERROR should not be retryable")
+	}
+}
+
+func TestReportFailureAlwaysSetsClassification(t *testing.T) {
+	// reportFailure classifies every failure — even an empty message must
+	// yield a non-empty failure type (FFMPEG_ERROR fallback), never "".
+	failureType, details := ClassifyFailure(1, "", "", false, false)
+	if failureType != protocol.FailureFFmpegError {
+		t.Errorf("empty stderr fallback = %q, want FFMPEG_ERROR", failureType)
+	}
+	if details == "" {
+		t.Error("details should never be empty for a classified failure")
+	}
+}
+
+// TestClassifyFailureInfraTextNotInputUnreachable locks the review fix:
+// generic infrastructure error text (server communication, upload, job-dir
+// plumbing) must NOT be pattern-matched into INPUT_UNREACHABLE — that
+// category is reserved for ffmpeg reporting unreachable inputs.
+func TestClassifyFailureInfraTextNotInputUnreachable(t *testing.T) {
+	infraMessages := []string{
+		"Failed to update job status to running: connection refused",
+		"Failed to download input file abc: Post \"http://server/files/abc\": connection refused",
+		"Failed to upload output: dial tcp 10.0.0.1:8080: connect: connection timed out",
+	}
+	for _, msg := range infraMessages {
+		got, _ := ClassifyFailure(1, msg, msg, false, false)
+		if got == protocol.FailureInputUnreachable {
+			t.Errorf("infra message %q misclassified as INPUT_UNREACHABLE", msg)
+		}
+		if got != protocol.FailureFFmpegError {
+			t.Errorf("infra message %q should fall back to FFMPEG_ERROR, got %q", msg, got)
+		}
+	}
+}
+
+func TestFailureTypeIsValid(t *testing.T) {
+	valid := []protocol.FailureType{
+		protocol.FailureInputUnreachable, protocol.FailureEncoderUnsupported,
+		protocol.FailureDiskFull, protocol.FailureTimeout,
+		protocol.FailureWorkerCrash, protocol.FailureFFmpegError,
+	}
+	for _, f := range valid {
+		if !f.IsValid() {
+			t.Errorf("%q should be valid", f)
+		}
+	}
+	for _, f := range []protocol.FailureType{"", "BOGUS", "input_unreachable"} {
+		if f.IsValid() {
+			t.Errorf("%q should be invalid", f)
+		}
 	}
 }

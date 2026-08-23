@@ -281,6 +281,106 @@ func TestUpdateJobStatus(t *testing.T) {
 	}
 }
 
+// TestUpdateJobFailureClassification verifies the worker failure_type flow:
+// a failed update persists failure_type/failure_details, an invalid enum
+// value is rejected with 400, and completing the job clears stale fields.
+func TestUpdateJobFailureClassification(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorker(t, router, []string{"libx264"})
+
+	fileContent := []byte("test content")
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.mp4")
+	part.Write(fileContent)
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var uploadResp protocol.UploadResponse
+	json.NewDecoder(w.Body).Decode(&uploadResp)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var jobResp protocol.JobSubmitResponse
+	json.NewDecoder(w.Body).Decode(&jobResp)
+
+	patch := func(update protocol.JobUpdateRequest) *httptest.ResponseRecorder {
+		updateBody, _ := json.Marshal(update)
+		r := httptest.NewRequest("PATCH", "/api/v1/jobs/"+jobResp.JobID, bytes.NewReader(updateBody))
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+		return rec
+	}
+	getJob := func() protocol.JobInfo {
+		r := httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+		var resp protocol.JobStatusResponse
+		json.NewDecoder(rec.Body).Decode(&resp)
+		return resp.Job
+	}
+
+	// 1. Invalid failure_type is rejected
+	resp := patch(protocol.JobUpdateRequest{
+		Status:      protocol.JobStatusFailed,
+		FailureType: "NOT_A_REAL_TYPE",
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Errorf("invalid failure_type: expected 400, got %d", resp.Code)
+	}
+
+	// 2. Valid classification is persisted
+	resp = patch(protocol.JobUpdateRequest{
+		Status:         protocol.JobStatusFailed,
+		ExitCode:       1,
+		Error:          "ffmpeg blew up",
+		FailureType:    string(protocol.FailureInputUnreachable),
+		FailureDetails: "Input file or stream cannot be reached",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("failed update: expected 200, got %d", resp.Code)
+	}
+	job := getJob()
+	if job.FailureType != string(protocol.FailureInputUnreachable) {
+		t.Errorf("expected failure_type %q persisted, got %q",
+			protocol.FailureInputUnreachable, job.FailureType)
+	}
+
+	// 3. Completing clears stale failure metadata (retry-after-failure path)
+	resp = patch(protocol.JobUpdateRequest{
+		Status:   protocol.JobStatusCompleted,
+		ExitCode: 0,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("complete update: expected 200, got %d", resp.Code)
+	}
+	job = getJob()
+	if job.Status != protocol.JobStatusCompleted {
+		t.Fatalf("expected completed, got %q", job.Status)
+	}
+	if job.FailureType != "" {
+		t.Errorf("completed job should have empty failure_type, got %q", job.FailureType)
+	}
+	if job.FailureDetails != "" {
+		t.Errorf("completed job should have empty failure_details, got %q", job.FailureDetails)
+	}
+}
+
 func TestCancelJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()

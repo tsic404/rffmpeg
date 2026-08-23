@@ -73,21 +73,21 @@ func TestMultiWorkerFailover_FullFlow(t *testing.T) {
 	if err := database.AssignJobToWorker(job1.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job1 to worker-a: %v", err)
 	}
-	if err := database.UpdateJobStatus(job1.ID, protocol.JobStatusRunning, nil, nil); err != nil {
+	if err := database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job1 as running: %v", err)
 	}
 
 	if err := database.AssignJobToWorker(job2.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job2 to worker-a: %v", err)
 	}
-	if err := database.UpdateJobStatus(job2.ID, protocol.JobStatusRunning, nil, nil); err != nil {
+	if err := database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job2 as running: %v", err)
 	}
 
 	if err := database.AssignJobToWorker(job3.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job3 to worker-a: %v", err)
 	}
-	if err := database.UpdateJobStatus(job3.ID, protocol.JobStatusQueued, nil, nil); err != nil {
+	if err := database.UpdateJobStatusWithFailure(job3.ID, protocol.JobStatusQueued, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job3 as queued: %v", err)
 	}
 
@@ -245,7 +245,7 @@ func TestMultiWorkerFailover_CapabilityAwareRescheduling(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if err := database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil); err != nil {
+	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
 
@@ -344,7 +344,7 @@ func TestMultiWorkerFailover_StressMultipleWorkers(t *testing.T) {
 		if err := database.AssignJobToWorker(job.ID, workerIDs[workerIdx]); err != nil {
 			t.Fatalf("Failed to assign job %d: %v", i, err)
 		}
-		if err := database.UpdateJobStatus(job.ID, protocol.JobStatusRunning, nil, nil); err != nil {
+		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 			t.Fatalf("Failed to set job %d running: %v", i, err)
 		}
 	}
