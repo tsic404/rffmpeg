@@ -19,6 +19,10 @@ const (
 	TranslationStatusDefault TranslationStatus = "default_applied"
 )
 
+// ConverterUsedHardwareInjection marks audit records whose parameter was
+// injected as a hardware default rather than translated from a user param.
+const ConverterUsedHardwareInjection = "hardware_injection"
+
 // TranslationAuditRecord records the details of a single parameter translation.
 // It captures the source and target values, any conversions applied, and errors encountered.
 type TranslationAuditRecord struct {
@@ -600,7 +604,7 @@ func (t *ParameterTranslatorImpl) injectHardwareParamsForEncoder(targetEncoder E
 				SourceValue:   "",
 				TargetValue:   param.Value,
 				Status:        TranslationStatusDefault,
-				ConverterUsed: "hardware_injection",
+				ConverterUsed: ConverterUsedHardwareInjection,
 			}
 			result.AuditRecords = append(result.AuditRecords, record)
 		}

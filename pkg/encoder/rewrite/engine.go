@@ -219,7 +219,8 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 
 	// Step 3: Translate parameters (if needed)
 	var translatedParams map[string]string
-	var paramsToFilter map[string]string // Original params that should be filtered from args
+	var paramsToFilter map[string]string    // Original params that should be filtered from args
+	var sameNameConverted map[string]string // Same-name params whose values were converted
 	if scenarioInfo.RequiresTranslation && e.translator != nil {
 		translationResult, err := e.translator.Translate(
 			ctx,
@@ -267,6 +268,20 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 					paramsToFilter[record.SourceParam] = record.SourceValue
 				}
 			}
+
+			// Same-name params whose VALUE was converted by a translation rule
+			// (e.g., x264 preset "fast" -> NVENC "p5", audit Reason carries the
+			// converter). These keep their flag name but must have their value
+			// rewritten in place so inline (-preset=fast) and separate forms
+			// behave identically. Hardware injections are not user params.
+			sameNameConverted = make(map[string]string)
+			for _, record := range translationResult.AuditRecords {
+				if record.Success &&
+					record.SourceParam != "" && record.SourceParam == record.TargetParam &&
+					record.Reason != "" && record.Reason != encoder.ConverterUsedHardwareInjection {
+					sameNameConverted[record.SourceParam] = record.TargetValue
+				}
+			}
 		} else {
 			// Translation returned nil result, use original params
 			translatedParams = make(map[string]string)
@@ -300,7 +315,7 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 	}
 
 	// Step 5: Build rewritten arguments
-	response.RewrittenArgs = e.buildRewrittenArgs(req.OriginalArgs, targetEncoder, translatedParams, paramsToFilter)
+	response.RewrittenArgs = e.buildRewrittenArgs(req.OriginalArgs, targetEncoder, translatedParams, paramsToFilter, sameNameConverted)
 
 	// Step 6: Generate notifications
 	// Notification message formats:
@@ -403,7 +418,9 @@ func isGlobalInitParam(paramName string) bool {
 // buildRewrittenArgs constructs the rewritten FFmpeg arguments.
 // paramsToFilter contains original encoder parameters that should be removed
 // from the args (these were translated to different parameter names).
-func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEncoder encoder.EncoderFamily, params map[string]string, paramsToFilter map[string]string) []string {
+// sameNameConverted maps parameters that kept their name but had their value
+// converted by a translation rule (e.g., x264 "preset fast" -> NVENC "p5").
+func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEncoder encoder.EncoderFamily, params map[string]string, paramsToFilter map[string]string, sameNameConverted map[string]string) []string {
 	result := make([]string, 0, len(originalArgs)+len(params)+2)
 
 	// Collect global initialization args (init_hw_device, hwaccel, etc.)
@@ -442,11 +459,17 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 		seenParams[paramName] = true
 	}
 
-	// Iterate through original args and rewrite
 	skipNext := false
 	for i, arg := range originalArgs {
 		if skipNext {
 			skipNext = false
+			continue
+		}
+
+		// Positional argument: either the value of the previous flag or
+		// an input/output path. It is never a parameter flag.
+		if !strings.HasPrefix(arg, "-") {
+			result = append(result, arg)
 			continue
 		}
 
@@ -462,33 +485,79 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 		}
 
 		// Handle encoder params that we need to filter or translate
-		if strings.HasPrefix(arg, "-") && (len(params) > 0 || len(paramsToFilter) > 0) {
+		if len(params) > 0 || len(paramsToFilter) > 0 || len(sameNameConverted) > 0 {
 			paramName := strings.TrimPrefix(arg, "-")
-			// Check for param with value in same arg (e.g., -crf=23)
-			if strings.Contains(paramName, "=") {
-				parts := strings.SplitN(paramName, "=", 2)
-				paramName = parts[0]
+
+			// Inline args carry their own value, so they never consume the
+			// next argument.
+			inlineForm := strings.IndexByte(paramName, '=') != -1
+
+			// Match tables first by FULL name (keys may contain stream
+			// specifiers, e.g. "b:v", "bsf:v"), then fall back to the base
+			// name with any inline value and specifier stripped
+			// (e.g. -crf=23 -> crf, -crf:v -> crf).
+			fullName := paramName
+			if idx := strings.IndexByte(fullName, '='); idx != -1 {
+				fullName = fullName[:idx]
+			}
+			baseName := fullName
+			if idx := strings.IndexByte(baseName, ':'); idx != -1 {
+				baseName = baseName[:idx]
 			}
 
-			// If this param is in our translated params set, skip it
-			// (it will be re-added with translated value later)
-			if _, exists := params[paramName]; exists {
-				seenParams[paramName] = true
-				// Check if value is next arg
-				if i+1 < len(originalArgs) && !strings.HasPrefix(originalArgs[i+1], "-") {
-					skipNext = true
+			// Lookup helper: try full name first, then base name.
+			lookup := func(m map[string]string) (string, bool) {
+				if v, ok := m[fullName]; ok {
+					return v, true
+				}
+				if v, ok := m[baseName]; ok {
+					return v, true
+				}
+				return "", false
+			}
+			markSeen := func() {
+				seenParams[fullName] = true
+				seenParams[baseName] = true
+			}
+
+			if _, exists := lookup(paramsToFilter); exists {
+				if !inlineForm {
+					// Separate-value form: consume the value so it isn't
+					// mistaken for an input/output path.
+					if i+1 < len(originalArgs) && !strings.HasPrefix(originalArgs[i+1], "-") {
+						skipNext = true
+					}
+				}
+				// Translated to a different name: drop here; the translated
+				// form is re-added below from the params map. Inline forms
+				// ("-crf=23") carry their own value and need no skipNext —
+				// skipping would swallow the output path.
+				markSeen()
+				continue
+			}
+
+			if convertedValue, found := lookup(sameNameConverted); found {
+				// Same-name param whose value was converted by a translation
+				// rule (e.g., x264 "preset fast" -> NVENC "p5"): rewrite the
+				// VALUE so inline and separate forms behave identically. The
+				// flag name itself stays unchanged.
+				markSeen()
+				if inlineForm {
+					eqIdx := strings.IndexByte(arg, '=')
+					result = append(result, arg[:eqIdx+1]+convertedValue)
+				} else {
+					result = append(result, arg)
+					if i+1 < len(originalArgs) && !strings.HasPrefix(originalArgs[i+1], "-") {
+						result = append(result, convertedValue)
+						skipNext = true
+					}
 				}
 				continue
 			}
 
-			// If this param is in the filter set, skip it
-			// (these are params that were translated to different param names)
-			if _, exists := paramsToFilter[paramName]; exists {
-				// Check if value is next arg
-				if i+1 < len(originalArgs) && !strings.HasPrefix(originalArgs[i+1], "-") {
-					skipNext = true
-				}
-				continue
+			if _, exists := lookup(params); exists {
+				// No translation rule: keep the original occurrence as-is.
+				markSeen()
 			}
 		}
 
@@ -501,35 +570,100 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 	// and FFmpeg falls back to its default encoder (e.g. libx264).  We must
 	// insert -c:v BEFORE the output path for it to take effect.
 	if !encoderAdded {
-		// Find the output file: the last positional argument (no leading '-')
-		// that is NOT a value of a preceding flag.
-		insertPos := len(result)
-		for j := len(result) - 1; j >= 0; j-- {
-			if !strings.HasPrefix(result[j], "-") {
-				insertPos = j
-				break
-			}
-		}
-		// Insert -c:v targetEncoder before the output path, preserving
-		// any trailing flag/value pairs already accumulated.
-		if insertPos < len(result) {
-			tail := make([]string, len(result)-insertPos)
-			copy(tail, result[insertPos:])
-			result = append(result[:insertPos], "-c:v", string(targetEncoder))
-			result = append(result, tail...)
-		} else {
-			// No output file found (should not happen in practice).
-			result = append(result, "-c:v", string(targetEncoder))
-		}
+		result = insertBeforeOutputPath(result, []string{"-c:v", string(targetEncoder)})
 	}
 
-	// Add translated params (skip global init params already prepended)
+	// Add translated params (skip global init params already prepended).
+	// FFmpeg per-file options apply to the NEXT file, so they must be placed
+	// BEFORE the output path — appending after it silently ignores them.
+	var newParams []string
 	for paramName, paramValue := range params {
 		if !seenParams[paramName] {
-			result = append(result, fmt.Sprintf("-%s", paramName), paramValue)
+			newParams = append(newParams, fmt.Sprintf("-%s", paramName), paramValue)
 		}
 	}
+	if len(newParams) > 0 {
+		result = insertBeforeOutputPath(result, newParams)
+	}
 
+	return result
+}
+
+// booleanFFmpegFlags lists FFmpeg options that never take a separate value.
+// Used by findOutputFilePos so a boolean flag followed by the output path
+// (e.g., "-shortest out.mp4") is not mis-paired as flag+value.
+var booleanFFmpegFlags = map[string]bool{
+	"shortest":      true,
+	"y":             true,
+	"n":             true,
+	"vn":            true,
+	"an":            true,
+	"sn":            true,
+	"dn":            true,
+	"stats":         true,
+	"hide_banner":   true,
+	"report":        true,
+	"benchmark":     true,
+	"benchmark_all": true,
+	"debug_ts":      true,
+	"copyts":        true,
+	"start_at_zero": true,
+	"bitexact":      true,
+	"re":            true,
+	"stdin":         true,
+	"copyinkf":      true,
+}
+
+// isBooleanFlagArg reports whether arg ("-flag" form) is a boolean FFmpeg
+// flag or uses the inline "-flag=value" form; neither consumes the next
+// argument.
+func isBooleanFlagArg(arg string) bool {
+	if !strings.HasPrefix(arg, "-") {
+		return false
+	}
+	name := strings.TrimPrefix(arg, "-")
+	if strings.IndexByte(name, '=') != -1 {
+		return true // inline value form carries its own value
+	}
+	return booleanFFmpegFlags[name]
+}
+
+// findOutputFilePos returns the index of the output file within args: the
+// last positional (no leading '-') argument that is NOT the value of a
+// preceding value-taking flag. Pairing skips boolean flags and inline
+// "=value" forms, which never consume the next argument.
+func findOutputFilePos(args []string) int {
+	outputPos := -1
+	expectValue := false
+	for i, arg := range args {
+		if expectValue {
+			expectValue = false
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" && !isBooleanFlagArg(arg) {
+			// A value-taking flag consumes the next arg only if that arg
+			// does not start with '-'.
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				expectValue = true
+			}
+			continue
+		}
+		outputPos = i
+	}
+	return outputPos
+}
+
+// insertBeforeOutputPath inserts toInsert before the output file in args.
+// If no output file is found, the items are appended at the end.
+func insertBeforeOutputPath(args []string, toInsert []string) []string {
+	insertPos := findOutputFilePos(args)
+	if insertPos < 0 || insertPos >= len(args) {
+		return append(args, toInsert...)
+	}
+	result := make([]string, 0, len(args)+len(toInsert))
+	result = append(result, args[:insertPos]...)
+	result = append(result, toInsert...)
+	result = append(result, args[insertPos:]...)
 	return result
 }
 

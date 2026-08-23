@@ -491,3 +491,66 @@ func TestRewriteAdapter_ParseEncoderParamsFromArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestRewriteAdapter_NonEncoderParamsPreserved verifies that non-encoder
+// parameters (like -preset, -movflags) survive the rewrite pipeline.
+// Regression test for TSI-2331: -preset/-movflags were silently dropped when
+// the rewrite engine re-emitted args, even though the DB stored them correctly.
+func TestRewriteAdapter_NonEncoderParamsPreserved(t *testing.T) {
+	adapter := NewRewriteAdapter()
+
+	tests := []struct {
+		name         string
+		caps         *protocol.WorkerCapabilities
+		args         []string
+		expectInArgs []string
+	}{
+		{
+			// x264 preset "fast" is translated to NVENC "p5" (same flag
+			// name, converted value); -movflags has no translation rule
+			// and must be preserved verbatim.
+			name: "auto-hw upgrade to nvenc converts preset value fast->p5",
+			caps: &protocol.WorkerCapabilities{
+				VideoEncoders: []protocol.EncoderInfo{
+					{Name: "h264_nvenc", Type: "video", IsHW: true},
+					{Name: "libx264", Type: "video", IsHW: false},
+				},
+				GPUDevices: []protocol.GPUDeviceInfo{
+					{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+				},
+			},
+			args:         []string{"-y", "-i", "input.mp4", "-c:v", "libx264", "-preset", "fast", "-movflags", "+faststart", "output.mp4"},
+			expectInArgs: []string{"-preset", "p5", "-movflags", "+faststart"},
+		},
+		{
+			name:         "no encoder specified with no HW keeps -preset and -movflags",
+			caps:         &protocol.WorkerCapabilities{},
+			args:         []string{"-y", "-i", "input.mp4", "-preset", "fast", "-movflags", "+faststart", "output.mp4"},
+			expectInArgs: []string{"-preset", "fast", "-movflags", "+faststart"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter.SetHardwareCapabilities(tt.caps)
+			rewritten, _, err := adapter.RewriteArgs(context.Background(), tt.args)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			for i := 0; i+1 < len(tt.expectInArgs); i += 2 {
+				flag, value := tt.expectInArgs[i], tt.expectInArgs[i+1]
+				foundPair := false
+				for j := 0; j+1 < len(rewritten); j++ {
+					if rewritten[j] == flag && rewritten[j+1] == value {
+						foundPair = true
+						break
+					}
+				}
+				if !foundPair {
+					t.Errorf("expected %s %s to be preserved as a flag/value pair in rewritten args, got %v", flag, value, rewritten)
+				}
+			}
+		})
+	}
+}

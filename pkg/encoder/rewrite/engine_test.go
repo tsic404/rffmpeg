@@ -291,7 +291,7 @@ func TestEngineCoordinator_BuildRewrittenArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil, nil)
 
 			for _, expected := range tt.expectContains {
 				found := false
@@ -528,7 +528,7 @@ func TestBuildRewrittenArgs_GlobalInitParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil, nil)
 
 			for _, expected := range tt.expectContains {
 				found := false
@@ -581,7 +581,7 @@ func TestBuildRewrittenArgs_EncoderPlacement(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEnc, map[string]string{}, nil)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEnc, map[string]string{}, nil, nil)
 
 			encIdx := -1
 			outputIdx := -1
@@ -607,7 +607,6 @@ func TestBuildRewrittenArgs_EncoderPlacement(t *testing.T) {
 	}
 }
 
-
 func TestBuildRewrittenArgs_ParamsToFilter(t *testing.T) {
 	engine := NewEngineCoordinator()
 
@@ -621,30 +620,30 @@ func TestBuildRewrittenArgs_ParamsToFilter(t *testing.T) {
 		expectNotContains []string
 	}{
 		{
-			name:           "translated param (crf->quality) is filtered from original args",
-			originalArgs:   []string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "-preset", "medium", "output.mp4"},
-			targetEncoder:  encoder.EncoderH264VAAPI,
-			params:         map[string]string{"quality": "55"},
-			paramsToFilter: map[string]string{"crf": "23"},
-			expectContains: []string{"-c:v", "h264_vaapi", "-quality", "55", "-preset", "medium"},
+			name:              "translated param (crf->quality) is filtered from original args",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "-preset", "medium", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264VAAPI,
+			params:            map[string]string{"quality": "55"},
+			paramsToFilter:    map[string]string{"crf": "23"},
+			expectContains:    []string{"-c:v", "h264_vaapi", "-quality", "55", "-preset", "medium"},
 			expectNotContains: []string{"-crf", "23", "libx264"},
 		},
 		{
-			name:           "non-translated param (preset) is preserved when not in paramsToFilter",
-			originalArgs:   []string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "-preset", "medium", "output.mp4"},
-			targetEncoder:  encoder.EncoderH264VAAPI,
-			params:         map[string]string{"quality": "55"},
-			paramsToFilter: map[string]string{"crf": "23"}, // Only crf is filtered; preset is preserved
-			expectContains: []string{"-quality", "55", "-preset", "medium"},
+			name:              "non-translated param (preset) is preserved when not in paramsToFilter",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "-preset", "medium", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264VAAPI,
+			params:            map[string]string{"quality": "55"},
+			paramsToFilter:    map[string]string{"crf": "23"}, // Only crf is filtered; preset is preserved
+			expectContains:    []string{"-quality", "55", "-preset", "medium"},
 			expectNotContains: []string{"-crf"},
 		},
 		{
-			name:           "nil paramsToFilter - original crf passes through when not in params",
-			originalArgs:   []string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "output.mp4"},
-			targetEncoder:  encoder.EncoderH264NVENC,
-			params:         map[string]string{"cq": "23"},
-			paramsToFilter: nil, // No additional filtering; -crf passes through since not in params
-			expectContains: []string{"-cq", "23"},
+			name:              "nil paramsToFilter - original crf passes through when not in params",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264NVENC,
+			params:            map[string]string{"cq": "23"},
+			paramsToFilter:    nil, // No additional filtering; -crf passes through since not in params
+			expectContains:    []string{"-cq", "23"},
 			expectNotContains: []string{"libx264"},
 		},
 		{
@@ -656,28 +655,92 @@ func TestBuildRewrittenArgs_ParamsToFilter(t *testing.T) {
 			expectContains: []string{"-quality", "55"},
 		},
 		{
-			name:           "multiple translated params all filtered",
-			originalArgs:   []string{"-i", "input.mp4", "-c:v", "libx265", "-crf", "28", "-preset", "slow", "output.mp4"},
-			targetEncoder:  encoder.EncoderHEVCVAAPI,
-			params:         map[string]string{"quality": "46"},
-			paramsToFilter: map[string]string{"crf": "28", "preset": "slow"}, // Both crf and preset filtered
-			expectContains: []string{"-c:v", "hevc_vaapi", "-quality", "46"},
+			name:              "multiple translated params all filtered",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx265", "-crf", "28", "-preset", "slow", "output.mp4"},
+			targetEncoder:     encoder.EncoderHEVCVAAPI,
+			params:            map[string]string{"quality": "46"},
+			paramsToFilter:    map[string]string{"crf": "28", "preset": "slow"}, // Both crf and preset filtered
+			expectContains:    []string{"-c:v", "hevc_vaapi", "-quality", "46"},
 			expectNotContains: []string{"-crf", "28", "-preset", "slow", "libx265"},
 		},
 		{
-			name:           "param with equals syntax (-crf=23) is filtered",
-			originalArgs:   []string{"-i", "input.mp4", "-c:v", "libx264", "-crf=23", "output.mp4"},
-			targetEncoder:  encoder.EncoderH264NVENC,
-			params:         map[string]string{"cq": "23"},
-			paramsToFilter: map[string]string{"crf": "23"},
-			expectContains: []string{"-c:v", "h264_nvenc", "-cq", "23"},
+			name:              "param with equals syntax (-crf=23) is filtered",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-crf=23", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264NVENC,
+			params:            map[string]string{"cq": "23"},
+			paramsToFilter:    map[string]string{"crf": "23"},
+			expectContains:    []string{"-c:v", "h264_nvenc", "-cq", "23"},
 			expectNotContains: []string{"-crf=23", "-crf"},
+		},
+		{
+			// Blocking regression (round 2): a boolean flag adjacent to the
+			// output path must not be mis-paired as flag+value; the inserted
+			// encoder/params must land BEFORE the output path.
+			name:              "boolean flag adjacent to output path does not break insertion",
+			originalArgs:      []string{"-y", "-i", "in.mkv", "-shortest", "out.mp4"},
+			targetEncoder:     encoder.EncoderH264VAAPI,
+			params:            map[string]string{"quality": "55"},
+			paramsToFilter:    map[string]string{},
+			expectContains:    []string{"-shortest", "-c:v", "h264_vaapi", "-quality", "55"},
+			expectNotContains: []string{},
+		},
+		{
+			// Non-blocking regression (round 2 #2): full-name keys like "b:v"
+			// must match before base-name stripping; the original occurrence
+			// is marked seen so backfill does not duplicate it.
+			name:              "stream-specifier full name matches table key without duplication",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-b:v", "5M", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264NVENC,
+			params:            map[string]string{"b:v": "5M"},
+			paramsToFilter:    map[string]string{},
+			expectContains:    []string{"output.mp4"},
+			expectNotContains: []string{},
+		},
+		{
+			// Regression: translated params must NOT be inserted between a
+			// trailing flag and its value (e.g., between "-t" and "60").
+			name:              "translated params inserted before output, not inside trailing flag/value pair",
+			originalArgs:      []string{"-i", "input.mp4", "-t", "60", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264VAAPI,
+			params:            map[string]string{"quality": "55"},
+			paramsToFilter:    map[string]string{},
+			expectContains:    []string{"-quality"},
+			expectNotContains: []string{},
+		},
+		{
+			// Regression: inline filter form must drop only the flag itself,
+			// never the output path that follows it.
+			name:              "inline filter form does not swallow following output path",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-crf=23", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264NVENC,
+			params:            map[string]string{"cq": "23"},
+			paramsToFilter:    map[string]string{"crf": "23"},
+			expectContains:    []string{"output.mp4"},
+			expectNotContains: []string{"-crf=23"},
+		},
+		{
+			name:              "value not starting with dash is kept as flag value, not dropped",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-preset", "fast", "-movflags", "+faststart", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264VAAPI,
+			params:            map[string]string{"quality": "55"},
+			paramsToFilter:    map[string]string{},
+			expectContains:    []string{"-movflags", "+faststart", "-preset", "fast"},
+			expectNotContains: []string{"-crf"},
+		},
+		{
+			name:              "stream-specifier suffix param (-crf:v) is filtered by base name",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v", "libx264", "-crf:v", "23", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264NVENC,
+			params:            map[string]string{"cq": "23"},
+			paramsToFilter:    map[string]string{"crf": "23"},
+			expectContains:    []string{"-c:v", "h264_nvenc", "-cq", "23"},
+			expectNotContains: []string{"-crf:v", "-crf"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, tt.paramsToFilter)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, tt.paramsToFilter, nil)
 
 			for _, expected := range tt.expectContains {
 				found := false
