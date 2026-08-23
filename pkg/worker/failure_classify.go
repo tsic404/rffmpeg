@@ -6,6 +6,14 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 )
 
+// isRemoteURL reports whether s is a remote URL (e.g. http://, https://,
+// ftp://) rather than a server file ID. This is the single source of truth
+// for the "://" heuristic in the worker package — DownloadInput's remote
+// branch and the download-failure classifier must never disagree.
+func isRemoteURL(s string) bool {
+	return strings.Contains(s, "://")
+}
+
 // ClassifyFailure categorizes an ffmpeg execution failure into one of 6
 // FailureType values. stderr must be ffmpeg output — generic error text is
 // never matched against input/encoder patterns.
@@ -46,6 +54,19 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 
 	// Fallback: FFmpeg error
 	return protocol.FailureFFmpegError, extractFFmpegSummary(stderr)
+}
+
+// ClassifyInputDownloadFailure classifies a failed input-file download by
+// input kind. A remote URL (see isRemoteURL) is fetched directly from the
+// user-supplied source — if the worker cannot reach it, the job's input is
+// unreachable → INPUT_UNREACHABLE. A server file ID is fetched over the
+// worker↔server channel; failing there is infrastructure, not an input
+// problem → FFMPEG_ERROR (same rationale as reportInfraFailure).
+func ClassifyInputDownloadFailure(fileID string) protocol.FailureType {
+	if isRemoteURL(fileID) {
+		return protocol.FailureInputUnreachable
+	}
+	return protocol.FailureFFmpegError
 }
 
 // isDiskFull checks stderr for disk-full patterns.

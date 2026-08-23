@@ -148,7 +148,7 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 	var req *http.Request
 	var err error
 
-	if strings.Contains(fileID, "://") {
+	if isRemoteURL(fileID) {
 		// Remote URL — download directly
 		downloadURL = fileID
 		req, err = http.NewRequest("GET", downloadURL, nil)

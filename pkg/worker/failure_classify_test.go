@@ -142,6 +142,34 @@ func TestReportFailureAlwaysSetsClassification(t *testing.T) {
 	}
 }
 
+// TestClassifyInputDownloadFailure locks the TSI-2348 fix: a failed download
+// of a remote-URL input is the user's input being unreachable (INPUT_UNREACHABLE),
+// while a failed server-file fetch is worker↔server infrastructure (FFMPEG_ERROR).
+func TestClassifyInputDownloadFailure(t *testing.T) {
+	remoteURLs := []string{
+		"http://example.com/video.mp4",
+		"https://cdn.example.com/a/b/c.mkv",
+		"ftp://files.example.com/media.avi",
+		"http://10.0.0.1:8080/stream",
+	}
+	for _, url := range remoteURLs {
+		if got := ClassifyInputDownloadFailure(url); got != protocol.FailureInputUnreachable {
+			t.Errorf("remote URL %q classified as %q, want INPUT_UNREACHABLE", url, got)
+		}
+	}
+
+	serverFileIDs := []string{
+		"abc123",
+		"0f8b3c2e-1d4a-4e5f-9a6b-upload0042",
+		"",
+	}
+	for _, id := range serverFileIDs {
+		if got := ClassifyInputDownloadFailure(id); got != protocol.FailureFFmpegError {
+			t.Errorf("server file ID %q classified as %q, want FFMPEG_ERROR", id, got)
+		}
+	}
+}
+
 // TestClassifyFailureInfraTextNotInputUnreachable locks the review fix:
 // generic infrastructure error text (server communication, upload, job-dir
 // plumbing) must NOT be pattern-matched into INPUT_UNREACHABLE — that
