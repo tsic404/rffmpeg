@@ -193,6 +193,7 @@ type WorkerHeartbeatRequest struct {
 	Status        WorkerStatus `json:"status"`
 	ActiveJobs    []string     `json:"active_jobs,omitempty"`
 	ThroughputFPS float64      `json:"throughput_fps,omitempty"`
+	CompletedJobs int          `json:"completed_jobs,omitempty"`
 }
 
 type WorkerHeartbeatResponse struct {
@@ -327,6 +328,7 @@ type WorkerState struct {
 	EWMAThroughput float64   `json:"ewma_throughput,omitempty"` // EWMA-smoothed throughput
 	Evicted        bool      `json:"evicted"`                   // Whether worker is a slow node (evicted from scheduling)
 	QueueDepth     int       `json:"queue_depth,omitempty"`
+	CompletedJobs  int       `json:"completed_jobs,omitempty"` // Cumulative jobs completed since the current registration
 	LastSeen       time.Time `json:"last_seen"`
 	StartedAt      time.Time `json:"started_at,omitempty"`
 }

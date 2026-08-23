@@ -725,6 +725,7 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 		Status:        protocol.WorkerStatusBusy,
 		ActiveJobs:    []string{"job-1", "job-2"},
 		ThroughputFPS: 1.5,
+		CompletedJobs: 7,
 	}
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 
@@ -755,6 +756,8 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 			t.Errorf("Expected throughput 1.5 in state table, got %f", state.ThroughputFPS)
 		} else if len(state.ActiveJobs) != 2 {
 			t.Errorf("Expected 2 active jobs in state table, got %d", len(state.ActiveJobs))
+		} else if state.CompletedJobs != 7 {
+			t.Errorf("Expected 7 completed jobs in state table, got %d", state.CompletedJobs)
 		}
 	}
 }

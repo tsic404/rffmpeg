@@ -84,12 +84,13 @@ func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string
 }
 
 // Heartbeat sends a heartbeat to the server and returns any cancelled job IDs
-func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64) ([]string, error) {
+func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int) ([]string, error) {
 	req := protocol.WorkerHeartbeatRequest{
 		WorkerID:      c.workerID,
 		Status:        status,
 		ActiveJobs:    activeJobs,
 		ThroughputFPS: throughputFPS,
+		CompletedJobs: completedJobs,
 	}
 
 	resp, err := c.doRequest("POST", "/workers/heartbeat", req)

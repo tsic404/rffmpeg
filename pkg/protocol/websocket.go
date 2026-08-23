@@ -52,6 +52,7 @@ type WorkerHeartbeatPayload struct {
 	ActiveJobs    []string  `json:"active_jobs,omitempty"`
 	ThroughputFPS float64   `json:"throughput_fps,omitempty"`
 	QueueDepth    int       `json:"queue_depth,omitempty"`
+	CompletedJobs int       `json:"completed_jobs,omitempty"`
 	Timestamp     time.Time `json:"timestamp"`
 }
 

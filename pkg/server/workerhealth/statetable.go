@@ -52,6 +52,7 @@ func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatP
 	state.GPUMemUsedMB = payload.GPUMemUsedMB
 	state.ActiveJobs = payload.ActiveJobs
 	state.ThroughputFPS = payload.ThroughputFPS
+	state.CompletedJobs = payload.CompletedJobs
 	state.QueueDepth = payload.QueueDepth
 	state.LastSeen = payload.Timestamp
 
@@ -123,6 +124,12 @@ const SlowNodeThreshold = 3.0
 // throughput is above median/1.5.
 const RecoveryThreshold = 1.5
 
+// MinJobsForEviction is the minimum number of jobs a worker must have completed
+// before it becomes eligible for slow-node eviction. Workers still in their warmup
+// phase (fewer than this many completed jobs) are excluded from the median
+// calculation and are never marked as slow, preventing cold-start false positives.
+const MinJobsForEviction = 5
+
 // SlowNodeDetectionResult holds the result of slow node detection.
 type SlowNodeDetectionResult struct {
 	NewlyEvicted []string
@@ -134,7 +141,9 @@ type SlowNodeDetectionResult struct {
 // throughput, and marks workers as evicted if their throughput is below median/SlowNodeThreshold.
 // Previously evicted workers are recovered if their throughput exceeds median/RecoveryThreshold.
 // Workers with zero throughput and no active jobs (idle) are excluded from the median calculation
-// and are not marked as slow — they are simply skipped.
+// and are not marked as slow — they are simply skipped. Newly registered workers that have
+// completed fewer than MinJobsForEviction jobs are also excluded, so cold-start throughput
+// (which is not yet representative) cannot trigger a false eviction.
 //
 // Returns SlowNodeDetectionResult containing newly evicted IDs, recovered IDs, and the computed median.
 func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
@@ -152,6 +161,10 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 	for id, state := range t.states {
 		// Skip offline workers
 		if state.Status == string(protocol.WorkerStatusOffline) {
+			continue
+		}
+		// Skip new workers still in their warmup phase
+		if state.CompletedJobs < MinJobsForEviction {
 			continue
 		}
 		hasJobs := len(state.ActiveJobs) > 0

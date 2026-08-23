@@ -34,6 +34,7 @@ type Worker struct {
 	pollInterval       time.Duration
 	lastHeartbeatTime  time.Time
 	jobsCompleted      int
+	totalJobsCompleted int
 	ffprobeExecutor    *FFprobeExecutor
 	pixelFormatChecker *PixelFormatChecker
 	auditRecorder      audit.AuditRecorder
@@ -136,6 +137,20 @@ func (w *Worker) Register(caps protocol.WorkerCapabilities) error {
 	}
 	w.id = workerID
 	w.client.workerID = workerID
+
+	// Reset per-registration counters so the server-side warmup check
+	// (CompletedJobs < MinJobsForEviction) applies to this registration.
+	// After a server restart the worker re-registers with a fresh identity;
+	// without this reset, the process-lifetime count would bypass the
+	// cold-start eviction protection. lastHeartbeatTime is reset too, so the
+	// first heartbeat reports throughput over a full interval instead of the
+	// pre-restart window.
+	w.mu.Lock()
+	w.jobsCompleted = 0
+	w.totalJobsCompleted = 0
+	w.lastHeartbeatTime = time.Now()
+	w.mu.Unlock()
+
 	log.Printf("Worker registered with ID: %s", workerID)
 
 	// Set hardware capabilities on the rewrite adapter
@@ -234,6 +249,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		w.mu.Lock()
 		delete(w.activeJobs, job.ID)
 		w.jobsCompleted++
+		w.totalJobsCompleted++
 		becameIdle := len(w.activeJobs) == 0
 		w.mu.Unlock()
 
@@ -459,11 +475,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// Record audit operation
 			if w.auditRecorder != nil {
 				_ = w.auditRecorder.Record(audit.AuditOperation{
-					RequestID:            job.ID,
-					OriginalEncoder:      rewriteResult.OriginalEncoder,
-					RewrittenEncoder:      rewriteResult.TargetEncoder,
-					DecisionReason:       rewriteResult.DecisionReason,
-					CapabilitiesSummary:  rewriteResult.CapabilitiesSummary,
+					RequestID:           job.ID,
+					OriginalEncoder:     rewriteResult.OriginalEncoder,
+					RewrittenEncoder:    rewriteResult.TargetEncoder,
+					DecisionReason:      rewriteResult.DecisionReason,
+					CapabilitiesSummary: rewriteResult.CapabilitiesSummary,
 				})
 			}
 
@@ -793,11 +809,12 @@ func (w *Worker) sendHeartbeat() {
 	if elapsed > 0 && w.jobsCompleted > 0 {
 		throughputFPS = float64(w.jobsCompleted) / elapsed
 	}
+	completedJobs := w.totalJobsCompleted
 	w.jobsCompleted = 0
 	w.lastHeartbeatTime = now
 	w.mu.Unlock()
 
-	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, throughputFPS)
+	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, throughputFPS, completedJobs)
 	if err != nil {
 		log.Printf("Failed to send heartbeat: %v", err)
 		// Attempt re-registration if server may have restarted

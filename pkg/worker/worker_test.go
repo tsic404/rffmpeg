@@ -1,8 +1,74 @@
 package worker
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/protocol"
 )
+
+// TestRegisterResetsJobCounters verifies that a successful registration resets
+// the job counters and heartbeat timestamp. After a server restart the worker
+// re-registers with a fresh identity; without this reset, the process-lifetime
+// completed-job count would bypass the server-side warmup check
+// (CompletedJobs < MinJobsForEviction) and defeat the cold-start eviction
+// protection (review blocker #1 on TSI-2218).
+func TestRegisterResetsJobCounters(t *testing.T) {
+	var mu sync.Mutex
+	var registrations int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workers/register" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		registrations++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"worker_id":"test-worker-id"}`))
+	}))
+	defer srv.Close()
+
+	w, err := New(Config{ServerURL: srv.URL})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	// Simulate state accumulated before re-registration: jobs finished,
+	// per-interval counter set for the next heartbeat, stale timestamp.
+	stale := time.Now().Add(-10 * time.Minute)
+	w.mu.Lock()
+	w.totalJobsCompleted = 42
+	w.jobsCompleted = 3
+	w.lastHeartbeatTime = stale
+	w.mu.Unlock()
+
+	if err := w.Register(protocol.WorkerCapabilities{}); err != nil {
+		t.Fatalf("Register() failed: %v", err)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.totalJobsCompleted != 0 {
+		t.Errorf("totalJobsCompleted = %d, want 0 after registration reset", w.totalJobsCompleted)
+	}
+	if w.jobsCompleted != 0 {
+		t.Errorf("jobsCompleted = %d, want 0 after registration reset", w.jobsCompleted)
+	}
+	if !w.lastHeartbeatTime.After(stale) {
+		t.Error("lastHeartbeatTime should be refreshed on registration")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if registrations != 1 {
+		t.Errorf("server received %d registrations, want exactly 1", registrations)
+	}
+}
 
 func TestFfmpegStderrIndicatesEmptyOutput(t *testing.T) {
 	tests := []struct {

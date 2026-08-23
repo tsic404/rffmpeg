@@ -839,6 +839,7 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 			Status:        string(req.Status),
 			ActiveJobs:    req.ActiveJobs,
 			ThroughputFPS: req.ThroughputFPS,
+			CompletedJobs: req.CompletedJobs,
 			Timestamp:     time.Now(),
 		}
 		h.stateTable.UpdateFromHeartbeat(statePayload)
