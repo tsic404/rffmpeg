@@ -559,12 +559,35 @@ POST /api/v1/workers/register
   }
 }
 
-# 心跳
+# 心跳（含 GPU 利用率与显存指标，由 nvidia-smi 采样）
 POST /api/v1/workers/heartbeat
 {
   "worker_id": "uuid",
   "status": "busy",
-  "active_jobs": ["job_id_1"]
+  "active_jobs": ["job_id_1"],
+  "throughput_fps": 120.5,
+  "gpu_util_percent": 87,
+  "gpu_mem_used_mb": 4096
+}
+
+# Worker 列表（含实时健康指标）
+GET /api/v1/workers
+{
+  "workers": [
+    {
+      "id": "uuid",
+      "status": "busy",
+      "gpu_model": "NVIDIA RTX 3080",
+      "health": {
+        "status": "busy",
+        "gpu_util_percent": 87,
+        "gpu_mem_used_mb": 4096,
+        "active_jobs": ["job_id_1"],
+        "throughput_fps": 120.5,
+        "last_seen": "2024-01-01T00:00:00Z"
+      }
+    }
+  ]
 }
 
 # 拉取任务

@@ -427,6 +427,43 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /workers:
+    get:
+      tags: [workers]
+      summary: List workers
+      description: List all registered workers with capabilities and health metrics
+      operationId: listWorkers
+      responses:
+        '200':
+          description: Workers registered on the server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkersListResponse'
+
+  /workers/{workerId}:
+    get:
+      tags: [workers]
+      summary: Get worker
+      description: Get a single registered worker with capabilities and health metrics
+      operationId: getWorker
+      parameters:
+        - name: workerId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Worker details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerGetResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /workers/{workerId}/jobs:
     get:
       tags: [workers]
@@ -680,6 +717,18 @@ components:
           items:
             type: string
             format: uuid
+        throughput_fps:
+          type: number
+          format: double
+          description: Encoding throughput in frames per second since the last heartbeat
+        gpu_util_percent:
+          type: number
+          format: double
+          description: GPU utilization percentage sampled via nvidia-smi (omitted when unavailable)
+        gpu_mem_used_mb:
+          type: integer
+          format: int64
+          description: GPU memory in use, megabytes, sampled via nvidia-smi (omitted when unavailable)
 
     WorkerStatus:
       type: string
@@ -698,6 +747,87 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/JobInfo'
+
+    WorkerHealth:
+      type: object
+      required: [status, last_seen]
+      properties:
+        status:
+          $ref: '#/components/schemas/WorkerStatus'
+        gpu_util_percent:
+          type: number
+          format: double
+          description: GPU utilization percentage (omitted when the worker reports no GPU metrics)
+        gpu_mem_used_mb:
+          type: integer
+          format: int64
+          description: GPU memory in use, megabytes (omitted when the worker reports no GPU metrics)
+        active_jobs:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: IDs of jobs currently running on this worker
+        throughput_fps:
+          type: number
+          format: double
+          description: Encoding throughput in frames per second since the last heartbeat
+        last_seen:
+          type: string
+          format: date-time
+
+    WorkerInfo:
+      type: object
+      required: [id, status, encoders, ffmpeg_version, max_concurrent, last_heartbeat, created_at, health]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/WorkerStatus'
+        evicted:
+          type: boolean
+          description: Whether the worker is currently evicted from scheduling as a slow node
+        gpu_model:
+          type: string
+        encoders:
+          type: array
+          items:
+            type: string
+        decoders:
+          type: array
+          items:
+            type: string
+        ffmpeg_version:
+          type: string
+        max_concurrent:
+          type: integer
+        last_heartbeat:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        health:
+          $ref: '#/components/schemas/WorkerHealth'
+
+    WorkersListResponse:
+      type: object
+      required: [workers]
+      properties:
+        workers:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkerInfo'
+
+    WorkerGetResponse:
+      type: object
+      required: [worker]
+      properties:
+        worker:
+          $ref: '#/components/schemas/WorkerInfo'
 
     HealthResponse:
       type: object

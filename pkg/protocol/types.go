@@ -194,6 +194,8 @@ type WorkerHeartbeatRequest struct {
 	ActiveJobs    []string     `json:"active_jobs,omitempty"`
 	ThroughputFPS float64      `json:"throughput_fps,omitempty"`
 	CompletedJobs int          `json:"completed_jobs,omitempty"`
+	GPUUtilPct    float64      `json:"gpu_util_percent,omitempty"`
+	GPUMemUsedMB  int          `json:"gpu_mem_used_mb,omitempty"`
 }
 
 type WorkerHeartbeatResponse struct {

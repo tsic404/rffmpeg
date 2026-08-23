@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
 )
 
 // apiPrefix is the API version prefix for all server endpoints
@@ -83,14 +84,18 @@ func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string
 	return result.WorkerID, nil
 }
 
-// Heartbeat sends a heartbeat to the server and returns any cancelled job IDs
-func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int) ([]string, error) {
+// Heartbeat sends a heartbeat to the server and returns any cancelled job IDs.
+// gpuMetrics carries GPU utilization samples; zero values mean "not available"
+// and are omitted from the wire payload.
+func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int, gpuMetrics gpu.Metrics) ([]string, error) {
 	req := protocol.WorkerHeartbeatRequest{
 		WorkerID:      c.workerID,
 		Status:        status,
 		ActiveJobs:    activeJobs,
 		ThroughputFPS: throughputFPS,
 		CompletedJobs: completedJobs,
+		GPUUtilPct:    gpuMetrics.UtilPct,
+		GPUMemUsedMB:  gpuMetrics.MemUsedMB,
 	}
 
 	resp, err := c.doRequest("POST", "/workers/heartbeat", req)

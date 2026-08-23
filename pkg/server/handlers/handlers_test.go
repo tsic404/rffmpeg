@@ -59,6 +59,8 @@ func setupTest(t *testing.T) (*handlers.Handler, *chi.Mux, func()) {
 	r.Post("/api/v1/workers/register", h.RegisterWorker)
 	r.Post("/api/v1/workers/heartbeat", h.WorkerHeartbeat)
 	r.Get("/api/v1/workers/{workerId}/jobs", h.PullWorkerJobs)
+	r.Get("/api/v1/workers/{workerId}", h.GetWorker)
+	r.Get("/api/v1/workers", h.ListWorkers)
 	r.Get("/api/v1/files/{fileId}", h.DownloadFile)
 
 	cleanup := func() {
@@ -860,6 +862,129 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 			t.Errorf("Expected 7 completed jobs in state table, got %d", state.CompletedJobs)
 		}
 	}
+}
+
+// TestWorkerHealthInListResponse verifies that the workers endpoints always
+// return a non-null health object (TSI-2219) and that GPU metrics sent via
+// heartbeat flow into the response.
+// workerHealth mirrors the handler's health object for JSON decoding in tests.
+type WorkerHealth struct {
+	Status        string   `json:"status"`
+	GPUUtilPct    float64  `json:"gpu_util_percent,omitempty"`
+	GPUMemUsedMB  int      `json:"gpu_mem_used_mb,omitempty"`
+	ActiveJobs    []string `json:"active_jobs,omitempty"`
+	ThroughputFPS float64  `json:"throughput_fps,omitempty"`
+	LastSeen      string   `json:"last_seen"`
+}
+
+func TestWorkerHealthInListResponse(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// Register a worker
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "test-worker-health",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	var regResp protocol.WorkerRegisterResponse
+	json.NewDecoder(rec.Body).Decode(&regResp)
+
+	// Before any heartbeat: health must still be present (never null), derived from the DB record.
+	req = httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	var getResp struct {
+		Worker struct {
+			ID     string        `json:"id"`
+			Status string        `json:"status"`
+			Health *WorkerHealth `json:"health"`
+		} `json:"worker"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&getResp); err != nil {
+		t.Fatalf("Failed to decode get worker response: %v", err)
+	}
+	if getResp.Worker.Health == nil {
+		t.Fatalf("Expected non-null health for registered worker before first heartbeat")
+	}
+	if getResp.Worker.Health.Status != string(protocol.WorkerStatusIdle) {
+		t.Errorf("Expected health status '%s', got '%s'", protocol.WorkerStatusIdle, getResp.Worker.Health.Status)
+	}
+
+	// Send a heartbeat with GPU metrics and active jobs.
+	heartbeatReq := protocol.WorkerHeartbeatRequest{
+		WorkerID:      regResp.WorkerID,
+		Status:        protocol.WorkerStatusBusy,
+		ActiveJobs:    []string{"job-1"},
+		ThroughputFPS: 42.5,
+		GPUUtilPct:    87,
+		GPUMemUsedMB:  4096,
+	}
+	heartbeatBody, _ := json.Marshal(heartbeatReq)
+	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Heartbeat failed with status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The list endpoint must surface the live metrics in health.
+	req = httptest.NewRequest("GET", "/api/v1/workers", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	var listResp struct {
+		Workers []struct {
+			ID     string        `json:"id"`
+			Status string        `json:"status"`
+			Health *WorkerHealth `json:"health"`
+		} `json:"workers"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatalf("Failed to decode list workers response: %v", err)
+	}
+	var found *struct {
+		ID     string        `json:"id"`
+		Status string        `json:"status"`
+		Health *WorkerHealth `json:"health"`
+	}
+	for i := range listResp.Workers {
+		if listResp.Workers[i].ID == regResp.WorkerID {
+			found = &listResp.Workers[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("Registered worker missing from list response")
+	}
+	health := found.Health
+	if health == nil {
+		t.Fatalf("Expected non-null health after heartbeat")
+	}
+	if health.Status != string(protocol.WorkerStatusBusy) {
+		t.Errorf("Expected health status 'busy', got '%s'", health.Status)
+	}
+	if health.GPUUtilPct != 87 {
+		t.Errorf("Expected gpu_util_percent 87, got %f", health.GPUUtilPct)
+	}
+	if health.GPUMemUsedMB != 4096 {
+		t.Errorf("Expected gpu_mem_used_mb 4096, got %d", health.GPUMemUsedMB)
+	}
+	if len(health.ActiveJobs) != 1 || health.ActiveJobs[0] != "job-1" {
+		t.Errorf("Expected active_jobs [job-1], got %v", health.ActiveJobs)
+	}
+	if health.ThroughputFPS != 42.5 {
+		t.Errorf("Expected throughput_fps 42.5, got %f", health.ThroughputFPS)
+	}
+
+	_ = h // handler kept for state table wiring via setupTest
 }
 
 func TestCancelCompletedJob(t *testing.T) {

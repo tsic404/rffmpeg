@@ -82,6 +82,20 @@ func (h *Handler) GetStateTable() *workerhealth.WorkerStateTable {
 	return h.stateTable
 }
 
+// workerStateMap returns the worker state table contents keyed by worker ID.
+// Returns nil when no state table is configured.
+func (h *Handler) workerStateMap() map[string]*protocol.WorkerState {
+	if h.stateTable == nil {
+		return nil
+	}
+	states := make(map[string]*protocol.WorkerState)
+	for _, s := range h.stateTable.GetAll() {
+		state := s // copy for stable pointer
+		states[s.WorkerID] = &state
+	}
+	return states
+}
+
 // SetScheduler sets the scheduler reference (TSI-1501)
 func (h *Handler) SetScheduler(sched *scheduler.Scheduler) {
 	h.scheduler = sched
@@ -863,6 +877,8 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 			ActiveJobs:    req.ActiveJobs,
 			ThroughputFPS: req.ThroughputFPS,
 			CompletedJobs: req.CompletedJobs,
+			GPUUtilPct:    req.GPUUtilPct,
+			GPUMemUsedMB:  req.GPUMemUsedMB,
 			Timestamp:     time.Now(),
 		}
 		h.stateTable.UpdateFromHeartbeat(statePayload)
@@ -1342,8 +1358,9 @@ func (h *Handler) ListWorkers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := make([]WorkerInfo, len(workers))
+	states := h.workerStateMap()
 	for i, worker := range workers {
-		response[i] = dbWorkerToWorkerInfo(worker)
+		response[i] = dbWorkerToWorkerInfo(worker, states)
 	}
 
 	writeJSON(w, http.StatusOK, ListWorkersResponse{Workers: response})
@@ -1367,7 +1384,7 @@ func (h *Handler) GetWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, GetWorkerResponse{Worker: dbWorkerToWorkerInfo(worker)})
+	writeJSON(w, http.StatusOK, GetWorkerResponse{Worker: dbWorkerToWorkerInfo(worker, h.workerStateMap())})
 }
 
 // ListWorkersByEncoder handles listing workers that have a specific encoder
@@ -1383,8 +1400,9 @@ func (h *Handler) ListWorkersByEncoder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := make([]WorkerInfo, len(workers))
+	states := h.workerStateMap()
 	for i, worker := range workers {
-		response[i] = dbWorkerToWorkerInfo(worker)
+		response[i] = dbWorkerToWorkerInfo(worker, states)
 	}
 
 	writeJSON(w, http.StatusOK, ListWorkersByEncoderResponse{
@@ -1446,24 +1464,37 @@ func (h *Handler) ListAllHwaccels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// WorkerHealth carries live runtime metrics for a worker (TSI-2219).
+// Populated from the server's worker state table when at least one heartbeat
+// has been received; otherwise derived from the database record.
+type WorkerHealth struct {
+	Status        string   `json:"status"`
+	GPUUtilPct    float64  `json:"gpu_util_percent,omitempty"`
+	GPUMemUsedMB  int      `json:"gpu_mem_used_mb,omitempty"`
+	ActiveJobs    []string `json:"active_jobs,omitempty"`
+	ThroughputFPS float64  `json:"throughput_fps,omitempty"`
+	LastSeen      string   `json:"last_seen"`
+}
+
 // WorkerInfo represents worker information for API responses
 type WorkerInfo struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name,omitempty"`
-	Status        string   `json:"status"`
-	Evicted       bool     `json:"evicted"`
-	GPUModel      string   `json:"gpu_model,omitempty"`
-	Encoders      []string `json:"encoders"`
-	Decoders      []string `json:"decoders,omitempty"`
-	FFmpegVersion string   `json:"ffmpeg_version"`
-	MaxConcurrent int      `json:"max_concurrent"`
-	LastHeartbeat string   `json:"last_heartbeat"`
-	CreatedAt     string   `json:"created_at"`
-	Hwaccels      string   `json:"hwaccels,omitempty"`
-	Codecs        string   `json:"codecs,omitempty"`
-	Filters       string   `json:"filters,omitempty"`
-	PixFmts       string   `json:"pix_fmts,omitempty"`
-	Formats       string   `json:"formats,omitempty"`
+	ID            string        `json:"id"`
+	Name          string        `json:"name,omitempty"`
+	Status        string        `json:"status"`
+	Evicted       bool          `json:"evicted"`
+	GPUModel      string        `json:"gpu_model,omitempty"`
+	Encoders      []string      `json:"encoders"`
+	Decoders      []string      `json:"decoders,omitempty"`
+	FFmpegVersion string        `json:"ffmpeg_version"`
+	MaxConcurrent int           `json:"max_concurrent"`
+	LastHeartbeat string        `json:"last_heartbeat"`
+	CreatedAt     string        `json:"created_at"`
+	Hwaccels      string        `json:"hwaccels,omitempty"`
+	Codecs        string        `json:"codecs,omitempty"`
+	Filters       string        `json:"filters,omitempty"`
+	PixFmts       string        `json:"pix_fmts,omitempty"`
+	Formats       string        `json:"formats,omitempty"`
+	Health        *WorkerHealth `json:"health"`
 }
 
 // ListWorkersResponse is the response for listing workers
@@ -1597,8 +1628,10 @@ func writeInfoFlagText(w http.ResponseWriter, header string, items []string) {
 	w.Write([]byte(sb.String()))
 }
 
-// dbWorkerToWorkerInfo converts database Worker to WorkerInfo
-func dbWorkerToWorkerInfo(worker *db.Worker) WorkerInfo {
+// dbWorkerToWorkerInfo converts database Worker to WorkerInfo.
+// states may be nil; when provided, live health metrics come from the worker
+// state table, otherwise they are derived from the database record.
+func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerState) WorkerInfo {
 	var encoders, decoders []string
 	if err := json.Unmarshal([]byte(worker.Encoders), &encoders); err != nil {
 		log.Printf("Failed to unmarshal encoders for worker %s: %v", worker.ID, err)
@@ -1628,6 +1661,21 @@ func dbWorkerToWorkerInfo(worker *db.Worker) WorkerInfo {
 	if worker.GPUModel.Valid {
 		info.GPUModel = worker.GPUModel.String
 	}
+
+	health := WorkerHealth{
+		Status:     string(worker.Status),
+		LastSeen:   worker.LastHeartbeat.Format(time.RFC3339),
+		ActiveJobs: []string{},
+	}
+	if state, ok := states[worker.ID]; ok && state != nil {
+		health.Status = state.Status
+		health.GPUUtilPct = state.GPUUtilPct
+		health.GPUMemUsedMB = state.GPUMemUsedMB
+		health.ThroughputFPS = state.ThroughputFPS
+		health.ActiveJobs = state.ActiveJobs
+		health.LastSeen = state.LastSeen.Format(time.RFC3339)
+	}
+	info.Health = &health
 
 	return info
 }

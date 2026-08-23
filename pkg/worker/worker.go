@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tsix404/rffmpeg/pkg/audit"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
 )
 
 // Worker is the main worker struct that handles job processing
@@ -39,6 +40,7 @@ type Worker struct {
 	pixelFormatChecker *PixelFormatChecker
 	auditRecorder      audit.AuditRecorder
 	auditNotifier      audit.Notifier
+	gpuDetector        *gpu.Detector
 }
 
 // Config holds worker configuration
@@ -100,22 +102,22 @@ func New(cfg Config) (*Worker, error) {
 	auditRecorder := audit.NewRingBufferRecorder(500)
 
 	return &Worker{
-		id:                 cfg.WorkerID,
-		name:               cfg.Name,
-		client:             client,
-		executor:           executor,
-		retryExecutor:      retryExecutor,
-		rewriteAdapter:     rewriteAdapter,
-		cache:              cache,
-		tempDir:            cfg.TempDir,
-		activeJobs:         make(map[string]context.CancelFunc),
-		heartbeatInterval:  cfg.HeartbeatInterval,
-		pollInterval:       cfg.PollInterval,
-		lastHeartbeatTime:  time.Now(),
-		ffprobeExecutor:    NewFFprobeExecutor(""),
-		pixelFormatChecker: NewPixelFormatChecker(NewFFprobeExecutor("")),
-		auditRecorder:      auditRecorder,
-		auditNotifier:      auditNotifier,
+		id:                cfg.WorkerID,
+		name:              cfg.Name,
+		client:            client,
+		executor:          executor,
+		retryExecutor:     retryExecutor,
+		rewriteAdapter:    rewriteAdapter,
+		cache:             cache,
+		tempDir:           cfg.TempDir,
+		activeJobs:        make(map[string]context.CancelFunc),
+		heartbeatInterval: cfg.HeartbeatInterval,
+		pollInterval:      cfg.PollInterval,
+		lastHeartbeatTime: time.Now(),
+		ffprobeExecutor:   NewFFprobeExecutor(""),
+		auditRecorder:     auditRecorder,
+		auditNotifier:     auditNotifier,
+		gpuDetector:       gpu.NewDetector(),
 	}, nil
 }
 
@@ -835,7 +837,8 @@ func (w *Worker) sendHeartbeat() {
 	w.lastHeartbeatTime = now
 	w.mu.Unlock()
 
-	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, throughputFPS, completedJobs)
+	gpuMetrics := w.gpuDetector.SampleMetrics()
+	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, throughputFPS, completedJobs, gpuMetrics)
 	if err != nil {
 		log.Printf("Failed to send heartbeat: %v", err)
 		// Attempt re-registration if server may have restarted

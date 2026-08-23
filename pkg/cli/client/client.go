@@ -612,23 +612,34 @@ func (c *Client) setAuthHeader(req *http.Request) {
 	}
 }
 
+// WorkerHealth carries live runtime metrics for a worker (TSI-2219).
+type WorkerHealth struct {
+	Status        string   `json:"status"`
+	GPUUtilPct    float64  `json:"gpu_util_percent,omitempty"`
+	GPUMemUsedMB  int      `json:"gpu_mem_used_mb,omitempty"`
+	ActiveJobs    []string `json:"active_jobs,omitempty"`
+	ThroughputFPS float64  `json:"throughput_fps,omitempty"`
+	LastSeen      string   `json:"last_seen"`
+}
+
 // WorkerInfo represents worker information from the API
 type WorkerInfo struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name,omitempty"`
-	Status        string   `json:"status"`
-	GPUModel      string   `json:"gpu_model,omitempty"`
-	Encoders      []string `json:"encoders"`
-	Decoders      []string `json:"decoders,omitempty"`
-	FFmpegVersion string   `json:"ffmpeg_version"`
-	MaxConcurrent int      `json:"max_concurrent"`
-	LastHeartbeat string   `json:"last_heartbeat"`
-	CreatedAt     string   `json:"created_at"`
-	Hwaccels      string   `json:"hwaccels,omitempty"`
-	Codecs        string   `json:"codecs,omitempty"`
-	Filters       string   `json:"filters,omitempty"`
-	PixFmts       string   `json:"pix_fmts,omitempty"`
-	Formats       string   `json:"formats,omitempty"`
+	ID            string        `json:"id"`
+	Name          string        `json:"name,omitempty"`
+	Status        string        `json:"status"`
+	GPUModel      string        `json:"gpu_model,omitempty"`
+	Encoders      []string      `json:"encoders"`
+	Decoders      []string      `json:"decoders,omitempty"`
+	FFmpegVersion string        `json:"ffmpeg_version"`
+	MaxConcurrent int           `json:"max_concurrent"`
+	LastHeartbeat string        `json:"last_heartbeat"`
+	CreatedAt     string        `json:"created_at"`
+	Hwaccels      string        `json:"hwaccels,omitempty"`
+	Codecs        string        `json:"codecs,omitempty"`
+	Filters       string        `json:"filters,omitempty"`
+	PixFmts       string        `json:"pix_fmts,omitempty"`
+	Formats       string        `json:"formats,omitempty"`
+	Health        *WorkerHealth `json:"health"`
 }
 
 // ListWorkersResponse is the response for listing workers
