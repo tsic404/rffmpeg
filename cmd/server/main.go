@@ -109,6 +109,7 @@ func main() {
 		ScheduleInterval:     cfg.ScheduleInterval,
 		TimeoutCheckInterval: cfg.TimeoutCheckInterval,
 		MaxJobsPerWorker:     cfg.MaxJobsPerWorker,
+		NoWorkerJobTimeout:   cfg.NoWorkerJobTimeout,
 	})
 
 	// Connect the scheduler to the monitor so job migration triggers rescheduling
@@ -118,8 +119,8 @@ func main() {
 	h.SetScheduler(jobScheduler)
 
 	jobScheduler.Start()
-	log.Printf("Job scheduler started (job timeout: %s, schedule interval: %s, timeout check interval: %s, max jobs per worker: %d)",
-		cfg.JobTimeout, cfg.ScheduleInterval, cfg.TimeoutCheckInterval, cfg.MaxJobsPerWorker)
+	log.Printf("Job scheduler started (job timeout: %s, schedule interval: %s, timeout check interval: %s, max jobs per worker: %d, no-worker job timeout: %s)",
+		cfg.JobTimeout, cfg.ScheduleInterval, cfg.TimeoutCheckInterval, cfg.MaxJobsPerWorker, cfg.NoWorkerJobTimeout)
 
 	// Initialize rate limiter runtime config
 	rateLimitCfg := &ratelimit.RuntimeConfig{
@@ -315,7 +316,7 @@ func parseFlags() *config.Flags {
 	flag.StringVar(&flags.JobTimeout, "job-timeout", "", "Timeout for running jobs before rescheduling (default: 30m)")
 	flag.StringVar(&flags.ScheduleInterval, "schedule-interval", "", "Interval for job scheduling (default: 5s)")
 	flag.StringVar(&flags.TimeoutCheckInterval, "timeout-check-interval", "", "Interval for checking job timeouts (default: 30s)")
-	flag.IntVar(&flags.MaxJobsPerWorker, "max-jobs-per-worker", 0, "Maximum concurrent jobs per worker (default: 1)")
+	flag.StringVar(&flags.NoWorkerJobTimeout, "no-worker-job-timeout", "", "Fail pending jobs waiting longer than this with no schedulable worker; 0 disables (default: 2m)")
 
 	// TLS flags
 	flag.BoolVar(&flags.TLSEnabled, "tls", false, "Enable TLS (HTTPS)")

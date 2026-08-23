@@ -271,12 +271,14 @@ const (
 	FailureTimeout            FailureType = "TIMEOUT"
 	FailureWorkerCrash        FailureType = "WORKER_CRASH"
 	FailureFFmpegError        FailureType = "FFMPEG_ERROR"
+	FailureNoWorkerAvailable  FailureType = "NO_WORKER_AVAILABLE"
 )
 
 func (f FailureType) IsValid() bool {
 	switch f {
 	case FailureInputUnreachable, FailureEncoderUnsupported, FailureDiskFull,
-		FailureTimeout, FailureWorkerCrash, FailureFFmpegError:
+		FailureTimeout, FailureWorkerCrash, FailureFFmpegError,
+		FailureNoWorkerAvailable:
 		return true
 	default:
 		return false

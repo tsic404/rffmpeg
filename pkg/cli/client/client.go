@@ -233,7 +233,7 @@ func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, 
 		}
 		var errResp protocol.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
-			return "", fmt.Errorf("job submission failed: %s", errResp.Message)
+			return "", fmt.Errorf("job submission failed [%s]: %s", errResp.Code, errResp.Message)
 		}
 		return "", fmt.Errorf("job submission failed with status %d", resp.StatusCode)
 	}

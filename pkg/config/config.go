@@ -35,6 +35,10 @@ type ServerConfig struct {
 	ScheduleInterval     time.Duration `json:"schedule_interval" yaml:"schedule_interval"`
 	TimeoutCheckInterval time.Duration `json:"timeout_check_interval" yaml:"timeout_check_interval"`
 	MaxJobsPerWorker     int           `json:"max_jobs_per_worker" yaml:"max_jobs_per_worker"`
+	// NoWorkerJobTimeout fails pending jobs waiting longer than this with no
+	// schedulable worker (all offline/evicted) as NO_WORKER_AVAILABLE.
+	// 0 disables the check.
+	NoWorkerJobTimeout time.Duration `json:"no_worker_job_timeout" yaml:"no_worker_job_timeout"`
 
 	// Rate limit settings (per-client)
 	RateLimitEnabled           bool `json:"rate_limit_enabled" yaml:"rate_limit_enabled"`
@@ -63,6 +67,7 @@ type Flags struct {
 	ScheduleInterval           string
 	TimeoutCheckInterval       string
 	MaxJobsPerWorker           int
+	NoWorkerJobTimeout         string
 	TLSEnabled                 bool
 	TLSCertFile                string
 	TLSKeyFile                 string
@@ -89,6 +94,7 @@ func DefaultServerConfig() *ServerConfig {
 		ScheduleInterval:           5 * time.Second,  // Schedule jobs every 5 seconds
 		TimeoutCheckInterval:       30 * time.Second, // Check for timeouts every 30 seconds
 		MaxJobsPerWorker:           1,                // One job at a time per worker by default
+		NoWorkerJobTimeout:         2 * time.Minute,  // Fail jobs pending >2m with no schedulable worker
 		RateLimitEnabled:           true,             // Enable per-client rate limiting by default
 		MaxConcurrentJobsPerClient: 10,               // Max 10 concurrent jobs per client
 		TLS:                        tlspkg.DefaultConfig(),
@@ -165,6 +171,11 @@ func LoadFromEnv() *ServerConfig {
 	if timeoutCheckInterval := os.Getenv("TIMEOUT_CHECK_INTERVAL"); timeoutCheckInterval != "" {
 		if d, err := time.ParseDuration(timeoutCheckInterval); err == nil {
 			config.TimeoutCheckInterval = d
+		}
+	}
+	if noWorkerTimeout := os.Getenv("NO_WORKER_JOB_TIMEOUT"); noWorkerTimeout != "" {
+		if d, err := time.ParseDuration(noWorkerTimeout); err == nil {
+			config.NoWorkerJobTimeout = d
 		}
 	}
 	if maxJobs := os.Getenv("MAX_JOBS_PER_WORKER"); maxJobs != "" {
@@ -267,6 +278,11 @@ func (c *ServerConfig) Merge(flags *Flags) {
 	if flags.TimeoutCheckInterval != "" {
 		if d, err := time.ParseDuration(flags.TimeoutCheckInterval); err == nil {
 			c.TimeoutCheckInterval = d
+		}
+	}
+	if flags.NoWorkerJobTimeout != "" {
+		if d, err := time.ParseDuration(flags.NoWorkerJobTimeout); err == nil {
+			c.NoWorkerJobTimeout = d
 		}
 	}
 	if flags.MaxJobsPerWorker > 0 {

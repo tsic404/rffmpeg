@@ -168,6 +168,7 @@ func TestFailureTypeIsValid(t *testing.T) {
 		protocol.FailureInputUnreachable, protocol.FailureEncoderUnsupported,
 		protocol.FailureDiskFull, protocol.FailureTimeout,
 		protocol.FailureWorkerCrash, protocol.FailureFFmpegError,
+		protocol.FailureNoWorkerAvailable,
 	}
 	for _, f := range valid {
 		if !f.IsValid() {

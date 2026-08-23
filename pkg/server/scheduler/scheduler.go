@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -15,6 +16,11 @@ type Config struct {
 	ScheduleInterval     time.Duration // Interval for scheduling checks
 	TimeoutCheckInterval time.Duration // Interval for timeout checks
 	MaxJobsPerWorker     int           // Maximum jobs to assign to a worker at once
+	// NoWorkerJobTimeout is how long a pending job may wait with no schedulable
+	// worker (offline/evicted pool) before being failed as NO_WORKER_AVAILABLE.
+	// 0 disables the check. Pending jobs queued behind busy workers are NOT
+	// affected: schedulable workers exist, so the job keeps waiting (TSI-2204).
+	NoWorkerJobTimeout time.Duration
 }
 
 // DefaultConfig returns the default scheduler configuration
@@ -24,6 +30,7 @@ func DefaultConfig() Config {
 		ScheduleInterval:     5 * time.Second,
 		TimeoutCheckInterval: 30 * time.Second,
 		MaxJobsPerWorker:     1, // One job at a time per worker by default
+		NoWorkerJobTimeout:   2 * time.Minute,
 	}
 }
 
@@ -35,16 +42,21 @@ type Scheduler struct {
 	done    chan struct{}
 	mu      sync.Mutex
 	resched chan struct{} // Channel to trigger immediate rescheduling
+
+	// noWorkerEnabled mirrors config.NoWorkerJobTimeout > 0; captured at
+	// construction so the loop never sees a torn config read.
+	noWorkerEnabled bool
 }
 
 // New creates a new scheduler
 func New(database *db.Database, config Config) *Scheduler {
 	return &Scheduler{
-		db:      database,
-		config:  config,
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
-		resched: make(chan struct{}, 1), // Buffered to allow non-blocking trigger
+		db:              database,
+		config:          config,
+		stop:            make(chan struct{}),
+		done:            make(chan struct{}),
+		resched:         make(chan struct{}, 1), // Buffered to allow non-blocking trigger
+		noWorkerEnabled: config.NoWorkerJobTimeout > 0,
 	}
 }
 
@@ -81,6 +93,7 @@ func (s *Scheduler) run() {
 			s.schedulePendingJobs()
 		case <-timeoutTicker.C:
 			s.checkTimeouts()
+			s.checkNoWorkerStarvation()
 		}
 	}
 }
@@ -332,5 +345,53 @@ func (s *Scheduler) checkTimeouts() {
 		}
 
 		log.Printf("Scheduler: Job %s rescheduled successfully", job.ID)
+	}
+}
+
+// checkNoWorkerStarvation fails pending jobs that have been waiting longer
+// than NoWorkerJobTimeout while the cluster has NO schedulable worker (all
+// offline or evicted). Without this, a job submitted just before its only
+// worker died would stay pending forever and CLI clients would hang (TSI-2334).
+//
+// Jobs queued behind busy workers are deliberately untouched: schedulable
+// workers exist, so the job is expected to start once one frees up.
+func (s *Scheduler) checkNoWorkerStarvation() {
+	if !s.noWorkerEnabled {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pendingJobs, err := s.db.GetPendingJobs(1)
+	if err != nil {
+		log.Printf("Scheduler: Failed to get pending jobs: %v", err)
+		return
+	}
+	if len(pendingJobs) == 0 {
+		return
+	}
+
+	schedulable, err := s.db.GetSchedulableWorkers()
+	if err != nil {
+		log.Printf("Scheduler: Failed to get schedulable workers: %v", err)
+		return
+	}
+	if len(schedulable) > 0 {
+		// At least one worker can still take jobs; keep waiting (TSI-2204).
+		return
+	}
+
+	cutoff := time.Now().Add(-s.config.NoWorkerJobTimeout)
+	errMsg := fmt.Sprintf(
+		"no worker available for over %s (all workers offline or evicted); submit again once a worker is online",
+		s.config.NoWorkerJobTimeout)
+	failed, err := s.db.FailStarvedPendingJobs(cutoff, errMsg, string(protocol.FailureNoWorkerAvailable))
+	if err != nil {
+		log.Printf("Scheduler: Failed to fail starved pending jobs: %v", err)
+		return
+	}
+	if failed > 0 {
+		log.Printf("Scheduler: Failed %d starved job(s) after waiting %s with no schedulable worker",
+			failed, s.config.NoWorkerJobTimeout)
 	}
 }

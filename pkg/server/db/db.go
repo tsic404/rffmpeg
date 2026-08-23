@@ -910,6 +910,26 @@ func (d *Database) FailJob(id, errMsg string, failureType string) error {
 	return nil
 }
 
+// FailStarvedPendingJobs fails all pending jobs created before cutoff in a
+// single statement, returning the number of jobs failed. Used by the scheduler
+// starvation guard (TSI-2334) so a backlog larger than any fetch limit
+// converges within one tick.
+func (d *Database) FailStarvedPendingJobs(cutoff time.Time, errMsg, failureType string) (int64, error) {
+	now := time.Now()
+	exitCode := -1
+	result, err := d.db.Exec(`
+		UPDATE jobs SET status = ?, worker_id = NULL,
+		                exit_code = ?, error = ?,
+		                failure_type = ?, finished_at = ?, updated_at = ?
+		WHERE status = ? AND worker_id IS NULL AND created_at < ?
+	`, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now,
+		protocol.JobStatusPending, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fail starved pending jobs: %w", err)
+	}
+	return result.RowsAffected()
+}
+
 // ResetJobToPending resets a job to pending status, clearing worker assignment.
 // This is used during worker failover to re-queue a job for another worker.
 func (d *Database) ResetJobToPending(id string) error {

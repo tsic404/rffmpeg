@@ -958,3 +958,231 @@ func TestSchedulerEncoderFallbackExactMatchPreferred(t *testing.T) {
 
 	_ = workerNVENC // Use to avoid unused variable warning
 }
+
+// TSI-2334: a pending job whose only worker went offline must be failed with
+// NO_WORKER_AVAILABLE after the grace period instead of waiting forever.
+func TestSchedulerNoWorkerStarvation(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   1 * time.Minute,
+	})
+
+	// Create an idle worker, then take it offline (simulates death after submit)
+	_, err = database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Backdate created_at beyond the grace period
+	if _, err := database.GetDB().Exec(`
+		UPDATE jobs SET created_at = ? WHERE id = ?
+	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {
+		t.Fatalf("Failed to backdate created_at: %v", err)
+	}
+
+	s.checkNoWorkerStarvation()
+
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusFailed {
+		t.Errorf("Expected status failed, got %s", updatedJob.Status)
+	}
+	if updatedJob.FailureType != string(protocol.FailureNoWorkerAvailable) {
+		t.Errorf("Expected failure_type %q, got %q",
+			protocol.FailureNoWorkerAvailable, updatedJob.FailureType)
+	}
+	if updatedJob.Error.String == "" {
+		t.Error("Expected non-empty error message")
+	}
+}
+
+// TSI-2204 contract: pending jobs queued behind BUSY workers must NOT be
+// failed — schedulable workers exist, so the starvation check is a no-op.
+func TestSchedulerNoWorkerStarvation_SkipsWhenWorkerBusy(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   1 * time.Minute,
+	})
+
+	_, err = database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusBusy); err != nil {
+		t.Fatalf("Failed to mark worker busy: %v", err)
+	}
+
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+	if _, err := database.GetDB().Exec(`
+		UPDATE jobs SET created_at = ? WHERE id = ?
+	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {
+		t.Fatalf("Failed to backdate created_at: %v", err)
+	}
+
+	s.checkNoWorkerStarvation()
+
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusPending {
+		t.Errorf("Busy worker means job stays pending; got %s", updatedJob.Status)
+	}
+}
+
+// Fresh jobs inside the grace period are left pending even with no workers.
+func TestSchedulerNoWorkerStarvation_RespectsGracePeriod(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   1 * time.Minute,
+	})
+
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// No workers registered at all; but job was created just now
+	s.checkNoWorkerStarvation()
+
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusPending {
+		t.Errorf("Job within grace period should stay pending; got %s", updatedJob.Status)
+	}
+}
+
+// NoWorkerJobTimeout=0 disables the check entirely.
+func TestSchedulerNoWorkerStarvation_DisabledByZero(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   0,
+	})
+
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+	if _, err := database.GetDB().Exec(`
+		UPDATE jobs SET created_at = ? WHERE id = ?
+	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {
+		t.Fatalf("Failed to backdate created_at: %v", err)
+	}
+
+	s.checkNoWorkerStarvation()
+
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusPending {
+		t.Errorf("Check disabled (timeout=0): job should stay pending; got %s", updatedJob.Status)
+	}
+}
+
+// TSI-2334 review: a backlog of starved jobs larger than any fetch limit must
+// converge within a single tick (bulk SQL failure, not per-job iteration).
+func TestSchedulerNoWorkerStarvation_BulkBacklog(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   1 * time.Minute,
+	})
+
+	const backlog = 250
+	for i := 0; i < backlog; i++ {
+		if _, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false); err != nil {
+			t.Fatalf("Failed to create job %d: %v", i, err)
+		}
+	}
+	old := time.Now().Add(-5 * time.Minute)
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET created_at = ?`, old); err != nil {
+		t.Fatalf("Failed to backdate created_at: %v", err)
+	}
+
+	s.checkNoWorkerStarvation()
+
+	pendingJobs, err := database.GetPendingJobs(1000)
+	if err != nil {
+		t.Fatalf("Failed to get pending jobs: %v", err)
+	}
+	if len(pendingJobs) != 0 {
+		t.Errorf("Expected all %d starved jobs failed in one tick, %d still pending", backlog, len(pendingJobs))
+	}
+	failed, err := database.GetJobsByStatus(protocol.JobStatusFailed, 1000)
+	if err != nil {
+		t.Fatalf("Failed to get failed jobs: %v", err)
+	}
+	if len(failed) != backlog {
+		t.Errorf("Expected %d failed jobs, got %d", backlog, len(failed))
+	}
+	for _, job := range failed {
+		if job.FailureType != string(protocol.FailureNoWorkerAvailable) {
+			t.Errorf("job %s: expected failure_type NO_WORKER_AVAILABLE, got %q",
+				job.ID, job.FailureType)
+			break
+		}
+	}
+}
