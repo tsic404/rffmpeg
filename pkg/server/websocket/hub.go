@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -30,6 +31,12 @@ type Hub struct {
 	mu         sync.RWMutex
 	// seq tracks the next per-job message sequence number for gap detection
 	seq map[string]int64
+	// seqStore, when non-nil, persists seq counters across server restarts
+	// (TSI-2379): without it a restart resets numbering to 1 and reconnecting
+	// streaming clients misread the new stream as lost data.
+	seqStore SeqStore
+	// seqPersistFailures counts failed store writes/deletes for observability.
+	seqPersistFailures atomic.Int64
 }
 
 // BroadcastMessage represents a message to be broadcast
@@ -38,14 +45,29 @@ type BroadcastMessage struct {
 	Message []byte
 }
 
-// NewHub creates a new Hub
+// SeqStore persists per-job WebSocket sequence counters. Implemented by
+// *db.Database; declared here to keep this package free of a db import.
+type SeqStore interface {
+	LoadWSJobSeq(jobID string) (int64, error)
+	SaveWSJobSeq(jobID string, lastSeq int64) error
+	DeleteWSJobSeq(jobID string) error
+}
+
+// NewHub creates a new Hub without sequence persistence (tests, embedders).
 func NewHub() *Hub {
+	return NewHubWithSeqStore(nil)
+}
+
+// NewHubWithSeqStore creates a Hub whose per-job sequence counters survive a
+// restart via store. A nil store keeps the in-memory-only behavior.
+func NewHubWithSeqStore(store SeqStore) *Hub {
 	return &Hub{
 		clients:    make(map[string]map[*Client]bool),
 		broadcast:  make(chan *BroadcastMessage, 256),
 		register:   make(chan *Client, 100), // Buffered to prevent blocking
 		unregister: make(chan *Client, 100), // Buffered to prevent blocking
 		seq:        make(map[string]int64),
+		seqStore:   store,
 	}
 }
 
@@ -123,22 +145,43 @@ func (h *Hub) Broadcast(jobID string, message []byte) {
 // The counter lives for the whole job: it is only removed once the terminal
 // status broadcast (completed/failed/cancelled/timeout) has gone out, so a
 // reconnecting client's lastSeq stays meaningful across disconnect windows.
+//
+// With a SeqStore configured, the counter is persisted on every increment
+// and restored on the first broadcast after a restart — a server restart no
+// longer resets numbering to 1, which streaming clients would read as lost
+// data and fail the job with a spurious gap error. Persistence happens
+// outside h.mu: the store has its own locking and must not be called under
+// the hub lock that Run-loop paths also take.
 func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 	if msg.Type != protocol.WSMsgHeartbeat {
+		// Restore a persisted counter before locking, when the first
+		// post-restart broadcast for this job arrives: LoadWSJobSeq does
+		// SQLite I/O and must never run under h.mu, which the Run loop's
+		// register/unregister/broadcast paths share. The locked re-check in
+		// ensureSeq resolves races with concurrent broadcasts for the same
+		// job (each may speculatively load here; only one result wins).
+		h.prefetchSeq(msg.JobID)
+
 		h.mu.Lock()
+		h.ensureSeq(msg.JobID)
 		h.seq[msg.JobID]++
 		msg.Seq = h.seq[msg.JobID]
+		terminal := false
 		if msg.Type == protocol.WSMsgStatus {
 			if payload, ok := msg.Data.(protocol.WSStatusPayload); ok && protocol.IsTerminalStatus(payload.Status) {
 				delete(h.seq, msg.JobID)
+				terminal = true
 			}
 		}
 		if msg.Type == protocol.WSMsgComplete || msg.Type == protocol.WSMsgError {
 			// Complete/error are themselves terminal events: the job will
 			// produce no further sequenced data worth tracking.
 			delete(h.seq, msg.JobID)
+			terminal = true
 		}
 		h.mu.Unlock()
+
+		h.persistSeq(msg.JobID, msg.Seq, terminal)
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -146,6 +189,87 @@ func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 	}
 	h.Broadcast(msg.JobID, data)
 	return nil
+}
+
+// persistSeq writes the counter through to the store (best-effort) and drops
+// it once the job is terminal. Errors are logged, never fatal: an unpersisted
+// counter only costs gap detection across a restart, not the live stream.
+// Failures are counted in seqPersistFailures (read via SeqPersistFailureCount)
+// so monitoring can alert on a degraded store without a metrics framework.
+// Called without h.mu held — same rule as prefetchSeq.
+func (h *Hub) persistSeq(jobID string, seq int64, terminal bool) {
+	if h.seqStore == nil {
+		return
+	}
+	if terminal {
+		if err := h.seqStore.DeleteWSJobSeq(jobID); err != nil {
+			h.seqPersistFailures.Add(1)
+			log.Printf("Failed to delete websocket seq for job %s: %v", jobID, err)
+		}
+		return
+	}
+	if err := h.seqStore.SaveWSJobSeq(jobID, seq); err != nil {
+		h.seqPersistFailures.Add(1)
+		log.Printf("Failed to persist websocket seq for job %s: %v", jobID, err)
+	}
+}
+
+// SeqPersistFailureCount reports how many sequence-counter persistence
+// operations have failed since hub creation. A rising value means the seq
+// store is degraded and restart-resume numbering may silently regress to 1.
+func (h *Hub) SeqPersistFailureCount() int64 {
+	return h.seqPersistFailures.Load()
+}
+
+// prefetchSeq speculatively loads a persisted counter into memory before the
+// first post-restart increment for a job. Called WITHOUT h.mu held: the load
+// does SQLite I/O that must not block the Run loop's register/unregister/
+// broadcast paths sharing the hub lock. Concurrent broadcasts for the same
+// job may all load; ensureSeq's locked re-check makes exactly one injection
+// win, so this is at worst a redundant read.
+func (h *Hub) prefetchSeq(jobID string) {
+	if h.seqStore == nil {
+		return
+	}
+	h.mu.RLock()
+	_, ok := h.seq[jobID]
+	h.mu.RUnlock()
+	if ok {
+		return
+	}
+	lastSeq, err := h.seqStore.LoadWSJobSeq(jobID)
+	if err != nil {
+		log.Printf("Failed to load persisted websocket seq for job %s: %v", jobID, err)
+		return
+	}
+
+	h.mu.Lock()
+	h.injectSeqLocked(jobID, lastSeq)
+	h.mu.Unlock()
+}
+
+// ensureSeq falls back to an in-lock restore when prefetchSeq missed (e.g.
+// the job's first broadcast raced past it). Store errors are swallowed here —
+// blocking on I/O under h.mu is worse than starting from scratch — so the
+// common path is a pure map lookup.
+func (h *Hub) ensureSeq(jobID string) {
+	if _, ok := h.seq[jobID]; ok || h.seqStore == nil {
+		return
+	}
+	lastSeq, err := h.seqStore.LoadWSJobSeq(jobID)
+	if err != nil {
+		log.Printf("Failed to load persisted websocket seq under lock for job %s: %v", jobID, err)
+		return
+	}
+	h.injectSeqLocked(jobID, lastSeq)
+}
+
+// injectSeqLocked seeds the in-memory map with a persisted counter unless a
+// concurrent broadcast already restored or advanced it. Called with h.mu held.
+func (h *Hub) injectSeqLocked(jobID string, lastSeq int64) {
+	if _, ok := h.seq[jobID]; !ok && lastSeq > 0 {
+		h.seq[jobID] = lastSeq
+	}
 }
 
 // BroadcastStderr broadcasts a stderr chunk to all clients for a job

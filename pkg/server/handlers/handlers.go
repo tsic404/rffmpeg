@@ -41,7 +41,7 @@ func New(database *db.Database, store *storage.Storage, version string, stateTab
 		db:          database,
 		storage:     store,
 		version:     version,
-		wsHub:       websocket.NewHub(),
+		wsHub:       websocket.NewHubWithSeqStore(database),
 		rateLimiter: ratelimit.NewInMemoryCounter(),
 		stateTable:  stateTable,
 	}
