@@ -305,8 +305,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		log.Printf("Job %s: direct paths mode, %d input(s)", job.ID, len(job.DirectPaths))
 	}
 
-	// Compute cache key from input files + original args (before rewrite)
-	cacheKey := GenerateCacheKey(job.InputFiles, job.Args)
+	// Compute cache key from input files + original args (before rewrite).
+	// auto_hw MUST be part of the key: a --auto-hw run may upgrade the encoder
+	// (e.g. libx264 → h264_qsv), and that output must never be served to
+	// requests without --auto-hw (TSI-2352).
+	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW)
 	cached := false
 
 	// Check if output is a network URL (rtmp://, udp://, etc.)

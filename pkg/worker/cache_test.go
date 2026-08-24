@@ -12,8 +12,8 @@ func TestGenerateCacheKey_Deterministic(t *testing.T) {
 	inputSources := []string{"file-a", "file-b"}
 	args := []string{"-c:v", "libx264", "-preset", "fast", "-b:v", "2M"}
 
-	key1 := GenerateCacheKey(inputSources, args)
-	key2 := GenerateCacheKey(inputSources, args)
+	key1 := GenerateCacheKey(inputSources, args, false)
+	key2 := GenerateCacheKey(inputSources, args, false)
 
 	if key1 != key2 {
 		t.Errorf("GenerateCacheKey is not deterministic: %s != %s", key1[:16], key2[:16])
@@ -23,8 +23,8 @@ func TestGenerateCacheKey_Deterministic(t *testing.T) {
 func TestGenerateCacheKey_DifferentInputs(t *testing.T) {
 	args := []string{"-c:v", "libx264"}
 
-	key1 := GenerateCacheKey([]string{"file-a"}, args)
-	key2 := GenerateCacheKey([]string{"file-b"}, args)
+	key1 := GenerateCacheKey([]string{"file-a"}, args, false)
+	key2 := GenerateCacheKey([]string{"file-b"}, args, false)
 
 	if key1 == key2 {
 		t.Error("Different inputs should produce different keys")
@@ -34,11 +34,25 @@ func TestGenerateCacheKey_DifferentInputs(t *testing.T) {
 func TestGenerateCacheKey_DifferentArgs(t *testing.T) {
 	sources := []string{"file-a"}
 
-	key1 := GenerateCacheKey(sources, []string{"-c:v", "libx264"})
-	key2 := GenerateCacheKey(sources, []string{"-c:v", "libx265"})
+	key1 := GenerateCacheKey(sources, []string{"-c:v", "libx264"}, false)
+	key2 := GenerateCacheKey(sources, []string{"-c:v", "libx265"}, false)
 
 	if key1 == key2 {
 		t.Error("Different args should produce different keys")
+	}
+}
+
+// TSI-2352: a --auto-hw run upgrades the encoder (e.g. libx264 → h264_qsv), so its
+// cached output must never be served to a request without --auto-hw (and vice versa).
+func TestGenerateCacheKey_DifferentAutoHW(t *testing.T) {
+	sources := []string{"file-a"}
+	args := []string{"-c:v", "libx264"}
+
+	keyNoHW := GenerateCacheKey(sources, args, false)
+	keyHW := GenerateCacheKey(sources, args, true)
+
+	if keyNoHW == keyHW {
+		t.Error("auto_hw flag must produce different cache keys")
 	}
 }
 
@@ -49,8 +63,8 @@ func TestGenerateCacheKey_Canonicalization(t *testing.T) {
 	args1 := []string{"-preset", "fast", "-c:v", "libx264"}
 	args2 := []string{"-c:v", "libx264", "-preset", "fast"}
 
-	key1 := GenerateCacheKey(sources, args1)
-	key2 := GenerateCacheKey(sources, args2)
+	key1 := GenerateCacheKey(sources, args1, false)
+	key2 := GenerateCacheKey(sources, args2, false)
 
 	if key1 != key2 {
 		t.Errorf("Canonicalization should produce same key: %s != %s", key1[:16], key2[:16])
@@ -58,7 +72,7 @@ func TestGenerateCacheKey_Canonicalization(t *testing.T) {
 }
 
 func TestGenerateCacheKey_ShardingFormat(t *testing.T) {
-	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false)
 
 	if len(key) != 64 {
 		t.Errorf("Key should be 64 hex chars (SHA-256), got %d", len(key))
@@ -128,7 +142,7 @@ func TestCachePutAndCheck(t *testing.T) {
 		t.Fatalf("Failed to write source: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test-input-1"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"test-input-1"}, []string{"-c:v", "libx264"}, false)
 
 	// Check before put - should miss
 	cachedPath, hit := cache.Check(key)
@@ -195,7 +209,7 @@ func TestCacheTTLExpiration(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test-ttl"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"test-ttl"}, []string{"-c:v", "libx264"}, false)
 	if err := cache.Put(key, srcPath); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
@@ -240,7 +254,7 @@ func TestCacheLRUEviction(t *testing.T) {
 	if err := os.WriteFile(srcPath1, data, 0644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
-	key1 := GenerateCacheKey([]string{"file-1"}, []string{"-c:v", "libx264"})
+	key1 := GenerateCacheKey([]string{"file-1"}, []string{"-c:v", "libx264"}, false)
 	if err := cache.Put(key1, srcPath1); err != nil {
 		t.Fatalf("Put key1 failed: %v", err)
 	}
@@ -250,7 +264,7 @@ func TestCacheLRUEviction(t *testing.T) {
 	if err := os.WriteFile(srcPath2, data, 0644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
-	key2 := GenerateCacheKey([]string{"file-2"}, []string{"-c:v", "libx265"})
+	key2 := GenerateCacheKey([]string{"file-2"}, []string{"-c:v", "libx265"}, false)
 	if err := cache.Put(key2, srcPath2); err != nil {
 		t.Fatalf("Put key2 failed: %v", err)
 	}
@@ -284,7 +298,7 @@ func TestCacheClear(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test-clear"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"test-clear"}, []string{"-c:v", "libx264"}, false)
 	if err := cache.Put(key, srcPath); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
@@ -312,7 +326,7 @@ func TestCacheDisabledCheckAlwaysMiss(t *testing.T) {
 		t.Fatalf("NewCache failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false)
 	_, hit := cache.Check(key)
 	if hit {
 		t.Error("Disabled cache should always miss")
@@ -325,7 +339,7 @@ func TestCacheDisabledPutNoError(t *testing.T) {
 		t.Fatalf("NewCache failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false)
 	if err := cache.Put(key, "/nonexistent/path"); err != nil {
 		t.Errorf("Put on disabled cache should not error: %v", err)
 	}
@@ -351,7 +365,7 @@ func TestCacheStats(t *testing.T) {
 	}
 
 	// Miss
-	key := GenerateCacheKey([]string{"stats-test"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"stats-test"}, []string{"-c:v", "libx264"}, false)
 	cache.Check(key)
 	stats = cache.Stats()
 	if stats.Misses != 1 {
@@ -387,7 +401,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 	srcPath := filepath.Join(dir, "src.bin")
 	os.WriteFile(srcPath, []byte("concurrent test data"), 0644)
 
-	key := GenerateCacheKey([]string{"concurrent"}, []string{"-c:v", "libx264"})
+	key := GenerateCacheKey([]string{"concurrent"}, []string{"-c:v", "libx264"}, false)
 	cache.Put(key, srcPath)
 
 	// Run concurrent checks

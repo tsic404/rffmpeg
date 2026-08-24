@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -255,13 +256,15 @@ func (c *Cache) Stop() {
 	c.wg.Wait()
 }
 
-// GenerateKey computes a deterministic cache key from input sources and ffmpeg arguments.
-// Key = SHA256(inputSources joined by "|" + "|" + canonicalized args)
+// GenerateCacheKey computes a deterministic cache key from input sources, ffmpeg arguments,
+// and the auto_hw flag. Key = SHA256(inputSources joined by "|" + "|" + canonicalized args + "|auto_hw=<bool>")
+// The auto_hw flag MUST be part of the key: hardware-upgraded output (--auto-hw) must never
+// be served to requests without --auto-hw, which would silently rewrite the requested encoder.
 // The first 2 hex chars of the key are used as a sharding subdirectory.
-func GenerateCacheKey(inputSources []string, args []string) string {
+func GenerateCacheKey(inputSources []string, args []string, autoHW bool) string {
 	canonicalArgs := canonicalizeArgs(args)
 	inputPart := strings.Join(inputSources, "|")
-	payload := inputPart + "|" + canonicalArgs
+	payload := inputPart + "|" + canonicalArgs + "|auto_hw=" + strconv.FormatBool(autoHW)
 
 	hash := sha256.Sum256([]byte(payload))
 	return fmt.Sprintf("%x", hash)

@@ -172,7 +172,7 @@ func TestCacheIntegration_MissThenHit(t *testing.T) {
 	beforeDownloads := mockSrv.DownloadCount()
 	beforeUploads := mockSrv.UploadCount()
 
-	cacheKey := GenerateCacheKey(job.InputFiles, job.Args)
+	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW)
 	_, hit := w.cache.Check(cacheKey)
 	if hit {
 		t.Fatal("Expected cache miss before first run")
@@ -246,7 +246,7 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
-	cacheKey := GenerateCacheKey(job.InputFiles, job.Args)
+	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW)
 
 	_, hit := w.cache.Check(cacheKey)
 	if hit {
