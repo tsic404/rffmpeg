@@ -135,7 +135,14 @@ func registerValueConverters(m *EncoderMapping) {
 func registerHardwareParams(m *EncoderMapping) {
 	// NVIDIA hardware params for NVENC encoders
 	nvencCommonParams := []HardwareParamRule{
-		{Param: "rc", Value: "constqp", Description: "Rate control mode for NVENC"},
+		{
+			Param: "rc",
+			Value: "constqp",
+			// rc=constqp is only meaningful when the quantizer comes from
+			// the injected/default channel; an explicit user quality carrier
+			// (cq/global_quality/quality) must not be combined with it.
+			ConflictsWith: []string{"cq", "global_quality", "quality"},
+		},
 	}
 
 	m.AddHardwareParams(EncoderH264NVENC, GPUVendorNVIDIA, nvencCommonParams)

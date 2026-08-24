@@ -1,6 +1,7 @@
 package encoder
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -40,11 +41,15 @@ func TestIntegration_FullH264Translation(t *testing.T) {
 	if len(result.AuditRecords) < len(params) {
 		t.Errorf("Expected at least %d audit records, got %d", len(params), len(result.AuditRecords))
 	}
-
-	// Verify hardware params were injected
-	if len(result.HardwareParams) == 0 {
-		t.Error("Expected hardware params to be injected")
+	// rc=constqp is NOT injected here: the user-supplied crf→cq conflicts
+	// with it (mutual-exclusion metadata). The command stays valid instead.
+	if _, exists := result.HardwareParams["rc"]; exists {
+		t.Error("rc=constqp should not be injected when user supplied cq")
 	}
+	if len(result.Warnings) == 0 {
+		t.Error("Expected a warning about the suppressed rc injection")
+	}
+
 }
 
 // TestIntegration_FullHEVCTranslation tests a complete HEVC parameter translation scenario.
@@ -312,14 +317,15 @@ func TestIntegration_AuditTrail(t *testing.T) {
 func TestIntegration_HardwareParamInjection(t *testing.T) {
 	translator := NewDefaultParameterTranslator(WithHardwareParamInjection(true))
 
-	// Test NVENC hardware params
-	result, err := translator.Translate(EncoderLibX264, EncoderH264NVENC, map[string]string{"crf": "23"})
+	// Test NVENC hardware params: no user quality carrier, so rc=constqp
+	// must be injected.
+	result, err := translator.Translate(EncoderLibX264, EncoderH264NVENC, map[string]string{"preset": "fast"})
 	if err != nil {
 		t.Fatalf("Translation failed: %v", err)
 	}
 
-	if len(result.HardwareParams) == 0 {
-		t.Error("Expected hardware params to be injected for NVENC")
+	if result.HardwareParams["rc"] != "constqp" {
+		t.Error("Expected rc=constqp to be injected for NVENC")
 	}
 
 	// Test QSV hardware params
@@ -381,9 +387,19 @@ func TestIntegration_StrictMode(t *testing.T) {
 		t.Errorf("Translation should succeed in non-strict mode: %v", err)
 	}
 
-	// Unknown param should be skipped
-	if _, exists := result.TranslatedParams["unknown_param"]; exists {
-		t.Error("Unknown parameter should be skipped")
+	// Unknown param should be passed through with a warning (never dropped)
+	if v, exists := result.TranslatedParams["unknown_param"]; !exists || v != "value" {
+		t.Errorf("Unknown parameter should be preserved, got value %q exists=%v", v, exists)
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "unknown_param") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected a warning mentioning unknown_param")
 	}
 
 	// Test with strict mode enabled

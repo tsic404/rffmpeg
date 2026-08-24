@@ -255,16 +255,18 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 			}
 
 			// Collect warnings from translation
-			response.Warnings = append(response.Warnings, translationResult.Warnings...)
 
-			// When translation is performed, we need to filter out the original params
-			// that were translated (e.g., "crf" -> "quality").
-			// Only filter params whose translated name genuinely changed (source != target);
-			// non-translated params (skipped with empty target, like preset→"" for VAAPI)
-			// must be preserved in the output args.
+			// When translation is performed, filter out the original params
+			// that were successfully translated (e.g., "crf" -> "quality").
+			// ONLY records with Success=true are eligible: a FAILED record
+			// may still carry a non-empty TargetParam, and filtering it
+			// would silently drop the user's parameter (the translated value
+			// is absent from TranslatedParams). Failed/Skipped params are
+			// preserved by the translator itself.
 			paramsToFilter = make(map[string]string)
 			for _, record := range translationResult.AuditRecords {
-				if record.SourceParam != "" && record.SourceParam != record.TargetParam && record.TargetParam != "" {
+				if record.Success &&
+					record.SourceParam != "" && record.SourceParam != record.TargetParam && record.TargetParam != "" {
 					paramsToFilter[record.SourceParam] = record.SourceValue
 				}
 			}
@@ -578,9 +580,15 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 	// BEFORE the output path — appending after it silently ignores them.
 	var newParams []string
 	for paramName, paramValue := range params {
-		if !seenParams[paramName] {
-			newParams = append(newParams, fmt.Sprintf("-%s", paramName), paramValue)
+		if seenParams[paramName] {
+			continue
 		}
+		// An empty value would emit "-flag ''" and swallow the next token
+		// in the command line. Never output empty-valued params.
+		if paramValue == "" {
+			continue
+		}
+		newParams = append(newParams, fmt.Sprintf("-%s", paramName), paramValue)
 	}
 	if len(newParams) > 0 {
 		result = insertBeforeOutputPath(result, newParams)

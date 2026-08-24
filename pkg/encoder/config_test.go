@@ -344,7 +344,7 @@ func TestCRFToVAAPIQualityConverter_InvalidInput(t *testing.T) {
 }
 
 func TestSvtav1PresetToNVENC(t *testing.T) {
-	tests := []struct {
+	validTests := []struct {
 		input    string
 		expected string
 	}{
@@ -353,10 +353,9 @@ func TestSvtav1PresetToNVENC(t *testing.T) {
 		{"7", "p5"},
 		{"10", "p3"},
 		{"13", "p1"},
-		{"unknown", "unknown"},
 	}
 
-	for _, tt := range tests {
+	for _, tt := range validTests {
 		t.Run(tt.input, func(t *testing.T) {
 			result, err := svtav1PresetToNVENC(tt.input)
 			if err != nil {
@@ -364,6 +363,16 @@ func TestSvtav1PresetToNVENC(t *testing.T) {
 			}
 			if result != tt.expected {
 				t.Errorf("svtav1PresetToNVENC(%s) = %v, want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+
+	// Out-of-range or non-numeric presets must be rejected, never passed
+	// through as illegal av1_nvenc values.
+	for _, input := range []string{"unknown", "14", "-1", "99", ""} {
+		t.Run("invalid/"+input, func(t *testing.T) {
+			if _, err := svtav1PresetToNVENC(input); err == nil {
+				t.Errorf("svtav1PresetToNVENC(%s) expected error, got nil", input)
 			}
 		})
 	}

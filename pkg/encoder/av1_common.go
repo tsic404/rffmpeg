@@ -148,6 +148,7 @@ func initAV1NameTranslations(m *AV1CommonMapping) {
 		"crf":     "cq",
 		"qp":      "qp",
 		"preset":  "preset",
+		"speed":   "preset",
 		"b:v":     "b:v",
 		"maxrate": "maxrate",
 		"bufsize": "bufsize",
@@ -161,6 +162,7 @@ func initAV1NameTranslations(m *AV1CommonMapping) {
 		"crf":     "global_quality",
 		"qp":      "qp",
 		"preset":  "preset",
+		"speed":   "preset",
 		"b:v":     "b:v",
 		"maxrate": "maxrate",
 		"bufsize": "bufsize",
@@ -173,6 +175,7 @@ func initAV1NameTranslations(m *AV1CommonMapping) {
 	m.NameTranslations[EncoderAV1VAAPI] = map[string]string{
 		"crf":     "quality",
 		"qp":      "qp",
+		"speed":   "speed",
 		"b:v":     "b:v",
 		"maxrate": "maxrate",
 		"bufsize": "bufsize",
@@ -185,6 +188,7 @@ func initAV1NameTranslations(m *AV1CommonMapping) {
 	m.NameTranslations[EncoderLibAOM] = map[string]string{
 		"crf":          "crf",
 		"qp":           "qp",
+		"speed":        "cpu-used",
 		"b:v":          "b:v",
 		"maxrate":      "maxrate",
 		"bufsize":      "bufsize",

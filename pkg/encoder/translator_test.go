@@ -1,6 +1,7 @@
 package encoder
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -95,9 +96,10 @@ func TestTranslate_H264ToNVENC(t *testing.T) {
 		t.Error("No audit records generated")
 	}
 
-	// Check hardware params were injected
-	if len(result.HardwareParams) == 0 {
-		t.Error("No hardware params injected")
+	// Hardware params: rc=constqp must be suppressed because the user cq
+	// (from crf) conflicts with it.
+	if _, exists := result.HardwareParams["rc"]; exists {
+		t.Error("rc should not be injected when user supplied cq")
 	}
 }
 
@@ -458,39 +460,71 @@ func TestStrictMode(t *testing.T) {
 		"unknown_param": "value",
 	}
 
-	// This should not fail in non-strict mode, just skip the parameter
+	// Unknown params are no longer silently dropped: they are passed through
+	// unchanged and a warning is emitted.
 	result, err := translator.Translate(EncoderLibX264, EncoderH264NVENC, params)
 	if err != nil {
-		// In strict mode, unknown params might cause an error
-		t.Logf("Strict mode error: %v", err)
+		t.Fatalf("Translate error = %v", err)
 	}
 
-	if result != nil {
-		// Check that the unknown param was skipped
-		if _, exists := result.TranslatedParams["unknown_param"]; exists {
-			t.Error("Unknown parameter should not be in translated params")
+	if result == nil {
+		t.Fatal("Expected non-nil result")
+	}
+	if v, exists := result.TranslatedParams["unknown_param"]; !exists || v != "value" {
+		t.Errorf("Unknown parameter should be preserved, got value %q exists=%v", v, exists)
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "unknown_param") {
+			found = true
+			break
 		}
+	}
+	if !found {
+		t.Error("Expected a warning mentioning unknown_param")
 	}
 }
 
 func TestHardwareParamInjection(t *testing.T) {
-	// Test with hardware param injection enabled
+	// Test with hardware param injection enabled and NO conflicting param:
+	// rc=constqp must be injected.
 	translator := NewDefaultParameterTranslator(WithHardwareParamInjection(true))
 
-	params := map[string]string{"crf": "23"}
+	params := map[string]string{"preset": "fast"}
 	result, err := translator.Translate(EncoderLibX264, EncoderH264NVENC, params)
 	if err != nil {
 		t.Fatalf("Translate failed: %v", err)
 	}
 
-	// Check that hardware params were injected
-	if len(result.HardwareParams) == 0 {
-		t.Error("Expected hardware params to be injected")
+	if result.HardwareParams["rc"] != "constqp" {
+		t.Errorf("Expected rc=constqp to be injected, got %v", result.HardwareParams)
+	}
+
+	// An explicit user cq conflicts with rc=constqp: the injection must be
+	// suppressed (with a warning) instead of emitting both.
+	params = map[string]string{"crf": "23"}
+	result, err = translator.Translate(EncoderLibX264, EncoderH264NVENC, params)
+	if err != nil {
+		t.Fatalf("Translate failed: %v", err)
+	}
+	if _, exists := result.HardwareParams["rc"]; exists {
+		t.Error("rc should not be injected when user supplied cq")
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "'rc=constqp'") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected a warning about the suppressed rc injection")
 	}
 
 	// Test with hardware param injection disabled
 	translator = NewDefaultParameterTranslator(WithHardwareParamInjection(false))
 
+	params = map[string]string{"preset": "fast"}
 	result, err = translator.Translate(EncoderLibX264, EncoderH264NVENC, params)
 	if err != nil {
 		t.Fatalf("Translate failed: %v", err)

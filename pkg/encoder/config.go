@@ -3,6 +3,7 @@ package encoder
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,10 +146,15 @@ func (c *MappingConfig) ApplyTo(m *EncoderMapping) error {
 				Required:     rc.Required,
 				Description:  rc.Description,
 			}
-
 			// Wire up converter from reference or value map
 			if rc.ConverterRef != "" {
-				rule.Converter = m.GetValueConversion(rc.ConverterRef)
+				converter := m.GetValueConversion(rc.ConverterRef)
+				if converter == nil {
+					return fmt.Errorf(
+						"parameter translation %s: unknown converter reference '%s' for parameter '%s'",
+						key, rc.ConverterRef, rc.SourceParam)
+				}
+				rule.Converter = converter
 			} else if len(rc.ValueMap) > 0 {
 				valueMap := rc.ValueMap // capture for closure
 				rule.Converter = func(sourceValue string) (string, error) {
@@ -247,7 +253,24 @@ func svtav1PresetToNVENC(preset string) (string, error) {
 	if result, ok := mapping[preset]; ok {
 		return result, nil
 	}
-	return preset, nil
+	return "", fmt.Errorf("SVT-AV1 preset out of range 0-13: %s", preset)
+}
+
+// svtav1SpeedToCPUsed converts an SVT-AV1 speed preset (0-13) to libaom's
+// cpu-used value (0-8). Values above 8 clamp to 8; out-of-range input is
+// rejected so no illegal cpu-used reaches the command line.
+func svtav1SpeedToCPUsed(speed string) (string, error) {
+	n, err := parseIntValue(speed)
+	if err != nil {
+		return "", fmt.Errorf("SVT-AV1 speed must be numeric, got %q", speed)
+	}
+	if n > 13 {
+		return "", fmt.Errorf("SVT-AV1 speed out of range 0-13: %s", speed)
+	}
+	if n > 8 {
+		n = 8
+	}
+	return fmt.Sprintf("%d", n), nil
 }
 
 // svtav1CRFToQSVQuality converts SVT-AV1 CRF value to QSV global_quality.
@@ -256,11 +279,19 @@ func svtav1CRFToQSVQuality(value string) (string, error) {
 }
 
 // parseIntValue safely parses a string as an integer.
+// Empty strings and non-numeric characters are rejected so callers never
+// mistake missing input for 0 (e.g., crf="" producing quality=100).
 func parseIntValue(value string) (int, error) {
-	var result int
+	if value == "" {
+		return 0, fmt.Errorf("empty numeric value")
+	}
+	result := 0
 	for _, c := range value {
 		if c < '0' || c > '9' {
 			return 0, fmt.Errorf("invalid numeric value: %s", value)
+		}
+		if result > (math.MaxInt-int(c-'0'))/10 {
+			return 0, fmt.Errorf("numeric value out of range: %s", value)
 		}
 		result = result*10 + int(c-'0')
 	}

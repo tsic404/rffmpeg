@@ -54,6 +54,11 @@ type HardwareParamRule struct {
 	// If empty, the rule is always applied.
 	Condition string `json:"condition,omitempty"`
 
+	// ConflictsWith lists parameter names that are mutually exclusive with
+	// this rule (e.g. rc=constqp conflicts with a user-supplied cq). When any
+	// of these is already present, the rule is NOT injected.
+	ConflictsWith []string `json:"conflicts_with,omitempty"`
+
 	// Description provides documentation for the hardware parameter rule.
 	Description string `json:"description,omitempty"`
 }

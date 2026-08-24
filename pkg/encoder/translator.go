@@ -5,6 +5,8 @@ package encoder
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -224,8 +226,18 @@ func (t *ParameterTranslatorImpl) Translate(sourceEncoder, targetEncoder Encoder
 				sourceEncoder, targetEncoder))
 	}
 
-	// Translate each parameter
-	for sourceParam, sourceValue := range params {
+	// Translate each parameter in DETERMINISTIC order (sorted by name) so
+	// that two source params mapping to the same target param (e.g. SVT-AV1
+	// preset/speed both -> av1_nvenc "preset") resolve identically on every
+	// run instead of by Go map iteration order.
+	paramNames := make([]string, 0, len(params))
+	for sourceParam := range params {
+		paramNames = append(paramNames, sourceParam)
+	}
+	sort.Strings(paramNames)
+
+	for _, sourceParam := range paramNames {
+		sourceValue := params[sourceParam]
 		record := t.translateSingleParam(sourceEncoder, targetEncoder, sourceParam, sourceValue, 0, 1)
 		result.AuditRecords = append(result.AuditRecords, record)
 
@@ -236,20 +248,62 @@ func (t *ParameterTranslatorImpl) Translate(sourceEncoder, targetEncoder Encoder
 			}
 		case TranslationStatusFailed:
 			result.Errors = append(result.Errors, record.ErrorMessage)
+			// An empty source value must never reach the output args: it
+			// would emit a bare "-flag ''" that swallows the next token.
+			// Warn (and error) without keeping the parameter.
+			if sourceValue == "" {
+				result.Warnings = append(result.Warnings, fmt.Sprintf(
+					"parameter '%s' dropped: empty value and translation failed: %s",
+					sourceParam, record.ErrorMessage))
+				if t.strictMode {
+					return result, fmt.Errorf("translation failed for parameter '%s': %s",
+						sourceParam, record.ErrorMessage)
+				}
+				break
+			}
+			// Preserve the original parameter so it is never silently
+			// dropped: the value may still be valid for the target encoder,
+			// and losing it changes the output quality without notice.
+			result.TranslatedParams[sourceParam] = sourceValue
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"translation failed for parameter '%s=%s', keeping original value: %s",
+				sourceParam, sourceValue, record.ErrorMessage))
 			if t.strictMode {
 				return result, fmt.Errorf("translation failed for parameter '%s': %s",
 					sourceParam, record.ErrorMessage)
 			}
 		case TranslationStatusSkipped:
-			// Parameter was skipped (no translation needed or not supported)
+			declaredUnsupported := strings.Contains(record.ErrorMessage,
+				"is not supported by target encoder")
+
+			// (a) The mapping explicitly declares the target encoder does
+			// not support this parameter: DROP it. Passing it through emits
+			// an option the encoder does not have and ffmpeg fails hard.
+			if declaredUnsupported ||
+				(t.isCodecScopedParam(sourceParam) &&
+					t.codecFormatsDiffer(sourceEncoder, targetEncoder)) {
+				result.Warnings = append(result.Warnings, fmt.Sprintf(
+					"parameter '%s=%s' removed: not supported by %s",
+					sourceParam, sourceValue, targetEncoder))
+				break
+			}
+
+			// (b) No rule at all — an unknown user parameter. Keep the
+			// original name/value pair and surface a warning; it may still
+			// be valid for the target.
+			result.TranslatedParams[sourceParam] = sourceValue
+			result.Warnings = append(result.Warnings, fmt.Sprintf(
+				"parameter '%s=%s' has no translation to %s, passing through unchanged",
+				sourceParam, sourceValue, targetEncoder))
 		}
 	}
 
-	// Inject hardware-specific parameters if enabled
+	// Inject hardware-specific parameters if enabled. This runs after the
+	// user-parameter loop so an explicit user parameter always wins over a
+	// default (map iteration order must not decide the outcome).
 	if t.injectHardwareParams {
 		t.injectHardwareParamsForEncoder(targetEncoder, result)
 	}
-
 	t.auditRecords = result.AuditRecords
 	return result, nil
 }
@@ -279,8 +333,7 @@ func (t *ParameterTranslatorImpl) translateSingleParam(
 	}
 
 	if rule == nil {
-		// No translation rule found - check if we should pass through
-		if t.shouldPassThrough(sourceParam) {
+		if t.shouldPassThrough(sourceEncoder, targetEncoder, sourceParam) {
 			record.TargetParam = sourceParam
 			record.TargetValue = sourceValue
 			record.Status = TranslationStatusSuccess
@@ -295,6 +348,9 @@ func (t *ParameterTranslatorImpl) translateSingleParam(
 	record.TargetParam = rule.TargetParam
 	if record.TargetParam == "" {
 		record.Status = TranslationStatusSkipped
+		// The rule (direct or codec-specific) exists but declares the
+		// parameter unsupported by the target encoder. This is an explicit
+		// declaration, not a missing rule: the parameter must be DROPPED.
 		record.ErrorMessage = fmt.Sprintf("parameter '%s' is not supported by target encoder", sourceParam)
 		return record
 	}
@@ -356,44 +412,88 @@ func (t *ParameterTranslatorImpl) getValueConverterForParam(sourceEncoder, targe
 }
 
 // getCodecSpecificRule attempts to get a rule from codec-specific mappings.
+//
+// Parameters whose value domain is codec-specific (profile, level, qp) are
+// only resolved when source and target share the same codec format — the
+// per-target NameTranslations tables describe same-codec hardware variants,
+// not cross-codec semantics.
 func (t *ParameterTranslatorImpl) getCodecSpecificRule(
 	sourceEncoder, targetEncoder EncoderFamily,
 	sourceParam string,
 ) *ParameterRule {
+	switch sourceParam {
+	case "profile", "level", "qp":
+		sourceFormat, srcOK := t.mapping.GetCodecFormat(sourceEncoder)
+		targetFormat, tgtOK := t.mapping.GetCodecFormat(targetEncoder)
+		if !srcOK || !tgtOK || sourceFormat != targetFormat {
+			return nil
+		}
+	}
+
 	// Get the codec format for the source encoder
 	format, exists := t.mapping.GetCodecFormat(sourceEncoder)
 	if !exists {
 		return nil
 	}
 
-	var targetParam string
-	var converter ValueConverter
+	var (
+		targetParam string
+		converter   ValueConverter
+		// declaredUnsupported records that the NameTranslations table has an
+		// explicit "" entry for this parameter: the target encoder does not
+		// support it and it must be dropped, never passed through.
+		declaredUnsupported bool
+	)
+
+	check := func(m map[string]string) {
+		if tgt, ok := m[sourceParam]; ok && tgt == "" {
+			declaredUnsupported = true
+		}
+	}
 
 	switch format {
 	case CodecH264:
 		targetParam = t.h264Mapping.GetCommonParameterTranslation(targetEncoder, sourceParam)
+		if translations, ok := t.h264Mapping.NameTranslations[targetEncoder]; ok {
+			check(translations)
+		}
 		if targetParam != "" {
-			// Try to get value conversion
 			converter = t.getH264ValueConverter(sourceParam, targetEncoder)
 		}
 	case CodecHEVC:
 		targetParam = t.hevcMapping.GetCommonParameterTranslation(targetEncoder, sourceParam)
+		if translations, ok := t.hevcMapping.NameTranslations[targetEncoder]; ok {
+			check(translations)
+		}
 		if targetParam != "" {
 			converter = t.getHEVCValueConverter(sourceParam, targetEncoder)
 		}
 	case CodecVP9:
 		targetParam = t.vp9Mapping.GetCommonParameterTranslation(targetEncoder, sourceParam)
+		if translations, ok := t.vp9Mapping.NameTranslations[targetEncoder]; ok {
+			check(translations)
+		}
 		if targetParam != "" {
 			converter = t.getVP9ValueConverter(sourceParam, targetEncoder)
 		}
 	case CodecAV1:
 		targetParam = t.av1Mapping.GetCommonParameterTranslation(targetEncoder, sourceParam)
+		if translations, ok := t.av1Mapping.NameTranslations[targetEncoder]; ok {
+			check(translations)
+		}
 		if targetParam != "" {
 			converter = t.getAV1ValueConverter(sourceParam, targetEncoder)
 		}
 	}
 
 	if targetParam == "" {
+		if declaredUnsupported {
+			return &ParameterRule{
+				SourceParam: sourceParam,
+				TargetParam: "",
+				Description: "parameter is explicitly not supported by the target encoder",
+			}
+		}
 		return nil
 	}
 
@@ -492,13 +592,21 @@ func (t *ParameterTranslatorImpl) getAV1ValueConverter(param string, targetEncod
 		if targetEncoder == EncoderAV1NVENC {
 			return svtav1PresetToNVENC
 		}
+		if targetEncoder == EncoderLibAOM {
+			return svtav1SpeedToCPUsed
+		}
 	}
 	return nil
 }
 
 // av1PresetToNVENC converts AV1 preset names to NVENC preset values.
 func (t *ParameterTranslatorImpl) av1PresetToNVENC(v string) (string, error) {
-	// Same mapping as x264/x265 since AV1 presets follow similar naming
+	// SVT-AV1 presets are numeric (0-13) and av1_nvenc only accepts p1-p7.
+	// Route numeric values through the SVT-AV1 converter; named x264-style
+	// presets keep the text mapping.
+	if _, err := strconv.Atoi(v); err == nil {
+		return svtav1PresetToNVENC(v)
+	}
 	return x264PresetToNVENC(v)
 }
 
@@ -544,6 +652,24 @@ func (t *ParameterTranslatorImpl) x264PresetToQSV(v string) (string, error) {
 	return v, nil
 }
 
+// isCodecScopedParam reports whether the parameter's valid value domain
+// depends on the codec format.
+func (t *ParameterTranslatorImpl) isCodecScopedParam(param string) bool {
+	switch param {
+	case "profile", "level", "qp":
+		return true
+	}
+	return false
+}
+
+// codecFormatsDiffer reports whether source and target encoders belong to
+// different codec formats (h264/hevc/vp9/av1).
+func (t *ParameterTranslatorImpl) codecFormatsDiffer(sourceEncoder, targetEncoder EncoderFamily) bool {
+	sourceFormat, srcOK := t.mapping.GetCodecFormat(sourceEncoder)
+	targetFormat, tgtOK := t.mapping.GetCodecFormat(targetEncoder)
+	return !srcOK || !tgtOK || sourceFormat != targetFormat
+}
+
 func (t *ParameterTranslatorImpl) x264PresetToAMF(v string) (string, error) {
 	mapping := map[string]string{
 		"ultrafast": "speed",
@@ -563,8 +689,15 @@ func (t *ParameterTranslatorImpl) x264PresetToAMF(v string) (string, error) {
 	return v, nil
 }
 
-// shouldPassThrough returns true if a parameter should be passed through unchanged.
-func (t *ParameterTranslatorImpl) shouldPassThrough(param string) bool {
+// shouldPassThrough returns true if a parameter should be passed through
+// unchanged when no translation rule exists.
+//
+// Parameters whose valid value domain depends on the codec (profile, level,
+// qp) are only passed through between encoders of the SAME codec format —
+// e.g. "-profile high" is legal for H.264 but meaningless/illegal for VP9.
+func (t *ParameterTranslatorImpl) shouldPassThrough(
+	sourceEncoder, targetEncoder EncoderFamily, param string,
+) bool {
 	// Common ffmpeg parameters that can be passed through
 	passThroughParams := map[string]bool{
 		"b:v":     true,
@@ -573,11 +706,18 @@ func (t *ParameterTranslatorImpl) shouldPassThrough(param string) bool {
 		"g":       true,
 		"bf":      true,
 		"refs":    true,
-		"profile": true,
-		"level":   true,
-		"qp":      true,
 	}
-	return passThroughParams[param]
+	if passThroughParams[param] {
+		return true
+	}
+
+	switch param {
+	case "profile", "level", "qp":
+		sourceFormat, srcOK := t.mapping.GetCodecFormat(sourceEncoder)
+		targetFormat, tgtOK := t.mapping.GetCodecFormat(targetEncoder)
+		return srcOK && tgtOK && sourceFormat == targetFormat
+	}
+	return false
 }
 
 // injectHardwareParamsForEncoder adds hardware-specific parameters for the target encoder.
@@ -591,6 +731,24 @@ func (t *ParameterTranslatorImpl) injectHardwareParamsForEncoder(targetEncoder E
 	for _, param := range hwParams {
 		// Don't override if already set
 		if _, exists := result.TranslatedParams[param.Param]; !exists {
+			// Respect mutual-exclusion metadata: if the user (or an earlier
+			// translation) already supplied a conflicting parameter — e.g. an
+			// explicit cq alongside an injected rc=constqp — skip the
+			// injection instead of emitting a command ffmpeg will reject.
+			conflict := false
+			for _, c := range param.ConflictsWith {
+				if _, exists := result.TranslatedParams[c]; exists {
+					result.Warnings = append(result.Warnings, fmt.Sprintf(
+						"hardware parameter '%s=%s' not injected: conflicts with existing parameter '%s'",
+						param.Param, param.Value, c))
+					conflict = true
+					break
+				}
+			}
+			if conflict {
+				continue
+			}
+
 			result.HardwareParams[param.Param] = param.Value
 			result.TranslatedParams[param.Param] = param.Value
 
@@ -635,7 +793,14 @@ func (t *ParameterTranslatorImpl) TranslateChain(encoderChain []EncoderFamily, p
 		currentParams[k] = v
 	}
 
-	// Translate through each encoder in the chain
+	// Translate through each encoder in the chain. Hardware injection is
+	// disabled for intermediate stages (only the FINAL stage injects, after
+	// this loop): a mid-chain nvenc's rc/async_depth must never leak into
+	// later stages as if it were a user parameter.
+	savedInject := t.injectHardwareParams
+	if len(encoderChain) > 2 {
+		t.injectHardwareParams = false
+	}
 	for i := 0; i < len(encoderChain)-1; i++ {
 		sourceEncoder := encoderChain[i]
 		targetEncoder := encoderChain[i+1]
@@ -644,6 +809,7 @@ func (t *ParameterTranslatorImpl) TranslateChain(encoderChain []EncoderFamily, p
 		stageResult, err := t.Translate(sourceEncoder, targetEncoder, currentParams)
 		if err != nil {
 			if t.strictMode {
+				t.injectHardwareParams = savedInject
 				return result, fmt.Errorf("chain translation failed at step %d (%s -> %s): %w",
 					i+1, sourceEncoder, targetEncoder, err)
 			}
@@ -652,7 +818,10 @@ func (t *ParameterTranslatorImpl) TranslateChain(encoderChain []EncoderFamily, p
 			continue
 		}
 
-		// Update current params for next iteration
+		// Update current params for next iteration. TranslatedParams now
+		// carries Skipped/Failed originals too (preserved by Translate), so
+		// parameters without a rule at this stage still reach later chain
+		// stages instead of vanishing after the first hop.
 		currentParams = make(map[string]string)
 		for k, v := range stageResult.TranslatedParams {
 			currentParams[k] = v
@@ -669,13 +838,22 @@ func (t *ParameterTranslatorImpl) TranslateChain(encoderChain []EncoderFamily, p
 		}
 		result.AuditRecords = append(result.AuditRecords, stageResult.AuditRecords...)
 	}
+	t.injectHardwareParams = savedInject
 
 	// Set final translated params
 	result.TranslatedParams = currentParams
 
-	// Inject hardware params for final target encoder
+	// Inject hardware params for the FINAL target encoder only, and stamp
+	// the final-stage chain metadata onto the injected audit records so they
+	// match records from the loop above.
 	if t.injectHardwareParams {
+		finalIdx := len(encoderChain) - 2
+		before := len(result.AuditRecords)
 		t.injectHardwareParamsForEncoder(encoderChain[len(encoderChain)-1], result)
+		for j := before; j < len(result.AuditRecords); j++ {
+			result.AuditRecords[j].ChainPosition = finalIdx
+			result.AuditRecords[j].ChainTotal = len(encoderChain) - 1
+		}
 	}
 
 	t.auditRecords = result.AuditRecords
