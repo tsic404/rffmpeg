@@ -94,11 +94,11 @@ func TestIntegrationMultipleOperations(t *testing.T) {
 	// Simulate multiple operations for one job
 	operations := []AuditOperation{
 		{
-			RequestID:            requestID,
-			ScenarioType:         ScenarioNoEncoderSpecified,
-			RewrittenEncoder:     "h264_nvenc",
-			DecisionReason:       "未指定编码器，自动选择 NVENC",
-			CapabilitiesSummary:  "h264_nvenc,libx264",
+			RequestID:           requestID,
+			ScenarioType:        ScenarioNoEncoderSpecified,
+			RewrittenEncoder:    "h264_nvenc",
+			DecisionReason:      "未指定编码器，自动选择 NVENC",
+			CapabilitiesSummary: "h264_nvenc,libx264",
 		},
 		{
 			RequestID:       requestID,

@@ -14,12 +14,12 @@ func TestTranslate_AllH264Families(t *testing.T) {
 	translator := NewDefaultParameterTranslator()
 
 	tests := []struct {
-		name               string
-		targetEncoder      EncoderFamily
-		crfValue           string
-		expectedParamName  string
-		expectedValue      string
-		expectPresetMap    bool
+		name                string
+		targetEncoder       EncoderFamily
+		crfValue            string
+		expectedParamName   string
+		expectedValue       string
+		expectPresetMap     bool
 		expectedNVEncPreset string
 	}{
 		{
@@ -167,9 +167,9 @@ func TestTranslate_PresetMapping(t *testing.T) {
 	translator := NewDefaultParameterTranslator()
 
 	tests := []struct {
-		name          string
-		targetEncoder EncoderFamily
-		sourcePreset  string
+		name           string
+		targetEncoder  EncoderFamily
+		sourcePreset   string
 		expectedPreset string
 	}{
 		// NVENC presets: ultrafast→p1, faster→p4, medium→p6, slow→p7, veryslow→p7

@@ -396,7 +396,6 @@ func TestEndToEnd_ComplexScenario(t *testing.T) {
 	}
 }
 
-
 // TestEndToEnd_ParamsToFilter tests that the full Rewrite pipeline correctly
 // filters translated params while preserving non-translated params.
 // This uses the real TranslatorAdapter (via NewEngineCoordinator).

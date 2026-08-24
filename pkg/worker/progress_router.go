@@ -12,12 +12,12 @@ import (
 // forwards all lines to the underlying StderrHandler so that regular
 // stderr batching is unaffected.
 type ProgressRouter struct {
-	parser    *ProgressParser
-	client    *Client
-	jobID     string
+	parser     *ProgressParser
+	client     *Client
+	jobID      string
 	underlying StderrHandler
-	lastSend  time.Time
-	sendDelay time.Duration
+	lastSend   time.Time
+	sendDelay  time.Duration
 }
 
 // NewProgressRouter creates a new ProgressRouter.

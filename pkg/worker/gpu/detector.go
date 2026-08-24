@@ -61,7 +61,7 @@ func (d *Detector) DetectGPUDevices() []Device {
 
 // detectLinux performs GPU detection on Linux systems.
 func (d *Detector) detectLinux() []Device {
-	var devices []Device
+	devices := []Device{}
 
 	// Detect VAAPI/QSV devices (Intel/AMD)
 	vaapiDevs := d.detectVAAPI()
@@ -76,7 +76,7 @@ func (d *Detector) detectLinux() []Device {
 
 // detectVAAPI detects VAAPI/QSV devices (/dev/dri/renderD*).
 func (d *Detector) detectVAAPI() []Device {
-	var devices []Device
+	devices := []Device{}
 
 	// Check if /dev/dri directory exists
 	driDir := "/dev/dri"
@@ -197,7 +197,7 @@ func (d *Detector) getDRMDriverVersion(devPath string) string {
 
 // detectNVIDIA detects NVIDIA GPU devices.
 func (d *Detector) detectNVIDIA() []Device {
-	var devices []Device
+	devices := []Device{}
 
 	// First, check for /dev/nvidia* devices
 	nvidiaPattern := "/dev/nvidia*"
@@ -276,7 +276,7 @@ func (d *Detector) getNVIDIASMIInfo() (name, driver string) {
 
 // detectMacOS performs GPU detection on macOS.
 func (d *Detector) detectMacOS() []Device {
-	var devices []Device
+	devices := []Device{}
 
 	// Check if VideoToolbox is available by checking macOS version
 	// VideoToolbox is available on OS X 10.8+ and all macOS versions
@@ -338,7 +338,7 @@ func (d *Detector) getMacOSGPUInfo() (name, vendor string) {
 
 // detectWindows performs GPU detection on Windows.
 func (d *Detector) detectWindows() []Device {
-	var devices []Device
+	devices := []Device{}
 
 	// Use PowerShell to query GPU information via WMI
 	gpuInfos := d.getWindowsGPUInfo()
