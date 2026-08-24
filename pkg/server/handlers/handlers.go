@@ -610,6 +610,16 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 				))
 				return
 			}
+			if errors.Is(err, protocol.ErrJobTerminal) {
+				// A late report racing a terminal outcome (worker completion
+				// vs. concurrent cancel) is a benign lost race, not a server
+				// fault. 409 tells the worker the job is already finished so
+				// it stops reporting instead of retrying a "500".
+				writeError(w, http.StatusConflict, protocol.NewProtocolError(
+					protocol.ErrCodeConflict, "Job already in terminal state", err,
+				))
+				return
+			}
 			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 				protocol.ErrCodeInternalError, "Failed to update job", err,
 			))

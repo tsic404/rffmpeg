@@ -303,10 +303,18 @@ func TestChunkExists(t *testing.T) {
 	session, _ := db.CreateUploadSession("test.mp4", 1024, 512, 2, nil)
 	db.CreateUploadChunk(session.ID, 0, 512, "checksum", "/path")
 
-	if !db.ChunkExists(session.ID, 0) {
+	exists, err := db.ChunkExists(session.ID, 0)
+	if err != nil {
+		t.Fatalf("Failed to check chunk existence: %v", err)
+	}
+	if !exists {
 		t.Error("Chunk 0 should exist")
 	}
-	if db.ChunkExists(session.ID, 1) {
+	exists, err = db.ChunkExists(session.ID, 1)
+	if err != nil {
+		t.Fatalf("Failed to check chunk existence: %v", err)
+	}
+	if exists {
 		t.Error("Chunk 1 should not exist")
 	}
 }

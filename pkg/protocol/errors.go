@@ -19,6 +19,7 @@ var (
 	ErrInvalidFileID     = errors.New("invalid file id")
 	ErrWorkerNotFound    = errors.New("worker not found")
 	ErrJobNotFound       = errors.New("job not found")
+	ErrJobTerminal       = errors.New("job already in terminal state")
 	ErrRateLimitExceeded = errors.New("rate limit exceeded")
 )
 

@@ -79,14 +79,49 @@ type Database struct {
 	db *sql.DB
 }
 
-// New creates a new database connection and initializes tables
+// sqliteDSN builds a SQLite DSN with the pragmas required for safe concurrent
+// use (TSI-2359): WAL journaling so readers never block the writer, a busy
+// timeout so concurrent writes queue instead of failing with SQLITE_BUSY,
+// foreign-key enforcement so ON DELETE CASCADE fires (upload_chunks cleanup),
+// and immediate transactions so lock acquisition happens at BEGIN rather than
+// at first write (avoids deadlock-prone deferred-to-write upgrades).
+func sqliteDSN(dbPath string) string {
+	const params = "_busy_timeout=5000&_journal_mode=WAL&_fk=1&_txlock=immediate"
+	switch {
+	case strings.HasPrefix(dbPath, "file:"):
+		if strings.Contains(dbPath, "?") {
+			return dbPath + "&" + params
+		}
+		return dbPath + "?" + params
+	case dbPath == ":memory:" || dbPath == "file::memory:":
+		return "file::memory:?" + params
+	default:
+		return "file:" + dbPath + "?" + params
+	}
+}
+
+// New creates a new database connection and initializes tables.
 func New(dbPath string) (*Database, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	if dbPath == "" {
+		// An empty path would silently become an in-memory database that
+		// "works" but loses everything on restart — reject it loudly instead
+		// (TSI-2359 review round 2).
+		return nil, fmt.Errorf("database path must not be empty (use \":memory:\" explicitly for a test database)")
+	}
+
+	db, err := sql.Open("sqlite3", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	d := &Database{db: db}
+
+	// An in-memory database lives per-connection: every extra pooled
+	// connection would see its own empty database. Pin the pool to one
+	// connection so :memory: keeps working as a shared store.
+	if dbPath == ":memory:" || dbPath == "file::memory:" {
+		db.SetMaxOpenConns(1)
+	}
 
 	if err := d.initTables(); err != nil {
 		db.Close()
@@ -196,6 +231,12 @@ func (d *Database) initTables() error {
 		CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status);
 		CREATE INDEX IF NOT EXISTS idx_upload_sessions_expires_at ON upload_sessions(expires_at);
 		CREATE INDEX IF NOT EXISTS idx_upload_chunks_upload_id ON upload_chunks(upload_id);
+
+		-- TSI-2359: a (upload_id, chunk_index) pair identifies one chunk.
+		-- Without this, a retried upload could insert duplicate rows; the
+		-- constraint makes CreateUploadChunk idempotent via conflict handling.
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_chunks_upload_chunk
+			ON upload_chunks(upload_id, chunk_index);
 
 		CREATE TABLE IF NOT EXISTS migration_events (
 			id TEXT PRIMARY KEY,
@@ -324,6 +365,14 @@ func (d *Database) JobExists(id string) (bool, error) {
 
 // UpdateJobStatusWithFailure updates the job status along with failure
 // classification fields. Non-failure fields are ignored when the pointers are nil.
+//
+// TSI-2359: the update is guarded against stale writes. A late running
+// report (or a stale cancel racing a worker's completion) must never
+// resurrect or overwrite a finished job. The one legal terminal→terminal
+// transition is failed→completed/failed: a worker retries the job after a
+// failure and reports success (handlers clear stale failure metadata on
+// completed), so that path stays open. Everything else hitting a terminal
+// job is dropped and reported as ErrJobTerminal.
 func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
 	now := time.Now()
 
@@ -335,16 +384,56 @@ func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStat
 		finishedAt = &now
 	}
 
-	_, err := d.db.Exec(`
-		UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
-		                failure_type = COALESCE(?, failure_type),
-		                failure_details = COALESCE(?, failure_details),
-		                started_at = COALESCE(started_at, ?), finished_at = ?
-		WHERE id = ?
-	`, status, now, exitCode, errMsg, failureType, failureDetails, startedAt, finishedAt, id)
+	// TSI-2359: reject updates that would overwrite a terminal outcome.
+	// failed→completed / failed→failed remains allowed for the worker
+	// retry-after-failure flow; all other terminal targets are frozen.
+	var result sql.Result
+	var err error
+	if status == protocol.JobStatusCompleted || status == protocol.JobStatusFailed {
+		result, err = d.db.Exec(`
+			UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
+			                failure_type = COALESCE(?, failure_type),
+			                failure_details = COALESCE(?, failure_details),
+			                started_at = COALESCE(started_at, ?), finished_at = ?
+			WHERE id = ?
+			  AND NOT EXISTS (
+			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?)
+			  )
+		`, status, now, exitCode, errMsg, failureType, failureDetails,
+			startedAt, finishedAt, id, id,
+			protocol.JobStatusCompleted, protocol.JobStatusCancelled, protocol.JobStatusTimeout)
+	} else {
+		result, err = d.db.Exec(`
+			UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
+			                failure_type = COALESCE(?, failure_type),
+			                failure_details = COALESCE(?, failure_details),
+			                started_at = COALESCE(started_at, ?), finished_at = ?
+			WHERE id = ?
+			  AND NOT EXISTS (
+			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?, ?)
+			  )
+		`, status, now, exitCode, errMsg, failureType, failureDetails,
+			startedAt, finishedAt, id, id,
+			protocol.JobStatusCompleted, protocol.JobStatusFailed,
+			protocol.JobStatusCancelled, protocol.JobStatusTimeout)
+	}
 
 	if err != nil {
 		return fmt.Errorf("failed to update job status: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rows == 0 {
+		// Distinguish "job missing" from "job already terminal" so callers
+		// can treat a lost race (late report vs. concurrent cancel) as a
+		// no-op instead of an error.
+		if _, getErr := d.GetJob(id); getErr != nil {
+			return protocol.ErrJobNotFound
+		}
+		return protocol.ErrJobTerminal
 	}
 
 	return nil
@@ -381,19 +470,35 @@ func (d *Database) UpdateJobOutput(id string, outputFiles string) error {
 }
 
 // CancelJob cancels a job if it's in a cancellable state
-// Jobs can be cancelled if they are pending, queued, or running
+// Jobs can be cancelled if they are pending, queued, or running.
+//
+// TSI-2359: the state check and the update are a single conditional UPDATE,
+// so a worker completing the job between the check and the write can no longer
+// have its terminal status overwritten by a stale cancel (TOCTOU fix).
 func (d *Database) CancelJob(id string) error {
-	job, err := d.GetJob(id)
+	now := time.Now()
+	result, err := d.db.Exec(`
+		UPDATE jobs SET status = ?, updated_at = ?, finished_at = ?
+		WHERE id = ? AND status IN (?, ?, ?)
+	`, protocol.JobStatusCancelled, now, now, id,
+		protocol.JobStatusPending, protocol.JobStatusQueued, protocol.JobStatusRunning)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to cancel job: %w", err)
 	}
 
-	// Allow cancellation of pending, queued, and running jobs
-	if job.Status != protocol.JobStatusPending && job.Status != protocol.JobStatusQueued && job.Status != protocol.JobStatusRunning {
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rows == 0 {
+		job, getErr := d.GetJob(id)
+		if getErr != nil {
+			return protocol.ErrJobNotFound
+		}
 		return fmt.Errorf("cannot cancel job in status %s", job.Status)
 	}
 
-	return d.UpdateJobStatusWithFailure(id, protocol.JobStatusCancelled, nil, nil, nil, nil)
+	return nil
 }
 
 // AssignJobToWorker assigns a job to a worker
@@ -732,15 +837,31 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 	}
 
 	now := time.Now()
+	claimedJobs := make([]*Job, 0, len(newJobs))
 	for _, job := range newJobs {
-		_, err := tx.Exec(`
-			UPDATE jobs SET worker_id = ?, status = ?, updated_at = ? WHERE id = ?
-		`, workerID, protocol.JobStatusQueued, now, job.ID)
+		// TSI-2359: guard every claim with the exact preconditions read
+		// above. Two workers pulling concurrently run this inside separate
+		// write transactions; SQLite serializes them, and without the guard
+		// the second transaction would blindly re-claim the same row. A
+		// guarded UPDATE that matches 0 rows means the other worker won the
+		// race — skip the job instead of double-dispatching it.
+		result, err := tx.Exec(`
+			UPDATE jobs SET worker_id = ?, status = ?, updated_at = ?
+			WHERE id = ? AND status = ? AND worker_id IS NULL
+		`, workerID, protocol.JobStatusQueued, now, job.ID, protocol.JobStatusPending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to assign job %s: %w", job.ID, err)
 		}
+		claimed, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("failed to check rows affected for job %s: %w", job.ID, err)
+		}
+		if claimed == 0 {
+			continue // lost the race to another worker's pull
+		}
 		job.WorkerID = sql.NullString{String: workerID, Valid: true}
 		job.Status = protocol.JobStatusQueued
+		claimedJobs = append(claimedJobs, job)
 	}
 
 	// TSI-2347: mark the worker busy atomically with the assignment so
@@ -752,7 +873,8 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 	// in the same transaction prevents the health monitor from racing us and
 	// marking a just-assigned worker offline mid-transaction. It does not fake
 	// a heartbeat: no state-table entry or GPU metrics are produced.
-	if len(newJobs) > 0 {
+
+	if len(claimedJobs) > 0 {
 		if _, err := tx.Exec(`
 			UPDATE workers SET status = ?, last_heartbeat = ? WHERE id = ? AND status = ?
 		`, protocol.WorkerStatusBusy, now, workerID, protocol.WorkerStatusIdle); err != nil {
@@ -764,8 +886,8 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Combine queued jobs (already assigned) with newly assigned jobs
-	return append(queuedJobs, newJobs...), nil
+	// Combine queued jobs (already assigned) with newly claimed jobs
+	return append(queuedJobs, claimedJobs...), nil
 }
 
 // MarkOfflineWorkers marks workers as offline if their last heartbeat exceeds the timeout
@@ -891,12 +1013,17 @@ func (d *Database) GetTimedOutJobs(timeout time.Duration) ([]*Job, error) {
 	return d.scanJobs(rows)
 }
 
-// RescheduleJob resets a job for rescheduling after timeout
+// RescheduleJob resets a job for rescheduling after timeout.
+//
+// TSI-2359: conditional on the job still being running. A timeout sweep that
+// races a worker's completion report must not drag a finished job back to
+// pending; the guarded UPDATE simply matches 0 rows and the caller logs it.
 func (d *Database) RescheduleJob(id string) error {
 	now := time.Now()
 	result, err := d.db.Exec(`
-		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ? WHERE id = ?
-	`, protocol.JobStatusPending, now, id)
+		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?
+		WHERE id = ? AND status = ?
+	`, protocol.JobStatusPending, now, id, protocol.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("failed to reschedule job: %w", err)
 	}
@@ -906,7 +1033,11 @@ func (d *Database) RescheduleJob(id string) error {
 		return fmt.Errorf("failed to check rows affected: %w", err)
 	}
 	if rows == 0 {
-		return protocol.ErrJobNotFound
+		job, getErr := d.GetJob(id)
+		if getErr != nil {
+			return protocol.ErrJobNotFound
+		}
+		return fmt.Errorf("cannot reschedule job in status %s: %w", job.Status, protocol.ErrJobTerminal)
 	}
 
 	return nil
@@ -920,13 +1051,16 @@ func (d *Database) RescheduleJob(id string) error {
 func (d *Database) FailJob(id, errMsg string, failureType string) error {
 	now := time.Now()
 	exitCode := -1
+	// TSI-2359: only fail jobs still in an active state. Failing a completed
+	// or cancelled job would overwrite a legitimate terminal outcome.
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL,
 		                exit_code = ?, error = ?,
 		                failure_type = COALESCE(NULLIF(?, ''), failure_type),
 		                finished_at = ?, updated_at = ?
-		WHERE id = ?
-	`, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now, id)
+		WHERE id = ? AND status IN (?, ?, ?)
+	`, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now, id,
+		protocol.JobStatusPending, protocol.JobStatusQueued, protocol.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("failed to fail job: %w", err)
 	}
@@ -936,7 +1070,11 @@ func (d *Database) FailJob(id, errMsg string, failureType string) error {
 		return fmt.Errorf("failed to check rows affected: %w", err)
 	}
 	if rows == 0 {
-		return protocol.ErrJobNotFound
+		job, getErr := d.GetJob(id)
+		if getErr != nil {
+			return protocol.ErrJobNotFound
+		}
+		return fmt.Errorf("cannot fail job in status %s: %w", job.Status, protocol.ErrJobTerminal)
 	}
 
 	return nil
@@ -966,10 +1104,14 @@ func (d *Database) FailStarvedPendingJobs(cutoff time.Time, errMsg, failureType 
 // This is used during worker failover to re-queue a job for another worker.
 func (d *Database) ResetJobToPending(id string) error {
 	now := time.Now()
+	// TSI-2359: only reset jobs still in an active state. A failover sweep
+	// racing a worker's completion must not drag a finished job back to
+	// pending and re-run it.
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?
-		WHERE id = ?
-	`, protocol.JobStatusPending, now, id)
+		WHERE id = ? AND status IN (?, ?, ?)
+	`, protocol.JobStatusPending, now, id,
+		protocol.JobStatusQueued, protocol.JobStatusRunning, protocol.JobStatusPending)
 	if err != nil {
 		return fmt.Errorf("failed to reset job to pending: %w", err)
 	}
@@ -979,7 +1121,11 @@ func (d *Database) ResetJobToPending(id string) error {
 		return fmt.Errorf("failed to check rows affected: %w", err)
 	}
 	if rows == 0 {
-		return protocol.ErrJobNotFound
+		job, getErr := d.GetJob(id)
+		if getErr != nil {
+			return protocol.ErrJobNotFound
+		}
+		return fmt.Errorf("cannot reset job in status %s: %w", job.Status, protocol.ErrJobTerminal)
 	}
 
 	return nil
@@ -1782,31 +1928,52 @@ func (d *Database) GetRunningJobsByWorker(workerID string) ([]*Job, error) {
 	return d.scanJobs(rows)
 }
 
-// MigrateJobsFromWorker migrates all in-progress jobs from a worker back to pending state.
-// Returns the list of job IDs that were migrated.
+// MigrateJobsFromWorker migrates all in-progress jobs from a worker back to
+// pending state. Returns the list of job IDs that were migrated.
+//
+// TSI-2359: the whole migration runs in one transaction, and each reset is a
+// conditional UPDATE on status IN (running, queued). This closes two holes:
+// (1) a job that reaches a terminal state after the snapshot is no longer
+// dragged back to pending and re-run, and (2) a partial failure mid-migration
+// now rolls back instead of leaving jobs half-reset with orphaned outputs.
 func (d *Database) MigrateJobsFromWorker(workerID string) ([]string, error) {
-	// Get all running/queued jobs for this worker
-	jobs, err := d.GetRunningJobsByWorker(workerID)
+	tx, err := d.db.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get jobs for worker: %w", err)
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	defer tx.Rollback()
 
-	if len(jobs) == 0 {
-		return nil, nil
-	}
-
-	// Reset all jobs to pending
 	now := time.Now()
-	jobIDs := make([]string, len(jobs))
-	for i, job := range jobs {
-		_, err := d.db.Exec(`
-			UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?
-			WHERE id = ?
-		`, protocol.JobStatusPending, now, job.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to reset job %s: %w", job.ID, err)
+	// Conditional reset straight from the active-state set: rows that left
+	// the running/queued set between the caller's decision and this statement
+	// are simply not touched, and RETURNING gives exactly what we migrated.
+	rows, err := tx.Query(`
+		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?
+		WHERE worker_id = ? AND status IN (?, ?)
+		RETURNING id
+	`, protocol.JobStatusPending, now, workerID,
+		protocol.JobStatusRunning, protocol.JobStatusQueued)
+	if err != nil {
+		return nil, fmt.Errorf("failed to migrate jobs for worker %s: %w", workerID, err)
+	}
+
+	var jobIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("failed to scan migrated job id: %w", err)
 		}
-		jobIDs[i] = job.ID
+		jobIDs = append(jobIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("failed to iterate migrated jobs: %w", err)
+	}
+	rows.Close()
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit migration: %w", err)
 	}
 
 	return jobIDs, nil
