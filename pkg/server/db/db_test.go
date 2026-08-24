@@ -553,6 +553,241 @@ func TestCreateOrUpdateWorker(t *testing.T) {
 	}
 }
 
+// TSI-2366: after a server restart, offline worker records left over by
+// previous runs must be removable so crash loops don't accumulate stale
+// duplicates of re-registering workers.
+func TestRemoveStaleOfflineWorkers(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}
+
+	offline1, err := database.CreateWorker("stale-1", "stale-worker-1", caps)
+	if err != nil {
+		t.Fatalf("Failed to create stale worker 1: %v", err)
+	}
+	offline2, err := database.CreateWorker("stale-2", "stale-worker-2", caps)
+	if err != nil {
+		t.Fatalf("Failed to create stale worker 2: %v", err)
+	}
+	live, err := database.CreateWorker("live-1", "live-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create live worker: %v", err)
+	}
+
+	// Mark only the two stale workers offline (threshold 0 would sweep the
+	// live worker too since its heartbeat is also "old" in a fresh DB).
+	for _, id := range []string{offline1.ID, offline2.ID} {
+		if err := database.UpdateWorkerStatus(id, protocol.WorkerStatusOffline); err != nil {
+			t.Fatalf("Failed to mark %s offline: %v", id, err)
+		}
+	}
+
+	removed, err := database.RemoveStaleOfflineWorkers()
+	if err != nil {
+		t.Fatalf("Failed to remove stale offline workers: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("Expected 2 stale workers removed, got %d", removed)
+	}
+
+	if _, err := database.GetWorker(offline1.ID); err != protocol.ErrWorkerNotFound {
+		t.Errorf("Expected stale worker 1 to be gone, got %v", err)
+	}
+	if _, err := database.GetWorker(offline2.ID); err != protocol.ErrWorkerNotFound {
+		t.Errorf("Expected stale worker 2 to be gone, got %v", err)
+	}
+
+	// Live (non-offline) workers are untouched.
+	if _, err := database.GetWorker(live.ID); err != nil {
+		t.Errorf("Expected live worker to survive cleanup, got %v", err)
+	}
+
+	// Idempotent: a second sweep removes nothing.
+	removed, err = database.RemoveStaleOfflineWorkers()
+	if err != nil {
+		t.Fatalf("Second sweep failed: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("Expected 0 removals on second sweep, got %d", removed)
+	}
+}
+
+// TSI-2366 end-to-end residue scenario: register two workers, restart the
+// server (RecoverState marks everything offline), then only one worker comes
+// back. The leftover record of the absent worker must be gone after recovery.
+func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}
+
+	returning, err := database.CreateOrUpdateWorker("worker-returning", "returning-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to register returning worker: %v", err)
+	}
+	if _, err := database.CreateOrUpdateWorker("worker-gone", "gone-worker", caps); err != nil {
+		t.Fatalf("Failed to register departing worker: %v", err)
+	}
+
+	// Simulated restart: RecoverState marks all workers offline.
+	if _, _, err := database.RecoverState(); err != nil {
+		t.Fatalf("RecoverState failed: %v", err)
+	}
+
+	// The returning worker re-registers and is recreated as idle; the absent
+	// worker's offline row is swept as residue in the same recovery pass.
+	if _, err := database.CreateOrUpdateWorker(returning.ID, "returning-worker", caps); err != nil {
+		t.Fatalf("Failed to re-register returning worker: %v", err)
+	}
+	removed, err := database.RemoveStaleOfflineWorkers()
+	if err != nil {
+		t.Fatalf("Failed to remove stale workers: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("Expected 1 stale record removed, got %d", removed)
+	}
+
+	all, err := database.GetAllWorkers()
+	if err != nil {
+		t.Fatalf("Failed to list workers: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != returning.ID {
+		t.Errorf("Expected exactly the returning worker %+v, got %d rows", returning, len(all))
+	}
+}
+
+// TSI-2366 companion fix: heartbeats and status updates from a UUID reported
+// in non-canonical format (compact/hyphenless, uppercase) must reach the
+// canonical row instead of silently matching nothing.
+func TestHeartbeatAndStatusNormalizeUUID(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	hyphenated := "550e8400-e29b-41d4-a716-446655440000"
+	compact := strings.ToUpper("550e8400e29b41d4a716446655440000")
+
+	if _, err := database.CreateOrUpdateWorker(hyphenated, "uuid-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	if err := database.UpdateWorkerHeartbeat(compact, protocol.WorkerStatusBusy); err != nil {
+		t.Fatalf("Compact-format heartbeat rejected: %v", err)
+	}
+	worker, err := database.GetWorker(hyphenated)
+	if err != nil {
+		t.Fatalf("Failed to get worker: %v", err)
+	}
+	if worker.Status != protocol.WorkerStatusBusy {
+		t.Errorf("Expected status busy from compact heartbeat, got %s", worker.Status)
+	}
+
+	if err := database.UpdateWorkerStatus(compact, protocol.WorkerStatusIdle); err != nil {
+		t.Fatalf("Compact-format status update rejected: %v", err)
+	}
+	worker, err = database.GetWorker(hyphenated)
+	if err != nil {
+		t.Fatalf("Failed to get worker: %v", err)
+	}
+	if worker.Status != protocol.WorkerStatusIdle {
+		t.Errorf("Expected status idle from compact update, got %s", worker.Status)
+	}
+
+	if err := database.MarkWorkerEvicted(compact); err != nil {
+		t.Fatalf("Compact-format eviction rejected: %v", err)
+	}
+	evicted, err := database.IsWorkerEvicted(compact)
+	if err != nil {
+		t.Fatalf("Failed to check eviction: %v", err)
+	}
+	if !evicted {
+		t.Error("Expected worker evicted via compact ID")
+	}
+	if err := database.ClearWorkerEviction(compact); err != nil {
+		t.Fatalf("Compact-format eviction clear rejected: %v", err)
+	}
+}
+
+// TSI-2366 review follow-up: job read paths (pull queue, running-job lookup)
+// and UpdateWorkerCapabilities must also resolve non-canonical UUID formats,
+// otherwise a compact-format worker passes existence checks but silently
+// matches zero rows.
+func TestJobReadPathsNormalizeUUID(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	hyphenated := "550e8400-e29b-41d4-a716-446655440000"
+	compact := strings.ToUpper("550e8400e29b41d4a716446655440000")
+
+	if _, err := database.CreateOrUpdateWorker(hyphenated, "uuid-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+	if _, err := database.AssignPendingJobsToWorker(compact, 10); err != nil {
+		t.Fatalf("Compact-format pull failed: %v", err)
+	}
+
+	// The compact-format pull must have claimed the pending job under the
+	// canonical ID and marked the worker busy.
+	pulled, err := database.GetJobsForWorker(compact, 10)
+	if err != nil {
+		t.Fatalf("Compact-format GetJobsForWorker failed: %v", err)
+	}
+	if len(pulled) != 1 || pulled[0].ID != job.ID {
+		t.Errorf("Expected queued job %s via compact ID, got %d jobs", job.ID, len(pulled))
+	}
+
+	count, err := database.GetWorkerActiveJobCount(hyphenated)
+	if err != nil {
+		t.Fatalf("Failed to get active job count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected 1 active job on canonical row, got %d", count)
+	}
+
+	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatalf("Failed to set job running: %v", err)
+	}
+	running, err := database.GetRunningJobsByWorker(compact)
+	if err != nil {
+		t.Fatalf("Compact-format GetRunningJobsByWorker failed: %v", err)
+	}
+	if len(running) != 1 || running[0].ID != job.ID {
+		t.Errorf("Expected running job %s via compact ID, got %d jobs", job.ID, len(running))
+	}
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"h264_nvenc"},
+		FFmpegVersion: "6.0",
+	}
+	if err := database.UpdateWorkerCapabilities(compact, caps); err != nil {
+		t.Fatalf("Compact-format UpdateWorkerCapabilities failed: %v", err)
+	}
+	worker, err := database.GetWorker(hyphenated)
+	if err != nil {
+		t.Fatalf("Failed to get worker: %v", err)
+	}
+	if worker.Encoders != `["h264_nvenc"]` || worker.FFmpegVersion != "6.0" {
+		t.Errorf("Capabilities not applied via compact ID: encoders=%s ffmpeg=%s", worker.Encoders, worker.FFmpegVersion)
+	}
+}
+
 func TestGetJobsByStatus(t *testing.T) {
 	database, cleanup := setupDBTest(t)
 	defer cleanup()

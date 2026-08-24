@@ -61,8 +61,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to recover database state: %v", err)
 	}
-	if jobsReset > 0 || workersMarkedOffline > 0 {
-		log.Printf("State recovery: reset %d job(s) to pending, marked %d worker(s) offline", jobsReset, workersMarkedOffline)
+
+	// Remove worker records left offline by previous runs (TSI-2366). After a
+	// restart no worker is serving, so any offline row is residue; live
+	// workers re-register and come back as idle. This keeps crash loops from
+	// accumulating stale duplicate records that the health monitor would only
+	// clean up after the offline threshold — if it ever runs at all.
+	staleWorkersRemoved, err := database.RemoveStaleOfflineWorkers()
+	if err != nil {
+		log.Printf("Warning: failed to remove stale offline workers: %v", err)
+	}
+
+	if jobsReset > 0 || workersMarkedOffline > 0 || staleWorkersRemoved > 0 {
+		log.Printf("State recovery: reset %d job(s) to pending, marked %d worker(s) offline, removed %d stale offline worker record(s)",
+			jobsReset, workersMarkedOffline, staleWorkersRemoved)
 	}
 
 	// Initialize storage
