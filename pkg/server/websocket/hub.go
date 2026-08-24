@@ -125,9 +125,13 @@ func (h *Hub) BroadcastStderr(jobID, chunk string) error {
 	return h.BroadcastWSMessage(msg)
 }
 
-// BroadcastStdout broadcasts a stdout chunk to all clients for a job (streaming output mode)
-func (h *Hub) BroadcastStdout(jobID, chunk string) error {
-	msg := protocol.NewStdoutMessage(jobID, chunk)
+// BroadcastStdout broadcasts a base64-encoded stdout chunk to all clients for a
+// job (streaming output mode). The worker already encodes raw bytes as standard
+// base64, and the chunk is passed through unchanged: it is ASCII-safe inside the
+// JSON text frame (encoding/json corrupts invalid UTF-8 to U+FFFD), so decoding
+// and re-encoding here would be a wasted identity transform.
+func (h *Hub) BroadcastStdout(jobID string, chunkB64 string) error {
+	msg := protocol.NewStdoutMessage(jobID, chunkB64)
 	return h.BroadcastWSMessage(msg)
 }
 

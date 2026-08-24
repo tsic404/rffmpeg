@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/base64"
 	"time"
 
 	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
@@ -207,12 +208,27 @@ type WorkerJobPullResponse struct {
 	Jobs []JobInfo `json:"jobs"`
 }
 
+// StdoutChunkBase64 decodes a base64-encoded stdout chunk (see EncodeStdoutChunk).
+func StdoutChunkBase64(encoded string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(encoded)
+}
+
+// EncodeStdoutChunk encodes raw stdout bytes as standard base64.
+//
+// Stdout data is arbitrary binary and must not travel in a JSON string field:
+// encoding/json replaces invalid UTF-8 bytes with U+FFFD on both encode and
+// decode, silently corrupting the stream. Base64 is ASCII-safe, so it survives
+// every JSON boundary between worker and CLI byte-for-byte.
+func EncodeStdoutChunk(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
+
 type JobUpdateRequest struct {
 	Status         JobStatus `json:"status,omitempty"`
 	ExitCode       int       `json:"exit_code,omitempty"`
 	Error          string    `json:"error,omitempty"`
 	StderrChunk    string    `json:"stderr_chunk,omitempty"`
-	StdoutChunk    string    `json:"stdout_chunk,omitempty"`
+	StdoutChunk    string    `json:"stdout_chunk,omitempty"` // base64-encoded raw stdout bytes (binary-safe)
 	Progress       float64   `json:"progress,omitempty"`
 	EtaSeconds     int       `json:"eta_seconds,omitempty"`     // Estimated time remaining in seconds
 	TimeUs         int64     `json:"time_us,omitempty"`         // Current decoded time in microseconds

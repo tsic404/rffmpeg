@@ -275,9 +275,11 @@ func (c *Client) SendStderrChunk(jobID string, chunk string) error {
 
 // SendStdoutChunk sends a stdout chunk to the server for real-time output streaming.
 // This is used in streaming output mode where ffmpeg writes to stdout instead of a file.
-func (c *Client) SendStdoutChunk(jobID string, chunk string) error {
+// The chunk is arbitrary binary data, so it is base64-encoded before JSON transport:
+// encoding/json would otherwise replace invalid UTF-8 bytes with U+FFFD.
+func (c *Client) SendStdoutChunk(jobID string, chunk []byte) error {
 	req := protocol.JobUpdateRequest{
-		StdoutChunk: chunk,
+		StdoutChunk: protocol.EncodeStdoutChunk(chunk),
 	}
 
 	url := fmt.Sprintf("%s/jobs/%s", c.baseURL, jobID)

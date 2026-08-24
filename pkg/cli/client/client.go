@@ -393,9 +393,9 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
 	// Start WebSocket connection for real-time stdout streaming
 	wsClient := NewWSClient(c.serverURL, jobID, c.token,
-		WithOnStdout(func(chunk string) {
-			// Write stdout chunks directly to stdout
-			fmt.Fprint(os.Stdout, chunk)
+		WithOnStdout(func(chunk []byte) {
+			// Write raw decoded stdout chunks directly to stdout
+			os.Stdout.Write(chunk)
 		}),
 		WithOnStderr(func(chunk string) {
 			// Write stderr to stderr (progress info, etc.)

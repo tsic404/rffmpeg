@@ -39,7 +39,7 @@ type WSClient struct {
 	mu           sync.Mutex
 	done         chan struct{}
 	onStderr     func(chunk string)
-	onStdout     func(chunk string)
+	onStdout     func(chunk []byte)
 	onStatus     func(status protocol.JobStatus, exitCode int, err string)
 	onProgress   func(percent float64)
 	onComplete   func(exitCode int)
@@ -58,8 +58,13 @@ func WithOnStderr(handler func(chunk string)) WSClientOption {
 	}
 }
 
-// WithOnStdout sets the stdout handler (streaming output mode)
-func WithOnStdout(handler func(chunk string)) WSClientOption {
+// WithOnStdout sets the stdout handler (streaming output mode).
+//
+// BREAKING (TSI-2355): the handler now receives decoded raw bytes. The
+// WSMsgStdout Payload on the wire changed from raw text to standard base64 —
+// required because JSON text frames corrupt invalid UTF-8 to U+FFFD — so CLIs
+// built against the old protocol cannot parse stdout messages from new servers.
+func WithOnStdout(handler func(chunk []byte)) WSClientOption {
 	return func(c *WSClient) {
 		c.onStdout = handler
 	}
@@ -277,7 +282,14 @@ func (c *WSClient) handleMessage(msg protocol.WSMessage) {
 
 	case protocol.WSMsgStdout:
 		if c.onStdout != nil && msg.Payload != "" {
-			c.onStdout(msg.Payload)
+			// Payload is base64-encoded raw bytes; JSON text frames would
+			// corrupt arbitrary binary (invalid UTF-8 becomes U+FFFD).
+			raw, err := protocol.StdoutChunkBase64(msg.Payload)
+			if err != nil {
+				log.Printf("Invalid base64 stdout chunk: %v", err)
+				break
+			}
+			c.onStdout(raw)
 		}
 
 	case protocol.WSMsgStatus:

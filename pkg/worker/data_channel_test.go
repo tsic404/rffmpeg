@@ -1,8 +1,12 @@
 package worker
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"os"
@@ -136,11 +140,12 @@ func TestClient_StreamingOutputMode(t *testing.T) {
 
 	client := NewClient(ts.URL, "test-worker", "")
 
-	// Simulate sending stdout chunks (streaming output)
-	chunks := []string{
-		"FLV header data...",
-		"video tag frame 1...",
-		"video tag frame 2...",
+	// Simulate sending stdout chunks (streaming output). Binary payloads must
+	// arrive byte-for-byte: SendStdoutChunk base64-encodes before JSON transport.
+	chunks := [][]byte{
+		[]byte("FLV header data..."),
+		[]byte("video tag frame 1..."),
+		[]byte("video tag frame 2..."),
 	}
 
 	for _, chunk := range chunks {
@@ -152,6 +157,47 @@ func TestClient_StreamingOutputMode(t *testing.T) {
 
 	if len(receivedChunks) != len(chunks) {
 		t.Errorf("Expected %d chunks received, got %d", len(chunks), len(receivedChunks))
+	}
+}
+
+// TestClient_SendStdoutChunk_BinaryIntegrity verifies that arbitrary binary
+// stdout data survives the JSON transport byte-for-byte (TSI-2355). Before the
+// fix, SendStdoutChunk put raw bytes in a JSON string field and encoding/json
+// replaced invalid UTF-8 bytes with U+FFFD on both ends.
+func TestClient_SendStdoutChunk_BinaryIntegrity(t *testing.T) {
+	var mu sync.Mutex
+	var receivedB64 string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PATCH" {
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			receivedB64 = string(body)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-worker", "")
+
+	// Payload containing bytes that are invalid UTF-8 (0xFF 0xFE) plus a NUL.
+	payload := []byte{'F', 'L', 'V', 0x00, 0x01, 0xFF, 0xFE, 0x00, 0x80, 'E', 'N', 'D'}
+	if err := client.SendStdoutChunk("test-job-id", payload); err != nil {
+		t.Fatalf("SendStdoutChunk failed: %v", err)
+	}
+
+	// The server receives JSON; decode exactly as handlers.go would.
+	var req protocol.JobUpdateRequest
+	if err := json.Unmarshal([]byte(receivedB64), &req); err != nil {
+		t.Fatalf("Failed to unmarshal request: %v", err)
+	}
+
+	got, err := protocol.StdoutChunkBase64(req.StdoutChunk)
+	if err != nil {
+		t.Fatalf("Failed to decode stdout chunk: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("stdout payload corrupted in transit:\n got %v\nwant %v", got, payload)
 	}
 }
 
@@ -207,9 +253,8 @@ func TestClient_StdoutBatcher(t *testing.T) {
 	defer stdoutBatcher.Close()
 
 	handler := stdoutBatcher.StdoutHandler()
-
-	handler(string([]byte{0x00, 0x01, 0x02, 0x03})) // Binary FLV data
-	handler(string([]byte{0x04, 0x05, 0x06, 0x07}))
+	handler([]byte{0x00, 0x01, 0x02, 0x03}) // Binary FLV data
+	handler([]byte{0x04, 0x05, 0x06, 0x07})
 
 	stdoutBatcher.Close()
 
@@ -280,7 +325,7 @@ func TestClient_RTMPStreamingOutput(t *testing.T) {
 
 	// Simulate a streaming job: worker sends stdout chunks
 	for i := 0; i < 5; i++ {
-		err := client.SendStdoutChunk("streaming-job", "FLV-frame-data")
+		err := client.SendStdoutChunk("streaming-job", []byte("FLV-frame-data"))
 		if err != nil {
 			t.Fatalf("SendStdoutChunk failed: %v", err)
 		}

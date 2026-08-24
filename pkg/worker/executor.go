@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -14,8 +15,8 @@ import (
 // StderrHandler is a callback function for processing stderr output
 type StderrHandler func(chunk string)
 
-// StdoutHandler is a callback function for processing stdout output (streaming mode)
-type StdoutHandler func(chunk string)
+// StdoutHandler is a callback function for processing raw stdout bytes (streaming mode)
+type StdoutHandler func(chunk []byte)
 
 // ExecResult holds the result of an ffmpeg command execution
 type ExecResult struct {
@@ -103,7 +104,7 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	}
 
 	// Collect stdout and stderr with optional streaming
-	var stdout, stderr strings.Builder
+	var stdout, stderr bytes.Buffer
 	var wg sync.WaitGroup
 
 	// Read stdout with optional chunk streaming
@@ -116,8 +117,8 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 			for {
 				n, readErr := stdoutPipe.Read(buf)
 				if n > 0 {
-					chunk := string(buf[:n])
-					stdout.WriteString(chunk)
+					chunk := buf[:n]
+					stdout.Write(chunk)
 					stdoutHandler(chunk)
 				}
 				if readErr != nil {

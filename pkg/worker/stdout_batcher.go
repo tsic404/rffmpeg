@@ -11,7 +11,7 @@ import (
 type StdoutBatcher struct {
 	jobID      string
 	client     *Client
-	chunks     []string
+	chunks     [][]byte
 	mu         sync.Mutex
 	flushTimer *time.Timer
 	batchSize  int
@@ -42,7 +42,7 @@ func NewStdoutBatcher(jobID string, client *Client, cfg StdoutBatcherConfig) *St
 	b := &StdoutBatcher{
 		jobID:      jobID,
 		client:     client,
-		chunks:     make([]string, 0, cfg.BatchSize),
+		chunks:     make([][]byte, 0, cfg.BatchSize),
 		batchSize:  cfg.BatchSize,
 		batchDelay: cfg.BatchDelay,
 		ctx:        ctx,
@@ -55,7 +55,7 @@ func NewStdoutBatcher(jobID string, client *Client, cfg StdoutBatcherConfig) *St
 }
 
 // Add adds a stdout chunk to the batch
-func (b *StdoutBatcher) Add(chunk string) {
+func (b *StdoutBatcher) Add(chunk []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -66,7 +66,10 @@ func (b *StdoutBatcher) Add(chunk string) {
 	default:
 	}
 
-	b.chunks = append(b.chunks, chunk)
+	// Copy: the executor reuses its read buffer across chunks
+	cp := make([]byte, len(chunk))
+	copy(cp, chunk)
+	b.chunks = append(b.chunks, cp)
 
 	// Flush if batch is full
 	if len(b.chunks) >= b.batchSize {
@@ -100,15 +103,19 @@ func (b *StdoutBatcher) flushLocked() {
 		return
 	}
 
-	// Combine chunks without adding newlines (binary data may be involved)
-	combined := ""
+	// Concatenate chunks without separators (binary data may be involved)
+	size := 0
 	for _, chunk := range b.chunks {
-		combined += chunk
+		size += len(chunk)
+	}
+	combined := make([]byte, 0, size)
+	for _, chunk := range b.chunks {
+		combined = append(combined, chunk...)
 	}
 
 	// Track the goroutine so Close() can wait for it
 	b.wg.Add(1)
-	go func(chunk string) {
+	go func(chunk []byte) {
 		defer b.wg.Done()
 		if err := b.client.SendStdoutChunk(b.jobID, chunk); err != nil {
 			// Log error but don't block
@@ -139,8 +146,8 @@ func (b *StdoutBatcher) Close() {
 }
 
 // StdoutHandler returns a function that can be used as a stdout handler
-func (b *StdoutBatcher) StdoutHandler() func(chunk string) {
-	return func(chunk string) {
+func (b *StdoutBatcher) StdoutHandler() func(chunk []byte) {
+	return func(chunk []byte) {
 		b.Add(chunk)
 	}
 }
