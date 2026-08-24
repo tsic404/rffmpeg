@@ -28,6 +28,8 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
+	// seq tracks the next per-job message sequence number for gap detection
+	seq map[string]int64
 }
 
 // BroadcastMessage represents a message to be broadcast
@@ -43,6 +45,7 @@ func NewHub() *Hub {
 		broadcast:  make(chan *BroadcastMessage, 256),
 		register:   make(chan *Client, 100), // Buffered to prevent blocking
 		unregister: make(chan *Client, 100), // Buffered to prevent blocking
+		seq:        make(map[string]int64),
 	}
 }
 
@@ -67,6 +70,12 @@ func (h *Hub) Run() {
 					client.Close()
 					if len(clients) == 0 {
 						delete(h.clients, client.jobID)
+						// The seq counter deliberately outlives its last
+						// client: a reconnecting client carries lastSeq from
+						// the old stream, and resetting to zero here would
+						// make new broadcasts renumber from 1 — every gap
+						// check would then silently pass while data is lost.
+						// Cleanup happens on terminal broadcast instead.
 					}
 				}
 			}
@@ -109,8 +118,28 @@ func (h *Hub) Broadcast(jobID string, message []byte) {
 	}
 }
 
-// BroadcastWSMessage broadcasts a protocol WSMessage to all clients for a job
+// BroadcastWSMessage stamps a per-job monotonically increasing sequence
+// number on data-bearing messages, then broadcasts to all clients for a job.
+// The counter lives for the whole job: it is only removed once the terminal
+// status broadcast (completed/failed/cancelled/timeout) has gone out, so a
+// reconnecting client's lastSeq stays meaningful across disconnect windows.
 func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
+	if msg.Type != protocol.WSMsgHeartbeat {
+		h.mu.Lock()
+		h.seq[msg.JobID]++
+		msg.Seq = h.seq[msg.JobID]
+		if msg.Type == protocol.WSMsgStatus {
+			if payload, ok := msg.Data.(protocol.WSStatusPayload); ok && protocol.IsTerminalStatus(payload.Status) {
+				delete(h.seq, msg.JobID)
+			}
+		}
+		if msg.Type == protocol.WSMsgComplete || msg.Type == protocol.WSMsgError {
+			// Complete/error are themselves terminal events: the job will
+			// produce no further sequenced data worth tracking.
+			delete(h.seq, msg.JobID)
+		}
+		h.mu.Unlock()
+	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err

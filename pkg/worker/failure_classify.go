@@ -3,6 +3,7 @@ package worker
 import (
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 )
 
@@ -12,6 +13,42 @@ import (
 // branch and the download-failure classifier must never disagree.
 func isRemoteURL(s string) bool {
 	return strings.Contains(s, "://")
+}
+
+// maxInputBaseName caps the length of filenames derived from remote URLs so a
+// hostile URL can't produce absurdly long path components.
+const maxInputBaseName = 128
+
+// allowedExtraChars lists additional safe punctuation for input basenames.
+const allowedExtraChars = " ()[]"
+
+// sanitizeInputBaseName converts the last segment of a remote URL into a
+// filename that is safe to join under a job directory: restricted charset,
+// bounded length, never empty, never a dot-prefixed traversal fragment.
+func sanitizeInputBaseName(rawBase string) string {
+	base := rawBase
+	if base == "." || base == "/" || base == ".." {
+		base = ""
+	}
+	var b strings.Builder
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_', strings.ContainsRune(allowedExtraChars, r):
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+		if b.Len() >= maxInputBaseName {
+			break
+		}
+	}
+	result := b.String()
+	if result == "" || result == "." || result == ".." {
+		return uuid.New().String()
+	}
+	return result
 }
 
 // ClassifyFailure categorizes an ffmpeg execution failure into one of 6

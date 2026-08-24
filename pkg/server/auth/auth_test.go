@@ -29,7 +29,10 @@ func TestMiddleware_NoToken(t *testing.T) {
 	}
 }
 
-// TestMiddleware_ExemptPath tests that exempt paths don't require authentication
+// TestMiddleware_ExemptPath tests that only health endpoints are exempt from
+// authentication. Worker register/heartbeat were deliberately removed from the
+// exemption list: unauthenticated registration lets attackers poison the
+// scheduler with ghost workers.
 func TestMiddleware_ExemptPath(t *testing.T) {
 	token := "test-token-123"
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,8 +49,6 @@ func TestMiddleware_ExemptPath(t *testing.T) {
 	}{
 		{"GET", "/health"},
 		{"GET", "/api/v1/health"},
-		{"POST", "/api/v1/workers/register"},
-		{"POST", "/api/v1/workers/heartbeat"},
 	}
 
 	for _, ep := range exemptEndpoints {
@@ -60,6 +61,97 @@ func TestMiddleware_ExemptPath(t *testing.T) {
 				t.Errorf("Exempt endpoint %s %s should be accessible without auth, got status %d", ep.method, ep.path, rec.Code)
 			}
 		})
+	}
+}
+
+// TestMiddleware_WorkerEndpointsRequireAuth tests that worker registration and
+// heartbeat are authenticated even when a token is configured (TSI-2361).
+// Without this, an attacker can inject ghost workers and keep them alive via
+// heartbeat, diverting real jobs to a worker they control.
+func TestMiddleware_WorkerEndpointsRequireAuth(t *testing.T) {
+	handlerReached := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	authMiddleware := Middleware("secret-token")
+	protectedHandler := authMiddleware(handler)
+
+	for _, path := range []string{"/api/v1/workers/register", "/api/v1/workers/heartbeat"} {
+		t.Run(path+" no token", func(t *testing.T) {
+			handlerReached = false
+			req := httptest.NewRequest("POST", path, nil)
+			rec := httptest.NewRecorder()
+			protectedHandler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s without token: expected 401, got %d", path, rec.Code)
+			}
+			if handlerReached {
+				t.Errorf("%s must not reach handler without token", path)
+			}
+		})
+
+		t.Run(path+" wrong token", func(t *testing.T) {
+			handlerReached = false
+			req := httptest.NewRequest("POST", path, nil)
+			req.Header.Set("Authorization", "Bearer wrong-token")
+			rec := httptest.NewRecorder()
+			protectedHandler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s with wrong token: expected 401, got %d", path, rec.Code)
+			}
+			if handlerReached {
+				t.Errorf("%s must not reach handler with wrong token", path)
+			}
+		})
+
+		t.Run(path+" correct token", func(t *testing.T) {
+			handlerReached = false
+			req := httptest.NewRequest("POST", path, nil)
+			req.Header.Set("Authorization", "Bearer secret-token")
+			rec := httptest.NewRecorder()
+			protectedHandler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s with correct token: expected 200, got %d", path, rec.Code)
+			}
+			if !handlerReached {
+				t.Errorf("%s with correct token must reach handler", path)
+			}
+		})
+	}
+}
+
+// TestMiddleware_TokenlessHealthProbe tests acceptance criterion 6: in a
+// tokenless deployment the /health probe stays reachable so load balancers
+// can still monitor the server. All other requests still get 401.
+func TestMiddleware_TokenlessHealthProbe(t *testing.T) {
+	healthReached := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		healthReached = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	authMiddleware := Middleware("")
+	protectedHandler := authMiddleware(handler)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	rec := httptest.NewRecorder()
+	protectedHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !healthReached {
+		t.Errorf("tokenless /health probe: expected 200 and handler reached, got %d reached=%v", rec.Code, healthReached)
+	}
+
+	// Any other path is rejected even when probing health works.
+	req = httptest.NewRequest("GET", "/api/v1/jobs", nil)
+	rec = httptest.NewRecorder()
+	protectedHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("tokenless API request: expected 401, got %d", rec.Code)
 	}
 }
 

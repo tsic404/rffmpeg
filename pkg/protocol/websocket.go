@@ -20,6 +20,11 @@ type WSMessage struct {
 	JobID     string        `json:"job_id,omitempty"`
 	Payload   string        `json:"payload,omitempty"`
 	Data      interface{}   `json:"data,omitempty"`
+	// Seq is a per-job monotonically increasing sequence number stamped by
+	// the server hub on every data-bearing message. Clients use it to detect
+	// gaps caused by reconnects — a silent hole in stderr/stdout produces
+	// corrupted output that must be reported, not swallowed.
+	Seq int64 `json:"seq,omitempty"`
 }
 
 type WSStderrPayload struct {

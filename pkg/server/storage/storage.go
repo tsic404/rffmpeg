@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 )
 
@@ -104,6 +105,27 @@ func (s *Storage) SaveFileByContent(reader io.Reader) (string, int64, string, er
 // GetFilePath returns the full path for a file ID
 func (s *Storage) GetFilePath(fileID string) string {
 	return filepath.Join(s.baseDir, "files", fileID)
+}
+
+// fileIDPattern restricts file IDs to lowercase hex SHA256 hashes (64 chars).
+// File IDs are content hashes; anything else (e.g. "../..", empty, path
+// separators) must never reach GetFilePath/OpenFile/DeleteFile.
+var fileIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// ValidateFileID reports whether fileID is a well-formed content-hash file ID.
+func ValidateFileID(fileID string) bool {
+	return fileIDPattern.MatchString(fileID)
+}
+
+// outputFileIDPattern accepts standard UUID strings — the format UploadJobOutput
+// assigns to output files (uuid.New().String()).
+var outputFileIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// ValidateOutputFileID reports whether fileID is a well-formed output file ID.
+// The strict charset blocks traversal fragments from reaching OpenOutput's
+// directory walk / path joins.
+func ValidateOutputFileID(fileID string) bool {
+	return outputFileIDPattern.MatchString(fileID)
 }
 
 // FileExists checks if a file exists

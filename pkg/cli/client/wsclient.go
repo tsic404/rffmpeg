@@ -46,6 +46,12 @@ type WSClient struct {
 	onError      func(errMsg string)
 	connected    bool
 	reconnecting bool
+	// lastSeq is the highest sequence number seen. A received Seq greater
+	// than lastSeq+1 means messages were lost during a reconnect — output
+	// has a hole and the stream must not silently continue.
+	lastSeq    int64
+	sawMessage bool // false until the first sequenced message arrives
+	gapFound   bool // set once a gap is detected; sticky for the session
 }
 
 // WSClientOption is a functional option for WSClient
@@ -272,8 +278,37 @@ func (c *WSClient) Listen(ctx context.Context) error {
 	}
 }
 
-// handleMessage processes a WebSocket message
+// handleMessage processes a WebSocket message. Every data-bearing message is
+// first checked for a sequence gap; a detected gap is sticky and surfaced via
+// HasGap so callers can refuse to treat the output as trustworthy.
 func (c *WSClient) handleMessage(msg protocol.WSMessage) {
+	if msg.Type != protocol.WSMsgHeartbeat {
+		c.mu.Lock()
+		switch {
+		case !c.sawMessage:
+			// First message of the session: adopt the current sequence.
+			c.sawMessage = true
+			c.lastSeq = msg.Seq
+		case msg.Seq == 1 && c.lastSeq > 1:
+			// The server restarted its numbering mid-stream. With the
+			// counter now persisted per job this means the hub lost state
+			// (server restart/crash): everything between lastSeq and the
+			// restart is gone, so treat it as a gap — not a fresh stream.
+			log.Printf("WebSocket stream sequence restarted for job %s: had seq %d, got 1 — data before server restart was lost",
+				c.jobID, c.lastSeq)
+			c.lastSeq = msg.Seq
+			c.gapFound = true
+		case msg.Seq > c.lastSeq+1:
+			log.Printf("WebSocket stream gap detected for job %s: expected seq %d, got %d — data was lost",
+				c.jobID, c.lastSeq+1, msg.Seq)
+			c.lastSeq = msg.Seq
+			c.gapFound = true
+		case msg.Seq > c.lastSeq:
+			c.lastSeq = msg.Seq
+		}
+		c.mu.Unlock()
+	}
+
 	switch msg.Type {
 	case protocol.WSMsgStderr:
 		if c.onStderr != nil && msg.Payload != "" {
@@ -374,6 +409,15 @@ func (c *WSClient) IsConnected() bool {
 	return c.connected
 }
 
+// HasGap reports whether a sequence gap was detected during this session —
+// i.e. some stderr/stdout/status messages were lost across a reconnect.
+// Streaming consumers MUST treat the received output as incomplete when true.
+func (c *WSClient) HasGap() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gapFound
+}
+
 // StreamJobLogs is a convenience function that streams job logs to stderr
 // and returns when the job completes or an error occurs
 func StreamJobLogs(ctx context.Context, serverURL, jobID, token string, quiet bool) error {
@@ -422,21 +466,32 @@ func StreamJobLogs(ctx context.Context, serverURL, jobID, token string, quiet bo
 		listenDone <- client.Listen(ctx)
 	}()
 
-	// Wait for completion, error, or context cancellation
+	// Wait for completion, error, or context cancellation. On success paths,
+	// a detected sequence gap downgrades the result to an error: the stream
+	// lost data, so the output is not trustworthy.
 	select {
 	case exitCode := <-completeChan:
 		if exitCode != 0 {
 			return fmt.Errorf("job exited with code %d", exitCode)
 		}
-		return nil
+		return checkGap(client)
 	case errMsg := <-errorChan:
 		return fmt.Errorf("job error: %s", errMsg)
 	case err := <-listenDone:
 		if err != nil {
 			return fmt.Errorf("WebSocket error: %w", err)
 		}
-		return nil
+		return checkGap(client)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// checkGap converts a successful stream result into an error when a sequence
+// gap was detected — the output has holes and must not be treated as complete.
+func checkGap(c *WSClient) error {
+	if c.HasGap() {
+		return fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+	}
+	return nil
 }

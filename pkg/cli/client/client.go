@@ -370,10 +370,12 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 		}
 	}()
 
-	// Wait for completion, error, or context cancellation
+	// Wait for completion, error, or context cancellation. A detected
+	// sequence gap means stderr chunks were lost across a reconnect — the
+	// log view has holes, so surface it like StreamJobLogs does.
 	select {
 	case job := <-pollDone:
-		return job, nil
+		return job, checkGap(wsClient)
 	case err := <-listenDone:
 		if err != nil {
 			// WebSocket failed, fall back to polling
@@ -382,7 +384,14 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 		// WebSocket closed normally; poll until terminal status is reached.
 		// A single GetJob call may return a non-terminal status if the
 		// WebSocket closes before the server DB is updated.
-		return c.WaitForJob(ctx, jobID, !quiet)
+		if _, err := c.WaitForJob(ctx, jobID, !quiet); err != nil {
+			return nil, err
+		}
+		job, err := c.GetJob(jobID)
+		if err != nil {
+			return nil, err
+		}
+		return job, checkGap(wsClient)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -454,9 +463,10 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	}()
 
 	// Wait for completion, error, or context cancellation
+	var finalJob *protocol.JobInfo
 	select {
 	case job := <-pollDone:
-		return job, nil
+		finalJob = job
 	case err := <-listenDone:
 		if err != nil {
 			// WebSocket failed, fall back to polling
@@ -469,6 +479,14 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+
+	// Gap detection: if messages were lost across a reconnect, the bytes
+	// already written to stdout have holes. Report failure rather than let
+	// a silently corrupted output pass as success.
+	if wsClient.HasGap() {
+		return finalJob, fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+	}
+	return finalJob, nil
 }
 
 // DownloadOutput downloads an output file

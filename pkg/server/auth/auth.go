@@ -18,12 +18,13 @@ type contextKey string
 // ClientIDKey is the context key for the client ID
 const ClientIDKey contextKey = "client_id"
 
-// exemptPaths are paths that don't require authentication
+// exemptPaths are paths that don't require authentication.
+// Only health probe endpoints are exempt. Worker registration and heartbeat
+// require authentication: an unauthenticated register/heartbeat lets any
+// attacker inject ghost workers and poison the scheduler.
 var exemptPaths = map[string]bool{
-	"/health":                   true,
-	"/api/v1/health":            true,
-	"/api/v1/workers/register":  true,
-	"/api/v1/workers/heartbeat": true,
+	"/health":        true,
+	"/api/v1/health": true,
 }
 
 // Middleware creates an authentication middleware for the given PSK token.
@@ -35,49 +36,20 @@ var exemptPaths = map[string]bool{
 func Middleware(authToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// No token configured: reject everything (fail closed)
-			if authToken == "" {
-				writeUnauthorized(w, "Server has no auth token configured; refusing request")
-				return
-			}
-
-			// Check if path is exempt from authentication
+			// Check if path is exempt from authentication. This runs BEFORE
+			// the fail-closed check so tokenless deployments can still serve
+			// load-balancer health probes on /health.
 			if exemptPaths[r.URL.Path] {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// Extract Authorization header
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				writeUnauthorized(w, "Missing Authorization header")
+			// Validate Bearer token (single shared implementation)
+			clientID, ok := ValidateBearer(w, r, authToken)
+			if !ok {
+				// ValidateBearer already wrote the response
 				return
 			}
-
-			// Parse Bearer token
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-				writeUnauthorized(w, "Invalid Authorization header format")
-				return
-			}
-
-			providedToken := parts[1]
-
-			// Explicitly check for empty token (defense in depth)
-			// This ensures requests with "Bearer " (empty token) are rejected
-			if providedToken == "" {
-				writeUnauthorized(w, "Missing token")
-				return
-			}
-
-			// Validate token using constant-time comparison to prevent timing attacks
-			if subtle.ConstantTimeCompare([]byte(providedToken), []byte(authToken)) != 1 {
-				writeUnauthorized(w, "Invalid token")
-				return
-			}
-
-			// Generate client ID from token (SHA256 first 16 hex chars)
-			clientID := GenerateClientID(providedToken)
 
 			// Inject client ID into context
 			ctx := context.WithValue(r.Context(), ClientIDKey, clientID)
@@ -86,6 +58,49 @@ func Middleware(authToken string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// ValidateBearer extracts and validates the Authorization header against the
+// configured PSK token. Returns the client ID derived from the token and true
+// when valid. When validation fails it writes a 401 response and returns false.
+// An empty authToken rejects every request (fail closed).
+func ValidateBearer(w http.ResponseWriter, r *http.Request, authToken string) (string, bool) {
+	// No token configured: reject everything (fail closed)
+	if authToken == "" {
+		writeUnauthorized(w, "Server has no auth token configured; refusing request")
+		return "", false
+	}
+
+	// Extract Authorization header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		writeUnauthorized(w, "Missing Authorization header")
+		return "", false
+	}
+
+	// Parse Bearer token
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+		writeUnauthorized(w, "Invalid Authorization header format")
+		return "", false
+	}
+
+	providedToken := parts[1]
+
+	// Explicitly check for empty token (defense in depth)
+	// This ensures requests with "Bearer " (empty token) are rejected
+	if providedToken == "" {
+		writeUnauthorized(w, "Missing token")
+		return "", false
+	}
+
+	// Validate token using constant-time comparison to prevent timing attacks
+	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(authToken)) != 1 {
+		writeUnauthorized(w, "Invalid token")
+		return "", false
+	}
+
+	return GenerateClientID(providedToken), true
 }
 
 // GenerateClientID generates a client ID from a token using SHA256
@@ -110,4 +125,21 @@ func GetClientID(r *http.Request) string {
 		return clientID
 	}
 	return ""
+}
+
+// maxJSONBodyBytes is the global request-body cap for JSON endpoints. It
+// bounds memory/CPU spent parsing unauthenticated input; multipart upload
+// endpoints apply their own (larger) MaxBytesReader before this matters.
+const maxJSONBodyBytes int64 = 10 * 1024 * 1024
+
+// MaxBodyBytesMiddleware caps JSON request bodies at 10MB via MaxBytesReader.
+// Multipart requests are exempt: upload handlers apply their own larger
+// MaxBytesReader sized to the actual payload limits.
+func MaxBodyBytesMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
 }

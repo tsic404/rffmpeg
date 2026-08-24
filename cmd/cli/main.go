@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -278,23 +279,37 @@ func run() int {
 		}
 	}
 
-	// Setup signal handling for graceful cancellation
+	// Setup signal handling for graceful cancellation.
+	// jobID/cancelled are guarded by sigMu: the goroutine reads them while
+	// the main flow writes, so unsynchronized access would be a data race.
+	// First interrupt cancels the running job; a second one exits hard.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	var jobID string
-	var cancelled bool
+	var (
+		sigMu     sync.Mutex
+		jobID     string
+		cancelled bool
+	)
 
 	go func() {
-		<-sigChan
-		if jobID != "" && !cancelled {
-			fmt.Fprintln(os.Stderr, "\nReceived interrupt, cancelling job...")
-			if err := cli.CancelJob(jobID); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to cancel job: %v\n", err)
-			} else {
+		for range sigChan {
+			sigMu.Lock()
+			id := jobID
+			done := cancelled
+			if id != "" && !done {
 				cancelled = true
+				sigMu.Unlock()
+				fmt.Fprintln(os.Stderr, "\nReceived interrupt, cancelling job...")
+				if err := cli.CancelJob(id); err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to cancel job: %v\n", err)
+					os.Exit(ExitError)
+				}
+				fmt.Fprintln(os.Stderr, "Job cancellation requested. Press Ctrl+C again to force quit.")
+				continue
 			}
+			sigMu.Unlock()
+			os.Exit(ExitError)
 		}
-		os.Exit(ExitError)
 	}()
 
 	// Upload input files (or skip in shared FS mode)
@@ -424,7 +439,9 @@ func run() int {
 		directPathParam = directPaths
 	}
 
+	sigMu.Lock()
 	jobID, err = cli.SubmitJobWithOptions(fileIDs, directPathParam, result.AllArgs, outputFilename, autoHW, result.StreamingOutput, timeout)
+	sigMu.Unlock()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error submitting job: %v\n", err)
 		return ExitError

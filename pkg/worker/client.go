@@ -19,6 +19,11 @@ import (
 // apiPrefix is the API version prefix for all server endpoints
 const apiPrefix = "/api/v1"
 
+// MaxRemoteInputBytes caps the size of files downloaded from remote URLs via
+// DownloadInput. Server-side file downloads are already bounded by the
+// server's own upload limits; remote URLs have no such bound.
+const MaxRemoteInputBytes int64 = 20 * 1024 * 1024 * 1024 // 20GB
+
 // Client is the HTTP client for communicating with the server
 type Client struct {
 	baseURL    string
@@ -188,10 +193,15 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 	}
 	defer file.Close()
 
-	// Copy the content
-	_, err = io.Copy(file, resp.Body)
+	// Copy the content with a hard size cap: a hostile remote URL must not
+	// be able to fill the disk unbounded via DownloadInput.
+	limited := io.LimitReader(resp.Body, MaxRemoteInputBytes)
+	written, err := io.Copy(file, limited)
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
+	}
+	if written >= MaxRemoteInputBytes {
+		return fmt.Errorf("remote input exceeds maximum size of %d bytes", MaxRemoteInputBytes)
 	}
 
 	return nil

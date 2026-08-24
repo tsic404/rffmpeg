@@ -2,9 +2,6 @@ package handlers
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +19,11 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/server/db"
 	"github.com/tsix404/rffmpeg/pkg/server/storage"
 )
+
+// MaxChunkSize caps the per-chunk size a client may request. Larger values
+// are clamped server-side to prevent a single init request from forcing
+// huge multipart memory buffers.
+const MaxChunkSize = 64 * 1024 * 1024
 
 // Default chunk size: 10MB
 const DefaultChunkSize = 10 * 1024 * 1024
@@ -68,29 +69,14 @@ func (h *ChunkUploadHandler) SetAuthToken(token string) {
 }
 
 // validateAuthToken validates the Authorization header for chunk upload requests.
-// Returns the client ID and true if valid, or empty string and false if invalid.
-// When no auth token is configured the request is rejected: fail closed.
-func (h *ChunkUploadHandler) validateAuthToken(r *http.Request) (string, bool) {
-	if h.authToken == "" {
+// Delegates to auth.ValidateBearer — the single shared Bearer implementation —
+// so all endpoints drift-proof their token checks. When no auth token is
+// configured the request is rejected: fail closed.
+func (h *ChunkUploadHandler) validateAuthToken(w http.ResponseWriter, r *http.Request) (string, bool) {
+	clientID, ok := auth.ValidateBearer(w, r, h.authToken)
+	if !ok {
 		return "", false
 	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		return "", false
-	}
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-		return "", false
-	}
-	providedToken := parts[1]
-	if providedToken == "" {
-		return "", false
-	}
-	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(h.authToken)) != 1 {
-		return "", false
-	}
-	hash := sha256.Sum256([]byte(providedToken))
-	clientID := hex.EncodeToString(hash[:])[:16]
 	ctx := context.WithValue(r.Context(), auth.ClientIDKey, clientID)
 	*r = *r.WithContext(ctx)
 	return clientID, true
@@ -108,7 +94,7 @@ func (h *ChunkUploadHandler) Shutdown() {
 
 // InitChunkUpload initializes a new chunked upload session
 func (h *ChunkUploadHandler) InitChunkUpload(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))
@@ -138,20 +124,41 @@ func (h *ChunkUploadHandler) InitChunkUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Determine chunk size
+	// Determine chunk size. Client-requested values are clamped to
+	// [1, MaxChunkSize]: a declared 10GB ChunkSize would otherwise drive a
+	// ~10GB ParseMultipartForm memory buffer per request.
 	chunkSize := h.chunkSize
 	if req.ChunkSize > 0 {
 		chunkSize = req.ChunkSize
+		if chunkSize > MaxChunkSize {
+			writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+				protocol.ErrCodeInvalidRequest,
+				fmt.Sprintf("chunk_size %d exceeds maximum of %d bytes", req.ChunkSize, MaxChunkSize), nil,
+			))
+			return
+		}
+	}
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
 	}
 
-	// Calculate total chunks
+	// Calculate total chunks from FileSize — the client-supplied TotalChunks
+	// is never trusted, so the accounting can't be bypassed by declaring an
+	// inconsistent value.
 	totalChunks := int(req.FileSize / chunkSize)
 	if req.FileSize%chunkSize > 0 {
 		totalChunks++
 	}
 
-	if req.TotalChunks > 0 {
-		totalChunks = req.TotalChunks
+	// If the client declares its planned chunking, it must match the
+	// server-computed values exactly.
+	if req.TotalChunks > 0 && req.TotalChunks != totalChunks {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest,
+			fmt.Sprintf("total_chunks %d inconsistent with file_size %d and chunk_size %d (expected %d)",
+				req.TotalChunks, req.FileSize, chunkSize, totalChunks), nil,
+		))
+		return
 	}
 
 	// Create upload session
@@ -178,7 +185,7 @@ func (h *ChunkUploadHandler) InitChunkUpload(w http.ResponseWriter, r *http.Requ
 
 // UploadChunk handles uploading a single chunk
 func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))
@@ -245,13 +252,19 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 	h.semaphore <- struct{}{}
 	defer func() { <-h.semaphore }()
 
-	// Parse multipart form
-	maxChunkSize := session.ChunkSize + 1024 // Allow small overhead
+	// Parse multipart form. The session's ChunkSize was validated at init
+	// time, but legacy sessions created before that validation may carry an
+	// oversized value — clamp again here so the memory buffer stays bounded.
+	chunkSize := session.ChunkSize
+	if chunkSize <= 0 || chunkSize > MaxChunkSize {
+		chunkSize = MaxChunkSize
+	}
+
+	maxChunkSize := chunkSize + 1024 // Allow small overhead
 	r.Body = http.MaxBytesReader(w, r.Body, maxChunkSize)
 
 	// Use the chunk size (plus overhead) as the in-memory threshold.
-	// Since chunks are typically 10MB, this should be sufficient.
-	if err := r.ParseMultipartForm(session.ChunkSize + 1024*1024); err != nil {
+	if err := r.ParseMultipartForm(chunkSize + 1024*1024); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
 		))
@@ -315,7 +328,7 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 
 // GetUploadProgress returns the upload progress
 func (h *ChunkUploadHandler) GetUploadProgress(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))
@@ -378,7 +391,7 @@ func (h *ChunkUploadHandler) GetUploadProgress(w http.ResponseWriter, r *http.Re
 
 // CompleteChunkUpload finalizes the chunked upload and assembles the file
 func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))
@@ -470,13 +483,25 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Verify final checksum if provided
-	if session.FileChecksum.Valid && session.FileChecksum.String != actualChecksum {
-		h.storage.DeleteFile(tempFileID)
-		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest, "Final file checksum mismatch", nil,
-		))
-		return
+	// Rename assembled file to content-hash-based file ID for cache key stability.
+	// Only "already exists" is benign (same content uploaded twice): any other
+	// error must fail the request — deleting the temp file and writing a DB
+	// record pointing at a nonexistent path would corrupt the catalog.
+	fileID := actualChecksum
+	finalPath := h.storage.GetFilePath(fileID)
+	if err := os.Rename(filePath, finalPath); err != nil {
+		if os.IsExist(err) {
+			// Destination already exists with identical content — drop the temp copy.
+			h.storage.DeleteFile(tempFileID)
+		} else {
+			h.storage.DeleteFile(tempFileID)
+			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+				protocol.ErrCodeInternalError, "Failed to finalize uploaded file", err,
+			))
+			return
+		}
+	} else {
+		filePath = finalPath
 	}
 
 	// Also check the checksum from the request
@@ -486,16 +511,6 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 			protocol.ErrCodeInvalidRequest, "Final file checksum mismatch", nil,
 		))
 		return
-	}
-
-	// Rename assembled file to content-hash-based file ID for cache key stability
-	fileID := actualChecksum
-	finalPath := h.storage.GetFilePath(fileID)
-	if err := os.Rename(filePath, finalPath); err != nil {
-		// If the destination already exists (same content), just remove the temp file
-		h.storage.DeleteFile(tempFileID)
-	} else {
-		filePath = finalPath
 	}
 
 	// Create file record in database
@@ -540,7 +555,7 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 
 // CancelChunkUpload cancels an upload session
 func (h *ChunkUploadHandler) CancelChunkUpload(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))
@@ -657,7 +672,7 @@ func (h *ChunkUploadHandler) UploadFileFromReader(filename string, fileSize int6
 
 // ResumeChunkUpload allows resuming an interrupted upload
 func (h *ChunkUploadHandler) ResumeChunkUpload(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))

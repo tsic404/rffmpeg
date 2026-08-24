@@ -401,11 +401,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// from the URL path. For server file IDs, use the fileID directly.
 			var inputPath string
 			if isRemoteURL(fileID) {
-				// Remote URL: use the last path segment as filename, fallback to UUID
-				baseName := filepath.Base(fileID)
-				if baseName == "." || baseName == "/" || baseName == "" {
-					baseName = uuid.New().String()
-				}
+				// Remote URL: sanitize the last path segment — hostile URLs
+				// must not inject path separators or oversized names.
+				baseName := sanitizeInputBaseName(filepath.Base(fileID))
 				inputPath = filepath.Join(jobDir, "input-"+baseName)
 			} else {
 				inputPath = filepath.Join(jobDir, "input-"+fileID)
@@ -801,11 +799,9 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 	fileID := job.InputFiles[0]
 	var inputPath string
 	if isRemoteURL(fileID) {
-		// Remote URL: use the last path segment as filename, fallback to UUID
-		baseName := filepath.Base(fileID)
-		if baseName == "." || baseName == "/" || baseName == "" {
-			baseName = uuid.New().String()
-		}
+		// Remote URL: sanitize the last path segment — hostile URLs
+		// must not inject path separators or oversized names.
+		baseName := sanitizeInputBaseName(filepath.Base(fileID))
 		inputPath = filepath.Join(jobDir, "input-"+baseName)
 	} else {
 		inputPath = filepath.Join(jobDir, "input-"+fileID)

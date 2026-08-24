@@ -2,9 +2,6 @@ package handlers
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,40 +104,15 @@ func (h *Handler) SetAuthToken(token string) {
 }
 
 // validateAuthToken validates the Authorization header against the configured auth token.
-// Returns the client ID and true if valid, or an empty string and false if invalid.
-// When no auth token is configured the request is rejected: the API must fail
-// closed rather than serve unauthenticated traffic.
-func (h *Handler) validateAuthToken(r *http.Request) (string, bool) {
-	// No auth token configured: reject (fail closed)
-	if h.authToken == "" {
+// Delegates to auth.ValidateBearer — the single shared Bearer implementation.
+// Returns the client ID and true if valid. When no auth token is configured
+// the request is rejected: the API must fail closed rather than serve
+// unauthenticated traffic.
+func (h *Handler) validateAuthToken(w http.ResponseWriter, r *http.Request) (string, bool) {
+	clientID, ok := auth.ValidateBearer(w, r, h.authToken)
+	if !ok {
 		return "", false
 	}
-
-	// Extract Authorization header
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		return "", false
-	}
-
-	// Parse Bearer token
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-		return "", false
-	}
-
-	providedToken := parts[1]
-	if providedToken == "" {
-		return "", false
-	}
-
-	// Validate token using constant-time comparison
-	if subtle.ConstantTimeCompare([]byte(providedToken), []byte(h.authToken)) != 1 {
-		return "", false
-	}
-
-	// Generate client ID from token
-	hash := sha256.Sum256([]byte(providedToken))
-	clientID := hex.EncodeToString(hash[:])[:16]
 
 	// Also set client ID in request context for downstream handlers
 	ctx := context.WithValue(r.Context(), auth.ClientIDKey, clientID)
@@ -234,7 +206,7 @@ func validateFileType(filename string) bool {
 func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	// Validate auth token (defense-in-depth; middleware also validates,
 	// but handler-level check ensures protection even if middleware is bypassed)
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))
@@ -311,7 +283,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	// Validate auth token (defense-in-depth; middleware also validates,
 	// but handler-level check ensures protection even if middleware is bypassed)
-	if _, ok := h.validateAuthToken(r); !ok {
+	if _, ok := h.validateAuthToken(w, r); !ok {
 		writeError(w, http.StatusUnauthorized, protocol.NewProtocolError(
 			protocol.ErrCodeUnauthorized, "Unauthorized: invalid or missing token", nil,
 		))
@@ -782,7 +754,12 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 // DownloadOutput handles output file download
 func (h *Handler) DownloadOutput(w http.ResponseWriter, r *http.Request) {
 	fileID := chi.URLParam(r, "fileId")
-
+	if !storage.ValidateOutputFileID(fileID) {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "Invalid file ID format", nil,
+		))
+		return
+	}
 	file, err := h.storage.OpenOutput(fileID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, protocol.NewProtocolError(
@@ -810,7 +787,12 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 // DownloadFile handles input file download
 func (h *Handler) DownloadFile(w http.ResponseWriter, r *http.Request) {
 	fileID := chi.URLParam(r, "fileId")
-
+	if !storage.ValidateFileID(fileID) {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "Invalid file ID format", nil,
+		))
+		return
+	}
 	file, err := h.storage.OpenFile(fileID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, protocol.NewProtocolError(

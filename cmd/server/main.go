@@ -159,6 +159,11 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 
+	// Global request-body cap for JSON endpoints. Upload handlers apply
+	// their own larger MaxBytesReader before parsing multipart forms, so a
+	// 10MB default never truncates legitimate uploads.
+	r.Use(auth.MaxBodyBytesMiddleware)
+
 	// Pass auth token to handler for health check reporting
 	h.SetAuthToken(cfg.AuthToken)
 

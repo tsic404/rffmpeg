@@ -25,18 +25,19 @@ func main() {
 	serverURL := flag.String("server-url", "", "Server URL (overrides config file and RFFMPEG_SERVER_URL env)")
 	flag.Parse()
 
-	// Load configuration
+	// Load configuration. On file-load failure, fall back to defaults but
+	// still merge environment variables — silently discarding
+	// RFFMPEG_TOKEN/RFFMPEG_SERVER_URL would leave the worker unable to
+	// authenticate against a token-required server.
 	var cfg *workerconfig.Config
 	if *configPath != "" {
-		var err error
-		cfg, err = workerconfig.LoadFromFile(*configPath)
+		fileCfg, err := workerconfig.LoadFromFile(*configPath)
 		if err != nil {
-			log.Printf("Warning: Failed to load config file: %v, using defaults", err)
-			cfg = workerconfig.DefaultConfig()
+			log.Printf("Warning: Failed to load config file: %v, using defaults merged with environment", err)
+			cfg = workerconfig.Merge(workerconfig.DefaultConfig(), workerconfig.LoadFromEnv())
 		} else {
 			// Merge with environment (env takes precedence)
-			envConfig := workerconfig.LoadFromEnv()
-			cfg = workerconfig.Merge(cfg, envConfig)
+			cfg = workerconfig.Merge(fileCfg, workerconfig.LoadFromEnv())
 		}
 	} else {
 		// Load from environment only

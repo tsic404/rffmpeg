@@ -180,7 +180,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 
 - **未设置 `--auth-token` / `RFFMPEG_SERVER_TOKEN` 时，Server 拒绝全部 API 请求**（返回 401），包括 worker 注册（`/api/v1/workers/register`）和心跳（`/api/v1/workers/heartbeat`），仅日志输出 `WARNING: No auth token configured. All API requests will be rejected (401). Set --auth-token to enable access.`。
 - 因此部署时**必须同时配置 server 与 worker 凭证**：Server 设置 `--auth-token <token>`，Worker 通过配置文件 `"token": "<token>"`、环境变量 `RFFMPEG_TOKEN` 或命令行 `--token <token>` 提供相同令牌；CLI 同样需要设置 `RFFMPEG_TOKEN`。
-- 例外路径：`/health` 与 `/api/v1/health` 健康检查无需认证，便于负载均衡探活。
+- **Worker 注册与心跳必须认证**：`/api/v1/workers/register` 与 `/api/v1/workers/heartbeat` 不再豁免鉴权，未携带正确 token 的请求返回 401。这防止未认证攻击者注入"幽灵 worker"并持续心跳保活、诱导调度器把任务派给其控制的节点。
+- 例外路径：仅 `/health` 与 `/api/v1/health` 健康检查无需认证（包括 tokenless 部署），便于负载均衡探活。
 
 ### Worker 配置
 
