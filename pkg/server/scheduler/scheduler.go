@@ -363,6 +363,10 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 	defer s.mu.Unlock()
 
 	pendingJobs, err := s.db.GetPendingJobs(1)
+	// GetPendingJobs(1) is a sentinel probe, not a work batch: we only need
+	// to know whether ANY pending job exists. FailStarvedPendingJobs below
+	// fails ALL qualifying starved jobs in one statement, so fetching more
+	// rows here would be wasted work.
 	if err != nil {
 		log.Printf("Scheduler: Failed to get pending jobs: %v", err)
 		return

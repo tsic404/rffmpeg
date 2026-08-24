@@ -464,9 +464,13 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			stderrHandler(notification + "\n")
 		}
 
-		// Emit detailed audit chain notification via the audit notifier.
-		// Format: [rffmpeg] Worker capabilities: <caps> | Requested: <orig> | Rewritten: <target> | Reason: <reason>
-		if rewriteResult.Performed && w.auditNotifier != nil {
+		// Emit the detailed audit chain line through the job's stderr
+		// batcher so it streams to CLI clients over the WebSocket stderr
+		// channel (TSI-2349). The shared audit notifier only writes to the
+		// worker process stderr, which CLI users never see, so the same
+		// formatted line is duplicated here onto the per-job stream.
+		// Format: [rffmpeg] INFO: Worker capabilities: <caps> | Requested: <orig> | Rewritten: <target> | Reason: <reason>
+		if rewriteResult.Performed {
 			requested := rewriteResult.OriginalEncoder
 			if requested == "" {
 				requested = "(none)"
@@ -488,14 +492,25 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				})
 			}
 
-			// Notify the detailed chain
-			_ = w.auditNotifier.NotifyRewriteChain(
+			// Notify the detailed chain on both sinks:
+			// - auditNotifier for operator visibility in worker logs
+			// - stderrHandler for streaming to connected CLI clients
+			if w.auditNotifier != nil {
+				_ = w.auditNotifier.NotifyRewriteChain(
+					rewriteResult.CapabilitiesSummary,
+					requested,
+					rewritten,
+					reason,
+					audit.InfoLevel,
+				)
+			}
+			stderrHandler(audit.FormatRewriteChainLine(
 				rewriteResult.CapabilitiesSummary,
 				requested,
 				rewritten,
 				reason,
 				audit.InfoLevel,
-			)
+			))
 		}
 	}
 

@@ -644,6 +644,7 @@ components:
           description: Machine-readable failure category set when the job fails.
         failure_details:
           type: string
+          description: Human-readable failure details.
         stderr_chunk:
           type: string
         progress:

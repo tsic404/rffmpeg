@@ -115,9 +115,22 @@ func (n *StderrNotifier) NotifyOperation(op AuditOperation) error {
 	return n.Notify(level, message)
 }
 
-// NotifyRewriteChain outputs the detailed rewrite chain notification.
-// Format: [rffmpeg] Worker capabilities: {caps} | Requested: {req} | Rewritten: {rew} | Reason: {reason}
-func (n *StderrNotifier) NotifyRewriteChain(capabilitiesSummary string, requested string, rewritten string, reason string, level NotifyLevel) error {
+// DefaultNotifierPrefix is the standard notification line prefix.
+const DefaultNotifierPrefix = "[rffmpeg]"
+
+// FormatRewriteChainLine renders the detailed rewrite chain as a complete
+// notification line, including the "<prefix> <LEVEL>: " prefix. It is the
+// single source of truth for this format: the Worker's per-job stderr stream
+// (TSI-2349) emits its output so CLI clients see exactly what worker-side
+// logs show.
+func FormatRewriteChainLine(capabilitiesSummary string, requested string, rewritten string, reason string, level NotifyLevel) string {
+	return fmt.Sprintf("%s %s: %s\n", DefaultNotifierPrefix, level, formatRewriteChainSegments(capabilitiesSummary, requested, rewritten, reason))
+}
+
+// formatRewriteChainSegments renders the non-empty "key: value" segments of a
+// rewrite chain joined by " | ". Shared by FormatRewriteChainLine and
+// StderrNotifier.NotifyRewriteChain to keep the two outputs in lockstep.
+func formatRewriteChainSegments(capabilitiesSummary string, requested string, rewritten string, reason string) string {
 	var parts []string
 	if capabilitiesSummary != "" {
 		parts = append(parts, fmt.Sprintf("Worker capabilities: %s", capabilitiesSummary))
@@ -131,7 +144,13 @@ func (n *StderrNotifier) NotifyRewriteChain(capabilitiesSummary string, requeste
 	if reason != "" {
 		parts = append(parts, fmt.Sprintf("Reason: %s", reason))
 	}
-	return n.Notify(level, strings.Join(parts, " | "))
+	return strings.Join(parts, " | ")
+}
+
+// NotifyRewriteChain outputs the detailed rewrite chain notification.
+// Format: [rffmpeg] Worker capabilities: {caps} | Requested: {req} | Rewritten: {rew} | Reason: {reason}
+func (n *StderrNotifier) NotifyRewriteChain(capabilitiesSummary string, requested string, rewritten string, reason string, level NotifyLevel) error {
+	return n.Notify(level, formatRewriteChainSegments(capabilitiesSummary, requested, rewritten, reason))
 }
 
 // scenarioToLevel maps scenario types to notification levels.
