@@ -3,6 +3,7 @@ package db_test
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,6 +256,66 @@ func TestWorkerNotFound(t *testing.T) {
 	_, err := database.GetWorker("non-existent-id")
 	if err != protocol.ErrWorkerNotFound {
 		t.Errorf("Expected ErrWorkerNotFound, got %v", err)
+	}
+}
+
+// TestGetWorkerUUIDFormatMismatch (TSI-2346): lookups must tolerate UUID
+// formatting differences between the stored ID and the query parameter
+// (hyphenated vs. compact, surrounding whitespace).
+func TestGetWorkerUUIDFormatMismatch(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	hyphenated := "550e8400-e29b-41d4-a716-446655440000"
+	compact := "550e8400e29b41d4a716446655440000"
+
+	if _, err := database.CreateOrUpdateWorker(hyphenated, "uuid-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	for name, id := range map[string]string{
+		"hyphenated":           hyphenated,
+		"compact":              compact,
+		"uppercase hyphenated": strings.ToUpper(hyphenated),
+	} {
+		worker, err := database.GetWorker(id)
+		if err != nil {
+			t.Errorf("%s lookup failed: %v", name, err)
+			continue
+		}
+		if worker.ID != hyphenated {
+			t.Errorf("%s lookup returned ID %q, want stored ID %q", name, worker.ID, hyphenated)
+		}
+	}
+
+	// Registering the compact form of the same UUID must converge on the
+	// existing hyphenated row (write path normalizes too, TSI-2346): it
+	// upserts "uuid-worker" rather than inserting a second worker.
+	if _, err := database.CreateOrUpdateWorker(compact, "uuid-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}); err != nil {
+		t.Fatalf("Failed to re-register worker via compact UUID: %v", err)
+	}
+	all, err := database.GetAllWorkers()
+	if err != nil {
+		t.Fatalf("Failed to list workers: %v", err)
+	}
+	if len(all) != 1 || all[0].ID != hyphenated {
+		t.Errorf("Expected single converged row %q, got %d rows: %+v", hyphenated, len(all), all)
+	}
+	if worker, err := database.GetWorker(compact); err != nil {
+		t.Fatalf("Compact lookup after convergence failed: %v", err)
+	} else if worker.Name != "uuid-worker" {
+		t.Errorf("Compact lookup returned name %q, want uuid-worker", worker.Name)
+	}
+
+	// Non-UUID identifiers are unaffected.
+	if _, err := database.GetWorker("non-existent-id"); err != protocol.ErrWorkerNotFound {
+		t.Errorf("Expected ErrWorkerNotFound for non-UUID unknown ID, got %v", err)
 	}
 }
 

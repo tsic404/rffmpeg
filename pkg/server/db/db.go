@@ -543,6 +543,10 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 // If the worker already exists, it updates capabilities, resets status to idle,
 // and clears eviction flags (TSI-1737 server restart recovery).
 func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCapabilities) (*Worker, error) {
+	// TSI-2346: normalize on the write path too, so the same logical UUID
+	// reported in different formats (hyphenated vs. compact, case, whitespace)
+	// converges on one row instead of forking into unreachable duplicates.
+	id = normalizeWorkerID(id)
 	if id == "" {
 		id = uuid.New().String()
 	}
@@ -612,8 +616,19 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	return d.GetWorker(id)
 }
 
+// normalizeWorkerID canonicalizes a worker ID so lookups tolerate UUID
+// formatting differences (hyphenated vs. compact). Non-UUID IDs pass through
+// unchanged, since registration accepts arbitrary identifiers (TSI-2346).
+func normalizeWorkerID(id string) string {
+	if parsed, err := uuid.Parse(strings.TrimSpace(id)); err == nil {
+		return parsed.String()
+	}
+	return strings.TrimSpace(id)
+}
+
 // GetWorker retrieves a worker by ID
 func (d *Database) GetWorker(id string) (*Worker, error) {
+	id = normalizeWorkerID(id)
 	worker := &Worker{}
 	err := d.db.QueryRow(`
 		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at

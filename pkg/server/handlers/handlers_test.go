@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -1147,6 +1148,75 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 
 	if h := getHealth(); h == nil || h.Status != string(protocol.WorkerStatusIdle) {
 		t.Errorf("Expected health status 'idle' after job completion, got %+v", h)
+	}
+}
+
+// TestGetWorkerUUIDFormatMismatch (TSI-2346) verifies the detail endpoint
+// resolves a worker whose ID is a UUID regardless of hyphenation or case in
+// the URL, and that id/name/status/health are populated from the DB record
+// when no state-table entry matches.
+func TestGetWorkerUUIDFormatMismatch(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	hyphenated := "550e8400-e29b-41d4-a716-446655440000"
+	regReq := protocol.WorkerRegisterRequest{
+		WorkerID: hyphenated,
+		Name:     "uuid-worker",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Register failed with status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	getWorker := func(id string) (int, map[string]any) {
+		req := httptest.NewRequest("GET", "/api/v1/workers/"+id, nil)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		var body map[string]any
+		json.NewDecoder(rec.Body).Decode(&body)
+		return rec.Code, body
+	}
+
+	for name, id := range map[string]string{
+		"exact":     hyphenated,
+		"compact":   "550e8400e29b41d4a716446655440000",
+		"uppercase": strings.ToUpper(hyphenated),
+	} {
+		code, body := getWorker(id)
+		if code != http.StatusOK {
+			t.Errorf("%s lookup failed with status %d: %v", name, code, body)
+			continue
+		}
+		worker, _ := body["worker"].(map[string]any)
+		if worker == nil {
+			t.Fatalf("%s lookup missing worker object", name)
+		}
+		if worker["id"] != hyphenated {
+			t.Errorf("%s lookup returned id %v, want stored ID %q", name, worker["id"], hyphenated)
+		}
+		if worker["name"] != "uuid-worker" {
+			t.Errorf("%s lookup returned name %v, want uuid-worker", name, worker["name"])
+		}
+		if worker["status"] != string(protocol.WorkerStatusIdle) {
+			t.Errorf("%s lookup returned status %v, want idle", name, worker["status"])
+		}
+		if worker["health"] == nil {
+			t.Errorf("%s lookup returned null health", name)
+		}
+	}
+
+	// Unknown non-UUID ID still 404s.
+	if code, _ := getWorker("non-existent-id"); code != http.StatusNotFound {
+		t.Errorf("Expected 404 for unknown ID, got %d", code)
 	}
 }
 
