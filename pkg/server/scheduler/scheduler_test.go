@@ -679,6 +679,10 @@ func TestSchedulerEncoderFallback(t *testing.T) {
 	}
 }
 
+// The job requests hevc_nvenc (HEVC family); the only worker has libx264
+// (H.264 family). A job explicitly requesting an encoder no worker provides
+// stays pending instead of being force-assigned to an incapable worker —
+// that would guarantee failure at run time (TSI-2362).
 func TestSchedulerEncoderFallbackDifferentCodecFamily(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {
@@ -687,17 +691,15 @@ func TestSchedulerEncoderFallbackDifferentCodecFamily(t *testing.T) {
 	defer database.Close()
 
 	// Create worker with only H.264 encoder
-	worker1, err := database.CreateWorker("worker-1", "cpu-worker", protocol.WorkerCapabilities{
+	if _, err := database.CreateWorker("worker-1", "cpu-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
 		FFmpegVersion: "5.0",
 		MaxConcurrent: 1,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("Failed to create worker1: %v", err)
 	}
 
-	// Create a job requesting hevc_nvenc (different codec family - HEVC, not H.264)
-	// The scheduler should fall back to regular scheduling since no HEVC encoder is available
+	// Create a job requesting hevc_nvenc (different codec family - HEVC, not H.264).
 	job, err := database.CreateJob(
 		`["file1.mp4"]`,
 		`["-i", "input.mp4", "-c:v", "hevc_nvenc", "output.mp4"]`,
@@ -708,33 +710,21 @@ func TestSchedulerEncoderFallbackDifferentCodecFamily(t *testing.T) {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
-	// Create scheduler
 	scheduler := New(database, DefaultConfig())
-
-	// Schedule the job - should fall back to regular scheduling (any worker)
-	// since no HEVC encoder is available in the same codec family
 	scheduled := scheduler.scheduleJob(job)
-	if !scheduled {
-		t.Fatalf("Expected job to be scheduled via regular scheduling fallback")
+	if scheduled {
+		t.Fatalf("Expected job requesting unavailable encoder to stay pending")
 	}
 
-	// Verify the job was assigned
 	updatedJob, err := database.GetJob(job.ID)
 	if err != nil {
 		t.Fatalf("Failed to get job: %v", err)
 	}
-
-	if !updatedJob.WorkerID.Valid {
-		t.Fatalf("Expected job to be assigned to a worker")
+	if updatedJob.Status != protocol.JobStatusPending {
+		t.Errorf("Expected job status to remain pending, got %s", updatedJob.Status)
 	}
-
-	if updatedJob.WorkerID.String != worker1.ID {
-		t.Errorf("Expected job to be assigned to worker1 (%s), got %s", worker1.ID, updatedJob.WorkerID.String)
-	}
-
-	// Verify the job status is queued
-	if updatedJob.Status != protocol.JobStatusQueued {
-		t.Errorf("Expected job status to be queued, got %s", updatedJob.Status)
+	if updatedJob.WorkerID.Valid {
+		t.Errorf("Expected no worker assignment, got %s", updatedJob.WorkerID.String)
 	}
 }
 
@@ -1184,5 +1174,130 @@ func TestSchedulerNoWorkerStarvation_BulkBacklog(t *testing.T) {
 				job.ID, job.FailureType)
 			break
 		}
+	}
+}
+
+// TestSchedulePendingJobsHeadOfLineBlocking verifies that a job no worker can
+// run (missing encoder capability, no capacity) does not block schedulable
+// jobs behind it in the queue (TSI-2362 acceptance 6).
+func TestSchedulePendingJobsHeadOfLineBlocking(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Worker has only libx264.
+	if _, err := database.CreateWorker("worker-1", "worker-1", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "5.0", MaxConcurrent: 1,
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	// Head job requires an encoder nobody has; second job is schedulable.
+	headJob, err := database.CreateJob(`["f.mkv"]`, `["-c:v","madeupenc","o.mkv"]`, "o.mkv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okJob, err := database.CreateJob(`["f2.mkv"]`, `["-c:v","libx264","o2.mkv"]`, "o2.mkv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(database, DefaultConfig())
+	s.schedulePendingJobs()
+
+	gotOK, err := database.GetJob(okJob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOK.Status != protocol.JobStatusQueued {
+		t.Errorf("schedulable job blocked by head-of-line job: status=%s", gotOK.Status)
+	}
+
+	gotHead, _ := database.GetJob(headJob.ID)
+	if gotHead.Status != protocol.JobStatusPending {
+		t.Errorf("unschedulable head job should stay pending, got %s", gotHead.Status)
+	}
+}
+
+// TestCheckTimeoutsRetryBudget verifies that a job failing repeatedly with
+// timeout is failed as TIMEOUT once the retry budget is exhausted instead of
+// being requeued forever (TSI-2362 acceptance 4).
+func TestCheckTimeoutsRetryBudget(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	if _, err := database.CreateWorker("worker-1", "worker-1", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "5.0", MaxConcurrent: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := database.CreateJob(`["f.mkv"]`, `[]`, "o.mkv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate started_at so GetTimedOutJobs picks it up.
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Hour), job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	const maxRetries = 2
+	cfg := DefaultConfig()
+	cfg.MaxTimeoutRetries = maxRetries
+	s := New(database, cfg)
+
+	// First pass: retries available → back to pending.
+	s.checkTimeouts()
+	got, _ := database.GetJob(job.ID)
+	if got.Status != protocol.JobStatusPending {
+		t.Fatalf("expected pending after first timeout (retry %d/%d), got %s", 1, maxRetries, got.Status)
+	}
+
+	// Exhaust the remaining budget: requeue as running and time out again.
+	for i := 1; i < maxRetries; i++ {
+		if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.GetDB().Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
+			time.Now().Add(-2*time.Hour), job.ID); err != nil {
+			t.Fatal(err)
+		}
+		s.checkTimeouts()
+	}
+
+	// Budget exhausted: one more running+timed-out cycle must FAIL the job.
+	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Hour), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.checkTimeouts()
+
+	got, _ = database.GetJob(job.ID)
+	if got.Status != protocol.JobStatusFailed {
+		t.Fatalf("expected failed(TIMEOUT) after exhausting retry budget, got %s", got.Status)
+	}
+	if got.FailureType != string(protocol.FailureTimeout) {
+		t.Fatalf("expected failure_type TIMEOUT, got %q", got.FailureType)
 	}
 }

@@ -237,6 +237,7 @@ type JobUpdateRequest struct {
 	Cached         bool      `json:"cached,omitempty"`          // Whether the result was served from cache
 	FailureType    string    `json:"failure_type,omitempty"`    // Machine-readable failure category
 	FailureDetails string    `json:"failure_details,omitempty"` // Human-readable failure details
+	WorkerID       string    `json:"worker_id,omitempty"`       // Reporting worker; terminal updates are rejected unless this still owns the job
 }
 
 type JobUpdateResponse struct {
@@ -361,4 +362,8 @@ type WorkerState struct {
 	CompletedJobs  int       `json:"completed_jobs,omitempty"` // Cumulative jobs completed since the current registration
 	LastSeen       time.Time `json:"last_seen"`
 	StartedAt      time.Time `json:"started_at,omitempty"`
+	// LastThroughputAt is the timestamp of the last heartbeat that reported a
+	// non-zero throughput sample. Time-boxes the busy-worker eviction
+	// exemption in slow-node detection.
+	LastThroughputAt time.Time `json:"last_throughput_at,omitempty"`
 }

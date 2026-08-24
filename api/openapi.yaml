@@ -650,6 +650,14 @@ components:
         progress:
           type: number
           format: double
+        worker_id:
+          type: string
+          description: >-
+            Reporting worker identity. When present, terminal-status updates are
+            ownership-guarded: the server returns 409 if this worker no longer
+            owns the job (reassigned after failover, or already finished).
+            Omitting it falls back to the unguarded update for backward
+            compatibility.
 
     JobUpdateResponse:
       type: object

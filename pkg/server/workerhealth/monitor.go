@@ -112,12 +112,19 @@ func (m *Monitor) checkWorkers() {
 		}
 	}
 
-	// Remove workers that have been offline longer than threshold
-	removed, err := m.db.RemoveOfflineWorkers(m.config.OfflineThreshold)
+	// Remove workers that have been offline longer than threshold and evict
+	// them from the in-memory state table: stale table entries previously
+	// kept dead nodes in the slow-node median sample pool forever.
+	removedIDs, err := m.db.RemoveOfflineWorkers(m.config.OfflineThreshold)
 	if err != nil {
 		log.Printf("Failed to remove offline workers: %v", err)
-	} else if removed > 0 {
-		log.Printf("Removed %d offline worker(s) exceeding offline threshold", removed)
+	} else if len(removedIDs) > 0 {
+		if m.stateTable != nil {
+			for _, workerID := range removedIDs {
+				m.stateTable.RemoveWorker(workerID)
+			}
+		}
+		log.Printf("Removed %d offline worker(s) exceeding offline threshold", len(removedIDs))
 	}
 
 	// Slow node detection (TSI-760)

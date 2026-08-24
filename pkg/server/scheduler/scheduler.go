@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/server/db"
+	"github.com/tsix404/rffmpeg/pkg/server/migration"
 )
 
 // Config holds the configuration for the scheduler
@@ -21,6 +23,10 @@ type Config struct {
 	// 0 disables the check. Pending jobs queued behind busy workers are NOT
 	// affected: schedulable workers exist, so the job keeps waiting (TSI-2204).
 	NoWorkerJobTimeout time.Duration
+
+	// MaxTimeoutRetries bounds how many times checkTimeouts may requeue the
+	// same job before failing it as TIMEOUT (0 = fail on first timeout).
+	MaxTimeoutRetries int
 }
 
 // DefaultConfig returns the default scheduler configuration
@@ -31,6 +37,12 @@ func DefaultConfig() Config {
 		TimeoutCheckInterval: 30 * time.Second,
 		MaxJobsPerWorker:     1, // One job at a time per worker by default
 		NoWorkerJobTimeout:   2 * time.Minute,
+
+		// MaxTimeoutRetries bounds how many times checkTimeouts may requeue
+		// the same job before failing it as TIMEOUT. Without a budget, a hung
+		// ffmpeg with healthy heartbeats was rescheduled every JobTimeout
+		// forever — each retry also double-executing against the stuck worker.
+		MaxTimeoutRetries: 2,
 	}
 }
 
@@ -127,11 +139,12 @@ func (s *Scheduler) schedulePendingJobs() {
 
 	// Process each pending job
 	for _, job := range pendingJobs {
-		// Try to schedule this job
+		// Try to schedule this job; a job with no eligible worker (missing
+		// encoder capability, no capacity) must not block schedulable jobs
+		// behind it in the queue.
 		scheduled := s.scheduleJob(job)
 		if !scheduled {
-			// No worker available for this job, leave it pending
-			break
+			continue
 		}
 	}
 }
@@ -188,8 +201,12 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 		}
 	}
 
-	// Fall back to regular scheduling if no capability-matched worker found
-	if bestWorker == nil {
+	// Fall back to regular scheduling only when the job did NOT request a
+	// specific encoder. A job explicitly requesting an encoder no worker has
+	// must stay pending: assigning it to an incapable worker guarantees
+	// failure, and the old behavior also made such jobs schedule-eligible,
+	// masking capability gaps.
+	if bestWorker == nil && requestedEncoder == "" {
 		workers, err := s.db.GetIdleWorkersWithJobCount()
 		if err != nil {
 			log.Printf("Scheduler: Failed to get idle workers: %v", err)
@@ -214,27 +231,18 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 	if bestWorker == nil {
 		return false
 	}
-
-	// Assign job to the best worker
+	// Assign the job atomically: one statement sets worker_id and flips the
+	// status to queued, eliminating the two-step pending+worker_id orphan
+	// window (a failure in between left the job invisible to both the
+	// scheduler scan and the starvation fallback).
 	err := s.db.AssignJobToWorker(job.ID, bestWorker.ID)
 	if err != nil {
+		if errors.Is(err, protocol.ErrJobNotOwned) {
+			// Another path (pull) assigned it first; not an error.
+			return true
+		}
 		log.Printf("Scheduler: Failed to assign job %s to worker %s: %v", job.ID, bestWorker.ID, err)
 		return false
-	}
-
-	// Update job status to queued
-	err = s.db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
-	if err != nil {
-		log.Printf("Scheduler: Failed to update job %s status: %v", job.ID, err)
-		return false
-	}
-
-	// Update worker status to busy if this was the first job
-	if bestActiveCount == 0 {
-		err = s.db.UpdateWorkerStatus(bestWorker.ID, protocol.WorkerStatusBusy)
-		if err != nil {
-			log.Printf("Scheduler: Failed to update worker %s status: %v", bestWorker.ID, err)
-		}
 	}
 
 	if requestedEncoder != "" {
@@ -326,25 +334,36 @@ func (s *Scheduler) checkTimeouts() {
 	}
 
 	for _, job := range timedOutJobs {
-		log.Printf("Scheduler: Job %s timed out (started at %v), rescheduling", job.ID, job.StartedAt.Time)
+		log.Printf("Scheduler: Job %s timed out (started at %v)", job.ID, job.StartedAt.Time)
 
-		// Reset job for rescheduling
-		err := s.db.RescheduleJob(job.ID)
+		// Retry budget: once the job has already been requeued MaxTimeoutRetries
+		// times, stop rescheduling and fail it as TIMEOUT. Unbounded requeue
+		retries, err := s.db.GetJobTimeoutRetryCount(job.ID)
 		if err != nil {
-			log.Printf("Scheduler: Failed to reschedule job %s: %v", job.ID, err)
+			log.Printf("Scheduler: Failed to get retry count for job %s: %v", job.ID, err)
 			continue
 		}
-
-		// Update worker's active job count and status
-		if job.WorkerID.Valid {
-			activeCount, err := s.db.GetWorkerActiveJobCount(job.WorkerID.String)
-			if err == nil && activeCount == 0 {
-				// No more active jobs, set worker to idle
-				s.db.UpdateWorkerStatus(job.WorkerID.String, protocol.WorkerStatusIdle)
+		if retries >= s.config.MaxTimeoutRetries {
+			errMsg := fmt.Sprintf("job exceeded maximum timeout retries (%d)", s.config.MaxTimeoutRetries)
+			if err := s.db.FailJob(job.ID, errMsg, string(protocol.FailureTimeout)); err != nil {
+				log.Printf("Scheduler: Failed to fail timed-out job %s: %v", job.ID, err)
+				continue
 			}
+			log.Printf("Scheduler: Job %s failed after %d timeout retries", job.ID, retries)
+		} else {
+			// Reset job for rescheduling and record the requeue so the retry
+			// budget is observable on the next pass (GetJobRetryCount reads
+			// migration events).
+			if err := s.db.RescheduleJob(job.ID); err != nil {
+				log.Printf("Scheduler: Failed to reschedule job %s: %v", job.ID, err)
+				continue
+			}
+			if _, err := s.db.CreateMigrationEvent(job.WorkerID.String, "",
+				string(migration.ReasonJobTimeout), retries, []string{job.ID}, 1); err != nil {
+				log.Printf("Scheduler: Failed to record timeout retry for job %s: %v", job.ID, err)
+			}
+			log.Printf("Scheduler: Job %s rescheduled (timeout retry %d/%d)", job.ID, retries+1, s.config.MaxTimeoutRetries)
 		}
-
-		log.Printf("Scheduler: Job %s rescheduled successfully", job.ID)
 	}
 }
 

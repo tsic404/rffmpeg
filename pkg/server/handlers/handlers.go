@@ -574,7 +574,16 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 				failureDetails = &req.FailureDetails
 			}
 		}
-		err := h.db.UpdateJobStatusWithFailure(jobID, req.Status, exitCode, errMsg, failureType, failureDetails)
+		var err error
+		if protocol.IsTerminalStatus(req.Status) && req.WorkerID != "" {
+			// Ownership-guarded terminal update: the report only lands if
+			// req.WorkerID still owns the job (running/queued). A stale
+			// terminal report from a worker that lost the job to failover
+			// returns 409 instead of overwriting the new owner's result.
+			err = h.db.UpdateJobTerminalStatusWithOwner(jobID, db.NormalizeWorkerID(req.WorkerID), req.Status, exitCode, errMsg, failureType, failureDetails)
+		} else {
+			err = h.db.UpdateJobStatusWithFailure(jobID, req.Status, exitCode, errMsg, failureType, failureDetails)
+		}
 		if err != nil {
 			if errors.Is(err, protocol.ErrJobNotFound) {
 				writeError(w, http.StatusNotFound, protocol.NewProtocolError(
@@ -592,6 +601,15 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 				))
 				return
 			}
+			if errors.Is(err, protocol.ErrJobNotOwned) {
+				// Ownership guard tripped: the reporting worker no longer owns
+				// this job (reassigned after failover) or the job is already in
+				// a terminal state. 409 tells the stale reporter to stop.
+				writeError(w, http.StatusConflict, protocol.NewProtocolError(
+					protocol.ErrCodeConflict, "Job no longer assigned to this worker", err,
+				))
+				return
+			}
 			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 				protocol.ErrCodeInternalError, "Failed to update job", err,
 			))
@@ -603,25 +621,30 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 			h.rateLimiter.DecrementByJob(jobID)
 		}
 
-		// When a job reaches terminal status, immediately update the worker
-		// to idle if it has no remaining active jobs. This eliminates the
-		// 10-15 second delay where the worker remains "busy" on the server
-		// until the next heartbeat, causing subsequent jobs to be rejected.
+		// When a job reaches terminal status, immediately flip the worker to
+		// idle if it has no remaining active jobs. This eliminates the 10-15
+		// second delay where the worker remains "busy" on the server until the
+		// next heartbeat, causing subsequent jobs to be rejected.
+		//
+		// SetWorkerIdleIfNoActiveJobs does the active-count check and the
+		// status write in ONE guarded statement (status != offline, no active
+		// jobs): an offline worker can no longer be resurrected into the
+		// schedulable pool by its own late completion report, and a racing
+		// pull-path busy write cannot be overwritten to idle.
 		if protocol.IsTerminalStatus(req.Status) {
 			job, err := h.db.GetJob(jobID)
 			if err == nil && job.WorkerID.Valid {
-				activeCount, err := h.db.GetWorkerActiveJobCount(job.WorkerID.String)
-				if err == nil && activeCount == 0 {
-					if err := h.db.UpdateWorkerStatus(job.WorkerID.String, protocol.WorkerStatusIdle); err != nil {
+				if err := h.db.SetWorkerIdleIfNoActiveJobs(job.WorkerID.String); err != nil {
+					if !errors.Is(err, protocol.ErrWorkerNotFound) {
 						log.Printf("Failed to set worker %s to idle after job %s completed: %v",
 							job.WorkerID.String, jobID, err)
-					} else {
-						log.Printf("Worker %s set to idle after job %s completed (active jobs: 0)",
-							job.WorkerID.String, jobID)
-						// Trigger immediate rescheduling so pending jobs can be assigned
-						if h.scheduler != nil {
-							h.scheduler.TriggerReschedule()
-						}
+					}
+				} else {
+					log.Printf("Worker %s set to idle after job %s completed (active jobs: 0)",
+						job.WorkerID.String, jobID)
+					// Trigger immediate rescheduling so pending jobs can be assigned
+					if h.scheduler != nil {
+						h.scheduler.TriggerReschedule()
 					}
 				}
 			}
@@ -877,14 +900,20 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		h.stateTable.UpdateFromHeartbeat(statePayload)
 	}
 
-	// Check for cancelled jobs among the worker's active jobs
+	// Cancel notification: report any active job the worker listed that is no
+	// longer (or not exclusively) its own — cancelled, re-queued/re-assigned to
+	// another worker after failover, or already terminal. Checking only
+	// status==cancelled missed migrated jobs: a partitioned worker kept running
+	// a job concurrently with its new owner (double execution).
 	var cancelledJobs []string
 	for _, jobID := range req.ActiveJobs {
 		job, err := h.db.GetJob(jobID)
 		if err != nil {
 			continue
 		}
-		if job.Status == protocol.JobStatusCancelled {
+		if job.Status == protocol.JobStatusCancelled ||
+			job.Status == protocol.JobStatusPending ||
+			job.WorkerID.Valid && job.WorkerID.String != db.NormalizeWorkerID(req.WorkerID) {
 			cancelledJobs = append(cancelledJobs, jobID)
 		}
 	}
@@ -899,8 +928,10 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 	workerID := chi.URLParam(r, "workerId")
 
-	// Verify worker exists
-	_, err := h.db.GetWorker(workerID)
+	// Verify worker exists and is pull-eligible. An offline worker must
+	// re-register before pulling (its jobs were already migrated); an evicted
+	// (slow-node) worker gets no new work at all.
+	worker, err := h.db.GetWorker(workerID)
 	if err != nil {
 		if errors.Is(err, protocol.ErrWorkerNotFound) {
 			writeError(w, http.StatusNotFound, protocol.NewProtocolError(
@@ -910,6 +941,18 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to get worker", err,
+		))
+		return
+	}
+	if worker.Status == protocol.WorkerStatusOffline {
+		writeError(w, http.StatusConflict, protocol.NewProtocolError(
+			protocol.ErrCodeConflict, "Worker is offline; re-register to resume pulling", nil,
+		))
+		return
+	}
+	if worker.Evicted {
+		writeError(w, http.StatusConflict, protocol.NewProtocolError(
+			protocol.ErrCodeConflict, "Worker is evicted from scheduling", nil,
 		))
 		return
 	}
@@ -1665,6 +1708,12 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 		Status:     string(worker.Status),
 		LastSeen:   worker.LastHeartbeat.Format(time.RFC3339),
 		ActiveJobs: []string{},
+	}
+	if state, ok := states[worker.ID]; ok && state != nil && len(state.ActiveJobs) > 0 && worker.Status == protocol.WorkerStatusIdle {
+		// Heartbeats no longer write the reported status into the DB
+		// (status is derived from active job count), but a busy heartbeat's
+		// ActiveJobs sample still proves activity: surface busy immediately.
+		health.Status = string(protocol.WorkerStatusBusy)
 	}
 	if state, ok := states[worker.ID]; ok && state != nil {
 		health.GPUUtilPct = state.GPUUtilPct

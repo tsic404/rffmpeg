@@ -89,20 +89,22 @@ func TestUpdateWorkerHeartbeat(t *testing.T) {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 
-	// Update heartbeat to busy
+	// Heartbeat refreshes last_heartbeat only; status is derived state and is
+	// not written by heartbeats anymore (a late idle beat must not overwrite
+	// the busy state set by the pull path).
 	err = database.UpdateWorkerHeartbeat(worker.ID, protocol.WorkerStatusBusy)
 	if err != nil {
 		t.Fatalf("Failed to update heartbeat: %v", err)
 	}
 
-	// Verify status
+	// Verify liveness was refreshed without touching status
 	retrieved, err := database.GetWorker(worker.ID)
 	if err != nil {
 		t.Fatalf("Failed to get worker: %v", err)
 	}
 
-	if retrieved.Status != protocol.WorkerStatusBusy {
-		t.Errorf("Expected status 'busy', got '%s'", retrieved.Status)
+	if retrieved.Status != protocol.WorkerStatusIdle {
+		t.Errorf("Expected status to remain 'idle' after heartbeat, got '%s'", retrieved.Status)
 	}
 }
 
@@ -189,13 +191,13 @@ func TestRemoveOfflineWorkers(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Remove workers offline for more than 50ms
-	removed, err := database.RemoveOfflineWorkers(50 * time.Millisecond)
+	removedIDs, err := database.RemoveOfflineWorkers(50 * time.Millisecond)
 	if err != nil {
 		t.Fatalf("Failed to remove offline workers: %v", err)
 	}
 
-	if removed != 1 {
-		t.Errorf("Expected 1 worker to be removed, got %d", removed)
+	if len(removedIDs) != 1 {
+		t.Errorf("Expected 1 worker to be removed, got %d", len(removedIDs))
 	}
 
 	// Verify worker is gone

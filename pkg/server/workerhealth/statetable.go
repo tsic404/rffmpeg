@@ -58,12 +58,20 @@ func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatP
 
 	// Compute EWMA-smoothed throughput
 	if exists {
+		if payload.ThroughputFPS > 0 {
+			// Track when the worker last produced a real throughput sample:
+			// the busy-with-zero-EWMA eviction exemption is time-boxed by this,
+			// so a hung ffmpeg (jobs active, throughput dead) cannot hide behind
+			// "measurement absence" forever.
+			state.LastThroughputAt = payload.Timestamp
+		}
 		// Apply EWMA smoothing: EWMA = α * current + (1-α) * previous
 		alpha := t.ewmaAlpha
 		state.EWMAThroughput = alpha*payload.ThroughputFPS + (1-alpha)*state.EWMAThroughput
 	} else {
 		// First data point: initialize EWMA directly
 		state.EWMAThroughput = payload.ThroughputFPS
+		state.LastThroughputAt = payload.Timestamp
 	}
 }
 
@@ -144,18 +152,19 @@ type SlowNodeDetectionResult struct {
 // and are not marked as slow — they are simply skipped. Newly registered workers that have
 // completed fewer than MinJobsForEviction jobs are also excluded, so cold-start throughput
 // (which is not yet representative) cannot trigger a false eviction.
-//
-// Returns SlowNodeDetectionResult containing newly evicted IDs, recovered IDs, and the computed median.
+
+// workerInfo is the per-worker view DetectSlowWorkers evaluates.
+type workerInfo struct {
+	id      string
+	ewmaFPS float64
+	hasJobs bool
+}
+
 func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	// Collect EWMA throughput values from active, non-offline workers
-	type workerInfo struct {
-		id      string
-		ewmaFPS float64
-		hasJobs bool
-	}
 	var activeWorkers []workerInfo
 
 	for id, state := range t.states {
@@ -218,6 +227,14 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 				state.Evicted = false
 				recovered = append(recovered, w.id)
 			}
+		} else if w.hasJobs && w.ewmaFPS == 0 && t.busyExempt(w) {
+			// Busy worker with no throughput samples yet (job just started):
+			// EWMA decay is measurement absence, not slowness — exempt from
+			// eviction until real samples arrive, but only for a bounded
+			// window (see busyExpiry): a hung ffmpeg with active jobs must
+			// eventually face the slow-node safety net instead of hiding in
+			// "measurement absence" forever.
+			continue
 		} else {
 			// Slow node detection: if throughput is below median/SlowNodeThreshold
 			if median > 0 && w.ewmaFPS < median/SlowNodeThreshold {
@@ -232,6 +249,28 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 		Recovered:    recovered,
 		Median:       median,
 	}
+}
+
+// busyExpiry bounds how long a busy worker with zero EWMA throughput is
+// exempt from slow-node eviction. Generous enough to cover a long-running
+// job's startup ramp; short enough that a hung ffmpeg (jobs active, no
+// samples) eventually reaches the eviction safety net.
+const busyExpiry = 10 * time.Minute
+
+// busyExempt reports whether a busy, zero-throughput worker still counts as
+// "no samples yet". Once the worker has gone busyExpiry without a single
+// non-zero throughput sample while holding active jobs, the exemption lapses
+// and normal eviction evaluation applies.
+func (t *WorkerStateTable) busyExempt(w workerInfo) bool {
+	state, ok := t.states[w.id]
+	if !ok {
+		return true
+	}
+	if state.LastThroughputAt.IsZero() {
+		// Never produced a sample: exempt only within the window since first sight.
+		return time.Since(state.StartedAt) < busyExpiry
+	}
+	return time.Since(state.LastThroughputAt) < busyExpiry
 }
 
 // computeMedian returns the median value of a sorted slice of float64s.

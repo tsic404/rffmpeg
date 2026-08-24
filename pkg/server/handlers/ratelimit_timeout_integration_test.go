@@ -110,6 +110,10 @@ func setupTestWithScheduler(t *testing.T, jobTimeout time.Duration) (*handlers.H
 		ScheduleInterval:     100 * time.Millisecond,
 		TimeoutCheckInterval: 100 * time.Millisecond,
 		MaxJobsPerWorker:     1,
+
+		// High budget so these integration tests exercise repeated
+		// timeout-reschedule cycles instead of tripping the retry limit.
+		MaxTimeoutRetries: 1000,
 	})
 
 	r := chi.NewRouter()

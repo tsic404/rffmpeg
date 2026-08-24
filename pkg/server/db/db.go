@@ -439,6 +439,40 @@ func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStat
 	return nil
 }
 
+// UpdateJobTerminalStatusWithOwner updates a job to a terminal state only if
+// the job is still owned by the reporting worker and still active (running or
+// queued). This closes the double-execution window: after failover the job's
+// worker_id points at the new worker, so a stale terminal report from the old
+// worker (network partition survivor) matches zero rows and returns
+// protocol.ErrJobNotOwned instead of overwriting the new owner's result.
+// A report for a job already in a terminal state is equally rejected.
+func (d *Database) UpdateJobTerminalStatusWithOwner(jobID, workerID string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
+	now := time.Now()
+
+	finishedAt := now
+	result, err := d.db.Exec(`
+		UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?,
+		                error = ?,
+		                failure_type = COALESCE(?, failure_type),
+		                failure_details = COALESCE(?, failure_details),
+		                finished_at = ?
+		WHERE id = ? AND worker_id = ? AND status IN (?, ?)
+	`, status, now, exitCode, errMsg, failureType, failureDetails, finishedAt,
+		jobID, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
+	if err != nil {
+		return fmt.Errorf("failed to update job terminal status: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rows == 0 {
+		return protocol.ErrJobNotOwned
+	}
+	return nil
+}
+
 // UpdateJobProgress updates the progress and ETA seconds for a job.
 func (d *Database) UpdateJobProgress(id string, progress float64, etaSeconds int) error {
 	now := time.Now()
@@ -455,17 +489,30 @@ func (d *Database) UpdateJobProgress(id string, progress float64, etaSeconds int
 	return nil
 }
 
-// UpdateJobOutput updates the output files for a job
-func (d *Database) UpdateJobOutput(id string, outputFiles string) error {
+// AssignJobToWorker atomically assigns a job to a worker: one statement sets
+// worker_id AND flips the status to queued. The previous two-step version
+// (worker_id write, then queued status) left a pending+worker_id orphan when
+// it failed in between — such a job was invisible to both the scheduler
+// (status=pending scan) and FailStarvedPendingJobs (WHERE worker_id IS NULL),
+// hanging CLI clients forever. Returns ErrJobNotOwned if the job is no longer
+// schedulable (already assigned, or not pending).
+func (d *Database) AssignJobToWorker(jobID, workerID string) error {
 	now := time.Now()
-	_, err := d.db.Exec(`
-		UPDATE jobs SET output_files = ?, updated_at = ? WHERE id = ?
-	`, outputFiles, now, id)
-
+	result, err := d.db.Exec(`
+		UPDATE jobs SET worker_id = ?, status = ?, updated_at = ?
+		WHERE id = ? AND status = ? AND worker_id IS NULL
+	`, workerID, protocol.JobStatusQueued, now, jobID, protocol.JobStatusPending)
 	if err != nil {
-		return fmt.Errorf("failed to update job output: %w", err)
+		return fmt.Errorf("failed to assign job to worker: %w", err)
 	}
 
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rows == 0 {
+		return protocol.ErrJobNotOwned
+	}
 	return nil
 }
 
@@ -501,15 +548,15 @@ func (d *Database) CancelJob(id string) error {
 	return nil
 }
 
-// AssignJobToWorker assigns a job to a worker
-func (d *Database) AssignJobToWorker(jobID, workerID string) error {
+// UpdateJobOutput updates the output files for a job
+func (d *Database) UpdateJobOutput(id string, outputFiles string) error {
 	now := time.Now()
 	_, err := d.db.Exec(`
-		UPDATE jobs SET worker_id = ?, updated_at = ? WHERE id = ?
-	`, workerID, now, jobID)
+		UPDATE jobs SET output_files = ?, updated_at = ? WHERE id = ?
+	`, outputFiles, now, id)
 
 	if err != nil {
-		return fmt.Errorf("failed to assign job to worker: %w", err)
+		return fmt.Errorf("failed to update job output: %w", err)
 	}
 
 	return nil
@@ -651,7 +698,7 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	// TSI-2346: normalize on the write path too, so the same logical UUID
 	// reported in different formats (hyphenated vs. compact, case, whitespace)
 	// converges on one row instead of forking into unreachable duplicates.
-	id = normalizeWorkerID(id)
+	id = NormalizeWorkerID(id)
 	if id == "" {
 		id = uuid.New().String()
 	}
@@ -721,10 +768,11 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	return d.GetWorker(id)
 }
 
-// normalizeWorkerID canonicalizes a worker ID so lookups tolerate UUID
-// formatting differences (hyphenated vs. compact). Non-UUID IDs pass through
-// unchanged, since registration accepts arbitrary identifiers (TSI-2346).
-func normalizeWorkerID(id string) string {
+// NormalizeWorkerID canonicalizes a worker ID so lookups and ownership
+// comparisons tolerate UUID formatting differences (hyphenated vs. compact).
+// Non-UUID IDs pass through unchanged, since registration accepts arbitrary
+// identifiers (TSI-2346).
+func NormalizeWorkerID(id string) string {
 	if parsed, err := uuid.Parse(strings.TrimSpace(id)); err == nil {
 		return parsed.String()
 	}
@@ -733,7 +781,7 @@ func normalizeWorkerID(id string) string {
 
 // GetWorker retrieves a worker by ID
 func (d *Database) GetWorker(id string) (*Worker, error) {
-	id = normalizeWorkerID(id)
+	id = NormalizeWorkerID(id)
 	worker := &Worker{}
 	err := d.db.QueryRow(`
 		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
@@ -756,13 +804,18 @@ func (d *Database) GetWorker(id string) (*Worker, error) {
 	return worker, nil
 }
 
-// UpdateWorkerHeartbeat updates the worker's heartbeat timestamp and status
+// UpdateWorkerHeartbeat refreshes a live worker's heartbeat timestamp without
+// touching its status. Worker status is derived state (active job count +
+// terminal-state hooks), not worker-authoritative: honoring the reported
+// status here let a late idle heartbeat overwrite the busy state written by
+// the pull path, resurrecting TSI-2347 through a race. Offline/evicted guards
+// keep dead workers from refreshing liveness.
 func (d *Database) UpdateWorkerHeartbeat(id string, status protocol.WorkerStatus) error {
 	id = normalizeWorkerID(id)
 	now := time.Now()
 	result, err := d.db.Exec(`
-		UPDATE workers SET status = ?, last_heartbeat = ? WHERE id = ?
-	`, status, now, id)
+		UPDATE workers SET last_heartbeat = ? WHERE id = ? AND status != ?
+	`, now, NormalizeWorkerID(id), protocol.WorkerStatusOffline)
 
 	if err != nil {
 		return fmt.Errorf("failed to update worker heartbeat: %w", err)
@@ -776,6 +829,37 @@ func (d *Database) UpdateWorkerHeartbeat(id string, status protocol.WorkerStatus
 		return protocol.ErrWorkerNotFound
 	}
 
+	return nil
+}
+
+// SetWorkerIdleIfNoActiveJobs flips an online worker to idle only when it has
+// no active jobs and is not offline. This is the terminal-state hook of the
+// derived-status invariant: an offline worker's late completion report can no
+// longer resurrect it into the schedulable pool (zombie revival), and a
+// racing new assignment (which sets busy) cannot be overwritten to idle
+// because the active-count predicate fails.
+func (d *Database) SetWorkerIdleIfNoActiveJobs(workerID string) error {
+	result, err := d.db.Exec(`
+		UPDATE workers SET status = ?, last_heartbeat = ?
+		WHERE id = ? AND status != ? AND status != ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM jobs
+			WHERE jobs.worker_id = workers.id AND jobs.status IN (?, ?)
+		  )
+	`, protocol.WorkerStatusIdle, time.Now(), workerID,
+		protocol.WorkerStatusIdle, protocol.WorkerStatusOffline,
+		protocol.JobStatusRunning, protocol.JobStatusQueued)
+	if err != nil {
+		return fmt.Errorf("failed to set worker idle: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rows == 0 {
+		return protocol.ErrWorkerNotFound
+	}
 	return nil
 }
 
@@ -872,17 +956,14 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 	// TSI-2347: mark the worker busy atomically with the assignment so
 	// health.status reflects activity immediately instead of waiting for the
 	// next heartbeat. The idle guard keeps an offline worker offline.
-	//
-	// Side effect: refreshing last_heartbeat here is deliberate. Assignment is
-	// proof of liveness (the worker pulled this job), so bumping the timestamp
-	// in the same transaction prevents the health monitor from racing us and
-	// marking a just-assigned worker offline mid-transaction. It does not fake
-	// a heartbeat: no state-table entry or GPU metrics are produced.
-
+	// last_heartbeat is deliberately NOT refreshed here: assignment is not
+	// proof of liveness (the pull may come from a partitioned zombie), and
+	// refreshing it postponed offline re-detection and lengthened the
+	// double-execution window.
 	if len(claimedJobs) > 0 {
 		if _, err := tx.Exec(`
-			UPDATE workers SET status = ?, last_heartbeat = ? WHERE id = ? AND status = ?
-		`, protocol.WorkerStatusBusy, now, workerID, protocol.WorkerStatusIdle); err != nil {
+			UPDATE workers SET status = ? WHERE id = ? AND status = ?
+		`, protocol.WorkerStatusBusy, workerID, protocol.WorkerStatusIdle); err != nil {
 			return nil, fmt.Errorf("failed to mark worker busy: %w", err)
 		}
 	}
@@ -899,7 +980,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 func (d *Database) MarkOfflineWorkers(heartbeatTimeout time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-heartbeatTimeout)
 	result, err := d.db.Exec(`
-		UPDATE workers SET status = ? 
+		UPDATE workers SET status = ?
 		WHERE status != ? AND last_heartbeat < ?
 	`, protocol.WorkerStatusOffline, protocol.WorkerStatusOffline, cutoff)
 	if err != nil {
@@ -908,17 +989,62 @@ func (d *Database) MarkOfflineWorkers(heartbeatTimeout time.Duration) (int64, er
 	return result.RowsAffected()
 }
 
-// RemoveOfflineWorkers removes workers that have been offline longer than the threshold
-func (d *Database) RemoveOfflineWorkers(offlineThreshold time.Duration) (int64, error) {
+// RemoveOfflineWorkers removes workers that have been offline longer than the
+// threshold and returns their IDs so callers can evict them from in-memory
+// state (the WorkerStateTable) — stale table entries previously kept feeding
+// dead nodes into slow-node median calculations.
+func (d *Database) RemoveOfflineWorkers(offlineThreshold time.Duration) ([]string, error) {
 	cutoff := time.Now().Add(-offlineThreshold)
-	result, err := d.db.Exec(`
-		DELETE FROM workers 
+
+	// Single transaction: the SELECT-then-DELETE version had a TOCTOU window
+	// where a worker deleted by the DELETE missed the returned ID list (its
+	// state-table entry then leaked) or a freshly re-registered row got
+	// swept. Inside a transaction, the read set and delete set are identical.
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`
+		SELECT id FROM workers
 		WHERE status = ? AND last_heartbeat < ?
 	`, protocol.WorkerStatusOffline, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("failed to remove offline workers: %w", err)
+		return nil, fmt.Errorf("failed to query removed workers: %w", err)
 	}
-	return result.RowsAffected()
+
+	var workerIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("failed to scan worker id: %w", err)
+		}
+		workerIDs = append(workerIDs, id)
+	}
+	rows.Close()
+
+	if len(workerIDs) == 0 {
+		return nil, nil
+	}
+
+	result, err := tx.Exec(`
+		DELETE FROM workers
+		WHERE status = ? AND last_heartbeat < ?
+	`, protocol.WorkerStatusOffline, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove offline workers: %w", err)
+	}
+
+	if _, err := result.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("failed to check rows affected: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return workerIDs, nil
 }
 
 // GetActiveWorkers retrieves all workers that are not offline
@@ -2063,6 +2189,26 @@ func (d *Database) GetJobRetryCount(jobID string) (int, error) {
 	`, jobID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get job retry count: %w", err)
+	}
+	return count, nil
+}
+
+// GetJobTimeoutRetryCount counts only timeout-driven requeues for a job. The
+// scheduler's MaxTimeoutRetries budget must not be consumed by unrelated
+// migrations: a job twice migrated for worker crashes would otherwise burn its
+// entire timeout budget on the first hang.
+func (d *Database) GetJobTimeoutRetryCount(jobID string) (int, error) {
+	var count int
+	err := d.db.QueryRow(`
+		SELECT COUNT(*) FROM migration_events
+		WHERE reason = 'job_timeout'
+		  AND id IN (
+			SELECT me.id FROM migration_events me, json_each(me.job_ids)
+			WHERE json_each.value = ?
+		  )
+	`, jobID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get job timeout retry count: %w", err)
 	}
 	return count, nil
 }

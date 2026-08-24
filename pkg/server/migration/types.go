@@ -14,6 +14,9 @@ const (
 	ReasonWorkerOffline Reason = "worker_offline"
 	// ReasonServerRestart indicates migration due to server restart recovery.
 	ReasonServerRestart Reason = "server_restart"
+	// ReasonJobTimeout indicates the job was requeued after exceeding its
+	// execution timeout (scheduler retry budget accounting).
+	ReasonJobTimeout Reason = "job_timeout"
 )
 
 // Event represents a job migration event record.

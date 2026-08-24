@@ -10,13 +10,12 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 )
 
-// TestRegisterResetsJobCounters verifies that a successful registration resets
-// the job counters and heartbeat timestamp. After a server restart the worker
-// re-registers with a fresh identity; without this reset, the process-lifetime
-// completed-job count would bypass the server-side warmup check
-// (CompletedJobs < MinJobsForEviction) and defeat the cold-start eviction
-// protection (review blocker #1 on TSI-2218).
-func TestRegisterResetsJobCounters(t *testing.T) {
+// TestRegisterPreservesCountersOnReregister verifies that an automatic
+// re-register (worker had completed jobs) does NOT zero the counters:
+// resetting dropped the worker out of the eviction median sample pool and
+// re-opened the cold-start window. The heartbeat timestamp must still be
+// refreshed so the next heartbeat reports throughput over a full interval.
+func TestRegisterPreservesCountersOnReregister(t *testing.T) {
 	var mu sync.Mutex
 	var registrations int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,11 +52,8 @@ func TestRegisterResetsJobCounters(t *testing.T) {
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.totalJobsCompleted != 0 {
-		t.Errorf("totalJobsCompleted = %d, want 0 after registration reset", w.totalJobsCompleted)
-	}
-	if w.jobsCompleted != 0 {
-		t.Errorf("jobsCompleted = %d, want 0 after registration reset", w.jobsCompleted)
+	if w.totalJobsCompleted != 42 {
+		t.Errorf("totalJobsCompleted = %d, want 42 (re-register must not reset)", w.totalJobsCompleted)
 	}
 	if !w.lastHeartbeatTime.After(stale) {
 		t.Error("lastHeartbeatTime should be refreshed on registration")

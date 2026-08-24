@@ -130,6 +130,16 @@ func (w *Worker) ID() string {
 // Performs initial registration and stores capabilities for later re-registration
 // after server restart (TSI-1737 recovery).
 func (w *Worker) Register(caps protocol.WorkerCapabilities) error {
+	return w.register(caps, w.totalJobsCompleted == 0 && len(w.activeJobs) == 0)
+}
+
+// register performs the registration. firstRegistration controls whether the
+// per-registration counters are reset: a fresh process must reset them so the
+// server-side warmup check (CompletedJobs < MinJobsForEviction) applies to
+// this registration, but an automatic re-register after a transient server
+// restart must NOT zero them — resetting dropped the worker out of the
+// eviction median sample pool and re-opened the cold-start window.
+func (w *Worker) register(caps protocol.WorkerCapabilities, firstRegistration bool) error {
 	// Store capabilities for re-registration
 	w.caps = caps
 
@@ -140,16 +150,13 @@ func (w *Worker) Register(caps protocol.WorkerCapabilities) error {
 	w.id = workerID
 	w.client.workerID = workerID
 
-	// Reset per-registration counters so the server-side warmup check
-	// (CompletedJobs < MinJobsForEviction) applies to this registration.
-	// After a server restart the worker re-registers with a fresh identity;
-	// without this reset, the process-lifetime count would bypass the
-	// cold-start eviction protection. lastHeartbeatTime is reset too, so the
-	// first heartbeat reports throughput over a full interval instead of the
-	// pre-restart window.
 	w.mu.Lock()
-	w.jobsCompleted = 0
-	w.totalJobsCompleted = 0
+	if firstRegistration {
+		w.jobsCompleted = 0
+		w.totalJobsCompleted = 0
+	}
+	// lastHeartbeatTime is always reset, so the next heartbeat reports
+	// throughput over a full interval instead of the pre-(re)start window.
 	w.lastHeartbeatTime = time.Now()
 	w.mu.Unlock()
 
@@ -166,7 +173,7 @@ func (w *Worker) Register(caps protocol.WorkerCapabilities) error {
 // Returns true if re-registration succeeded.
 func (w *Worker) reregister() bool {
 	log.Printf("Attempting re-registration with server...")
-	if err := w.Register(w.caps); err != nil {
+	if err := w.register(w.caps, false); err != nil {
 		log.Printf("Re-registration failed: %v", err)
 		return false
 	}
@@ -247,11 +254,17 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 
 // processJob processes a single job
 func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel context.CancelFunc) {
+	jobFailed := false
 	defer func() {
 		w.mu.Lock()
 		delete(w.activeJobs, job.ID)
-		w.jobsCompleted++
-		w.totalJobsCompleted++
+		// Only successful jobs advance the completion counters. Counting
+		// failures/cancels/probes inflated completed_jobs and let workers
+		// pass the MinJobsForEviction warmup gate without real work.
+		if !jobFailed {
+			w.jobsCompleted++
+			w.totalJobsCompleted++
+		}
 		becameIdle := len(w.activeJobs) == 0
 		w.mu.Unlock()
 
@@ -262,8 +275,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	}()
 
-	// Detect probe jobs: args[0] == "__rffmpeg_probe__"
+	// Detect probe jobs: args[0] == "__rffmpeg_probe__". Probes are health
+	// checks, not transcode work — they must not advance the completion
+	// counters, or pure probe traffic would push a worker past the server-side
+	// MinJobsForEviction warmup gate without doing real work.
 	if len(job.Args) > 0 && job.Args[0] == "__rffmpeg_probe__" {
+		jobFailed = true // suppress counter increment in the deferred hook
 		w.processProbeJob(ctx, job)
 		return
 	}
@@ -522,6 +539,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	if err != nil {
 		log.Printf("Rewrite error for job %s: %v", job.ID, err)
 		// Fail the job if rewrite returns an error (e.g., format not available)
+		jobFailed = true
 		w.reportFailure(job.ID, 1, fmt.Sprintf("Encoder rewrite failed: %v", err), false)
 		return
 	}
@@ -648,6 +666,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// so output_empty is a false classification — retrying won't help.
 			if networkOutput && intercepted.FFmpegError.Type == ErrorTypeOutputEmpty {
 				log.Printf("Job %s: network output detected, skipping output_empty retry", job.ID)
+				jobFailed = true
 				w.reportFailure(job.ID, result.ExitCode, result.Stderr, false)
 				return
 			}
@@ -681,15 +700,16 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				}
 				goto uploadOutput
 			}
-
 			// All retries exhausted — report failure with audit trail
 			log.Printf("Job %s: All retry attempts exhausted (stages: %s)", job.ID, retryResult.FinalStage)
 			errMsg := fmt.Sprintf("All retry attempts exhausted (original encoder: %s, final stage: %s): %s",
 				retryResult.OriginalEncoder, retryResult.FinalStage, retryResult.FinalResult.Stderr)
+			jobFailed = true
 			w.reportFailure(job.ID, retryResult.FinalResult.ExitCode, errMsg, false)
 			return
 		}
 
+		jobFailed = true
 		w.reportFailure(job.ID, result.ExitCode, result.Stderr, false)
 		return
 	}
@@ -701,6 +721,7 @@ uploadOutput:
 	if !job.StreamingOutput && !directMode && !isNetOutput {
 		if _, err := os.Stat(outputPath); err == nil {
 			if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
+				jobFailed = true
 				w.reportInfraFailure(job.ID, result.ExitCode, fmt.Sprintf("Failed to upload output: %v", err))
 				return
 			}

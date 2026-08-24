@@ -94,6 +94,7 @@ func (c *Client) SendProgress(jobID string, progressPercent float64, etaSeconds 
 		TimeUs:     timeUs,
 		DurationUs: durationUs,
 		Speed:      speed,
+		WorkerID:   c.workerID,
 	}
 
 	resp, err := c.doRequest("PATCH", "/jobs/"+jobID, req)

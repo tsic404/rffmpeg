@@ -18,6 +18,12 @@ var (
 	ErrInvalidJobStatus  = errors.New("invalid job status")
 	ErrInvalidFileID     = errors.New("invalid file id")
 	ErrWorkerNotFound    = errors.New("worker not found")
+
+	// ErrJobNotOwned is returned when a worker reports a terminal state for a job
+	// it no longer owns (reassigned to another worker after failover, or already
+	// in a terminal state). The stale report must not overwrite the current owner's
+	// result.
+	ErrJobNotOwned       = errors.New("job no longer assigned to this worker")
 	ErrJobNotFound       = errors.New("job not found")
 	ErrJobTerminal       = errors.New("job already in terminal state")
 	ErrRateLimitExceeded = errors.New("rate limit exceeded")

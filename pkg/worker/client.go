@@ -221,6 +221,7 @@ func (c *Client) UpdateJobWithFailure(jobID string, status protocol.JobStatus, e
 		Cached:         cached,
 		FailureType:    failureType,
 		FailureDetails: failureDetails,
+		WorkerID:       c.workerID, // ownership guard: server rejects stale reports from a worker that lost the job
 	}
 
 	url := fmt.Sprintf("%s/jobs/%s", c.baseURL, jobID)
@@ -255,6 +256,7 @@ func (c *Client) UpdateJobWithFailure(jobID string, status protocol.JobStatus, e
 func (c *Client) SendStderrChunk(jobID string, chunk string) error {
 	req := protocol.JobUpdateRequest{
 		StderrChunk: chunk,
+		WorkerID:    c.workerID,
 	}
 
 	url := fmt.Sprintf("%s/jobs/%s", c.baseURL, jobID)
@@ -290,6 +292,7 @@ func (c *Client) SendStderrChunk(jobID string, chunk string) error {
 func (c *Client) SendStdoutChunk(jobID string, chunk []byte) error {
 	req := protocol.JobUpdateRequest{
 		StdoutChunk: protocol.EncodeStdoutChunk(chunk),
+		WorkerID:    c.workerID,
 	}
 
 	url := fmt.Sprintf("%s/jobs/%s", c.baseURL, jobID)

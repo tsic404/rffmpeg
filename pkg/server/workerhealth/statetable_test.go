@@ -260,7 +260,9 @@ func TestDetectSlowWorkers_IdleWorkerWithActiveJobs(t *testing.T) {
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 		WorkerID: "w1", Status: "online", ThroughputFPS: 100, ActiveJobs: []string{"job-1"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
-	// w2: established worker with active jobs but throughput=0 (not idle, not warming up)
+	// w2: busy worker whose job just started — throughput sample is still 0.
+	// EWMA decay here is measurement absence, not slowness, so w2 is exempt
+	// from eviction evaluation until real throughput samples arrive.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 		WorkerID: "w2", Status: "online", ThroughputFPS: 0, ActiveJobs: []string{"job-2"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
@@ -269,17 +271,17 @@ func TestDetectSlowWorkers_IdleWorkerWithActiveJobs(t *testing.T) {
 		WorkerID: "w3", Status: "online", ThroughputFPS: 110, ActiveJobs: []string{"job-3"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
-	// w2 has active jobs, so it's NOT idle and should be considered
-	// throughput=0 and has jobs → included in median, may be slow
+	// Median of [100, 110] → median=105. w2 (busy, zero throughput) is
+	// exempt from eviction evaluation — a job that just started has no
+	// throughput samples yet, and EWMA decay is measurement absence.
 	result := table.DetectSlowWorkers()
 
-	// Median of [100, 0, 110] → sorted [0, 100, 110] → median=100
-	// w2 throughput=0 < median/3=33.3 → should be evicted
-	if len(result.NewlyEvicted) != 1 {
-		t.Fatalf("expected 1 evicted worker, got %d: %v", len(result.NewlyEvicted), result.NewlyEvicted)
+	if len(result.NewlyEvicted) != 0 {
+		t.Fatalf("expected 0 evicted workers, got %d: %v", len(result.NewlyEvicted), result.NewlyEvicted)
 	}
-	if result.NewlyEvicted[0] != "w2" {
-		t.Errorf("expected w2 to be evicted (zero throughput with active jobs), got %s", result.NewlyEvicted[0])
+	state2, _ := table.Get("w2")
+	if state2.Evicted {
+		t.Error("busy worker w2 with no throughput samples should be exempt from eviction")
 	}
 }
 
