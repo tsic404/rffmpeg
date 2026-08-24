@@ -316,8 +316,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Cache is not applicable for streaming/network outputs
 	isNetOutput := isRemoteURL(job.OutputFilename)
 
-	// Check cache before any work (skip for direct mode and network outputs)
-	if !directMode && !isNetOutput {
+	// Check cache before any work (skip for direct mode, network outputs, and
+	// streaming outputs — stdout has no local file to cache)
+	if !directMode && !isNetOutput && !job.StreamingOutput {
 		if cachePath, ok := w.cache.Check(cacheKey); ok {
 			log.Printf("Job %s: cache HIT (key=%s)", job.ID, cacheKey[:16])
 
@@ -417,15 +418,21 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			log.Printf("Downloaded input file %s to %s", fileID, inputPath)
 		}
 	}
-
-	// Prepare output path (for non-streaming jobs)
+	// Prepare output path.
+	// Streaming jobs must write to stdout ("-") so ffmpeg's transcoded data
+	// reaches the stdoutBatcher; defaulting an empty filename to a regular
+	// file makes ffmpeg produce a local file and the CLI receive nothing.
 	outputFilename := job.OutputFilename
-	if outputFilename == "" {
+	if job.StreamingOutput {
+		if outputFilename == "" || isRemoteURL(outputFilename) {
+			outputFilename = "-"
+		}
+	} else if outputFilename == "" {
 		outputFilename = "output"
 	}
 	var outputPath string
-	if isRemoteURL(outputFilename) {
-		// Network URL (rtmp://, udp://, etc.) — pass directly to ffmpeg
+	if outputFilename == "-" || isRemoteURL(outputFilename) {
+		// ffmpeg stdout ("-") or network URL (rtmp://, udp://, etc.) — pass directly
 		outputPath = outputFilename
 	} else if filepath.IsAbs(outputFilename) {
 		outputPath = outputFilename
@@ -550,12 +557,15 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	// Execute with appropriate handlers
 	var result ExecResult
+	var stdoutHandler StdoutHandler
 	if job.StreamingOutput {
-		// Streaming output mode: stdout goes to WebSocket
+		// Streaming output mode: stdout goes to WebSocket. The batcher handler
+		// is also passed to ExecuteWithRetry so retried attempts keep streaming.
 		stdoutBatcher := NewStdoutBatcher(job.ID, w.client, DefaultStdoutBatcherConfig())
 		defer stdoutBatcher.Close()
 
-		result = w.executor.ExecuteWithHandlers(jobCtx, args, stdoutBatcher.StdoutHandler(), progressRouter.Handler())
+		stdoutHandler = stdoutBatcher.StdoutHandler()
+		result = w.executor.ExecuteWithHandlers(jobCtx, args, stdoutHandler, progressRouter.Handler())
 	} else {
 		// Normal mode: stdout goes to file
 		result = w.executor.ExecuteWithStderrHandler(jobCtx, args, progressRouter.Handler())
@@ -650,8 +660,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			progressRouter.Handler()(notification + "\n")
 
 			// Use RetryExecutor for multi-stage retry:
-			// Stage 1: hardware-pruned → Stage 2: advanced-pruned → Stage 3: software fallback
-			retryResult := w.retryExecutor.ExecuteWithRetry(jobCtx, args, outputPath, networkOutput)
+			retryResult := w.retryExecutor.ExecuteWithRetry(jobCtx, args, outputPath, networkOutput, stdoutHandler)
 
 			if retryResult.Success {
 				// Retry succeeded — use the final result

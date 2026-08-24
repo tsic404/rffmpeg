@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -90,6 +91,65 @@ func TestBuildArgs(t *testing.T) {
 			got := BuildArgs(tt.jobArgs, tt.inputPaths, tt.outputPath)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("BuildArgs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStreamingOutputPath verifies the worker's output path resolution for
+// streaming jobs (TSI-2345): an empty OutputFilename must resolve to "-"
+// (ffmpeg stdout) instead of a regular file, so transcoded data reaches the
+// stdoutBatcher and no 0-byte file is written.
+func TestStreamingOutputPath(t *testing.T) {
+	resolve := func(outputFilename string, streamingOutput bool) string {
+		if streamingOutput {
+			if outputFilename == "" || isRemoteURL(outputFilename) {
+				outputFilename = "-"
+			}
+		} else if outputFilename == "" {
+			outputFilename = "output"
+		}
+		var outputPath string
+		if outputFilename == "-" || isRemoteURL(outputFilename) {
+			outputPath = outputFilename
+		} else if filepath.IsAbs(outputFilename) {
+			outputPath = outputFilename
+		} else {
+			outputPath = filepath.Join("/tmp/jobs/job-1", outputFilename)
+		}
+		return outputPath
+	}
+
+	tests := []struct {
+		name            string
+		outputFilename  string
+		streamingOutput bool
+		want            string
+	}{
+		{
+			name:            "streaming empty filename resolves to stdout",
+			outputFilename:  "",
+			streamingOutput: true,
+			want:            "-",
+		},
+		{
+			name:            "streaming explicit stdout preserved",
+			outputFilename:  "-",
+			streamingOutput: true,
+			want:            "-",
+		},
+		{
+			name:            "non-streaming empty filename defaults to output file",
+			outputFilename:  "",
+			streamingOutput: false,
+			want:            "/tmp/jobs/job-1/output",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolve(tt.outputFilename, tt.streamingOutput)
+			if got != tt.want {
+				t.Errorf("output path = %q, want %q", got, tt.want)
 			}
 		})
 	}

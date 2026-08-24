@@ -1,6 +1,8 @@
 package worker
 
 import (
+	"context"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -514,5 +516,38 @@ func TestPruneHardwareParams_NoSwitchForSoftwareEncoder(t *testing.T) {
 	encoder := extractEncoderFromArgs(prunedArgs)
 	if encoder != "libx264" {
 		t.Errorf("Expected encoder libx264 to remain, got %s", encoder)
+	}
+}
+
+// TestExecuteWithRetry_StdoutOutputSkipsFileValidation verifies that when the
+// output path is "-" (ffmpeg stdout, streaming mode), ExecuteWithRetry skips
+// file existence/size validation on success — otherwise os.Stat("-") fails and
+// a successful streaming job is misclassified as output_empty (TSI-2345).
+func TestExecuteWithRetry_StdoutOutputSkipsFileValidation(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	executor := NewExecutor("ffmpeg", time.Minute)
+	re := &RetryExecutor{
+		executor:    executor,
+		interceptor: NewErrorInterceptor(),
+		pruner:      NewParamPruner(),
+		config:      DefaultRetryConfig(),
+		fallback:    NewEncoderFallback(),
+	}
+
+	// ffmpeg exits 0 writing only to stdout ("-"); no local file is created.
+	args := []string{"-f", "lavfi", "-i", "testsrc=duration=0.1", "-f", "mpegts", "-"}
+	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil)
+
+	if !result.Success {
+		t.Fatalf("expected success for stdout output, got stage=%s attempts=%d",
+			result.FinalStage, result.TotalAttempts)
+	}
+	for _, entry := range result.AuditTrail {
+		if entry.ErrorType == ErrorTypeOutputEmpty.String() {
+			t.Fatalf("stdout output misclassified as %s: %s", entry.ErrorType, entry.ErrorMessage)
+		}
 	}
 }

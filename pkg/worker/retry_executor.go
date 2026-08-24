@@ -208,8 +208,11 @@ func NewRetryExecutorWithFallback(executor *Executor, config *RetryConfig, fallb
 // ExecuteWithRetry executes an ffmpeg command with automatic retry and fallback.
 // The outputPath parameter is required to ensure output file path consistency across retries.
 // networkOutput indicates the output is a network URL (RTMP, RTSP, etc.) — when true,
-// output file existence/size validation is skipped since no local file is produced.
-func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, outputPath string, networkOutput bool) *RetryResult {
+// or the output is "-" (ffmpeg stdout, streaming mode), file existence/size validation
+// is skipped since no local file is produced.
+// stdoutHandler, when non-nil (streaming jobs), receives ffmpeg stdout chunks on every
+// retry attempt so streamed data reaches the client instead of being discarded.
+func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, outputPath string, networkOutput bool, stdoutHandler StdoutHandler) *RetryResult {
 	result := &RetryResult{
 		AuditTrail:    make([]RetryAuditEntry, 0),
 		FinalStage:    RetryStageInitial,
@@ -246,7 +249,12 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 		stage = e.determineStage(attempt)
 
 		// Execute
-		execResult := e.executor.Execute(ctx, currentArgs)
+		var execResult ExecResult
+		if stdoutHandler != nil {
+			execResult = e.executor.ExecuteWithHandlers(ctx, currentArgs, stdoutHandler, nil)
+		} else {
+			execResult = e.executor.Execute(ctx, currentArgs)
+		}
 		result.TotalAttempts = attempt
 
 		// Intercept and analyze — also detect silent hardware→software fallback
@@ -254,8 +262,8 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 		if intercepted.IsSuccess {
 			// Validate output file: FFmpeg may exit 0 but produce 0-byte output
 			// (e.g., unknown codec falls back to a64multi, MP4 mux fails silently).
-			// Skip for network outputs — no local file is produced.
-			if !networkOutput && outputPath != "" {
+			// Skip for network outputs and "-" (stdout) — no local file is produced.
+			if !networkOutput && outputPath != "" && outputPath != "-" {
 				if info, err := os.Stat(outputPath); err != nil {
 					log.Printf("Output file not accessible after exit code 0: %s: %v", outputPath, err)
 					intercepted.IsSuccess = false
@@ -379,7 +387,12 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 			log.Printf("Attempting final software encoder fallback")
 
 			attemptStart := time.Now()
-			execResult := e.executor.Execute(ctx, fallbackArgs)
+			var execResult ExecResult
+			if stdoutHandler != nil {
+				execResult = e.executor.ExecuteWithHandlers(ctx, fallbackArgs, stdoutHandler, nil)
+			} else {
+				execResult = e.executor.Execute(ctx, fallbackArgs)
+			}
 			result.TotalAttempts++
 			result.UsedSoftwareEncoder = true
 
@@ -389,8 +402,8 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 			intercepted := e.interceptor.InterceptWithEncoder(ctx, execResult, currentEncoder)
 			if intercepted.IsSuccess {
 				// Validate output file for fallback attempt too.
-				// Skip for network outputs — no local file is produced.
-				if !networkOutput && outputPath != "" {
+				// Skip for network outputs and "-" (stdout) — no local file is produced.
+				if !networkOutput && outputPath != "" && outputPath != "-" {
 					if info, err := os.Stat(outputPath); err != nil {
 						log.Printf("Fallback output file not accessible after exit code 0: %s: %v", outputPath, err)
 						intercepted.IsSuccess = false
