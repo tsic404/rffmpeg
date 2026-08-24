@@ -27,13 +27,17 @@ var exemptPaths = map[string]bool{
 }
 
 // Middleware creates an authentication middleware for the given PSK token.
-// If the token is empty, authentication is skipped (backward compatibility).
+// An empty token disables authentication entirely: every request is rejected,
+// including those that carry no Authorization header at all. This is a secure
+// default — an unauthenticated API must fail closed, never fall back to
+// accepting traffic. Deployments that intentionally want an open API must
+// configure a token on both sides (server --auth-token, client RFFMPEG_TOKEN).
 func Middleware(authToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip authentication if no token is configured (backward compatibility)
+			// No token configured: reject everything (fail closed)
 			if authToken == "" {
-				next.ServeHTTP(w, r)
+				writeUnauthorized(w, "Server has no auth token configured; refusing request")
 				return
 			}
 
@@ -73,7 +77,7 @@ func Middleware(authToken string) func(http.Handler) http.Handler {
 			}
 
 			// Generate client ID from token (SHA256 first 16 hex chars)
-			clientID := generateClientID(providedToken)
+			clientID := GenerateClientID(providedToken)
 
 			// Inject client ID into context
 			ctx := context.WithValue(r.Context(), ClientIDKey, clientID)
@@ -88,11 +92,6 @@ func Middleware(authToken string) func(http.Handler) http.Handler {
 func GenerateClientID(token string) string {
 	hash := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(hash[:])[:16]
-}
-
-// generateClientID generates a client ID from a token using SHA256
-func generateClientID(token string) string {
-	return GenerateClientID(token)
 }
 
 // writeUnauthorized writes a 401 Unauthorized response
@@ -111,20 +110,4 @@ func GetClientID(r *http.Request) string {
 		return clientID
 	}
 	return ""
-}
-
-// AddExemptPath adds a path to the exempt paths list.
-// This can be used for testing or dynamic configuration.
-func AddExemptPath(path string) {
-	exemptPaths[path] = true
-}
-
-// RemoveExemptPath removes a path from the exempt paths list.
-func RemoveExemptPath(path string) {
-	delete(exemptPaths, path)
-}
-
-// IsExemptPath checks if a path is exempt from authentication.
-func IsExemptPath(path string) bool {
-	return exemptPaths[path]
 }

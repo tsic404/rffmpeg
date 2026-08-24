@@ -151,8 +151,7 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 | `TLS_CERT_FILE` | TLS 证书文件路径 | - |
 | `TLS_KEY_FILE` | TLS 私钥文件路径 | - |
 | `TLS_CLIENT_CA_FILE` | 客户端 CA 证书路径 (mTLS) | - |
-| `RFFMPEG_SERVER_TOKEN` | API 认证令牌 (PSK) | `""` (未启用认证) |
-| `TLS_MTLS` | 启用双向 TLS 认证 | `false` |
+| `RFFMPEG_SERVER_TOKEN` | API 认证令牌 (PSK) | `""` (拒绝全部请求) |
 
 #### 命令行参数
 
@@ -174,6 +173,14 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
   --auth-token string                  Authentication token (PSK) for API requests
   --mtls                               Enable mTLS (mutual TLS authentication)
 ```
+
+#### 认证（重要）
+
+认证采用 **fail closed** 策略：
+
+- **未设置 `--auth-token` / `RFFMPEG_SERVER_TOKEN` 时，Server 拒绝全部 API 请求**（返回 401），包括 worker 注册（`/api/v1/workers/register`）和心跳（`/api/v1/workers/heartbeat`），仅日志输出 `WARNING: No auth token configured. All API requests will be rejected (401). Set --auth-token to enable access.`。
+- 因此部署时**必须同时配置 server 与 worker 凭证**：Server 设置 `--auth-token <token>`，Worker 通过配置文件 `"token": "<token>"`、环境变量 `RFFMPEG_TOKEN` 或命令行 `--token <token>` 提供相同令牌；CLI 同样需要设置 `RFFMPEG_TOKEN`。
+- 例外路径：`/health` 与 `/api/v1/health` 健康检查无需认证，便于负载均衡探活。
 
 ### Worker 配置
 
@@ -230,7 +237,12 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `RFFMPEG_SERVER_URL` | Server URL | `http://localhost:8080` |
-| `RFFMPEG_TOKEN` | 认证令牌 | - |
+| `RFFMPEG_TOKEN` | 认证令牌（server 启用认证时必填） | - |
+
+#### 认证
+
+- Server 未配置 token 时**拒绝一切请求**（401），并在启动日志打印 WARNING；因此 CLI 必须设置与 Server `--auth-token` 一致的令牌：环境变量 `RFFMPEG_TOKEN`、命令行 `-token <token>` 或配置文件 `"token": "<token>"`。
+- 未设置凭证时，CLI 会在提交/上传阶段收到 401 错误并直接退出，**不会回退到本地 ffmpeg**。
 
 ### 共享文件系统直通模式
 

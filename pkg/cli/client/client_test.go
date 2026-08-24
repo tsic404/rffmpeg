@@ -55,6 +55,8 @@ func setupTestServer(t *testing.T) (*httptest.Server, *db.Database, *storage.Sto
 	stateTable := workerhealth.NewWorkerStateTable(30 * time.Second)
 	h := handlers.New(database, store, "test", stateTable)
 	chunkHandler := handlers.NewChunkUploadHandler(database, store, 0) // Uses default chunk size
+	h.SetAuthToken("test-token")
+	chunkHandler.SetAuthToken("test-token")
 
 	// Setup router
 	r := chi.NewRouter()
@@ -298,7 +300,7 @@ func TestUploadFile(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Create a test file
 	content := []byte("test video content for upload")
@@ -321,7 +323,7 @@ func TestUploadFileChunked(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Create a test file that's larger than the default chunk size
 	// Use 15MB to test multiple chunks
@@ -348,7 +350,7 @@ func TestUploadFileChunkedWithChecksumVerification(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Create a test file with known content
 	content := []byte("test content for checksum verification")
@@ -378,7 +380,7 @@ func TestUploadFileAuto(t *testing.T) {
 	server := setupLightweightTestServer(t)
 	defer server.Close()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Test small file - should use simple upload
 	smallContent := []byte("small file content")
@@ -419,7 +421,7 @@ func TestUploadFileWithChecksumIntegrity(t *testing.T) {
 	server, _, store, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Create a test file with specific content
 	content := []byte("integrity test content - this should match exactly after upload")
@@ -582,7 +584,7 @@ func TestRetryLogic(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Create a small test file
 	content := []byte("test content for retry logic")
@@ -610,7 +612,7 @@ func TestHealthCheck(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	if err := c.HealthCheck(); err != nil {
 		t.Errorf("HealthCheck failed: %v", err)
@@ -625,7 +627,7 @@ func TestDownloadOutput(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Test that downloading a non-existent file returns an error
 	err := c.DownloadOutput("non-existent-file-id", "/tmp/test-output.mp4")
@@ -685,7 +687,7 @@ func TestLargeFileUploadIntegration(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Create a 50MB file
 	fileSize := int64(50 * 1024 * 1024)
@@ -723,7 +725,7 @@ func TestSharedFSSubmitJobWithDirectPath(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Upload a real file first to get a valid file ID
 	content := []byte("shared fs test content")
@@ -762,7 +764,7 @@ func TestSharedFSSubmitJobWithoutDirectPath(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Upload real files first
 	content1 := []byte("test file 1 content")
@@ -807,7 +809,7 @@ func TestSharedFSSubmitJobWithEmptyDirectPath(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Upload real file first
 	content := []byte("empty directpath test")
@@ -845,7 +847,7 @@ func TestSubmitJobBackwardsCompat(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	c := client.New(server.URL, "")
+	c := client.New(server.URL, "test-token")
 
 	// Upload real file first
 	content := []byte("backwards compat test")

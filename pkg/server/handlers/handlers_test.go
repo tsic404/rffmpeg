@@ -42,9 +42,12 @@ func setupTest(t *testing.T) (*handlers.Handler, *chi.Mux, func()) {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
 
-	// Create handler
+	// Create handler. A default auth token keeps handler-level validation
+	// active for every test; tests that exercise the tokenless fail-closed
+	// path override it with SetAuthToken("").
 	stateTable := workerhealth.NewWorkerStateTable(30 * time.Second)
 	h := handlers.New(database, store, "test", stateTable)
+	h.SetAuthToken("test-token")
 
 	// Setup router
 	r := chi.NewRouter()
@@ -84,6 +87,7 @@ func registerTestWorker(t *testing.T, router *chi.Mux, encoders []string) string
 	workerBody, _ := json.Marshal(workerReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(workerBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -100,6 +104,7 @@ func TestHealthEndpoint(t *testing.T) {
 	defer cleanup()
 
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
@@ -134,6 +139,7 @@ func TestUploadAndSubmitJob(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -159,6 +165,7 @@ func TestUploadAndSubmitJob(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -178,6 +185,7 @@ func TestUploadAndSubmitJob(t *testing.T) {
 
 	// Get job status
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -211,6 +219,7 @@ func TestUpdateJobStatus(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -225,6 +234,7 @@ func TestUpdateJobStatus(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -239,6 +249,7 @@ func TestUpdateJobStatus(t *testing.T) {
 	updateBody, _ := json.Marshal(updateReq)
 
 	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -249,6 +260,7 @@ func TestUpdateJobStatus(t *testing.T) {
 
 	// Verify status
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -267,12 +279,14 @@ func TestUpdateJobStatus(t *testing.T) {
 	updateBody, _ = json.Marshal(updateReq)
 
 	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
 	// Verify completed
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -300,6 +314,7 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -313,6 +328,7 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -323,6 +339,7 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	patch := func(update protocol.JobUpdateRequest) *httptest.ResponseRecorder {
 		updateBody, _ := json.Marshal(update)
 		r := httptest.NewRequest("PATCH", "/api/v1/jobs/"+jobResp.JobID, bytes.NewReader(updateBody))
+		r.Header.Set("Authorization", "Bearer test-token")
 		r.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, r)
@@ -330,6 +347,7 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	}
 	getJob := func() protocol.JobInfo {
 		r := httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+		r.Header.Set("Authorization", "Bearer test-token")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, r)
 		var resp protocol.JobStatusResponse
@@ -399,6 +417,7 @@ func TestCancelJob(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -413,6 +432,7 @@ func TestCancelJob(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -422,6 +442,7 @@ func TestCancelJob(t *testing.T) {
 
 	// Cancel job
 	req = httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -431,6 +452,7 @@ func TestCancelJob(t *testing.T) {
 
 	// Verify cancelled
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -458,6 +480,7 @@ func TestCancelRunningJob(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -472,6 +495,7 @@ func TestCancelRunningJob(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -486,6 +510,7 @@ func TestCancelRunningJob(t *testing.T) {
 	updateBody, _ := json.Marshal(updateReq)
 
 	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -496,6 +521,7 @@ func TestCancelRunningJob(t *testing.T) {
 
 	// Cancel running job
 	req = httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -505,6 +531,7 @@ func TestCancelRunningJob(t *testing.T) {
 
 	// Verify cancelled
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -532,6 +559,7 @@ func TestUploadOutputAndDownload(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -546,6 +574,7 @@ func TestUploadOutputAndDownload(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -562,6 +591,7 @@ func TestUploadOutputAndDownload(t *testing.T) {
 	outputWriter.Close()
 
 	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/output", jobResp.JobID), outputBody)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", outputWriter.FormDataContentType())
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -572,6 +602,7 @@ func TestUploadOutputAndDownload(t *testing.T) {
 
 	// Get job to find output file ID
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -587,6 +618,7 @@ func TestUploadOutputAndDownload(t *testing.T) {
 
 	// Download output
 	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/output/%s", outputFileID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -606,6 +638,7 @@ func TestGetNonExistentJob(t *testing.T) {
 	defer cleanup()
 
 	req := httptest.NewRequest("GET", "/api/v1/jobs/non-existent-id", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -625,6 +658,7 @@ func TestSubmitJobWithInvalidFile(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -652,6 +686,7 @@ func TestWorkerRegistration(t *testing.T) {
 	regBody, _ := json.Marshal(regReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -693,6 +728,7 @@ func TestWorkerReRegistration(t *testing.T) {
 	regBody, _ := json.Marshal(regReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -710,6 +746,7 @@ func TestWorkerReRegistration(t *testing.T) {
 	regBody, _ = json.Marshal(regReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -745,6 +782,7 @@ func TestWorkerHeartbeat(t *testing.T) {
 	regBody, _ := json.Marshal(regReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -760,6 +798,7 @@ func TestWorkerHeartbeat(t *testing.T) {
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -790,6 +829,7 @@ func TestWorkerHeartbeatNonExistent(t *testing.T) {
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -814,6 +854,7 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 	regBody, _ := json.Marshal(regReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -832,6 +873,7 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -891,6 +933,7 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 	}
 	regBody, _ := json.Marshal(regReq)
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -900,6 +943,7 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 
 	// Before any heartbeat: health must still be present (never null), derived from the DB record.
 	req = httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	var getResp struct {
@@ -930,6 +974,7 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 	}
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -939,6 +984,7 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 
 	// The list endpoint must surface the live metrics in health.
 	req = httptest.NewRequest("GET", "/api/v1/workers", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	var listResp struct {
@@ -1006,6 +1052,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	}
 	regBody, _ := json.Marshal(regReq)
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -1016,6 +1063,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 
 	getHealth := func() *WorkerHealth {
 		req := httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -1047,6 +1095,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	writer.Close()
 
 	req = httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1059,6 +1108,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1069,6 +1119,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&jobResp)
 
 	pullReq := httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID+"/jobs", nil)
+	pullReq.Header.Set("Authorization", "Bearer test-token")
 	router.ServeHTTP(w, pullReq)
 	if w.Code != http.StatusOK {
 		t.Fatalf("Pull jobs failed with status %d: %s", w.Code, w.Body.String())
@@ -1086,6 +1137,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	}
 	updateBody, _ := json.Marshal(updateReq)
 	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1114,6 +1166,7 @@ func TestCancelCompletedJob(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1128,6 +1181,7 @@ func TestCancelCompletedJob(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1143,12 +1197,14 @@ func TestCancelCompletedJob(t *testing.T) {
 	updateBody, _ := json.Marshal(updateReq)
 
 	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
 	// Try to cancel completed job - should fail
 	req = httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -1175,6 +1231,7 @@ func TestHeartbeatReturnsCancelledJobs(t *testing.T) {
 	regBody, _ := json.Marshal(regReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1191,6 +1248,7 @@ func TestHeartbeatReturnsCancelledJobs(t *testing.T) {
 	writer.Close()
 
 	req = httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1205,6 +1263,7 @@ func TestHeartbeatReturnsCancelledJobs(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1214,6 +1273,7 @@ func TestHeartbeatReturnsCancelledJobs(t *testing.T) {
 
 	// Cancel the job
 	req = httptest.NewRequest("DELETE", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -1230,6 +1290,7 @@ func TestHeartbeatReturnsCancelledJobs(t *testing.T) {
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1263,6 +1324,7 @@ func TestWorkerRegistrationWithInvalidCapabilities(t *testing.T) {
 	regBody, _ := json.Marshal(regReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1286,6 +1348,7 @@ func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1307,6 +1370,7 @@ func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1347,6 +1411,7 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1362,6 +1427,7 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1402,6 +1468,7 @@ func TestSubmitJobBusyWorkerQueued(t *testing.T) {
 	}
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 	req := httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1418,6 +1485,7 @@ func TestSubmitJobBusyWorkerQueued(t *testing.T) {
 	writer.Close()
 
 	req = httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1438,6 +1506,7 @@ func TestSubmitJobBusyWorkerQueued(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1457,6 +1526,7 @@ func TestSubmitJobBusyWorkerQueued(t *testing.T) {
 
 	// The job should be created in pending state, waiting for the worker to become idle
 	req = httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1489,6 +1559,7 @@ func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1510,6 +1581,7 @@ func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1537,6 +1609,7 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1558,6 +1631,7 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1590,6 +1664,7 @@ func TestSubmitJobExactEncoderMatchPreferred(t *testing.T) {
 	writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -1611,6 +1686,7 @@ func TestSubmitJobExactEncoderMatchPreferred(t *testing.T) {
 	jobBody, _ := json.Marshal(jobReq)
 
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)

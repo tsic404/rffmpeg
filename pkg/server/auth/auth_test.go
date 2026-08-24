@@ -7,9 +7,11 @@ import (
 	"testing"
 )
 
-// TestMiddleware_NoToken tests that authentication is skipped when no token is configured
+// TestMiddleware_NoToken tests that ALL requests are rejected when no token is
+// configured — including requests without an Authorization header (fail closed).
 func TestMiddleware_NoToken(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler must not be reached when no auth token is configured")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
@@ -22,11 +24,8 @@ func TestMiddleware_NoToken(t *testing.T) {
 
 	protectedHandler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rec.Code)
-	}
-	if rec.Body.String() != "OK" {
-		t.Errorf("Expected body 'OK', got '%s'", rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("Expected status 401, got %d", rec.Code)
 	}
 }
 
@@ -177,8 +176,8 @@ func TestGenerateClientID(t *testing.T) {
 	token1 := "test-token-1"
 	token2 := "test-token-2"
 
-	id1 := generateClientID(token1)
-	id2 := generateClientID(token2)
+	id1 := GenerateClientID(token1)
+	id2 := GenerateClientID(token2)
 
 	if len(id1) != 16 {
 		t.Errorf("Expected client ID length 16, got %d", len(id1))
@@ -188,7 +187,7 @@ func TestGenerateClientID(t *testing.T) {
 		t.Error("Different tokens should produce different client IDs")
 	}
 
-	id1Again := generateClientID(token1)
+	id1Again := GenerateClientID(token1)
 	if id1 != id1Again {
 		t.Error("Same token should produce same client ID")
 	}
@@ -197,7 +196,7 @@ func TestGenerateClientID(t *testing.T) {
 // TestGetClientID tests extracting client ID from request context
 func TestGetClientID(t *testing.T) {
 	token := "test-token-123"
-	expectedClientID := generateClientID(token)
+	expectedClientID := GenerateClientID(token)
 
 	var actualClientID string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -225,45 +224,6 @@ func TestGetClientID_NoContext(t *testing.T) {
 
 	if clientID != "" {
 		t.Errorf("Expected empty client ID, got '%s'", clientID)
-	}
-}
-
-// TestAddRemoveExemptPath tests adding and removing exempt paths
-func TestAddRemoveExemptPath(t *testing.T) {
-	path := "/api/v1/custom"
-
-	AddExemptPath(path)
-	if !IsExemptPath(path) {
-		t.Error("Path should be exempt after adding")
-	}
-
-	RemoveExemptPath(path)
-	if IsExemptPath(path) {
-		t.Error("Path should not be exempt after removing")
-	}
-}
-
-// TestMiddleware_CustomExemptPath tests custom exempt paths
-func TestMiddleware_CustomExemptPath(t *testing.T) {
-	token := "test-token-123"
-	customPath := "/api/v1/custom"
-
-	AddExemptPath(customPath)
-	defer RemoveExemptPath(customPath)
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	authMiddleware := Middleware(token)
-	protectedHandler := authMiddleware(handler)
-
-	req := httptest.NewRequest("GET", customPath, nil)
-	rec := httptest.NewRecorder()
-	protectedHandler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("Custom exempt path should be accessible without auth, got status %d", rec.Code)
 	}
 }
 

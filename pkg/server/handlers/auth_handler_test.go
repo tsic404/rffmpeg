@@ -85,3 +85,53 @@ func TestChunkUploadHandlers_RejectUnauthenticated(t *testing.T) {
 		})
 	}
 }
+
+// TestSubmitJob_RejectsWithoutConfiguredToken verifies that when NO auth token
+// is configured, job submission is rejected (fail closed) rather than silently
+// accepted — the TSI-2353 gap where an unset token bypassed authentication.
+func TestSubmitJob_RejectsWithoutConfiguredToken(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+	h.SetAuthToken("") // explicitly no token configured
+
+	body := []byte(`{"input_files":["test.mp4"],"args":["-c:v","libx264"],"output_filename":"out.mp4"}`)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("SubmitJob on tokenless server: expected 401, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+// TestChunkUploadHandlers_RejectWithoutConfiguredToken verifies chunk upload
+// handlers also fail closed when no auth token is configured.
+func TestChunkUploadHandlers_RejectWithoutConfiguredToken(t *testing.T) {
+	tmpDir := t.TempDir()
+	database, err := db.New(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	store, err := storage.New(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	ch := handlers.NewChunkUploadHandler(database, store, 0)
+	defer ch.Shutdown()
+	ch.SetAuthToken("") // explicitly no token configured
+
+	r := chi.NewRouter()
+	r.Post("/api/v1/upload/init", ch.InitChunkUpload)
+
+	req := httptest.NewRequest("POST", "/api/v1/upload/init", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("InitChunkUpload on tokenless server: expected 401, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}

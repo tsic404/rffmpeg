@@ -108,11 +108,12 @@ func (h *Handler) SetAuthToken(token string) {
 
 // validateAuthToken validates the Authorization header against the configured auth token.
 // Returns the client ID and true if valid, or an empty string and false if invalid.
-// When no auth token is configured, validation is skipped (backward compatible).
+// When no auth token is configured the request is rejected: the API must fail
+// closed rather than serve unauthenticated traffic.
 func (h *Handler) validateAuthToken(r *http.Request) (string, bool) {
-	// Skip validation if no auth token is configured
+	// No auth token configured: reject (fail closed)
 	if h.authToken == "" {
-		return "", true
+		return "", false
 	}
 
 	// Extract Authorization header

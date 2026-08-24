@@ -48,6 +48,7 @@ func setupTestWithRateLimit(t *testing.T, rateLimit int) (*handlers.Handler, *ch
 
 	stateTable := workerhealth.NewWorkerStateTable(30 * time.Second)
 	h := handlers.New(database, store, "test", stateTable)
+	h.SetAuthToken("test-token")
 
 	rateLimitCfg := &ratelimit.RuntimeConfig{
 		Enabled: true,
@@ -102,6 +103,7 @@ func setupTestWithScheduler(t *testing.T, jobTimeout time.Duration) (*handlers.H
 
 	stateTable := workerhealth.NewWorkerStateTable(30 * time.Second)
 	h := handlers.New(database, store, "test", stateTable)
+	h.SetAuthToken("test-token")
 
 	sched := scheduler.New(database, scheduler.Config{
 		JobTimeout:           jobTimeout,

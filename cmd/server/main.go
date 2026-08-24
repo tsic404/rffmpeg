@@ -150,12 +150,13 @@ func main() {
 	// Pass auth token to handler for health check reporting
 	h.SetAuthToken(cfg.AuthToken)
 
-	// Add authentication middleware if token is configured
+	// Authentication middleware is always installed: with a configured token it
+	// validates requests; without one it rejects everything (fail closed).
+	r.Use(auth.Middleware(cfg.AuthToken))
 	if cfg.AuthToken != "" {
-		r.Use(auth.Middleware(cfg.AuthToken))
 		log.Printf("Authentication enabled")
 	} else {
-		log.Printf("WARNING: No auth token configured. Server is running without authentication. Set --auth-token to enable.")
+		log.Printf("WARNING: No auth token configured. All API requests will be rejected (401). Set --auth-token to enable access.")
 	}
 
 	// API routes

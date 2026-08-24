@@ -69,9 +69,10 @@ func (h *ChunkUploadHandler) SetAuthToken(token string) {
 
 // validateAuthToken validates the Authorization header for chunk upload requests.
 // Returns the client ID and true if valid, or empty string and false if invalid.
+// When no auth token is configured the request is rejected: fail closed.
 func (h *ChunkUploadHandler) validateAuthToken(r *http.Request) (string, bool) {
 	if h.authToken == "" {
-		return "", true
+		return "", false
 	}
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
