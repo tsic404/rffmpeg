@@ -67,17 +67,18 @@ func NewNotifierWithOutput(w io.Writer) *StderrNotifier {
 
 // Notify outputs a notification message with the specified level.
 func (n *StderrNotifier) Notify(level NotifyLevel, message string) error {
-	n.mu.RLock()
-	silent := n.silent
-	output := n.output
-	prefix := n.prefix
-	n.mu.RUnlock()
+	// The write itself must happen under the full lock: the shared
+	// io.Writer is not required to be goroutine-safe (e.g. bytes.Buffer),
+	// so concurrent Notify calls would race on it if written outside the
+	// critical section.
+	n.mu.Lock()
+	defer n.mu.Unlock()
 
-	if silent {
+	if n.silent {
 		return nil
 	}
 
-	_, err := fmt.Fprintf(output, "%s %s: %s\n", prefix, level, message)
+	_, err := fmt.Fprintf(n.output, "%s %s: %s\n", n.prefix, level, message)
 	return err
 }
 
