@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,16 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
 )
 
+// cacheI is the subset of the disk cache the worker job loop uses. It exists
+// so tests can inject a fake (the concrete *Cache satisfies it).
+type cacheI interface {
+	Check(key string) (string, bool)
+	Put(key string, sourcePath string) error
+	Stats() CacheStats
+	Start(ctx context.Context)
+	Stop()
+}
+
 // Worker is the main worker struct that handles job processing
 type Worker struct {
 	id                 string
@@ -26,9 +37,8 @@ type Worker struct {
 	executor           *Executor
 	retryExecutor      *RetryExecutor
 	rewriteAdapter     *RewriteAdapter
-	cache              *Cache
+	cache              cacheI
 	tempDir            string
-	running            bool
 	mu                 sync.Mutex
 	activeJobs         map[string]context.CancelFunc
 	heartbeatInterval  time.Duration
@@ -41,6 +51,19 @@ type Worker struct {
 	auditRecorder      audit.AuditRecorder
 	auditNotifier      audit.Notifier
 	gpuDetector        *gpu.Detector
+
+	// regMu guards id/client.workerID updates and serializes re-registration:
+	// poll failures and heartbeat failures can both trigger reregister()
+	// concurrently; without serialization the ID swap races with readers and
+	// an in-flight job can end up reported under two identities.
+	regMu        sync.Mutex
+	reregisterMu sync.Mutex // held while a re-registration is in flight (singleflight)
+	registering  bool       // guarded by reregisterMu
+
+	// stopCh is closed by Stop() to break the Start loop; jobsWG tracks
+	// in-flight jobs so Stop can wait for their upload/cleanup to finish.
+	stopCh chan struct{}
+	jobsWG sync.WaitGroup
 }
 
 // Config holds worker configuration
@@ -101,28 +124,38 @@ func New(cfg Config) (*Worker, error) {
 	auditNotifier := audit.NewStderrNotifier()
 	auditRecorder := audit.NewRingBufferRecorder(500)
 
+	// Initialize the pixel format checker for VAAPI pre-flight compatibility
+	// checks (restored: a refactor accidentally dropped this and silently
+	// disabled yuv444p-style fallback for VAAPI encoders).
+	ffprobeExecutor := NewFFprobeExecutor("")
+	pixelFormatChecker := NewPixelFormatChecker(ffprobeExecutor)
+
 	return &Worker{
-		id:                cfg.WorkerID,
-		name:              cfg.Name,
-		client:            client,
-		executor:          executor,
-		retryExecutor:     retryExecutor,
-		rewriteAdapter:    rewriteAdapter,
-		cache:             cache,
-		tempDir:           cfg.TempDir,
-		activeJobs:        make(map[string]context.CancelFunc),
-		heartbeatInterval: cfg.HeartbeatInterval,
-		pollInterval:      cfg.PollInterval,
-		lastHeartbeatTime: time.Now(),
-		ffprobeExecutor:   NewFFprobeExecutor(""),
-		auditRecorder:     auditRecorder,
-		auditNotifier:     auditNotifier,
-		gpuDetector:       gpu.NewDetector(),
+		id:                 cfg.WorkerID,
+		name:               cfg.Name,
+		client:             client,
+		executor:           executor,
+		retryExecutor:      retryExecutor,
+		rewriteAdapter:     rewriteAdapter,
+		cache:              cache,
+		tempDir:            cfg.TempDir,
+		activeJobs:         make(map[string]context.CancelFunc),
+		heartbeatInterval:  cfg.HeartbeatInterval,
+		pollInterval:       cfg.PollInterval,
+		lastHeartbeatTime:  time.Now(),
+		ffprobeExecutor:    ffprobeExecutor,
+		pixelFormatChecker: pixelFormatChecker,
+		auditRecorder:      auditRecorder,
+		auditNotifier:      auditNotifier,
+		gpuDetector:        gpu.NewDetector(),
+		stopCh:             make(chan struct{}),
 	}, nil
 }
 
 // ID returns the worker ID
 func (w *Worker) ID() string {
+	w.regMu.Lock()
+	defer w.regMu.Unlock()
 	return w.id
 }
 
@@ -143,12 +176,15 @@ func (w *Worker) register(caps protocol.WorkerCapabilities, firstRegistration bo
 	// Store capabilities for re-registration
 	w.caps = caps
 
+	w.regMu.Lock()
+	defer w.regMu.Unlock()
+
 	workerID, err := w.client.Register(w.name, caps)
 	if err != nil {
 		return fmt.Errorf("failed to register: %w", err)
 	}
 	w.id = workerID
-	w.client.workerID = workerID
+	w.client.SetWorkerID(workerID)
 
 	w.mu.Lock()
 	if firstRegistration {
@@ -171,22 +207,46 @@ func (w *Worker) register(caps protocol.WorkerCapabilities, firstRegistration bo
 // reregister attempts to re-register with the server after detecting that the
 // worker record was lost (e.g., after server restart cleared all workers).
 // Returns true if re-registration succeeded.
+//
+// Singleflight: poll and heartbeat failures can both trigger re-registration
+// concurrently. The first caller performs it; later callers arriving while a
+// registration is already in flight wait for its outcome instead of issuing
+// duplicate registrations.
 func (w *Worker) reregister() bool {
+	w.reregisterMu.Lock()
+	// Reuse an in-flight registration if one is running.
+	if w.registering {
+		w.reregisterMu.Unlock()
+		// Wait for the in-flight registration to finish, then report
+		// success based on whether it changed our identity successfully.
+		w.regMu.Lock()
+		registered := w.id != ""
+		w.regMu.Unlock()
+		return registered
+	}
+	w.registering = true
+	w.reregisterMu.Unlock()
+
+	defer func() {
+		w.reregisterMu.Lock()
+		w.registering = false
+		w.reregisterMu.Unlock()
+	}()
+
 	log.Printf("Attempting re-registration with server...")
 	if err := w.register(w.caps, false); err != nil {
 		log.Printf("Re-registration failed: %v", err)
 		return false
 	}
-	log.Printf("Re-registration successful, worker ID: %s", w.id)
+	w.regMu.Lock()
+	currentID := w.id
+	w.regMu.Unlock()
+	log.Printf("Re-registration successful, worker ID: %s", currentID)
 	return true
 }
 
 // Start starts the worker loop
 func (w *Worker) Start(ctx context.Context) {
-	w.mu.Lock()
-	w.running = true
-	w.mu.Unlock()
-
 	// Start cache background eviction
 	w.cache.Start(ctx)
 
@@ -199,9 +259,18 @@ func (w *Worker) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Worker shutting down...")
+			log.Println("Worker shutting down (context cancelled)...")
+			return
+		case <-w.stopCh:
+			log.Println("Worker shutting down (Stop called)...")
 			return
 		case <-ticker.C:
+			// Do not accept new jobs after Stop was requested.
+			select {
+			case <-w.stopCh:
+				return
+			default:
+			}
 			w.pollAndProcess(ctx)
 		case <-heartbeatTicker.C:
 			w.sendHeartbeat()
@@ -209,17 +278,25 @@ func (w *Worker) Start(ctx context.Context) {
 	}
 }
 
-// Stop stops the worker
+// Stop stops the worker: it breaks the Start loop, cancels all in-flight jobs,
+// and waits for them to finish their upload/cleanup before returning.
 func (w *Worker) Stop() {
+	select {
+	case <-w.stopCh:
+		// Already stopped
+	default:
+		close(w.stopCh)
+	}
+
 	w.mu.Lock()
-	w.running = false
-	// Cancel all active jobs
 	for jobID, cancel := range w.activeJobs {
 		log.Printf("Cancelling job %s", jobID)
 		cancel()
 	}
-	w.activeJobs = make(map[string]context.CancelFunc)
 	w.mu.Unlock()
+
+	// Wait for in-flight jobs to complete reporting/upload/cleanup.
+	w.jobsWG.Wait()
 
 	// Stop cache background eviction
 	w.cache.Stop()
@@ -236,6 +313,13 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 	}
 
 	for _, job := range jobs {
+		// Do not start new work once Stop was requested.
+		select {
+		case <-w.stopCh:
+			return
+		default:
+		}
+
 		// Start processing in a goroutine with atomic check-and-add to prevent race condition
 		jobCtx, cancel := context.WithCancel(ctx)
 
@@ -248,14 +332,28 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 		w.activeJobs[job.ID] = cancel
 		w.mu.Unlock()
 
-		go w.processJob(jobCtx, job, cancel)
+		w.jobsWG.Add(1)
+		go func(job protocol.JobInfo, jobCtx context.Context, cancel context.CancelFunc) {
+			w.processJob(jobCtx, job, cancel, true)
+		}(job, jobCtx, cancel)
 	}
 }
 
 // processJob processes a single job
-func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel context.CancelFunc) {
+func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel context.CancelFunc, wgTracked bool) {
 	jobFailed := false
 	defer func() {
+		// Recover from panics so a single bad job cannot take down the whole
+		// worker process; the job is reported as WORKER_CRASH and the worker
+		// keeps serving other in-flight jobs.
+		if r := recover(); r != nil {
+			log.Printf("Job %s: panic recovered: %v\n%s", job.ID, r, debug.Stack())
+			w.reportFailureWithType(job.ID, -1,
+				fmt.Sprintf("worker panic during job processing: %v", r),
+				string(protocol.FailureWorkerCrash),
+				fmt.Sprintf("%v", r))
+		}
+
 		w.mu.Lock()
 		delete(w.activeJobs, job.ID)
 		// Only successful jobs advance the completion counters. Counting
@@ -272,6 +370,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		// can assign new jobs without waiting for the next heartbeat cycle.
 		if becameIdle {
 			w.sendHeartbeat()
+		}
+		// Signal Stop (if waiting) that this job has fully finished. Only
+		// balance the counter when pollAndProcess incremented it (direct
+		// callers of processJob in tests pass wgTracked=false).
+		if wgTracked {
+			w.jobsWG.Done()
 		}
 	}()
 
@@ -362,16 +466,17 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			if err := copyFile(cachePath, outputPath); err != nil {
 				log.Printf("Job %s: failed to copy cached file: %v", job.ID, err)
 				// Fall through to normal processing
+			} else if _, err := os.Stat(outputPath); err != nil {
+				// Copy claimed success but the file is not there — degrade to
+				// a cache miss instead of reporting Completed without output.
+				log.Printf("Job %s: cached file missing after copy (%v), falling through to normal processing", job.ID, err)
+			} else if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
+				// Upload failure is recoverable by re-transcoding — fall
+				// through to normal processing instead of failing the job.
+				log.Printf("Job %s: failed to upload cached output (%v), falling through to normal processing", job.ID, err)
+				cached = false
 			} else {
-				// Upload cached output
-				if _, err := os.Stat(outputPath); err == nil {
-					if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
-						w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to upload cached output: %v", err))
-						return
-					}
-					log.Printf("Uploaded cached output for job %s", job.ID)
-				}
-
+				log.Printf("Uploaded cached output for job %s", job.ID)
 				cached = true
 
 				// Report success with cached flag
@@ -458,9 +563,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Build initial args
 	args := BuildArgs(job.Args, inputPaths, outputPath)
 
-	// Apply encoder rewrite based on job.AutoHW flag
-	// Set the AutoHW flag on the rewrite adapter for this job
-	w.rewriteAdapter.SetAutoHW(job.AutoHW)
+	// Apply encoder rewrite based on job.AutoHW flag. The flag is passed per
+	// RewriteArgs call — the shared adapter config must not be mutated per job
+	// because concurrent jobs would clobber each other's auto-hw decision.
 
 	// Create stderr batcher early to reduce HTTP requests.
 	// Must be created before rewrite so notifications can be sent even when
@@ -473,7 +578,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	defer progressRouter.Reset()
 
 	// Rewrite args based on hardware capabilities and auto_hw setting
-	rewrittenArgs, rewriteResult, err := w.rewriteAdapter.RewriteArgs(jobCtx, args)
+	rewrittenArgs, rewriteResult, err := w.rewriteAdapter.RewriteArgs(jobCtx, args, job.AutoHW)
 
 	// Send rewrite/fallback notifications to stderr so they appear in job output.
 	// This must happen BEFORE ffmpeg execution AND before error reporting,

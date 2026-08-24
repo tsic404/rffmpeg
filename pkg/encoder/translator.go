@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -133,6 +134,11 @@ type ParameterTranslatorImpl struct {
 	// av1Mapping provides AV1 specific parameter mappings.
 	av1Mapping *AV1CommonMapping
 
+	// auditMu guards auditRecords: the translator is shared across concurrent
+	// rewrites via TranslatorAdapter/EngineCoordinator, and Translate both
+	// writes this field and is called concurrently.
+	auditMu sync.Mutex
+
 	// auditRecords stores audit records from the last translation.
 	auditRecords []TranslationAuditRecord
 
@@ -189,8 +195,10 @@ func NewDefaultParameterTranslator(opts ...TranslatorOption) *ParameterTranslato
 
 // Translate translates parameters from a source encoder to a target encoder.
 func (t *ParameterTranslatorImpl) Translate(sourceEncoder, targetEncoder EncoderFamily, params map[string]string) (*TranslationResult, error) {
-	// Clear previous audit records
+	// Reset previous audit records (guarded — see auditMu).
+	t.auditMu.Lock()
 	t.auditRecords = make([]TranslationAuditRecord, 0)
+	t.auditMu.Unlock()
 
 	result := &TranslationResult{
 		TargetEncoder:    targetEncoder,
@@ -304,7 +312,10 @@ func (t *ParameterTranslatorImpl) Translate(sourceEncoder, targetEncoder Encoder
 	if t.injectHardwareParams {
 		t.injectHardwareParamsForEncoder(targetEncoder, result)
 	}
+
+	t.auditMu.Lock()
 	t.auditRecords = result.AuditRecords
+	t.auditMu.Unlock()
 	return result, nil
 }
 
@@ -775,8 +786,10 @@ func (t *ParameterTranslatorImpl) TranslateChain(encoderChain []EncoderFamily, p
 		return nil, fmt.Errorf("encoder chain must have at least 2 encoders (source and target)")
 	}
 
-	// Clear previous audit records
+	// Reset previous audit records (guarded — see auditMu).
+	t.auditMu.Lock()
 	t.auditRecords = make([]TranslationAuditRecord, 0)
+	t.auditMu.Unlock()
 
 	result := &TranslationResult{
 		TargetEncoder:    encoderChain[len(encoderChain)-1],
@@ -856,7 +869,9 @@ func (t *ParameterTranslatorImpl) TranslateChain(encoderChain []EncoderFamily, p
 		}
 	}
 
+	t.auditMu.Lock()
 	t.auditRecords = result.AuditRecords
+	t.auditMu.Unlock()
 	return result, nil
 }
 
@@ -1021,6 +1036,8 @@ func (t *ParameterTranslatorImpl) GetSupportedTranslations(targetEncoder Encoder
 
 // GetAuditRecords returns all audit records from the last translation.
 func (t *ParameterTranslatorImpl) GetAuditRecords() []TranslationAuditRecord {
+	t.auditMu.Lock()
+	defer t.auditMu.Unlock()
 	return t.auditRecords
 }
 

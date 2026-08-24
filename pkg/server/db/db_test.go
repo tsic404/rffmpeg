@@ -108,6 +108,47 @@ func TestUpdateWorkerHeartbeat(t *testing.T) {
 	}
 }
 
+// TestUpdateWorkerHeartbeatUUIDFormatMismatch (TSI-2346 follow-up): the
+// heartbeat path must canonicalize its ID argument like registration and
+// lookup do — a heartbeat carrying a compact/uppercase variant of a stored
+// hyphenated UUID refreshes the same row instead of returning 404.
+// Heartbeats no longer write status (derived state, PR #24); the assertion
+// targets liveness only.
+func TestUpdateWorkerHeartbeatUUIDFormatMismatch(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	hyphenated := "550e8400-e29b-41d4-a716-446655440000"
+	if _, err := database.CreateOrUpdateWorker(hyphenated, "heartbeat-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	before, err := database.GetWorker(hyphenated)
+	if err != nil {
+		t.Fatalf("Failed to get worker before heartbeat: %v", err)
+	}
+
+	for name, id := range map[string]string{
+		"compact":              "550e8400e29b41d4a716446655440000",
+		"uppercase hyphenated": strings.ToUpper(hyphenated),
+	} {
+		if err := database.UpdateWorkerHeartbeat(id, protocol.WorkerStatusBusy); err != nil {
+			t.Errorf("%s heartbeat failed: %v", name, err)
+		}
+	}
+
+	worker, err := database.GetWorker(hyphenated)
+	if err != nil {
+		t.Fatalf("Failed to get worker: %v", err)
+	}
+	if !worker.LastHeartbeat.After(before.LastHeartbeat) {
+		t.Errorf("Expected last_heartbeat to be refreshed by compact-format heartbeats")
+	}
+}
+
 func TestMarkOfflineWorkers(t *testing.T) {
 	database, cleanup := setupDBTest(t)
 	defer cleanup()
@@ -682,15 +723,14 @@ func TestHeartbeatAndStatusNormalizeUUID(t *testing.T) {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 
+	// Heartbeats no longer write status (PR #24: status is derived state);
+	// the compact-format heartbeat must still resolve to the canonical row.
 	if err := database.UpdateWorkerHeartbeat(compact, protocol.WorkerStatusBusy); err != nil {
 		t.Fatalf("Compact-format heartbeat rejected: %v", err)
 	}
 	worker, err := database.GetWorker(hyphenated)
 	if err != nil {
 		t.Fatalf("Failed to get worker: %v", err)
-	}
-	if worker.Status != protocol.WorkerStatusBusy {
-		t.Errorf("Expected status busy from compact heartbeat, got %s", worker.Status)
 	}
 
 	if err := database.UpdateWorkerStatus(compact, protocol.WorkerStatusIdle); err != nil {

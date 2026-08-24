@@ -6,9 +6,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -77,6 +79,24 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, e.ffmpegPath, args...)
+
+	// Run ffmpeg in its own process group so ctx cancellation kills the whole
+	// process tree (filters may spawn helper processes that would otherwise
+	// survive as orphans holding the inherited pipe write ends).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// ctx cancellation can fire before Start() sets cmd.Process (start vs
+		// cancel race window); dereferencing nil would panic the worker.
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// WaitDelay bounds how long cmd.Wait waits for I/O pipes to close after
+	// the context is done. Without it, an orphaned grandchild inheriting the
+	// stdout/stderr pipe write ends keeps the readers open forever and
+	// ExecuteWithHandlers blocks permanently after cancellation.
+	cmd.WaitDelay = 30 * time.Second
 
 	// Get pipes for stdout and stderr
 	stdoutPipe, err := cmd.StdoutPipe()

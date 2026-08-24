@@ -179,7 +179,7 @@ func TestCacheIntegration_MissThenHit(t *testing.T) {
 	}
 	cacheStatsBefore := w.cache.Stats()
 
-	w.processJob(jobCtx, job, cancel)
+	w.processJob(jobCtx, job, cancel, false)
 
 	if mockSrv.DownloadCount() <= beforeDownloads {
 		t.Error("Expected at least one download on first run (miss path)")
@@ -213,7 +213,7 @@ func TestCacheIntegration_MissThenHit(t *testing.T) {
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
-	w.processJob(jobCtx, job2, cancel)
+	w.processJob(jobCtx, job2, cancel, false)
 
 	if mockSrv.DownloadCount() != beforeDownloads2 {
 		t.Errorf("Expected no downloads on cache hit, got %d new downloads",
@@ -253,7 +253,7 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 		t.Fatal("Expected cache miss before first run")
 	}
 
-	w.processJob(jobCtx, job, cancel)
+	w.processJob(jobCtx, job, cancel, false)
 
 	_, hit = w.cache.Check(cacheKey)
 	if !hit {
@@ -278,7 +278,7 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
-	w.processJob(jobCtx, job2, cancel)
+	w.processJob(jobCtx, job2, cancel, false)
 
 	if mockSrv.DownloadCount() <= beforeDownloads2 {
 		t.Error("Expected downloads on second run (TTL expired → miss)")
@@ -317,8 +317,8 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx265"},
 	}
 
-	w.processJob(jobCtx, jobA, cancel)
-	w.processJob(jobCtx, jobB, cancel)
+	w.processJob(jobCtx, jobA, cancel, false)
+	w.processJob(jobCtx, jobB, cancel, false)
 
 	stats := w.cache.Stats()
 	if stats.Misses < 2 {
@@ -335,7 +335,7 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 		InputFiles: []string{"input-a"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
-	w.processJob(jobCtx, jobA2, cancel)
+	w.processJob(jobCtx, jobA2, cancel, false)
 	if mockSrv.DownloadCount() != beforeDownloads {
 		t.Error("Expected no downloads on cache hit for job A re-run")
 	}
@@ -347,7 +347,7 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 		InputFiles: []string{"input-a"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx265"},
 	}
-	w.processJob(jobCtx, jobB2, cancel)
+	w.processJob(jobCtx, jobB2, cancel, false)
 	if mockSrv.DownloadCount() != beforeDownloads {
 		t.Error("Expected no downloads on cache hit for job B re-run")
 	}
@@ -374,7 +374,7 @@ func TestCacheIntegration_CanonicalizationHit(t *testing.T) {
 		InputFiles: []string{"input-canon"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
-	w.processJob(jobCtx, job1, cancel)
+	w.processJob(jobCtx, job1, cancel, false)
 
 	beforeDownloads := mockSrv.DownloadCount()
 	job2 := protocol.JobInfo{
@@ -382,7 +382,7 @@ func TestCacheIntegration_CanonicalizationHit(t *testing.T) {
 		InputFiles: []string{"input-canon"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-preset", "fast", "-c:v", "libx264"},
 	}
-	w.processJob(jobCtx, job2, cancel)
+	w.processJob(jobCtx, job2, cancel, false)
 
 	if mockSrv.DownloadCount() != beforeDownloads {
 		t.Error("Expected no downloads on second run — canonicalization should produce same key")

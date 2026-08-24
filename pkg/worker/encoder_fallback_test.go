@@ -72,41 +72,38 @@ func TestEncoderFallback_AddSoftwareFallbackChain(t *testing.T) {
 	}
 }
 
-func TestEncoderFallback_SetUserSelectedEncoder(t *testing.T) {
+func TestEncoderFallback_PrepareFallbackArgs_IsUserSelected(t *testing.T) {
 	fallback := NewEncoderFallback()
 
-	// Initially no user-selected encoder
-	if fallback.IsUserSelectedEncoder("libx264") {
-		t.Error("IsUserSelectedEncoder should return false when no encoder is set")
+	// User-selected hw encoder: falls back to the software equivalent.
+	args := []string{"-i", "input.mp4", "-c:v", "h264_nvenc", "output.mp4"}
+	got := fallback.PrepareFallbackArgs(args, "output.mp4", true)
+	if got == nil {
+		t.Fatal("PrepareFallbackArgs returned nil for user-selected hw encoder")
 	}
-	if fallback.IsUserSelectedEncoder("") {
-		t.Error("IsUserSelectedEncoder should return false for empty encoder")
-	}
-
-	// Set the user-selected encoder
-	fallback.SetUserSelectedEncoder("h264_nvenc")
-
-	if !fallback.IsUserSelectedEncoder("h264_nvenc") {
-		t.Error("IsUserSelectedEncoder should return true for the set encoder")
-	}
-	if fallback.IsUserSelectedEncoder("libx264") {
-		t.Error("IsUserSelectedEncoder should return false for a different encoder")
+	if encoder := extractEncoderFromArgs(got); encoder != "libx264" {
+		t.Errorf("encoder = %q, want %q", encoder, "libx264")
 	}
 
-	// Change the user-selected encoder
-	fallback.SetUserSelectedEncoder("hevc_qsv")
-
-	if fallback.IsUserSelectedEncoder("h264_nvenc") {
-		t.Error("IsUserSelectedEncoder should return false for previously set encoder after overwrite")
-	}
-	if !fallback.IsUserSelectedEncoder("hevc_qsv") {
-		t.Error("IsUserSelectedEncoder should return true for newly set encoder")
+	// User-selected software encoder: no fallback needed → nil.
+	args2 := []string{"-i", "input.mp4", "-c:v", "libx264", "output.mp4"}
+	if got2 := fallback.PrepareFallbackArgs(args2, "output.mp4", true); got2 != nil {
+		t.Errorf("PrepareFallbackArgs should return nil for user-selected software encoder, got %v", got2)
 	}
 
-	// Set to empty string
-	fallback.SetUserSelectedEncoder("")
-	if fallback.IsUserSelectedEncoder("hevc_qsv") {
-		t.Error("IsUserSelectedEncoder should return false after setting to empty string")
+	// System-chosen libx265 (isUserSelected=false): chained fallback applies.
+	args3 := []string{"-i", "input.mp4", "-c:v", "libx265", "output.mp4"}
+	got3 := fallback.PrepareFallbackArgs(args3, "output.mp4", false)
+	if got3 == nil {
+		t.Fatal("PrepareFallbackArgs returned nil for system-fallback encoder — expected chained fallback")
+	}
+	if encoder := extractEncoderFromArgs(got3); encoder != "libx264" {
+		t.Errorf("encoder = %q, want %q (chained from libx265)", encoder, "libx264")
+	}
+
+	// System-chosen libx264 (end of chain): nil.
+	if got4 := fallback.PrepareFallbackArgs(args2, "output.mp4", false); got4 != nil {
+		t.Errorf("PrepareFallbackArgs should return nil for end-of-chain, got %v", got4)
 	}
 }
 
@@ -153,25 +150,6 @@ func TestEncoderFallback_PrepareFallbackArgsWithSource_SystemFallback(t *testing
 	got2 := fallback.PrepareFallbackArgsWithSource(args2, "output.mp4", false)
 	if got2 != nil {
 		t.Errorf("PrepareFallbackArgsWithSource should return nil for end-of-chain, got %v", got2)
-	}
-}
-
-func TestEncoderFallback_PrepareFallbackArgs_WithUserSelectedEncoder(t *testing.T) {
-	fallback := NewEncoderFallback()
-
-	// Register the user's selected encoder
-	fallback.SetUserSelectedEncoder("h264_nvenc")
-
-	// PrepareFallbackArgs should detect this is user-selected and NOT chain
-	args := []string{"-i", "input.mp4", "-c:v", "h264_nvenc", "output.mp4"}
-	got := fallback.PrepareFallbackArgs(args, "output.mp4")
-	if got == nil {
-		t.Fatal("PrepareFallbackArgs returned nil for user-selected hw encoder")
-	}
-
-	encoder := extractEncoderFromArgs(got)
-	if encoder != "libx264" {
-		t.Errorf("encoder = %q, want %q", encoder, "libx264")
 	}
 }
 

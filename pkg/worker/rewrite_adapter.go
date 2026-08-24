@@ -35,9 +35,6 @@ type RewriteAdapterConfig struct {
 	// Enabled enables/disables the rewrite functionality
 	Enabled bool
 
-	// AutoHW enables automatic hardware encoder upgrade
-	AutoHW bool
-
 	// Silent disables rewrite notifications in stderr
 	Silent bool
 
@@ -49,7 +46,6 @@ type RewriteAdapterConfig struct {
 func DefaultRewriteAdapterConfig() *RewriteAdapterConfig {
 	return &RewriteAdapterConfig{
 		Enabled:            true,
-		AutoHW:             true,
 		Silent:             false,
 		FallbackToSoftware: true,
 	}
@@ -161,11 +157,14 @@ func (a *RewriteAdapter) convertCapabilities(caps *protocol.WorkerCapabilities) 
 
 // RewriteArgs rewrites FFmpeg arguments based on hardware capabilities.
 // This is the main entry point for argument rewriting.
-func (a *RewriteAdapter) RewriteArgs(ctx context.Context, originalArgs []string) ([]string, *RewriteResult, error) {
+//
+// autoHW is passed per call instead of being mutated on the shared adapter
+// config: concurrent jobs each carry their own flag, so one job's --auto-hw
+// decision can no longer bleed into another job running concurrently.
+func (a *RewriteAdapter) RewriteArgs(ctx context.Context, originalArgs []string, autoHW bool) ([]string, *RewriteResult, error) {
 	a.mu.RLock()
 	enabled := a.config.Enabled
 	hwCaps := a.hwCaps
-	autoHW := a.config.AutoHW
 	a.mu.RUnlock()
 
 	// If rewriting is disabled, return original args
@@ -213,14 +212,14 @@ func (a *RewriteAdapter) RewriteArgs(ctx context.Context, originalArgs []string)
 	performed := response.TranslationPerformed ||
 		response.OriginalEncoder != response.TargetEncoder
 	result := &RewriteResult{
-		Performed:            performed,
-		OriginalEncoder:      string(response.OriginalEncoder),
-		TargetEncoder:        string(response.TargetEncoder),
-		Scenario:             response.Scenario.String(),
-		Notifications:        make([]string, 0),
-		AuditRecords:         response.AuditRecords,
-		CapabilitiesSummary:  a.buildCapabilitiesSummary(hwCaps),
-		DecisionReason:       a.buildDecisionReason(response),
+		Performed:           performed,
+		OriginalEncoder:     string(response.OriginalEncoder),
+		TargetEncoder:       string(response.TargetEncoder),
+		Scenario:            response.Scenario.String(),
+		Notifications:       make([]string, 0),
+		AuditRecords:        response.AuditRecords,
+		CapabilitiesSummary: a.buildCapabilitiesSummary(hwCaps),
+		DecisionReason:      a.buildDecisionReason(response),
 	}
 
 	// Collect notifications
@@ -327,7 +326,6 @@ func (a *RewriteAdapter) buildDecisionReason(response *rewrite.EncoderRewriteRes
 	}
 	return scenarioInfo
 }
-
 
 // parseEncoderFromArgs extracts the video encoder from FFmpeg arguments.
 func (a *RewriteAdapter) parseEncoderFromArgs(args []string) encoder.EncoderFamily {
@@ -567,7 +565,7 @@ func (a *RewriteAdapter) fallbackToSoftware(ctx context.Context, originalArgs []
 }
 
 // ShouldRewrite checks if rewriting should be performed for the given args.
-func (a *RewriteAdapter) ShouldRewrite(args []string) bool {
+func (a *RewriteAdapter) ShouldRewrite(args []string, autoHW bool) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
@@ -600,7 +598,7 @@ func (a *RewriteAdapter) ShouldRewrite(args []string) bool {
 	}
 
 	// If auto-hw is enabled and we have hardware encoders, consider upgrade
-	if a.config.AutoHW && a.hwCaps != nil && a.hwCaps.HasHardwareEncoder() {
+	if autoHW && a.hwCaps != nil && a.hwCaps.HasHardwareEncoder() {
 		// Check if current encoder is software
 		if !enc.IsHardware() {
 			return true
@@ -620,13 +618,6 @@ func (a *RewriteAdapter) SetEnabled(enabled bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.config.Enabled = enabled
-}
-
-// SetAutoHW enables or disables automatic hardware upgrade.
-func (a *RewriteAdapter) SetAutoHW(autoHW bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.config.AutoHW = autoHW
 }
 
 // SetSilent enables or disables notification output.

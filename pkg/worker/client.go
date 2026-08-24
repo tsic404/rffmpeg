@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
@@ -27,8 +28,10 @@ const MaxRemoteInputBytes int64 = 20 * 1024 * 1024 * 1024 // 20GB
 // Client is the HTTP client for communicating with the server
 type Client struct {
 	baseURL    string
-	httpClient *http.Client
+	httpClient *http.Client // control plane: register/heartbeat/pull/status — short timeout
+	dataClient *http.Client // data plane: file download/upload — long timeout
 	workerID   string
+	workerMu   sync.RWMutex
 	token      string
 }
 
@@ -44,7 +47,10 @@ func NewClient(baseURL, workerID, token string) *Client {
 		workerID: workerID,
 		token:    token,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Minute, // Long timeout for large file transfers
+			Timeout: 15 * time.Second, // control-plane requests must fail fast; a hung heartbeat gets the worker marked offline
+		},
+		dataClient: &http.Client{
+			Timeout: 30 * time.Minute, // large media transfers need a generous ceiling
 		},
 	}
 }
@@ -67,10 +73,27 @@ func (c *Client) setAuthHeader(req *http.Request) {
 	}
 }
 
+// SetWorkerID updates the worker identity used in API paths and payloads.
+// It exists because re-registration (after a server restart) swaps the
+// worker ID while other goroutines may concurrently send heartbeats or pull
+// jobs; the swap must not race with those reads.
+func (c *Client) SetWorkerID(workerID string) {
+	c.workerMu.Lock()
+	defer c.workerMu.Unlock()
+	c.workerID = workerID
+}
+
+// getWorkerID returns the current worker identity.
+func (c *Client) getWorkerID() string {
+	c.workerMu.Lock()
+	defer c.workerMu.Unlock()
+	return c.workerID
+}
+
 // Register registers the worker with the server
 func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string, error) {
 	req := protocol.WorkerRegisterRequest{
-		WorkerID:     c.workerID,
+		WorkerID:     c.getWorkerID(),
 		Name:         name,
 		Capabilities: caps,
 	}
@@ -94,7 +117,7 @@ func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string
 // and are omitted from the wire payload.
 func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int, gpuMetrics gpu.Metrics) ([]string, error) {
 	req := protocol.WorkerHeartbeatRequest{
-		WorkerID:      c.workerID,
+		WorkerID:      c.getWorkerID(),
 		Status:        status,
 		ActiveJobs:    activeJobs,
 		ThroughputFPS: throughputFPS,
@@ -119,7 +142,7 @@ func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, th
 
 // PullJobs pulls pending jobs assigned to this worker
 func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
-	url := fmt.Sprintf("%s/workers/%s/jobs", c.baseURL, c.workerID)
+	url := fmt.Sprintf("%s/workers/%s/jobs", c.baseURL, c.getWorkerID())
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -170,8 +193,7 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 		}
 		c.setAuthHeader(req)
 	}
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.dataClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download file: %w", err)
 	}
@@ -354,8 +376,7 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 	c.setAuthHeader(httpReq)
-
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.dataClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to upload output: %w", err)
 	}

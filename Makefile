@@ -69,11 +69,15 @@ start-rtmp-server: ## Start RTMP stream receiver for S8.2 streaming output testi
 	@./scripts/start-rtmp-server.sh
 
 # Test targets
-.PHONY: test test-coverage
+.PHONY: test test-race test-coverage
 
 test: ## Run all tests
 	@echo "Running tests..."
 	$(GO) test -v ./...
+
+test-race: ## Run all tests with the race detector (includes concurrency regression tests)
+	@echo "Running race tests..."
+	$(GO) test -race ./...
 
 test-coverage: ## Run tests with coverage report
 	@echo "Running tests with coverage..."

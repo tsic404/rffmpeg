@@ -18,10 +18,6 @@ type EncoderFallback struct {
 	// When a software encoder chosen as a fallback is also unavailable, the chain
 	// provides an alternative instead of giving up. Example: libx265 -> libx264.
 	softwareFallbackChain map[string]string
-
-	// userSelectedEncoder tracks the encoder explicitly chosen by the user.
-	// Empty if no encoder was specified by the user.
-	userSelectedEncoder string
 }
 
 // NewEncoderFallback creates a new encoder fallback handler.
@@ -115,19 +111,6 @@ func defaultSoftwareFallbackChain() map[string]string {
 		// H.264 software fallback chain: libx264rgb -> libx264
 		"libx264rgb": "libx264",
 	}
-}
-
-// SetUserSelectedEncoder records the encoder that was explicitly chosen by
-// the user, enabling the fallback logic to distinguish between user-selected
-// encoders and system-chosen fallback encoders.
-func (f *EncoderFallback) SetUserSelectedEncoder(encoder string) {
-	f.userSelectedEncoder = encoder
-}
-
-// IsUserSelectedEncoder returns true if the given encoder matches the
-// user's explicitly selected encoder.
-func (f *EncoderFallback) IsUserSelectedEncoder(encoder string) bool {
-	return f.userSelectedEncoder != "" && f.userSelectedEncoder == encoder
 }
 
 // GetSoftwareEncoder returns the software encoder equivalent for a given encoder.
@@ -240,12 +223,13 @@ func (f *EncoderFallback) IsKnownSoftwareEncoder(encoder string) bool {
 }
 
 // PrepareFallbackArgs prepares ffmpeg arguments for software encoder fallback.
-// When isUserSelected is false (the current encoder was itself chosen by the system
-// as a fallback), the fallback chain is consulted to try the next alternative
+// isUserSelected reports whether the current encoder was explicitly chosen by
+// the user (true) or by the system as a fallback from a previous failure (false).
+// When false, the fallback chain is consulted to try the next alternative
 // instead of giving up on a known-but-unavailable software encoder.
 // Returns nil if no valid fallback can be determined.
-func (f *EncoderFallback) PrepareFallbackArgs(args []string, outputPath string) []string {
-	return f.prepareFallbackArgsWithSource(args, outputPath, !f.IsUserSelectedEncoder(extractEncoderFromArgs(args)))
+func (f *EncoderFallback) PrepareFallbackArgs(args []string, outputPath string, isUserSelected bool) []string {
+	return f.prepareFallbackArgsWithSource(args, outputPath, !isUserSelected)
 }
 
 // PrepareFallbackArgsWithSource prepares ffmpeg arguments for software encoder fallback

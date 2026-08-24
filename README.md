@@ -146,6 +146,7 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 | `SCHEDULE_INTERVAL` | 任务调度间隔 | `5s` |
 | `TIMEOUT_CHECK_INTERVAL` | 超时检查间隔 | `30s` |
 | `MAX_JOBS_PER_WORKER` | 每个 Worker 最大并发任务数 | `1` |
+| `NO_WORKER_JOB_TIMEOUT` | 无可调度 Worker 时 pending 任务的最长等待时间，超时判失败；`0` 禁用 | `2m` |
 | `ALLOWED_ORIGINS` | WebSocket 允许的源（逗号分隔） | - |
 | `TLS_ENABLED` | 启用 TLS | `false` |
 | `TLS_CERT_FILE` | TLS 证书文件路径 | - |
@@ -165,7 +166,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
   --worker-health-check-interval string Interval for checking worker health (default: 30s)
   --job-timeout string                 Timeout for running jobs (default: 30m)
   --schedule-interval string           Interval for job scheduling (default: 5s)
-  --max-jobs-per-worker int            Maximum concurrent jobs per worker (default: 1)
+  --timeout-check-interval string      Interval for checking job timeouts (default: 30s)
+  --no-worker-job-timeout string       Fail pending jobs waiting longer than this with no schedulable worker; 0 disables (default: 2m)
   --tls                                Enable TLS (HTTPS)
   --tls-cert string                    Path to TLS certificate file
   --tls-key string                     Path to TLS private key file

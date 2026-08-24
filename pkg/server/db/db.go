@@ -811,7 +811,10 @@ func (d *Database) GetWorker(id string) (*Worker, error) {
 // the pull path, resurrecting TSI-2347 through a race. Offline/evicted guards
 // keep dead workers from refreshing liveness.
 func (d *Database) UpdateWorkerHeartbeat(id string, status protocol.WorkerStatus) error {
-	id = normalizeWorkerID(id)
+	// Same canonicalization as registration/lookup (TSI-2346): a heartbeat
+	// carrying a non-canonical UUID format (compact/hyphenated variant) must
+	// hit the same row the worker registered under.
+	id = NormalizeWorkerID(id)
 	now := time.Now()
 	result, err := d.db.Exec(`
 		UPDATE workers SET last_heartbeat = ? WHERE id = ? AND status != ?
@@ -865,7 +868,7 @@ func (d *Database) SetWorkerIdleIfNoActiveJobs(workerID string) error {
 
 // GetJobsForWorker retrieves jobs assigned to a specific worker with pending or queued status
 func (d *Database) GetJobsForWorker(workerID string, limit int) ([]*Job, error) {
-	workerID = normalizeWorkerID(workerID)
+	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
@@ -885,7 +888,7 @@ func (d *Database) GetJobsForWorker(workerID string, limit int) ([]*Job, error) 
 func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*Job, error) {
 	// Normalize so a compact/uppercase UUID pull reaches jobs stored under the
 	// canonical ID; GetJobsForWorker normalizes its own copy too.
-	workerID = normalizeWorkerID(workerID)
+	workerID = NormalizeWorkerID(workerID)
 	// First, get jobs already assigned to this worker (queued status)
 	// This handles the race condition where the scheduler assigned jobs before the worker polled
 	queuedJobs, err := d.GetJobsForWorker(workerID, maxJobs)
@@ -1108,7 +1111,7 @@ func (d *Database) GetWorkerActiveJobCount(workerID string) (int, error) {
 }
 
 func (d *Database) UpdateWorkerStatus(id string, status protocol.WorkerStatus) error {
-	id = normalizeWorkerID(id)
+	id = NormalizeWorkerID(id)
 	now := time.Now()
 	result, err := d.db.Exec(`
 		UPDATE workers SET status = ?, last_heartbeat = ? WHERE id = ?
@@ -1436,7 +1439,7 @@ func (d *Database) GetSchedulableWorkersByEncoder(encoderName string) ([]*Worker
 
 // UpdateWorkerCapabilities updates the worker's capabilities (encoders, decoders, etc.)
 func (d *Database) UpdateWorkerCapabilities(id string, caps protocol.WorkerCapabilities) error {
-	id = normalizeWorkerID(id)
+	id = NormalizeWorkerID(id)
 	now := time.Now()
 
 	encodersJSON, err := json.Marshal(caps.Encoders)
@@ -1566,7 +1569,7 @@ func sortWorkersByJobCount(workers []WorkerWithJobCount) {
 
 // GetWorkerEncoders retrieves the list of encoders for a specific worker
 func (d *Database) GetWorkerEncoders(workerID string) ([]string, error) {
-	workerID = normalizeWorkerID(workerID)
+	workerID = NormalizeWorkerID(workerID)
 	var encodersJSON string
 	err := d.db.QueryRow(`SELECT encoders FROM workers WHERE id = ?`, workerID).Scan(&encodersJSON)
 	if err == sql.ErrNoRows {
@@ -2065,7 +2068,7 @@ func (d *Database) GetMigrationEventsByWorker(workerID string, limit int) ([]*Mi
 
 // GetRunningJobsByWorker retrieves all running/queued jobs for a specific worker.
 func (d *Database) GetRunningJobsByWorker(workerID string) ([]*Job, error) {
-	workerID = normalizeWorkerID(workerID)
+	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
@@ -2217,7 +2220,7 @@ func (d *Database) GetJobTimeoutRetryCount(jobID string) (int, error) {
 
 // MarkWorkerEvicted marks a worker as evicted (slow node) with the current timestamp.
 func (d *Database) MarkWorkerEvicted(workerID string) error {
-	workerID = normalizeWorkerID(workerID)
+	workerID = NormalizeWorkerID(workerID)
 	now := time.Now()
 	result, err := d.db.Exec(`
 		UPDATE workers SET evicted = 1, evicted_at = ? WHERE id = ?
@@ -2237,7 +2240,7 @@ func (d *Database) MarkWorkerEvicted(workerID string) error {
 
 // ClearWorkerEviction clears the eviction flag on a worker (recovery).
 func (d *Database) ClearWorkerEviction(workerID string) error {
-	workerID = normalizeWorkerID(workerID)
+	workerID = NormalizeWorkerID(workerID)
 	result, err := d.db.Exec(`
 		UPDATE workers SET evicted = 0, evicted_at = NULL WHERE id = ?
 	`, workerID)
@@ -2256,7 +2259,7 @@ func (d *Database) ClearWorkerEviction(workerID string) error {
 
 // IsWorkerEvicted checks whether a worker is currently evicted.
 func (d *Database) IsWorkerEvicted(workerID string) (bool, error) {
-	workerID = normalizeWorkerID(workerID)
+	workerID = NormalizeWorkerID(workerID)
 	var evicted bool
 	err := d.db.QueryRow(`SELECT evicted FROM workers WHERE id = ?`, workerID).Scan(&evicted)
 	if err == sql.ErrNoRows {

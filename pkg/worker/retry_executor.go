@@ -156,10 +156,18 @@ type RetryResult struct {
 	FinalEncoder string `json:"final_encoder,omitempty"`
 }
 
+// Executor runs ffmpeg commands. It is extracted as an interface so the
+// retry executor can be tested with a fake (the concrete *Executor satisfies
+// it).
+type executorI interface {
+	Execute(ctx context.Context, args []string) ExecResult
+	ExecuteWithHandlers(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult
+}
+
 // RetryExecutor wraps an Executor with automatic retry and fallback logic.
 type RetryExecutor struct {
 	// executor is the underlying ffmpeg executor.
-	executor *Executor
+	executor executorI
 
 	// interceptor is the error interceptor.
 	interceptor *ErrorInterceptor
@@ -224,9 +232,10 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 	originalEncoder := extractEncoderFromArgs(args)
 	result.OriginalEncoder = originalEncoder
 
-	// Register the user-selected encoder on the fallback so it can distinguish
-	// between user-chosen encoders and system-chosen fallback encoders.
-	e.fallback.SetUserSelectedEncoder(originalEncoder)
+	// The user-selected encoder is tracked as a local variable instead of on
+	// the shared fallback: ExecuteWithRetry runs per job, and a shared field
+	// let one concurrent job's registration leak into another's fallback
+	// decisions.
 
 	// Track current arguments and stage
 	currentArgs := make([]string, len(args))
@@ -247,6 +256,15 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 		// Record attempt start
 		attemptStart := time.Now()
 		stage = e.determineStage(attempt)
+
+		// Idempotency: a failed attempt may have left a partial output file
+		// behind. A later attempt that exits 0 without producing output would
+		// otherwise be misjudged as successful by the os.Stat validation.
+		if !networkOutput && outputPath != "" && outputPath != "-" {
+			if err := os.Remove(outputPath); err == nil {
+				log.Printf("Removed stale output from previous attempt: %s", outputPath)
+			}
+		}
 
 		// Execute
 		var execResult ExecResult
@@ -380,8 +398,12 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 	result.FinalStage = RetryStageExhausted
 	result.FinalEncoder = currentEncoder
 
-	// Execute one final attempt with software fallback if enabled
-	if e.config.EnableSoftwareFallback && !result.UsedSoftwareEncoder {
+	// Execute one final attempt with software fallback if enabled.
+	// A cancelled job must not start another full transcode round: check the
+	// context before committing to the fallback attempt.
+	if ctx.Err() != nil {
+		log.Printf("Skipping final software fallback: context cancelled")
+	} else if e.config.EnableSoftwareFallback && !result.UsedSoftwareEncoder {
 		fallbackArgs := e.fallback.PrepareFallbackArgsWithSource(currentArgs, outputPath, isUserSelected)
 		if fallbackArgs != nil {
 			log.Printf("Attempting final software encoder fallback")
@@ -581,7 +603,7 @@ func (e *RetryExecutor) pruneHardwareParams(args []string) ([]string, []string) 
 	// so we must replace it with its software equivalent.
 	currentEncoder := extractEncoderFromArgs(prunedArgs)
 	if currentEncoder != "" && e.fallback.IsHardwareEncoder(currentEncoder) {
-		fallbackArgs := e.fallback.PrepareFallbackArgs(prunedArgs, "")
+		fallbackArgs := e.fallback.PrepareFallbackArgs(prunedArgs, "", true)
 		if fallbackArgs != nil {
 			swEncoder := extractEncoderFromArgs(fallbackArgs)
 			if swEncoder != "" && swEncoder != currentEncoder {

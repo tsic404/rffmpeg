@@ -257,7 +257,7 @@ func TestEncoderFallback_PrepareFallbackArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := fallback.PrepareFallbackArgs(tt.args, tt.outputPath)
+			got := fallback.PrepareFallbackArgs(tt.args, tt.outputPath, true)
 
 			if tt.wantNil {
 				if got != nil {

@@ -1,9 +1,13 @@
 package gpu
 
 import (
+	"context"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Metrics holds point-in-time GPU utilization metrics.
@@ -32,9 +36,26 @@ func (d *Detector) sampleNVIDIAMetrics() (m Metrics, ok bool) {
 		return Metrics{}, false
 	}
 
-	cmd := exec.Command("nvidia-smi",
+	// Bound the query: a hung nvidia-smi (driver wedge) must not block the
+	// heartbeat loop, which also carries job cancellation.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "nvidia-smi",
 		"--query-gpu=utilization.gpu,memory.used",
 		"--format=csv,noheader,nounits")
+	// Kill the whole process group: a bare `sleep`-style script forks a
+	// child that survives a plain ctx kill and keeps the output pipes open,
+	// blocking cmd.Output forever.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// ctx timeout can fire before Start() sets cmd.Process (start vs
+		// cancel race window); dereferencing nil would panic the caller.
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return Metrics{}, false

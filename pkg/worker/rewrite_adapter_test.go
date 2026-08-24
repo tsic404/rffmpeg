@@ -71,7 +71,7 @@ func TestRewriteAdapter_RewriteArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rewritten, result, err := adapter.RewriteArgs(context.Background(), tt.args)
+			rewritten, result, err := adapter.RewriteArgs(context.Background(), tt.args, true)
 
 			if err != nil {
 				t.Errorf("unexpected error: %v", err)
@@ -151,7 +151,7 @@ func TestRewriteAdapter_ShouldRewrite(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := adapter.ShouldRewrite(tt.args)
+			result := adapter.ShouldRewrite(tt.args, true)
 			if result != tt.expectRewrite {
 				t.Errorf("expected ShouldRewrite=%v, got %v", tt.expectRewrite, result)
 			}
@@ -331,17 +331,6 @@ func TestRewriteAdapter_ConfigMethods(t *testing.T) {
 		t.Error("SetEnabled failed")
 	}
 
-	// Test SetAutoHW
-	adapter.SetAutoHW(false)
-	if adapter.config.AutoHW != false {
-		t.Error("SetAutoHW failed")
-	}
-
-	adapter.SetAutoHW(true)
-	if adapter.config.AutoHW != true {
-		t.Error("SetAutoHW failed")
-	}
-
 	// Test SetSilent
 	adapter.SetSilent(true)
 	if adapter.config.Silent != true {
@@ -369,8 +358,7 @@ func TestRewriteAdapter_NonexistentEncoderReturnsError(t *testing.T) {
 		},
 	}
 	adapter.SetHardwareCapabilities(caps)
-	// Disable auto-HW so it doesn't try to upgrade a known SW encoder
-	adapter.SetAutoHW(false)
+	// auto-HW is disabled by passing false to RewriteArgs below
 
 	tests := []struct {
 		name          string
@@ -388,7 +376,7 @@ func TestRewriteAdapter_NonexistentEncoderReturnsError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rewritten, result, err := adapter.RewriteArgs(context.Background(), tt.args)
+			rewritten, result, err := adapter.RewriteArgs(context.Background(), tt.args, false)
 
 			if tt.expectError {
 				if err == nil {
@@ -533,7 +521,7 @@ func TestRewriteAdapter_NonEncoderParamsPreserved(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			adapter.SetHardwareCapabilities(tt.caps)
-			rewritten, _, err := adapter.RewriteArgs(context.Background(), tt.args)
+			rewritten, _, err := adapter.RewriteArgs(context.Background(), tt.args, true)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
