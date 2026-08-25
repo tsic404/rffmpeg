@@ -48,8 +48,13 @@ func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatP
 	}
 
 	state.Status = payload.Status
-	state.GPUUtilPct = payload.GPUUtilPct
-	state.GPUMemUsedMB = payload.GPUMemUsedMB
+	if payload.GPUMetricsValid {
+		state.GPUUtilPct = payload.GPUUtilPct
+		state.GPUMemUsedMB = payload.GPUMemUsedMB
+		state.GPUMetricsValid = true
+	} else {
+		state.GPUMetricsValid = false
+	}
 	state.ActiveJobs = payload.ActiveJobs
 	state.ThroughputFPS = payload.ThroughputFPS
 	state.CompletedJobs = payload.CompletedJobs

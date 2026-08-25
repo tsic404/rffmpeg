@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,6 +123,38 @@ func LoadFromFile(path string) (*ServerConfig, error) {
 }
 
 // LoadFromEnv loads configuration from environment variables
+
+// parseDurationOrLog parses a duration env var / flag value. On failure it
+// logs and returns fallback instead of silently ignoring the setting (TSI-2365):
+// a typo like "30 mintes" must be visible to the operator.
+func parseDurationOrLog(name, value string, fallback time.Duration) time.Duration {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		log.Printf("Config: invalid duration for %s=%q (%v); keeping default %s", name, value, err, fallback)
+		return fallback
+	}
+	if d < 0 {
+		log.Printf("Config: negative duration for %s=%q is not supported; keeping default %s", name, value, fallback)
+		return fallback
+	}
+	return d
+}
+
+// parseBoolEnv reads a symmetric boolean env var: accepts 1/true/yes/on and
+// 0/false/no/off (case-insensitive). Unrecognized values are logged and the
+// current value kept.
+func parseBoolEnv(name, value string, current bool) bool {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		log.Printf("Config: invalid boolean for %s=%q; keeping current value %v", name, value, current)
+		return current
+	}
+}
+
 func LoadFromEnv() *ServerConfig {
 	config := DefaultServerConfig()
 
@@ -139,44 +172,27 @@ func LoadFromEnv() *ServerConfig {
 	if authToken := os.Getenv("RFFMPEG_SERVER_TOKEN"); authToken != "" {
 		config.AuthToken = authToken
 	}
-
-	// Worker management environment variables
-	if timeout := os.Getenv("WORKER_HEARTBEAT_TIMEOUT"); timeout != "" {
-		if d, err := time.ParseDuration(timeout); err == nil {
-			config.WorkerHeartbeatTimeout = d
-		}
+	// Worker management durations — parse errors are logged, not swallowed.
+	if v := os.Getenv("WORKER_HEARTBEAT_TIMEOUT"); v != "" {
+		config.WorkerHeartbeatTimeout = parseDurationOrLog("WORKER_HEARTBEAT_TIMEOUT", v, config.WorkerHeartbeatTimeout)
 	}
-	if threshold := os.Getenv("WORKER_OFFLINE_THRESHOLD"); threshold != "" {
-		if d, err := time.ParseDuration(threshold); err == nil {
-			config.WorkerOfflineThreshold = d
-		}
+	if v := os.Getenv("WORKER_OFFLINE_THRESHOLD"); v != "" {
+		config.WorkerOfflineThreshold = parseDurationOrLog("WORKER_OFFLINE_THRESHOLD", v, config.WorkerOfflineThreshold)
 	}
-	if interval := os.Getenv("WORKER_HEALTH_CHECK_INTERVAL"); interval != "" {
-		if d, err := time.ParseDuration(interval); err == nil {
-			config.WorkerHealthCheckInterval = d
-		}
+	if v := os.Getenv("WORKER_HEALTH_CHECK_INTERVAL"); v != "" {
+		config.WorkerHealthCheckInterval = parseDurationOrLog("WORKER_HEALTH_CHECK_INTERVAL", v, config.WorkerHealthCheckInterval)
 	}
-
-	// Scheduler environment variables
-	if jobTimeout := os.Getenv("JOB_TIMEOUT"); jobTimeout != "" {
-		if d, err := time.ParseDuration(jobTimeout); err == nil {
-			config.JobTimeout = d
-		}
+	if v := os.Getenv("JOB_TIMEOUT"); v != "" {
+		config.JobTimeout = parseDurationOrLog("JOB_TIMEOUT", v, config.JobTimeout)
 	}
-	if scheduleInterval := os.Getenv("SCHEDULE_INTERVAL"); scheduleInterval != "" {
-		if d, err := time.ParseDuration(scheduleInterval); err == nil {
-			config.ScheduleInterval = d
-		}
+	if v := os.Getenv("SCHEDULE_INTERVAL"); v != "" {
+		config.ScheduleInterval = parseDurationOrLog("SCHEDULE_INTERVAL", v, config.ScheduleInterval)
 	}
-	if timeoutCheckInterval := os.Getenv("TIMEOUT_CHECK_INTERVAL"); timeoutCheckInterval != "" {
-		if d, err := time.ParseDuration(timeoutCheckInterval); err == nil {
-			config.TimeoutCheckInterval = d
-		}
+	if v := os.Getenv("TIMEOUT_CHECK_INTERVAL"); v != "" {
+		config.TimeoutCheckInterval = parseDurationOrLog("TIMEOUT_CHECK_INTERVAL", v, config.TimeoutCheckInterval)
 	}
-	if noWorkerTimeout := os.Getenv("NO_WORKER_JOB_TIMEOUT"); noWorkerTimeout != "" {
-		if d, err := time.ParseDuration(noWorkerTimeout); err == nil {
-			config.NoWorkerJobTimeout = d
-		}
+	if v := os.Getenv("NO_WORKER_JOB_TIMEOUT"); v != "" {
+		config.NoWorkerJobTimeout = parseDurationOrLog("NO_WORKER_JOB_TIMEOUT", v, config.NoWorkerJobTimeout)
 	}
 	if maxJobs := os.Getenv("MAX_JOBS_PER_WORKER"); maxJobs != "" {
 		if n, err := strconv.Atoi(maxJobs); err == nil && n > 0 {
@@ -184,9 +200,9 @@ func LoadFromEnv() *ServerConfig {
 		}
 	}
 
-	// Rate limit environment variables
-	if rateLimitEnabled := os.Getenv("RATE_LIMIT_ENABLED"); rateLimitEnabled == "false" || rateLimitEnabled == "0" {
-		config.RateLimitEnabled = false
+	// Rate limit environment variables — symmetric boolean (TSI-2365)
+	if v := os.Getenv("RATE_LIMIT_ENABLED"); v != "" {
+		config.RateLimitEnabled = parseBoolEnv("RATE_LIMIT_ENABLED", v, config.RateLimitEnabled)
 	}
 	if maxPerClient := os.Getenv("MAX_CONCURRENT_JOBS_PER_CLIENT"); maxPerClient != "" {
 		if n, err := strconv.Atoi(maxPerClient); err == nil && n > 0 {
@@ -206,11 +222,12 @@ func LoadFromEnv() *ServerConfig {
 			config.RedisDB = n
 		}
 	}
-
-	// TLS environment variables
-	if tlsEnabled := os.Getenv("TLS_ENABLED"); tlsEnabled == "true" || tlsEnabled == "1" {
-		config.TLS.Enabled = true
+	// TLS environment variables — symmetric boolean (TSI-2365)
+	if v := os.Getenv("TLS_ENABLED"); v != "" {
+		config.TLS.Enabled = parseBoolEnv("TLS_ENABLED", v, config.TLS.Enabled)
 	}
+
+	// TLS environment variables (ENABLED handled above as a symmetric boolean)
 	if certFile := os.Getenv("TLS_CERT_FILE"); certFile != "" {
 		config.TLS.CertFile = certFile
 	}
@@ -247,43 +264,29 @@ func (c *ServerConfig) Merge(flags *Flags) {
 		c.AuthToken = flags.AuthToken
 	}
 
-	// Worker management flags
+	// Worker management flags — parse errors are logged, not swallowed (TSI-2365)
 	if flags.WorkerHeartbeatTimeout != "" {
-		if d, err := time.ParseDuration(flags.WorkerHeartbeatTimeout); err == nil {
-			c.WorkerHeartbeatTimeout = d
-		}
+		c.WorkerHeartbeatTimeout = parseDurationOrLog("worker-heartbeat-timeout", flags.WorkerHeartbeatTimeout, c.WorkerHeartbeatTimeout)
 	}
 	if flags.WorkerOfflineThreshold != "" {
-		if d, err := time.ParseDuration(flags.WorkerOfflineThreshold); err == nil {
-			c.WorkerOfflineThreshold = d
-		}
+		c.WorkerOfflineThreshold = parseDurationOrLog("worker-offline-threshold", flags.WorkerOfflineThreshold, c.WorkerOfflineThreshold)
 	}
 	if flags.WorkerHealthCheckInterval != "" {
-		if d, err := time.ParseDuration(flags.WorkerHealthCheckInterval); err == nil {
-			c.WorkerHealthCheckInterval = d
-		}
+		c.WorkerHealthCheckInterval = parseDurationOrLog("worker-health-check-interval", flags.WorkerHealthCheckInterval, c.WorkerHealthCheckInterval)
 	}
 
 	// Scheduler flags
 	if flags.JobTimeout != "" {
-		if d, err := time.ParseDuration(flags.JobTimeout); err == nil {
-			c.JobTimeout = d
-		}
+		c.JobTimeout = parseDurationOrLog("job-timeout", flags.JobTimeout, c.JobTimeout)
 	}
 	if flags.ScheduleInterval != "" {
-		if d, err := time.ParseDuration(flags.ScheduleInterval); err == nil {
-			c.ScheduleInterval = d
-		}
+		c.ScheduleInterval = parseDurationOrLog("schedule-interval", flags.ScheduleInterval, c.ScheduleInterval)
 	}
 	if flags.TimeoutCheckInterval != "" {
-		if d, err := time.ParseDuration(flags.TimeoutCheckInterval); err == nil {
-			c.TimeoutCheckInterval = d
-		}
+		c.TimeoutCheckInterval = parseDurationOrLog("timeout-check-interval", flags.TimeoutCheckInterval, c.TimeoutCheckInterval)
 	}
 	if flags.NoWorkerJobTimeout != "" {
-		if d, err := time.ParseDuration(flags.NoWorkerJobTimeout); err == nil {
-			c.NoWorkerJobTimeout = d
-		}
+		c.NoWorkerJobTimeout = parseDurationOrLog("no-worker-job-timeout", flags.NoWorkerJobTimeout, c.NoWorkerJobTimeout)
 	}
 	if flags.MaxJobsPerWorker > 0 {
 		c.MaxJobsPerWorker = flags.MaxJobsPerWorker
@@ -394,7 +397,8 @@ func resolvePath(path, baseDir string) (string, error) {
 	return filepath.Join(absBase, path), nil
 }
 
-// parseTLSVersion converts a string TLS version to uint16
+// parseTLSVersion converts a string TLS version to uint16. Unrecognized
+// values are logged — silently defaulting to TLS 1.2 hid operator typos.
 func parseTLSVersion(version string) uint16 {
 	switch strings.ToUpper(version) {
 	case "TLS1.0", "TLS10", "1.0":
@@ -406,7 +410,8 @@ func parseTLSVersion(version string) uint16 {
 	case "TLS1.3", "TLS13", "1.3":
 		return 0x0304 // tls.VersionTLS13
 	default:
-		return 0x0303 // Default to TLS 1.2
+		log.Printf("Config: unknown TLS min version %q; defaulting to TLS 1.2", version)
+		return 0x0303
 	}
 }
 

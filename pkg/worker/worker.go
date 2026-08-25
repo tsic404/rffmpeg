@@ -190,8 +190,16 @@ func (w *Worker) register(caps protocol.WorkerCapabilities, firstRegistration bo
 
 	w.mu.Lock()
 	if firstRegistration {
+		// TSI-2365: reset the lifetime count only on FIRST registration.
+		// On server-restart re-registrations totalJobsCompleted must survive:
+		// it feeds the server-side warmup/median sample pool — zeroing it on
+		// every re-registration would drop the worker out of slow-node
+		// detection forever in restart-heavy fleets. (Master's firstRegistration
+		// guard already encodes this distinction; keep it.)
 		w.jobsCompleted = 0
 		w.totalJobsCompleted = 0
+	} else {
+		w.jobsCompleted = 0
 	}
 	// lastHeartbeatTime is always reset, so the next heartbeat reports
 	// throughput over a full interval instead of the pre-(re)start window.
@@ -387,6 +395,8 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// MinJobsForEviction warmup gate without doing real work.
 	if len(job.Args) > 0 && job.Args[0] == "__rffmpeg_probe__" {
 		jobFailed = true // suppress counter increment in the deferred hook
+		// Probe jobs are not transcodes: counting them into completed_jobs
+		// floods the warmup window and skews the median sample pool (TSI-2365).
 		w.processProbeJob(ctx, job)
 		return
 	}
@@ -612,15 +622,18 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				reason = rewriteResult.Scenario
 			}
 
-			// Record audit operation
+			// Record audit operation — a failed Record is logged (audit trail
+			// gaps must be visible), never silently discarded (TSI-2365).
 			if w.auditRecorder != nil {
-				_ = w.auditRecorder.Record(audit.AuditOperation{
+				if err := w.auditRecorder.Record(audit.AuditOperation{
 					RequestID:           job.ID,
 					OriginalEncoder:     rewriteResult.OriginalEncoder,
 					RewrittenEncoder:    rewriteResult.TargetEncoder,
 					DecisionReason:      rewriteResult.DecisionReason,
 					CapabilitiesSummary: rewriteResult.CapabilitiesSummary,
-				})
+				}); err != nil {
+					log.Printf("Job %s: audit record failed: %v", job.ID, err)
+				}
 			}
 
 			// Notify the detailed chain on both sinks:
@@ -790,7 +803,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 			// Notify about retry attempt
 			notification := fmt.Sprintf("[RETRY] Initial attempt failed (%s), starting multi-stage retry", intercepted.FFmpegError.Type)
-			log.Printf(notification)
+			log.Printf("%s", notification)
 			progressRouter.Handler()(notification + "\n")
 
 			// Use RetryExecutor for multi-stage retry:
@@ -890,10 +903,10 @@ func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached
 // reportInfraFailure reports a worker-side infrastructure failure that happened
 // outside ffmpeg execution (job directory creation, server communication,
 // output upload, probe plumbing). Pattern-matching this text would misclassify
-// it as INPUT_UNREACHABLE etc., so it is always FFMPEG_ERROR with the raw
-// message as details.
+// it as INPUT_UNREACHABLE etc., so it uses the dedicated INFRA bucket —
+// FFMPEG_ERROR is reserved for actual ffmpeg execution failures (TSI-2365).
 func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
-	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, string(protocol.FailureFFmpegError), errMsg); err != nil {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, string(protocol.FailureInfra), errMsg); err != nil {
 		log.Printf("Failed to report job failure: %v", err)
 	}
 }
@@ -1046,9 +1059,19 @@ func (w *Worker) cleanupJobDir(dir string) {
 	}
 }
 
-// containsPathTraversal checks if a path contains ".." components (path traversal attempt).
+// containsPathTraversal checks whether any component of a path is exactly
+// ".." (path traversal attempt). Unlike a raw substring search, legitimate
+// filenames such as "my..video.mp4" or "a..b/c.mp4" are not false-positived
+// (TSI-2365).
 func containsPathTraversal(path string) bool {
-	return strings.Contains(path, "..")
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // ffmpegStderrIndicatesEmptyOutput checks ffmpeg stderr for indicators that the

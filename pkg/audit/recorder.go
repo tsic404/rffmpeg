@@ -189,10 +189,14 @@ func (r *RingBufferRecorder) GetSummary(requestID string) (*AuditSummary, error)
 
 		summary.Scenarios[op.ScenarioType]++
 
-		// Check for warning/error scenarios
+		// TSI-2365: HasErrors is derived from scenarios where the rewrite
+		// engine could not satisfy the request at all, instead of staying
+		// hardcoded false.
 		switch op.ScenarioType {
 		case ScenarioEncoderFallback, ScenarioEncoderSubstitution:
 			summary.HasWarnings = true
+		case ScenarioFormatNotAvailable, ScenarioEncoderUnsupported:
+			summary.HasErrors = true
 		}
 	}
 
@@ -328,6 +332,8 @@ func (r *InMemoryRecorder) GetSummary(requestID string) (*AuditSummary, error) {
 		switch op.ScenarioType {
 		case ScenarioEncoderFallback, ScenarioEncoderSubstitution:
 			summary.HasWarnings = true
+		case ScenarioFormatNotAvailable, ScenarioEncoderUnsupported:
+			summary.HasErrors = true
 		}
 	}
 

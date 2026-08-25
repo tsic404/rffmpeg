@@ -35,6 +35,15 @@ const (
 	// ScenarioNoEncoderSpecified indicates no encoder was specified, auto-selecting.
 	// Example: No -c:v specified -> auto-select h264_nvenc
 	ScenarioNoEncoderSpecified ScenarioType = "no_encoder_specified"
+
+	// ScenarioFormatNotAvailable indicates the requested format has no
+	// available encoder at all — the rewrite engine could not satisfy the
+	// request (error-level, TSI-2365).
+	ScenarioFormatNotAvailable ScenarioType = "format_not_available"
+
+	// ScenarioEncoderUnsupported indicates the encoder name is unrecognized —
+	// error-level (TSI-2365).
+	ScenarioEncoderUnsupported ScenarioType = "encoder_unsupported"
 )
 
 // String returns the string representation of the scenario type.

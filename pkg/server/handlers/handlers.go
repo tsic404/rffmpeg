@@ -216,11 +216,10 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	maxSize := int64(10 * 1024 * 1024 * 1024) // 10GB max
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
-	// Use 256MB as the in-memory threshold for multipart form parsing.
-	// Files larger than this will be written to temporary files on disk.
-	// This allows handling large media files (4K movies, etc.) without
-	// running into memory limits.
-	if err := r.ParseMultipartForm(256 << 20); err != nil {
+	// 32MB in-memory threshold for multipart parsing. Larger parts spill to
+	// temporary files on disk. The old 256MB threshold let a handful of
+	// concurrent uploads pin hundreds of MB of RSS (TSI-2365).
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
 		))
@@ -724,11 +723,12 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 	}
 
 	maxSize := int64(10 * 1024 * 1024 * 1024) // 10GB max
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
-	// Use 256MB as the in-memory threshold for multipart form parsing.
-	// Files larger than this will be written to temporary files on disk.
-	if err := r.ParseMultipartForm(256 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	// 32MB in-memory threshold, matching Upload: larger parts spill to
+	// temporary files on disk. The old 256MB let concurrent uploads pin
+	// hundreds of MB of RSS (TSI-2365).
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
 		))
@@ -888,14 +888,15 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// Update WorkerStateTable with throughput data (TSI-759)
 	if h.stateTable != nil {
 		statePayload := protocol.WorkerHeartbeatPayload{
-			WorkerID:      req.WorkerID,
-			Status:        string(req.Status),
-			ActiveJobs:    req.ActiveJobs,
-			ThroughputFPS: req.ThroughputFPS,
-			CompletedJobs: req.CompletedJobs,
-			GPUUtilPct:    req.GPUUtilPct,
-			GPUMemUsedMB:  req.GPUMemUsedMB,
-			Timestamp:     time.Now(),
+			WorkerID:        req.WorkerID,
+			Status:          string(req.Status),
+			ActiveJobs:      req.ActiveJobs,
+			ThroughputFPS:   req.ThroughputFPS,
+			CompletedJobs:   req.CompletedJobs,
+			GPUUtilPct:      req.GPUUtilPct,
+			GPUMemUsedMB:    req.GPUMemUsedMB,
+			GPUMetricsValid: req.GPUMetricsValid,
+			Timestamp:       time.Now(),
 		}
 		h.stateTable.UpdateFromHeartbeat(statePayload)
 	}
@@ -979,8 +980,27 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 // Probe handles ffprobe requests via job dispatch to workers.
 // POST /api/v1/probe
 func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
+	// Rate-limit quota release: JobSubmitMiddleware incremented this client's
+	// counter, but unlike job submission there is no RegisterJob mapping and
+	// no worker completion callback — a probe is synchronous. Release the
+	// slot exactly once per request, here. (The middleware's non-2xx decrement
+	// would double-release on error exits; the counter floors at 0, so the
+	// net effect is still correct — one request consumes at most one slot.)
+	clientID := auth.GetClientID(r)
+	if clientID == "" {
+		// Must mirror JobSubmitMiddleware's fallback or the decrement targets
+		// a different bucket than the increment did.
+		clientID = r.RemoteAddr
+	}
+	defer h.rateLimiter.Decrement(clientID)
+
+	// Bound the JSON body — a probe request is a path/URL plus optional
+	// options, never megabytes. Without a cap the endpoint is a free
+	// memory-amplification DoS vector (TSI-2365).
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 	var req protocol.ProbeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.rateLimiter.Decrement(clientID)
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Invalid JSON body", err,
 		))
@@ -1030,7 +1050,15 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	// Poll for job completion
 	var finalJob *db.Job
 	for i := 0; i < 60; i++ { // max 2 minutes (60 * 2s polls)
-		time.Sleep(2 * time.Second)
+		// Stop burning server resources when the client went away: cancel
+		// the dispatched probe job and return (TSI-2365).
+		select {
+		case <-r.Context().Done():
+			_ = h.db.CancelJob(job.ID)
+			return
+		case <-time.After(2 * time.Second):
+		}
+
 		j, err := h.db.GetJob(job.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
@@ -1347,7 +1375,6 @@ func dbJobToJobInfo(job *db.Job) protocol.JobInfo {
 		AutoHW:          job.AutoHW,
 		FailureType:     job.FailureType,
 		FailureDetails:  job.FailureDetails,
-		Retryable:       job.Retryable,
 		DirectPaths:     directPaths,
 		ProgressPercent: job.ProgressPercent,
 		EtaSeconds:      job.EtaSeconds,
@@ -1504,12 +1531,13 @@ func (h *Handler) ListAllHwaccels(w http.ResponseWriter, r *http.Request) {
 // Populated from the server's worker state table when at least one heartbeat
 // has been received; otherwise derived from the database record.
 type WorkerHealth struct {
-	Status        string   `json:"status"`
-	GPUUtilPct    float64  `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB  int      `json:"gpu_mem_used_mb,omitempty"`
-	ActiveJobs    []string `json:"active_jobs,omitempty"`
-	ThroughputFPS float64  `json:"throughput_fps,omitempty"`
-	LastSeen      string   `json:"last_seen"`
+	Status          string   `json:"status"`
+	GPUUtilPct      float64  `json:"gpu_util_percent,omitempty"`
+	GPUMemUsedMB    int      `json:"gpu_mem_used_mb,omitempty"`
+	GPUMetricsValid bool     `json:"gpu_metrics_valid"` // True when the GPU fields carry a fresh sample; false means stale/no sample (TSI-2365)
+	ActiveJobs      []string `json:"active_jobs,omitempty"`
+	ThroughputFPS   float64  `json:"throughput_fps,omitempty"`
+	LastSeen        string   `json:"last_seen"`
 }
 
 // WorkerInfo represents worker information for API responses
@@ -1718,6 +1746,7 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 	if state, ok := states[worker.ID]; ok && state != nil {
 		health.GPUUtilPct = state.GPUUtilPct
 		health.GPUMemUsedMB = state.GPUMemUsedMB
+		health.GPUMetricsValid = state.GPUMetricsValid
 		health.ThroughputFPS = state.ThroughputFPS
 		health.ActiveJobs = state.ActiveJobs
 		// !Before (not After): when the two timestamps are equal, prefer the

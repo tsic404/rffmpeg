@@ -27,7 +27,6 @@ type Job struct {
 	Error           sql.NullString
 	FailureType     string       // Classified failure type (TSI-757)
 	FailureDetails  string       // Human-readable failure detail
-	Retryable       bool         // Whether the failure is retryable
 	AutoHW          bool         // Enable automatic hardware encoder upgrade
 	Timeout         sql.NullTime // Per-job timeout deadline (TSI-764)
 	DirectPaths     string       // JSON array of direct output paths for pass-through mode (TSI-807)
@@ -343,12 +342,12 @@ func (d *Database) GetJob(id string) (*Job, error) {
 	job := &Job{}
 	err := d.db.QueryRow(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error,
-	       failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+	       failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 	       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE id = ?
 	`, id).Scan(
 		&job.ID, &job.Status, &job.InputFiles, &job.Args, &job.OutputFilename, &job.StreamingOutput, &job.OutputFiles,
-		&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.Retryable, &job.AutoHW,
+		&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW,
 		&job.Timeout, &job.DirectPaths, &job.ProgressPercent, &job.EtaSeconds,
 		&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt,
 	)
@@ -577,7 +576,7 @@ func (d *Database) UpdateJobOutput(id string, outputFiles string) error {
 // GetPendingJobs retrieves all pending jobs
 func (d *Database) GetPendingJobs(limit int) ([]*Job, error) {
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ?
 		ORDER BY created_at ASC LIMIT ?
@@ -641,7 +640,7 @@ func (d *Database) scanJobs(rows *sql.Rows) ([]*Job, error) {
 		job := &Job{}
 		err := rows.Scan(
 			&job.ID, &job.Status, &job.InputFiles, &job.Args, &job.OutputFilename, &job.StreamingOutput, &job.OutputFiles,
-			&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.Retryable, &job.AutoHW,
+			&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW,
 			&job.Timeout, &job.DirectPaths, &job.ProgressPercent, &job.EtaSeconds,
 			&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt,
 		)
@@ -882,7 +881,7 @@ func (d *Database) SetWorkerIdleIfNoActiveJobs(workerID string) error {
 func (d *Database) GetJobsForWorker(workerID string, limit int) ([]*Job, error) {
 	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
 		ORDER BY created_at ASC LIMIT ?
@@ -925,7 +924,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 
 	// Get pending jobs (status = pending AND worker_id IS NULL)
 	rows, err := tx.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ? AND worker_id IS NULL
 		ORDER BY created_at ASC LIMIT ?
@@ -1147,7 +1146,7 @@ func (d *Database) UpdateWorkerStatus(id string, status protocol.WorkerStatus) e
 func (d *Database) GetTimedOutJobs(timeout time.Duration) ([]*Job, error) {
 	cutoff := time.Now().Add(-timeout)
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ? AND started_at IS NOT NULL AND started_at < ?
 	`, protocol.JobStatusRunning, cutoff)
@@ -1246,6 +1245,31 @@ func (d *Database) FailStarvedPendingJobs(cutoff time.Time, errMsg, failureType 
 	return result.RowsAffected()
 }
 
+// GetStarvedPendingJobIDs lists the IDs of pending jobs created before the
+// cutoff (the exact set FailStarvedPendingJobs fails). The scheduler uses it
+// to release rate-limit quota and broadcast WS updates per failed job — the
+// bulk UPDATE bypasses the handler that normally does both (TSI-2365).
+func (d *Database) GetStarvedPendingJobIDs(cutoff time.Time) ([]string, error) {
+	rows, err := d.db.Query(`
+		SELECT id FROM jobs
+		WHERE status = ? AND worker_id IS NULL AND created_at < ?
+	`, protocol.JobStatusPending, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list starved pending job IDs: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]string, 0, 16)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan starved job ID: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // ResetJobToPending resets a job to pending status, clearing worker assignment.
 // This is used during worker failover to re-queue a job for another worker.
 func (d *Database) ResetJobToPending(id string) error {
@@ -1254,7 +1278,8 @@ func (d *Database) ResetJobToPending(id string) error {
 	// racing a worker's completion must not drag a finished job back to
 	// pending and re-run it.
 	result, err := d.db.Exec(`
-		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?
+		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?,
+		                failure_type = '', failure_details = '', exit_code = NULL, error = NULL
 		WHERE id = ? AND status IN (?, ?, ?)
 	`, protocol.JobStatusPending, now, id,
 		protocol.JobStatusQueued, protocol.JobStatusRunning, protocol.JobStatusPending)
@@ -1366,7 +1391,7 @@ func (d *Database) RemoveStaleOfflineWorkers() (int64, error) {
 // GetJobsByStatus retrieves all jobs with a specific status
 func (d *Database) GetJobsByStatus(status protocol.JobStatus, limit int) ([]*Job, error) {
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ?
 		ORDER BY created_at ASC LIMIT ?
@@ -2082,7 +2107,7 @@ func (d *Database) GetMigrationEventsByWorker(workerID string, limit int) ([]*Mi
 func (d *Database) GetRunningJobsByWorker(workerID string) ([]*Job, error) {
 	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, retryable, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
 		ORDER BY created_at ASC

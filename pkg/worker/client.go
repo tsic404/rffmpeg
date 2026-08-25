@@ -113,17 +113,20 @@ func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string
 }
 
 // Heartbeat sends a heartbeat to the server and returns any cancelled job IDs.
-// gpuMetrics carries GPU utilization samples; zero values mean "not available"
-// and are omitted from the wire payload.
+// gpuMetrics carries GPU utilization samples. When Metrics.Valid is false the
+// GPU fields are sent as 0, which receivers treat as "no sample available";
+// a valid sample with UtilPct == 0 is a real 0% reading and must survive the
+// wire (TSI-2365).
 func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int, gpuMetrics gpu.Metrics) ([]string, error) {
 	req := protocol.WorkerHeartbeatRequest{
-		WorkerID:      c.getWorkerID(),
-		Status:        status,
-		ActiveJobs:    activeJobs,
-		ThroughputFPS: throughputFPS,
-		CompletedJobs: completedJobs,
-		GPUUtilPct:    gpuMetrics.UtilPct,
-		GPUMemUsedMB:  gpuMetrics.MemUsedMB,
+		WorkerID:        c.getWorkerID(),
+		Status:          status,
+		ActiveJobs:      activeJobs,
+		ThroughputFPS:   throughputFPS,
+		CompletedJobs:   completedJobs,
+		GPUUtilPct:      gpuMetrics.UtilPct,
+		GPUMemUsedMB:    gpuMetrics.MemUsedMB,
+		GPUMetricsValid: gpuMetrics.Valid,
 	}
 
 	resp, err := c.doRequest("POST", "/workers/heartbeat", req)
@@ -339,48 +342,57 @@ func (c *Client) SendStdoutChunk(jobID string, chunk []byte) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("send stdout chunk failed with status: %d", resp.StatusCode)
 	}
-
 	return nil
 }
 
-// UploadOutput uploads an output file to the server
+// UploadOutput uploads an output file to the server. The body is streamed
+// through a pipe with an exact Content-Length so the whole file is never
+// buffered in memory (TSI-2365).
 func (c *Client) UploadOutput(jobID, filePath string) error {
-	// Open the file
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
-	// Create multipart form
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
 
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-	if err != nil {
-		return fmt.Errorf("failed to create form file: %w", err)
-	}
+	// Feed the multipart body from a goroutine: io.Pipe is synchronous, so
+	// the writer must run concurrently with the HTTP client's reads.
+	errChan := make(chan error, 1)
+	go func() {
+		defer close(errChan)
+		part, perr := writer.CreateFormFile("file", filepath.Base(filePath))
+		if perr != nil {
+			pw.CloseWithError(fmt.Errorf("failed to create form file: %w", perr))
+			return
+		}
+		if _, cerr := io.Copy(part, file); cerr != nil {
+			pw.CloseWithError(fmt.Errorf("failed to copy file content: %w", cerr))
+			return
+		}
+		pw.CloseWithError(writer.Close())
+	}()
 
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return fmt.Errorf("failed to copy file content: %w", err)
-	}
-
-	writer.Close()
-
-	// Create request
 	url := fmt.Sprintf("%s/jobs/%s/output", c.baseURL, jobID)
-	httpReq, err := http.NewRequest("POST", url, &buf)
+	httpReq, err := http.NewRequest("POST", url, pr)
 	if err != nil {
+		pr.Close()
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
 	c.setAuthHeader(httpReq)
 	resp, err := c.dataClient.Do(httpReq)
 	if err != nil {
+		pr.Close()
 		return fmt.Errorf("failed to upload output: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if copyErr := <-errChan; copyErr != nil {
+		return copyErr
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("upload output failed with status: %d", resp.StatusCode)

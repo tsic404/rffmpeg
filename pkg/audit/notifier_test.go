@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -292,8 +293,22 @@ func TestSilentNotifier(t *testing.T) {
 	}
 }
 
+// syncBuffer is a thread-safe io.Writer for concurrency tests: the notifier
+// serializes its internal state but deliberately does not serialize writes
+// to the caller-supplied output (TSI-2365).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
 func TestNotifier_Concurrency(t *testing.T) {
-	var buf bytes.Buffer
+	var buf syncBuffer
 	n := NewNotifierWithOutput(&buf)
 
 	done := make(chan bool)

@@ -162,7 +162,7 @@ func calculateMultipartSize(boundary string, fileSize int64, filename string) in
 	// \r\n--boundary--\r\n
 
 	preamble := fmt.Sprintf("--%s\r\n", boundary)
-	contentDisposition := fmt.Sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", filename)
+	contentDisposition := fmt.Sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", escapeMultipartQuotes(filename))
 	contentType := "Content-Type: application/octet-stream\r\n"
 	headerEnd := "\r\n"
 	epilogue := fmt.Sprintf("\r\n--%s--\r\n", boundary)
@@ -170,6 +170,17 @@ func calculateMultipartSize(boundary string, fileSize int64, filename string) in
 	return int64(len(preamble)+len(contentDisposition)+len(contentType)+len(headerEnd)) +
 		fileSize +
 		int64(len(epilogue))
+}
+
+// escapeMultipartQuotes mirrors mime/multipart's internal escapeQuotes: the
+// stdlib escapes " and \ inside form-data parameter values. calculateMultipartSize
+// must measure the escaped form or a filename containing a quote yields a
+// Content-Length that disagrees with the real body and truncates the request
+// (TSI-2365).
+func escapeMultipartQuotes(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	return s
 }
 
 // SubmitJob submits a transcoding job

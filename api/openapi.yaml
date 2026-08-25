@@ -493,7 +493,10 @@ paths:
     get:
       tags: [health]
       summary: Health check
-      description: Check server health status
+      description: >-
+        Check server health status. This endpoint is exempt from
+        authentication and rate limiting so load balancers and monitoring
+        probes can call it without credentials.
       operationId: healthCheck
       responses:
         '200':
@@ -730,15 +733,28 @@ components:
         throughput_fps:
           type: number
           format: double
-          description: Encoding throughput in frames per second since the last heartbeat
+          description: >-
+            Worker throughput in jobs per second since the last heartbeat.
+            The field name is historical; the unit is jobs/second, not frames
+            per second. Always present (0 when no job completed in the window).
+        gpu_metrics_valid:
+          type: boolean
+          description: >-
+            True when gpu_util_percent / gpu_mem_used_mb carry a fresh
+            nvidia-smi sample. When false, both fields are 0 and mean "no
+            sample available", not "0% utilization".
         gpu_util_percent:
           type: number
           format: double
-          description: GPU utilization percentage sampled via nvidia-smi (omitted when unavailable)
+          description: >-
+            Aggregated GPU utilization across all GPUs of the worker: on a
+            multi-GPU host this is the SUM (two GPUs at 50% report 100), so
+            values above 100 are valid there. Meaningful only when
+            gpu_metrics_valid is true.
         gpu_mem_used_mb:
           type: integer
           format: int64
-          description: GPU memory in use, megabytes, sampled via nvidia-smi (omitted when unavailable)
+          description: Total GPU memory in use across all GPUs, megabytes. Meaningful only when gpu_metrics_valid is true.
 
     WorkerStatus:
       type: string
@@ -767,11 +783,14 @@ components:
         gpu_util_percent:
           type: number
           format: double
-          description: GPU utilization percentage (omitted when the worker reports no GPU metrics)
+          description: >-
+            Aggregated GPU utilization across all GPUs (sum; values above 100
+            are valid on multi-GPU hosts). Reflects the last valid sample;
+            stale until the next heartbeat with gpu_metrics_valid=true.
         gpu_mem_used_mb:
           type: integer
           format: int64
-          description: GPU memory in use, megabytes (omitted when the worker reports no GPU metrics)
+          description: Total GPU memory in use across all GPUs, megabytes (last valid sample).
         active_jobs:
           type: array
           items:
@@ -781,7 +800,10 @@ components:
         throughput_fps:
           type: number
           format: double
-          description: Encoding throughput in frames per second since the last heartbeat
+          description: >-
+            Worker throughput in jobs per second since the last heartbeat.
+            The field name is historical; the unit is jobs/second, not frames
+            per second.
         last_seen:
           type: string
           format: date-time

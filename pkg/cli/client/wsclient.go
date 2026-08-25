@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,7 +28,6 @@ const (
 	WSMaxReconnectDelay = 30 * time.Second
 	WSReadTimeout       = 60 * time.Second
 	WSWriteTimeout      = 10 * time.Second
-	WSHeartbeatInterval = 30 * time.Second
 )
 
 // WSClient handles WebSocket connections for real-time log streaming
@@ -164,8 +164,9 @@ func (c *WSClient) connect(ctx context.Context) error {
 	conn, resp, err := dialer.Dial(u.String(), headers)
 	if err != nil {
 		if resp != nil {
+			defer resp.Body.Close()
 			body, _ := io.ReadAll(resp.Body)
-			return fmt.Errorf("WebSocket connection failed (status %d): %s", resp.StatusCode, string(body))
+			return &HandshakeError{Status: resp.StatusCode, Body: string(body)}
 		}
 		return fmt.Errorf("WebSocket connection failed: %w", err)
 	}
@@ -185,7 +186,22 @@ func (c *WSClient) connect(ctx context.Context) error {
 	return nil
 }
 
-// ConnectWithReconnect establishes a WebSocket connection with automatic reconnection
+// HandshakeError is returned by connect when the WebSocket upgrade fails with
+// an HTTP status (e.g. 401 for a bad token). Callers use it to stop retrying
+// errors that no backoff can fix.
+type HandshakeError struct {
+	Status int
+	Body   string
+}
+
+func (e *HandshakeError) Error() string {
+	return fmt.Sprintf("WebSocket connection failed (status %d): %s", e.Status, e.Body)
+}
+
+// ConnectWithReconnect establishes a WebSocket connection with automatic reconnection.
+// Transient failures retry with exponential backoff; a 4xx handshake rejection
+// (bad token, unknown job, forbidden) is permanent and aborts immediately —
+// no retry interval can fix it.
 func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 	reconnectDelay := WSReconnectDelay
 
@@ -201,6 +217,11 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 		err := c.connect(ctx)
 		if err == nil {
 			return nil
+		}
+
+		var hsErr *HandshakeError
+		if errors.As(err, &hsErr) && hsErr.Status >= 400 && hsErr.Status < 500 {
+			return err
 		}
 
 		log.Printf("WebSocket connection failed: %v, retrying in %v...", err, reconnectDelay)

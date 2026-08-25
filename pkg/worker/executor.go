@@ -302,9 +302,11 @@ var networkPrefixes = []string{
 // It checks both the output path string (which may contain the URL in shared-FS mode)
 // and the args list (where the URL may appear after the -- separator in non-shared-FS mode).
 func isNetworkOutput(outputPath string, args []string) bool {
-	// Check output path for network URL prefixes
+	// Check output path for network URL prefixes. HasPrefix, not Contains: a
+	// local path that merely contains "http://" (e.g. /data/http://x.mp4) is
+	// not a network output and its file must still be validated (TSI-2365).
 	for _, prefix := range networkPrefixes {
-		if strings.Contains(outputPath, prefix) {
+		if strings.HasPrefix(outputPath, prefix) {
 			return true
 		}
 	}

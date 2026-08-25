@@ -10,6 +10,7 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/server/db"
 	"github.com/tsix404/rffmpeg/pkg/server/migration"
+	"github.com/tsix404/rffmpeg/pkg/server/ratelimit"
 )
 
 // Config holds the configuration for the scheduler
@@ -46,14 +47,44 @@ func DefaultConfig() Config {
 	}
 }
 
+// JobBroadcaster pushes terminal-state WebSocket updates for jobs that reach
+// a terminal status outside the HTTP handler path (starvation sweep). The
+// websocket.Hub satisfies it; an interface keeps scheduler decoupled from
+// the hub package (TSI-2365).
+type JobBroadcaster interface {
+	BroadcastStatus(jobID string, status protocol.JobStatus, exitCode int, err string) error
+}
+
+// SetRateLimiter wires the rate limiter so quota is released for jobs failed
+// outside the HTTP handler path (TSI-2365).
+func (s *Scheduler) SetRateLimiter(counter ratelimit.ClientJobCounter) {
+	s.rateLimiter = counter
+}
+
+// SetJobNotifier wires the WS broadcaster for out-of-band job failures.
+func (s *Scheduler) SetJobNotifier(n JobBroadcaster) {
+	s.jobNotifier = n
+}
+
 // Scheduler manages job scheduling and timeout detection
 type Scheduler struct {
-	db      *db.Database
-	config  Config
-	stop    chan struct{}
-	done    chan struct{}
-	mu      sync.Mutex
-	resched chan struct{} // Channel to trigger immediate rescheduling
+	db       *db.Database
+	config   Config
+	stop     chan struct{}
+	done     chan struct{}
+	mu       sync.Mutex
+	started  bool          // Set by Start; guards the Stop-before-Start path
+	resched  chan struct{} // Channel to trigger immediate rescheduling
+	stopOnce sync.Once     // Guarantees Stop is idempotent (TSI-2365)
+
+	// rateLimiter releases the per-client quota of jobs failed outside the
+	// HTTP handler path (e.g. starvation sweep). Optional: nil skips release
+	// (TSI-2365).
+	rateLimiter ratelimit.ClientJobCounter
+
+	// jobNotifier broadcasts terminal-state WS messages for jobs failed
+	// outside the HTTP handler path. Optional: nil skips broadcast.
+	jobNotifier JobBroadcaster
 
 	// noWorkerEnabled mirrors config.NoWorkerJobTimeout > 0; captured at
 	// construction so the loop never sees a torn config read.
@@ -74,13 +105,29 @@ func New(database *db.Database, config Config) *Scheduler {
 
 // Start begins the scheduler loop
 func (s *Scheduler) Start() {
+	s.mu.Lock()
+	s.started = true
+	s.mu.Unlock()
 	go s.run()
 }
 
-// Stop stops the scheduler
+// Stop stops the scheduler and waits for the loop to exit. Idempotent, and
+// safe to call before Start: when the loop goroutine never launched, done is
+// closed here so Stop neither double-closes nor blocks forever (TSI-2365).
 func (s *Scheduler) Stop() {
-	close(s.stop)
-	<-s.done
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		started := s.started
+		if !started {
+			close(s.done) // no loop will ever close it
+		}
+		s.mu.Unlock()
+
+		close(s.stop)
+		if started {
+			<-s.done
+		}
+	})
 }
 
 // run is the main scheduler loop
@@ -408,6 +455,17 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 	errMsg := fmt.Sprintf(
 		"no worker available for over %s (all workers offline or evicted); submit again once a worker is online",
 		s.config.NoWorkerJobTimeout)
+
+	// The bulk UPDATE bypasses the HTTP handler that normally releases the
+	// per-client quota and broadcasts the terminal status. Do both here, or
+	// clients get stuck behind a permanently inflated counter and CLI
+	// listeners never learn their job died (TSI-2365).
+	starvedIDs, err := s.db.GetStarvedPendingJobIDs(cutoff)
+	if err != nil {
+		log.Printf("Scheduler: Failed to list starved pending jobs: %v", err)
+		return
+	}
+
 	failed, err := s.db.FailStarvedPendingJobs(cutoff, errMsg, string(protocol.FailureNoWorkerAvailable))
 	if err != nil {
 		log.Printf("Scheduler: Failed to fail starved pending jobs: %v", err)
@@ -416,5 +474,16 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 	if failed > 0 {
 		log.Printf("Scheduler: Failed %d starved job(s) after waiting %s with no schedulable worker",
 			failed, s.config.NoWorkerJobTimeout)
+
+		for _, jobID := range starvedIDs {
+			if s.rateLimiter != nil {
+				s.rateLimiter.DecrementByJob(jobID)
+			}
+			if s.jobNotifier != nil {
+				if err := s.jobNotifier.BroadcastStatus(jobID, protocol.JobStatusFailed, -1, errMsg); err != nil {
+					log.Printf("Scheduler: Failed to broadcast starvation failure for job %s: %v", jobID, err)
+				}
+			}
+		}
 	}
 }

@@ -13,11 +13,12 @@ import (
 // Metrics holds point-in-time GPU utilization metrics.
 // On multi-GPU hosts the values are summed across all GPUs, so UtilPct is an
 // aggregate busyness (two GPUs at 50% report 100), not a per-device average.
-// Zero values mean "not available" and are omitted from JSON payloads (see
-// the omitempty tags on the heartbeat request).
+// Valid reports whether the sample came from a successful nvidia-smi query;
+// a valid sample with UtilPct == 0 is a real 0% reading, not "unavailable".
 type Metrics struct {
 	UtilPct   float64 // Summed GPU utilization percentage across all GPUs (0-100*N)
 	MemUsedMB int     // Total GPU memory in use across all GPUs, megabytes
+	Valid     bool    // True when sampled successfully; zero Metrics means unavailable
 }
 
 // SampleMetrics queries GPU utilization via nvidia-smi. Returns zero Metrics
@@ -77,5 +78,6 @@ func (d *Detector) sampleNVIDIAMetrics() (m Metrics, ok bool) {
 			m.MemUsedMB += mem
 		}
 	}
+	m.Valid = true
 	return m, true
 }

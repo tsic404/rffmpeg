@@ -12,14 +12,15 @@ func TestWorkerStateTable_UpdateAndGet(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 
 	payload := protocol.WorkerHeartbeatPayload{
-		WorkerID:      "worker-1",
-		Status:        "online",
-		GPUUtilPct:    75.5,
-		GPUMemUsedMB:  4096,
-		ActiveJobs:    []string{"job-1", "job-2"},
-		ThroughputFPS: 120.0,
-		QueueDepth:    3,
-		Timestamp:     time.Now(),
+		WorkerID:        "worker-1",
+		Status:          "online",
+		GPUUtilPct:      75.5,
+		GPUMemUsedMB:    4096,
+		GPUMetricsValid: true,
+		ActiveJobs:      []string{"job-1", "job-2"},
+		ThroughputFPS:   120.0,
+		QueueDepth:      3,
+		Timestamp:       time.Now(),
 	}
 
 	table.UpdateFromHeartbeat(payload)

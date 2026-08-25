@@ -3,6 +3,7 @@ package workerhealth
 import (
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
@@ -18,12 +19,15 @@ type Config struct {
 	MaxRetryCount       int // Maximum retry count for job migration
 }
 
-// DefaultConfig returns the default configuration
+// DefaultConfig returns the default configuration. HeartbeatTimeout must
+// match ServerConfig.WorkerHeartbeatTimeout (pkg/config): two different
+// defaults for the same knob caused drift between the monitor and the rest
+// of the server (TSI-2365).
 func DefaultConfig() Config {
 	return Config{
-		HeartbeatTimeout:    30 * time.Second, // 30 seconds as per requirement
+		HeartbeatTimeout:    90 * time.Second,
 		OfflineThreshold:    10 * time.Minute,
-		HealthCheckInterval: 10 * time.Second, // Check every 10 seconds for faster detection
+		HealthCheckInterval: 30 * time.Second,
 		MaxRetryCount:       3,
 	}
 }
@@ -34,6 +38,9 @@ type Monitor struct {
 	config     Config
 	stop       chan struct{}
 	done       chan struct{}
+	mu         sync.Mutex
+	started    bool      // Set by Start; guards the Stop-before-Start path
+	stopOnce   sync.Once // Guarantees Stop is idempotent (TSI-2365)
 	sched      SchedulerInterface
 	stateTable *WorkerStateTable // Optional: enables slow node detection
 }
@@ -67,13 +74,29 @@ func (m *Monitor) SetStateTable(st *WorkerStateTable) {
 
 // Start begins the health monitoring loop
 func (m *Monitor) Start() {
+	m.mu.Lock()
+	m.started = true
+	m.mu.Unlock()
 	go m.run()
 }
 
-// Stop stops the health monitor
+// Stop stops the health monitor. Idempotent, and safe to call before Start:
+// when the loop goroutine never launched, done is closed here so Stop neither
+// double-closes nor blocks forever (TSI-2365).
 func (m *Monitor) Stop() {
-	close(m.stop)
-	<-m.done
+	m.stopOnce.Do(func() {
+		m.mu.Lock()
+		started := m.started
+		if !started {
+			close(m.done) // no loop will ever close it
+		}
+		m.mu.Unlock()
+
+		close(m.stop)
+		if started {
+			<-m.done
+		}
+	})
 }
 
 // run is the main monitoring loop

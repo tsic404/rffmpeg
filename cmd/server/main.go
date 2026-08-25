@@ -152,6 +152,12 @@ func main() {
 		// install github.com/redis/go-redis/v9 and create a RedisCounter implementation.
 	}
 
+	// Scheduler releases rate-limit quota and broadcasts WS status for jobs
+	// it fails out-of-band (starvation sweep) — the handler path that normally
+	// does both is bypassed by the bulk DB update (TSI-2365).
+	jobScheduler.SetRateLimiter(h.GetRateLimiter())
+	jobScheduler.SetJobNotifier(h.GetWSHub())
+
 	// Setup router
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -232,8 +238,13 @@ func main() {
 		// Health check
 		r.Get("/health", h.Health)
 
-		// Probe (ffprobe sync endpoint)
-		r.Post("/probe", h.Probe)
+		// Probe (ffprobe sync endpoint) — behind the job-submission rate
+		// limiter: a probe dispatches real work, so an unthrottled client can
+		// starve the queue just like unbounded job submissions (TSI-2365).
+		r.Group(func(r chi.Router) {
+			r.Use(ratelimit.JobSubmitMiddleware(h.GetRateLimiter(), rateLimitCfg))
+			r.Post("/probe", h.Probe)
+		})
 	})
 
 	// Admin routes (outside /api/v1, separate prefix)

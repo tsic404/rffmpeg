@@ -467,6 +467,8 @@ func TestMultipartSizeCalculation(t *testing.T) {
 		{"small file", 100, "test.mp4"},
 		{"medium file", 1024 * 1024, "video.mkv"},
 		{"large file", 100 * 1024 * 1024, "large-video.mp4"},
+		{"filename with quote", 512, `my"file.mp4`},
+		{"filename with backslash", 512, `dir\name.mp4`},
 	}
 
 	for _, tc := range testCases {
@@ -507,10 +509,12 @@ func TestMultipartSizeCalculation(t *testing.T) {
 	}
 }
 
-// calculateMultipartSizeForTest is a copy of the function for testing
+// calculateMultipartSizeForTest mirrors the production calculation, including
+// the quote escaping added in TSI-2365.
 func calculateMultipartSizeForTest(boundary string, fileSize int64, filename string) int64 {
+	escaped := strings.ReplaceAll(strings.ReplaceAll(filename, "\\", "\\\\"), "\"", "\\\"")
 	preamble := fmt.Sprintf("--%s\r\n", boundary)
-	contentDisposition := fmt.Sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", filename)
+	contentDisposition := fmt.Sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", escaped)
 	contentType := "Content-Type: application/octet-stream\r\n"
 	headerEnd := "\r\n"
 	epilogue := fmt.Sprintf("\r\n--%s--\r\n", boundary)

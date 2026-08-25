@@ -50,15 +50,16 @@ type WSProgressPayload struct {
 
 // WorkerHeartbeatPayload carries detailed worker metrics for heartbeat messages (TSI-756).
 type WorkerHeartbeatPayload struct {
-	WorkerID      string    `json:"worker_id"`
-	Status        string    `json:"status"`
-	GPUUtilPct    float64   `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB  int       `json:"gpu_mem_used_mb,omitempty"`
-	ActiveJobs    []string  `json:"active_jobs,omitempty"`
-	ThroughputFPS float64   `json:"throughput_fps,omitempty"`
-	QueueDepth    int       `json:"queue_depth,omitempty"`
-	CompletedJobs int       `json:"completed_jobs,omitempty"`
-	Timestamp     time.Time `json:"timestamp"`
+	WorkerID        string    `json:"worker_id"`
+	Status          string    `json:"status"`
+	GPUUtilPct      float64   `json:"gpu_util_percent"` // Aggregated across all GPUs (0-100*N); 0 is a valid reading
+	GPUMemUsedMB    int       `json:"gpu_mem_used_mb"`
+	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPUUtilPct/GPUMemUsedMB carry a fresh sample
+	ActiveJobs      []string  `json:"active_jobs,omitempty"`
+	ThroughputFPS   float64   `json:"throughput_fps"` // Jobs completed per second since the last heartbeat (legacy name kept for wire compatibility)
+	QueueDepth      int       `json:"queue_depth"`
+	CompletedJobs   int       `json:"completed_jobs"`
+	Timestamp       time.Time `json:"timestamp"`
 }
 
 func NewWSMessage(msgType WSMessageType, jobID string) WSMessage {

@@ -28,93 +28,146 @@ const (
 
 var version = "1.0.0"
 
-// parseArgs extracts rffmpeg-specific options from command-line arguments.
-// Returns: (rffmpegOpts, ffmpegArgs, shouldExit, exitCode)
-// rffmpegOpts contains: serverURL, token, quiet, showHelp, showVersion, autoHW
-// isProbe is true when the first positional argument is "probe".
-// probeInput is the file argument for the probe subcommand.
-// show* flags are true when the respective info flag is set.
-func parseArgs(argList []string) (serverURL, token string, quiet, showHelp, showVersion, autoHW, isProbe bool, probeInput string, timeout time.Duration, showEncoders, showDecoders, showCodecs, showHwaccels, showFilters, showPixFmts, showFormats, showBuildconf, showLayouts, showProtocols, showSampleFmts, showBsfs, showColors, showJSON bool, ffmpegArgs []string) {
-	ffmpegArgs = make([]string, 0)
-	positionalArgs := make([]string, 0)
+// Options holds the rffmpeg-specific options extracted from the command line.
+type Options struct {
+	ServerURL   string
+	Token       string
+	Quiet       bool
+	ShowHelp    bool
+	ShowVersion bool
+	AutoHW      bool
+	IsProbe     bool
+	ProbeInput  string
+	Timeout     time.Duration
+	FmpegArgs   []string
 
-	// First pass: extract rffmpeg-specific options and collect positional arguments.
-	// Positional arguments are anything not consumed as an rffmpeg option or its value.
+	// Info flags
+	ShowEncoders   bool
+	ShowDecoders   bool
+	ShowCodecs     bool
+	ShowHwaccels   bool
+	ShowFilters    bool
+	ShowPixFmts    bool
+	ShowFormats    bool
+	ShowBuildconf  bool
+	ShowLayouts    bool
+	ShowProtocols  bool
+	ShowSampleFmts bool
+	ShowBsfs       bool
+	ShowColors     bool
+	ShowJSON       bool
+}
+
+// parseArgs extracts rffmpeg-specific options from command-line arguments.
+// Everything after a bare "--" separator is passed through to ffmpeg verbatim.
+// An rffmpeg flag that requires a value but finds none is a hard error (the
+// previous silent fallback to defaults masked typos like "-server" with no URL).
+func parseArgs(argList []string) (*Options, error) {
+	opts := &Options{FmpegArgs: make([]string, 0)}
+	positionalArgs := make([]string, 0)
+	seen := make(map[string]bool)
+
+	warnDuplicate := func(flag string) {
+		if seen[flag] {
+			fmt.Fprintf(os.Stderr, "Warning: %s specified multiple times; last occurrence wins\n", flag)
+		}
+		seen[flag] = true
+	}
+
+	needValue := func(i int, flag string) (string, error) {
+		if i+1 >= len(argList) {
+			return "", fmt.Errorf("flag %s requires a value", flag)
+		}
+		return argList[i+1], nil
+	}
+
 	for i := 0; i < len(argList); i++ {
 		arg := argList[i]
 
 		switch arg {
+		case "--":
+			// Pass everything after "--" to ffmpeg verbatim.
+			opts.FmpegArgs = append(opts.FmpegArgs, positionalArgs...)
+			positionalArgs = positionalArgs[:0]
+			opts.FmpegArgs = append(opts.FmpegArgs, argList[i+1:]...)
+			i = len(argList)
+
 		case "--help", "-help":
-			showHelp = true
+			opts.ShowHelp = true
 		case "--version", "-version":
-			showVersion = true
+			opts.ShowVersion = true
 		case "--json":
-			showJSON = true
+			opts.ShowJSON = true
 		case "--server", "-server":
-			if i+1 < len(argList) {
-				serverURL = argList[i+1]
-				i++ // skip value
+			val, err := needValue(i, arg)
+			if err != nil {
+				return nil, err
 			}
+			warnDuplicate(arg)
+			opts.ServerURL = val
+			i++
 		case "--token", "-token":
-			if i+1 < len(argList) {
-				token = argList[i+1]
-				i++ // skip value
+			val, err := needValue(i, arg)
+			if err != nil {
+				return nil, err
 			}
+			warnDuplicate(arg)
+			opts.Token = val
+			i++
 		case "-q", "--quiet", "-quiet":
-			quiet = true
-		case "--auto-hw", "-auto-hw":
-			autoHW = true
-		case "--auto-hw=true", "-auto-hw=true":
-			autoHW = true
+			opts.Quiet = true
+		case "--auto-hw", "-auto-hw", "--auto-hw=true", "-auto-hw=true":
+			opts.AutoHW = true
 		case "--auto-hw=false", "-auto-hw=false":
-			autoHW = false
+			opts.AutoHW = false
 		case "--timeout", "-timeout":
-			if i+1 < len(argList) {
-				parsed, err := time.ParseDuration(argList[i+1])
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid timeout value: %s (use format like 30s, 5m, 2h)\n", argList[i+1])
-					os.Exit(1)
-				}
-				if parsed <= 0 {
-					fmt.Fprintf(os.Stderr, "Error: timeout must be positive: %s\n", argList[i+1])
-					os.Exit(1)
-				}
-				timeout = parsed
-				i++ // skip value
+			val, err := needValue(i, arg)
+			if err != nil {
+				return nil, err
 			}
+			parsed, perr := time.ParseDuration(val)
+			if perr != nil {
+				return nil, fmt.Errorf("invalid timeout value: %s (use format like 30s, 5m, 2h)", val)
+			}
+			if parsed <= 0 {
+				return nil, fmt.Errorf("timeout must be positive: %s", val)
+			}
+			warnDuplicate(arg)
+			opts.Timeout = parsed
+			i++
 
 		case "-encoders", "--encoders":
-			showEncoders = true
+			opts.ShowEncoders = true
 		case "-decoders", "--decoders":
-			showDecoders = true
+			opts.ShowDecoders = true
 		case "-codecs", "--codecs":
-			showCodecs = true
+			opts.ShowCodecs = true
 		case "-hwaccels", "--hwaccels":
-			showHwaccels = true
+			opts.ShowHwaccels = true
 		case "-filters", "--filters":
-			showFilters = true
+			opts.ShowFilters = true
 		case "-pix_fmts", "--pix_fmts":
-			showPixFmts = true
+			opts.ShowPixFmts = true
 		case "-formats", "--formats":
-			showFormats = true
+			opts.ShowFormats = true
 		case "-buildconf", "--buildconf":
-			showBuildconf = true
+			opts.ShowBuildconf = true
 		case "-layouts", "--layouts":
-			showLayouts = true
+			opts.ShowLayouts = true
 		case "-protocols", "--protocols":
-			showProtocols = true
+			opts.ShowProtocols = true
 		case "-sample_fmts", "--sample_fmts":
-			showSampleFmts = true
+			opts.ShowSampleFmts = true
 		case "-bsfs", "--bsfs":
-			showBsfs = true
+			opts.ShowBsfs = true
 		case "-colors", "--colors":
-			showColors = true
+			opts.ShowColors = true
 		case "-h":
 			// -h is ambiguous: could be rffmpeg help or ffmpeg help
 			// If there are other args, treat as ffmpeg arg
 			// If alone, treat as rffmpeg help
 			if len(argList) == 1 || (len(argList) == 2 && argList[len(argList)-1] == "-h") {
-				showHelp = true
+				opts.ShowHelp = true
 			} else {
 				positionalArgs = append(positionalArgs, arg)
 			}
@@ -127,33 +180,33 @@ func parseArgs(argList []string) (serverURL, token string, quiet, showHelp, show
 	// Check if first positional argument is "probe" subcommand.
 	// The probe subcommand can appear after rffmpeg options (e.g. -q probe file.mp4).
 	if len(positionalArgs) > 0 && positionalArgs[0] == "probe" {
-		isProbe = true
+		opts.IsProbe = true
 		positionalArgs = positionalArgs[1:]
 
-		// Everything after "probe" goes to ffmpegArgs; first arg is the probe input.
+		// Everything after "probe" goes to FmpegArgs; first arg is the probe input.
 		// Support both "probe <file>" and "probe -i <file>" syntax.
-		ffmpegArgs = positionalArgs
-		if len(ffmpegArgs) > 0 {
-			if ffmpegArgs[0] == "-i" {
+		opts.FmpegArgs = positionalArgs
+		if len(opts.FmpegArgs) > 0 {
+			if opts.FmpegArgs[0] == "-i" {
 				// Skip the -i flag and use next arg as probe input
-				if len(ffmpegArgs) >= 2 {
-					probeInput = ffmpegArgs[1]
-					ffmpegArgs = ffmpegArgs[2:]
+				if len(opts.FmpegArgs) >= 2 {
+					opts.ProbeInput = opts.FmpegArgs[1]
+					opts.FmpegArgs = opts.FmpegArgs[2:]
 				} else {
-					// "-i" without a value — skip it, probeInput remains empty
-					ffmpegArgs = ffmpegArgs[1:]
+					// "-i" without a value — skip it, ProbeInput remains empty
+					opts.FmpegArgs = opts.FmpegArgs[1:]
 				}
 			} else {
-				probeInput = ffmpegArgs[0]
-				ffmpegArgs = ffmpegArgs[1:]
+				opts.ProbeInput = opts.FmpegArgs[0]
+				opts.FmpegArgs = opts.FmpegArgs[1:]
 			}
 		}
 	} else {
 		// Not a probe subcommand — all positional args are ffmpeg args
-		ffmpegArgs = positionalArgs
+		opts.FmpegArgs = append(opts.FmpegArgs, positionalArgs...)
 	}
 
-	return serverURL, token, quiet, showHelp, showVersion, autoHW, isProbe, probeInput, timeout, showEncoders, showDecoders, showCodecs, showHwaccels, showFilters, showPixFmts, showFormats, showBuildconf, showLayouts, showProtocols, showSampleFmts, showBsfs, showColors, showJSON, ffmpegArgs
+	return opts, nil
 }
 
 func main() {
@@ -162,66 +215,73 @@ func main() {
 
 func run() int {
 	// Parse command-line arguments manually
-	serverURL, token, quiet, showHelp, showVersion, autoHW, isProbe, probeInput, timeout, showEncoders, showDecoders, showCodecs, showHwaccels, showFilters, showPixFmts, showFormats, showBuildconf, showLayouts, showProtocols, showSampleFmts, showBsfs, showColors, showJSON, ffmpegArgs := parseArgs(os.Args[1:])
+	opts, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		printUsage()
+		return ExitError
+	}
 
-	if showHelp {
+	if opts.ShowHelp {
 		printUsage()
 		return ExitSuccess
 	}
 
-	if showVersion {
+	if opts.ShowVersion {
 		fmt.Printf("rffmpeg %s\n", version)
 		return ExitSuccess
 	}
 
 	// Handle -encoders / -decoders flags (no -i input file required)
-	if showEncoders {
-		return runEncoders(serverURL, token, showJSON)
+	if opts.ShowEncoders {
+		return runEncoders(opts.ServerURL, opts.Token, opts.ShowJSON)
 	}
-	if showDecoders {
-		return runDecoders(serverURL, token, showJSON)
+	if opts.ShowDecoders {
+		return runDecoders(opts.ServerURL, opts.Token, opts.ShowJSON)
 	}
-	if showCodecs {
-		return runCodecsFromServer(serverURL, token, showJSON)
+	if opts.ShowCodecs {
+		return runCodecsFromServer(opts.ServerURL, opts.Token, opts.ShowJSON)
 	}
-	if showHwaccels {
-		return runHwaccels(serverURL, token, showJSON)
+	if opts.ShowHwaccels {
+		return runHwaccels(opts.ServerURL, opts.Token, opts.ShowJSON)
 	}
 
 	// P1 info flags: filters, pix_fmts, formats (call Server API)
-	if showFilters {
-		return runFilters(serverURL, token, showJSON)
+	if opts.ShowFilters {
+		return runFilters(opts.ServerURL, opts.Token, opts.ShowJSON)
 	}
-	if showPixFmts {
-		return runPixFmts(serverURL, token, showJSON)
+	if opts.ShowPixFmts {
+		return runPixFmts(opts.ServerURL, opts.Token, opts.ShowJSON)
 	}
-	if showFormats {
-		return runFormats(serverURL, token, showJSON)
+	if opts.ShowFormats {
+		return runFormats(opts.ServerURL, opts.Token, opts.ShowJSON)
 	}
 
 	// P2 info flags: buildconf, layouts, protocols, sample_fmts, bsfs, colors
 	// Run local ffmpeg for these since no server API endpoint exists
-	if showBuildconf {
+	if opts.ShowBuildconf {
 		return runLocalFfmpegInfo("-buildconf")
 	}
-	if showLayouts {
+	if opts.ShowLayouts {
 		return runLocalFfmpegInfo("-layouts")
 	}
-	if showProtocols {
+	if opts.ShowProtocols {
 		return runLocalFfmpegInfo("-protocols")
 	}
-	if showSampleFmts {
+	if opts.ShowSampleFmts {
 		return runLocalFfmpegInfo("-sample_fmts")
 	}
-	if showBsfs {
+	if opts.ShowBsfs {
 		return runLocalFfmpegInfo("-bsfs")
 	}
-	if showColors {
+	if opts.ShowColors {
 		return runLocalFfmpegInfo("-colors")
 	}
 
+	ffmpegArgs := opts.FmpegArgs
+
 	// If no ffmpeg args and not in probe mode, show help instead of connecting to server
-	if !isProbe && len(ffmpegArgs) == 0 {
+	if !opts.IsProbe && len(ffmpegArgs) == 0 {
 		printUsage()
 		return ExitSuccess
 	}
@@ -234,16 +294,16 @@ func run() int {
 	}
 
 	// Override config with command-line flags
-	if serverURL != "" {
-		cfg.ServerURL = serverURL
+	if opts.ServerURL != "" {
+		cfg.ServerURL = opts.ServerURL
 	}
-	if token != "" {
-		cfg.Token = token
+	if opts.Token != "" {
+		cfg.Token = opts.Token
 	}
 
 	// Detect shared filesystem mode
 	sharedFS := cfg.IsSharedFS()
-	if sharedFS && !quiet {
+	if sharedFS && !opts.Quiet {
 		fmt.Fprintln(os.Stderr, "Shared filesystem mode enabled: skipping upload/download")
 	}
 
@@ -257,9 +317,19 @@ func run() int {
 	}
 
 	// --- Probe subcommand ---
-	if isProbe {
-		return runProbe(cli, probeInput, quiet, sharedFS)
+	if opts.IsProbe {
+		return runProbe(cli, opts.ProbeInput, opts.Quiet, sharedFS)
 	}
+
+	return runTranscode(cli, cfg, opts, ffmpegArgs, sharedFS)
+}
+
+// runTranscode submits the transcoding job described by opts/ffmpegArgs and
+// waits for it, streaming logs and downloading outputs.
+func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegArgs []string, sharedFS bool) int {
+	quiet := opts.Quiet
+	autoHW := opts.AutoHW
+	timeout := opts.Timeout
 
 	// Parse ffmpeg arguments
 	parser := args.NewParser()

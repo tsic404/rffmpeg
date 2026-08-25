@@ -104,31 +104,34 @@ func TestParseArgs_SingleDashOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			serverURL, token, quiet, showHelp, showVersion, autoHW, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, ffmpegArgs := parseArgs(tt.args)
-			if serverURL != tt.wantServerURL {
-				t.Errorf("serverURL = %q, want %q", serverURL, tt.wantServerURL)
+			opts, err := parseArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
 			}
-			if token != tt.wantToken {
-				t.Errorf("token = %q, want %q", token, tt.wantToken)
+			if opts.ServerURL != tt.wantServerURL {
+				t.Errorf("serverURL = %q, want %q", opts.ServerURL, tt.wantServerURL)
 			}
-			if quiet != tt.wantQuiet {
-				t.Errorf("quiet = %v, want %v", quiet, tt.wantQuiet)
+			if opts.Token != tt.wantToken {
+				t.Errorf("token = %q, want %q", opts.Token, tt.wantToken)
 			}
-			if showHelp != tt.wantShowHelp {
-				t.Errorf("showHelp = %v, want %v", showHelp, tt.wantShowHelp)
+			if opts.Quiet != tt.wantQuiet {
+				t.Errorf("quiet = %v, want %v", opts.Quiet, tt.wantQuiet)
 			}
-			if showVersion != tt.wantShowVersion {
-				t.Errorf("showVersion = %v, want %v", showVersion, tt.wantShowVersion)
+			if opts.ShowHelp != tt.wantShowHelp {
+				t.Errorf("showHelp = %v, want %v", opts.ShowHelp, tt.wantShowHelp)
 			}
-			if autoHW != tt.wantAutoHW {
-				t.Errorf("autoHW = %v, want %v", autoHW, tt.wantAutoHW)
+			if opts.ShowVersion != tt.wantShowVersion {
+				t.Errorf("showVersion = %v, want %v", opts.ShowVersion, tt.wantShowVersion)
 			}
-			if len(ffmpegArgs) != len(tt.wantFfmpegArgs) {
-				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(ffmpegArgs), len(tt.wantFfmpegArgs), ffmpegArgs)
+			if opts.AutoHW != tt.wantAutoHW {
+				t.Errorf("autoHW = %v, want %v", opts.AutoHW, tt.wantAutoHW)
+			}
+			if len(opts.FmpegArgs) != len(tt.wantFfmpegArgs) {
+				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(opts.FmpegArgs), len(tt.wantFfmpegArgs), opts.FmpegArgs)
 			} else {
-				for i := range ffmpegArgs {
-					if ffmpegArgs[i] != tt.wantFfmpegArgs[i] {
-						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, ffmpegArgs[i], tt.wantFfmpegArgs[i])
+				for i := range opts.FmpegArgs {
+					if opts.FmpegArgs[i] != tt.wantFfmpegArgs[i] {
+						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], tt.wantFfmpegArgs[i])
 					}
 				}
 			}
@@ -171,16 +174,19 @@ func TestParseArgs_CodecsFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, _, _, _, _, showCodecs, _, _, _, _, _, _, _, _, _, _, _, ffmpegArgs := parseArgs(tt.args)
-			if showCodecs != tt.wantShowCodecs {
-				t.Errorf("showCodecs = %v, want %v", showCodecs, tt.wantShowCodecs)
+			opts, err := parseArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
 			}
-			if len(ffmpegArgs) != len(tt.wantFfmpegArgs) {
-				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(ffmpegArgs), len(tt.wantFfmpegArgs), ffmpegArgs)
+			if opts.ShowCodecs != tt.wantShowCodecs {
+				t.Errorf("showCodecs = %v, want %v", opts.ShowCodecs, tt.wantShowCodecs)
+			}
+			if len(opts.FmpegArgs) != len(tt.wantFfmpegArgs) {
+				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(opts.FmpegArgs), len(tt.wantFfmpegArgs), opts.FmpegArgs)
 			} else {
-				for i := range ffmpegArgs {
-					if ffmpegArgs[i] != tt.wantFfmpegArgs[i] {
-						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, ffmpegArgs[i], tt.wantFfmpegArgs[i])
+				for i := range opts.FmpegArgs {
+					if opts.FmpegArgs[i] != tt.wantFfmpegArgs[i] {
+						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], tt.wantFfmpegArgs[i])
 					}
 				}
 			}
@@ -291,27 +297,30 @@ func TestParseArgs_ProbeSubcommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			serverURL, _, quiet, _, _, _, isProbe, probeInput, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, ffmpegArgs := parseArgs(tt.args)
-			if isProbe != tt.wantIsProbe {
-				t.Errorf("isProbe = %v, want %v", isProbe, tt.wantIsProbe)
+			opts, err := parseArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
 			}
-			if probeInput != tt.wantProbeInput {
-				t.Errorf("probeInput = %q, want %q", probeInput, tt.wantProbeInput)
+			if opts.IsProbe != tt.wantIsProbe {
+				t.Errorf("isProbe = %v, want %v", opts.IsProbe, tt.wantIsProbe)
 			}
-			if len(ffmpegArgs) != len(tt.wantFfmpegArgs) {
-				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(ffmpegArgs), len(tt.wantFfmpegArgs), ffmpegArgs)
+			if opts.ProbeInput != tt.wantProbeInput {
+				t.Errorf("probeInput = %q, want %q", opts.ProbeInput, tt.wantProbeInput)
+			}
+			if len(opts.FmpegArgs) != len(tt.wantFfmpegArgs) {
+				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(opts.FmpegArgs), len(tt.wantFfmpegArgs), opts.FmpegArgs)
 			} else {
-				for i := range ffmpegArgs {
-					if ffmpegArgs[i] != tt.wantFfmpegArgs[i] {
-						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, ffmpegArgs[i], tt.wantFfmpegArgs[i])
+				for i := range opts.FmpegArgs {
+					if opts.FmpegArgs[i] != tt.wantFfmpegArgs[i] {
+						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], tt.wantFfmpegArgs[i])
 					}
 				}
 			}
-			if serverURL != tt.wantServerURL {
-				t.Errorf("serverURL = %q, want %q", serverURL, tt.wantServerURL)
+			if opts.ServerURL != tt.wantServerURL {
+				t.Errorf("serverURL = %q, want %q", opts.ServerURL, tt.wantServerURL)
 			}
-			if quiet != tt.wantQuiet {
-				t.Errorf("quiet = %v, want %v", quiet, tt.wantQuiet)
+			if opts.Quiet != tt.wantQuiet {
+				t.Errorf("quiet = %v, want %v", opts.Quiet, tt.wantQuiet)
 			}
 		})
 	}
@@ -446,47 +455,49 @@ func TestParseArgs_NewInfoFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, _, _, showEncoders, showDecoders, showCodecs, showHwaccels, showFilters, showPixFmts, showFormats, showBuildconf, showLayouts, showProtocols, showSampleFmts, showBsfs, showColors, showJSON, _ := parseArgs(tt.args)
-			if showEncoders != tt.wantEncoders {
-				t.Errorf("showEncoders = %v, want %v", showEncoders, tt.wantEncoders)
+			opts, err := parseArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
 			}
-			if showDecoders != tt.wantDecoders {
-				t.Errorf("showDecoders = %v, want %v", showDecoders, tt.wantDecoders)
+			if opts.ShowEncoders != tt.wantEncoders {
+				t.Errorf("showEncoders = %v, want %v", opts.ShowEncoders, tt.wantEncoders)
 			}
-			if showHwaccels != tt.wantHwaccels {
-				t.Errorf("showHwaccels = %v, want %v", showHwaccels, tt.wantHwaccels)
+			if opts.ShowDecoders != tt.wantDecoders {
+				t.Errorf("showDecoders = %v, want %v", opts.ShowDecoders, tt.wantDecoders)
 			}
-			if showFilters != tt.wantFilters {
-				t.Errorf("showFilters = %v, want %v", showFilters, tt.wantFilters)
+			if opts.ShowHwaccels != tt.wantHwaccels {
+				t.Errorf("showHwaccels = %v, want %v", opts.ShowHwaccels, tt.wantHwaccels)
 			}
-			if showPixFmts != tt.wantPixFmts {
-				t.Errorf("showPixFmts = %v, want %v", showPixFmts, tt.wantPixFmts)
+			if opts.ShowFilters != tt.wantFilters {
+				t.Errorf("showFilters = %v, want %v", opts.ShowFilters, tt.wantFilters)
 			}
-			if showFormats != tt.wantFormats {
-				t.Errorf("showFormats = %v, want %v", showFormats, tt.wantFormats)
+			if opts.ShowPixFmts != tt.wantPixFmts {
+				t.Errorf("showPixFmts = %v, want %v", opts.ShowPixFmts, tt.wantPixFmts)
 			}
-			if showBuildconf != tt.wantBuildconf {
-				t.Errorf("showBuildconf = %v, want %v", showBuildconf, tt.wantBuildconf)
+			if opts.ShowFormats != tt.wantFormats {
+				t.Errorf("showFormats = %v, want %v", opts.ShowFormats, tt.wantFormats)
 			}
-			if showLayouts != tt.wantLayouts {
-				t.Errorf("showLayouts = %v, want %v", showLayouts, tt.wantLayouts)
+			if opts.ShowBuildconf != tt.wantBuildconf {
+				t.Errorf("showBuildconf = %v, want %v", opts.ShowBuildconf, tt.wantBuildconf)
 			}
-			if showProtocols != tt.wantProtocols {
-				t.Errorf("showProtocols = %v, want %v", showProtocols, tt.wantProtocols)
+			if opts.ShowLayouts != tt.wantLayouts {
+				t.Errorf("showLayouts = %v, want %v", opts.ShowLayouts, tt.wantLayouts)
 			}
-			if showSampleFmts != tt.wantSampleFmts {
-				t.Errorf("showSampleFmts = %v, want %v", showSampleFmts, tt.wantSampleFmts)
+			if opts.ShowProtocols != tt.wantProtocols {
+				t.Errorf("showProtocols = %v, want %v", opts.ShowProtocols, tt.wantProtocols)
 			}
-			if showBsfs != tt.wantBsfs {
-				t.Errorf("showBsfs = %v, want %v", showBsfs, tt.wantBsfs)
+			if opts.ShowSampleFmts != tt.wantSampleFmts {
+				t.Errorf("showSampleFmts = %v, want %v", opts.ShowSampleFmts, tt.wantSampleFmts)
 			}
-			if showColors != tt.wantColors {
-				t.Errorf("showColors = %v, want %v", showColors, tt.wantColors)
+			if opts.ShowBsfs != tt.wantBsfs {
+				t.Errorf("showBsfs = %v, want %v", opts.ShowBsfs, tt.wantBsfs)
 			}
-			if showJSON != tt.wantJSON {
-				t.Errorf("showJSON = %v, want %v", showJSON, tt.wantJSON)
+			if opts.ShowColors != tt.wantColors {
+				t.Errorf("showColors = %v, want %v", opts.ShowColors, tt.wantColors)
 			}
-			_ = showCodecs
+			if opts.ShowJSON != tt.wantJSON {
+				t.Errorf("showJSON = %v, want %v", opts.ShowJSON, tt.wantJSON)
+			}
 		})
 	}
 }
@@ -639,10 +650,58 @@ func TestParseArgsTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, _, timeout, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := parseArgs(tt.args)
-			if timeout != tt.wantTimeout {
-				t.Errorf("timeout = %v, want %v", timeout, tt.wantTimeout)
+			opts, err := parseArgs(tt.args)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("parseArgs(%v) expected error, got nil", tt.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
+			}
+			if opts.Timeout != tt.wantTimeout {
+				t.Errorf("timeout = %v, want %v", opts.Timeout, tt.wantTimeout)
 			}
 		})
+	}
+}
+
+// TestParseArgs_MissingValue verifies that value-taking flags without a value
+// are a hard error instead of silently falling back to defaults (TSI-2365).
+func TestParseArgs_MissingValue(t *testing.T) {
+	for _, flag := range []string{"--server", "-server", "--token", "-token", "--timeout", "-timeout"} {
+		if _, err := parseArgs([]string{flag}); err == nil {
+			t.Errorf("parseArgs(%q) expected error for missing value, got nil", flag)
+		}
+	}
+}
+
+// TestParseArgs_DashDashSeparator verifies that everything after "--" is
+// passed through to ffmpeg verbatim.
+func TestParseArgs_DashDashSeparator(t *testing.T) {
+	opts, err := parseArgs([]string{"-q", "--", "-i", "a.mp4", "--server", "b.mp4"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"-i", "a.mp4", "--server", "b.mp4"}
+	if len(opts.FmpegArgs) != len(want) {
+		t.Fatalf("ffmpegArgs = %v, want %v", opts.FmpegArgs, want)
+	}
+	for i := range want {
+		if opts.FmpegArgs[i] != want[i] {
+			t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], want[i])
+		}
+	}
+}
+
+// TestParseArgs_InvalidTimeout verifies bad timeout values error out instead
+// of os.Exit mid-parse.
+func TestParseArgs_InvalidTimeout(t *testing.T) {
+	if _, err := parseArgs([]string{"--timeout", "abc"}); err == nil {
+		t.Error("parseArgs(--timeout abc) expected error, got nil")
+	}
+	if _, err := parseArgs([]string{"--timeout", "-5m"}); err == nil {
+		t.Error("parseArgs(--timeout -5m) expected error, got nil")
 	}
 }

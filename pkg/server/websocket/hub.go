@@ -310,22 +310,6 @@ func (h *Hub) BroadcastProgress(jobID string, percent float64, timeUs, durationU
 	return h.BroadcastWSMessage(msg)
 }
 
-// BroadcastHeartbeatPayload broadcasts a heartbeat with detailed worker metrics
-func (h *Hub) BroadcastHeartbeatPayload(payload protocol.WorkerHeartbeatPayload) error {
-	msg := protocol.WSMessage{
-		Type:      protocol.WSMsgHeartbeat,
-		Timestamp: time.Now(),
-		JobID:     payload.WorkerID,
-		Data:      payload,
-	}
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return err
-	}
-	h.Broadcast(payload.WorkerID, data)
-	return nil
-}
-
 // BroadcastComplete broadcasts a completion message for a job
 func (h *Hub) BroadcastComplete(jobID string, exitCode int) error {
 	msg := protocol.NewCompleteMessage(jobID, exitCode)

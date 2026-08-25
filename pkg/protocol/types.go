@@ -48,7 +48,6 @@ type JobInfo struct {
 	AutoHW          bool       `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
 	FailureType     string     `json:"failure_type,omitempty"`
 	FailureDetails  string     `json:"failure_details,omitempty"`
-	Retryable       bool       `json:"retryable,omitempty"`
 	Timeout         *time.Time `json:"timeout,omitempty"`      // Per-job timeout (nil = use default)
 	DirectPaths     []string   `json:"direct_paths,omitempty"` // Direct output paths for pass-through mode (TSI-807)
 	CreatedAt       time.Time  `json:"created_at"`
@@ -190,15 +189,15 @@ type WorkerRegisterResponse struct {
 }
 
 type WorkerHeartbeatRequest struct {
-	WorkerID      string       `json:"worker_id"`
-	Status        WorkerStatus `json:"status"`
-	ActiveJobs    []string     `json:"active_jobs,omitempty"`
-	ThroughputFPS float64      `json:"throughput_fps,omitempty"`
-	CompletedJobs int          `json:"completed_jobs,omitempty"`
-	GPUUtilPct    float64      `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB  int          `json:"gpu_mem_used_mb,omitempty"`
+	WorkerID        string       `json:"worker_id"`
+	Status          WorkerStatus `json:"status"`
+	ActiveJobs      []string     `json:"active_jobs,omitempty"`
+	ThroughputFPS   float64      `json:"throughput_fps"` // Jobs completed per second since the last heartbeat (despite the legacy name)
+	CompletedJobs   int          `json:"completed_jobs"`
+	GPUUtilPct      float64      `json:"gpu_util_percent"` // Aggregated across all GPUs (0-100*N on multi-GPU hosts); 0 is a valid reading
+	GPUMemUsedMB    int          `json:"gpu_mem_used_mb"`
+	GPUMetricsValid bool         `json:"gpu_metrics_valid"` // True when GPUUtilPct/GPUMemUsedMB carry a fresh nvidia-smi sample
 }
-
 type WorkerHeartbeatResponse struct {
 	Message       string   `json:"message"`
 	CancelledJobs []string `json:"cancelled_jobs,omitempty"`
@@ -289,13 +288,14 @@ const (
 	FailureWorkerCrash        FailureType = "WORKER_CRASH"
 	FailureFFmpegError        FailureType = "FFMPEG_ERROR"
 	FailureNoWorkerAvailable  FailureType = "NO_WORKER_AVAILABLE"
+	FailureInfra              FailureType = "INFRA"
 )
 
 func (f FailureType) IsValid() bool {
 	switch f {
 	case FailureInputUnreachable, FailureEncoderUnsupported, FailureDiskFull,
 		FailureTimeout, FailureWorkerCrash, FailureFFmpegError,
-		FailureNoWorkerAvailable:
+		FailureNoWorkerAvailable, FailureInfra:
 		return true
 	default:
 		return false
@@ -350,18 +350,19 @@ type EncoderSuggestion struct {
 // --- Worker State (TSI-756) ---
 
 type WorkerState struct {
-	WorkerID       string    `json:"worker_id"`
-	Status         string    `json:"status"` // online / offline / degraded / busy
-	GPUMemUsedMB   int       `json:"gpu_mem_used_mb,omitempty"`
-	GPUUtilPct     float64   `json:"gpu_util_percent,omitempty"`
-	ActiveJobs     []string  `json:"active_jobs,omitempty"`
-	ThroughputFPS  float64   `json:"throughput_fps,omitempty"`
-	EWMAThroughput float64   `json:"ewma_throughput,omitempty"` // EWMA-smoothed throughput
-	Evicted        bool      `json:"evicted"`                   // Whether worker is a slow node (evicted from scheduling)
-	QueueDepth     int       `json:"queue_depth,omitempty"`
-	CompletedJobs  int       `json:"completed_jobs,omitempty"` // Cumulative jobs completed since the current registration
-	LastSeen       time.Time `json:"last_seen"`
-	StartedAt      time.Time `json:"started_at,omitempty"`
+	WorkerID        string    `json:"worker_id"`
+	Status          string    `json:"status"` // online / offline / degraded / busy
+	GPUMemUsedMB    int       `json:"gpu_mem_used_mb,omitempty"`
+	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPU metrics reflect a fresh sample (TSI-2365)
+	GPUUtilPct      float64   `json:"gpu_util_percent,omitempty"`
+	ActiveJobs      []string  `json:"active_jobs,omitempty"`
+	ThroughputFPS   float64   `json:"throughput_fps,omitempty"`
+	EWMAThroughput  float64   `json:"ewma_throughput,omitempty"` // EWMA-smoothed throughput
+	Evicted         bool      `json:"evicted"`                   // Whether worker is a slow node (evicted from scheduling)
+	QueueDepth      int       `json:"queue_depth,omitempty"`
+	CompletedJobs   int       `json:"completed_jobs,omitempty"` // Cumulative jobs completed since the current registration
+	LastSeen        time.Time `json:"last_seen"`
+	StartedAt       time.Time `json:"started_at,omitempty"`
 	// LastThroughputAt is the timestamp of the last heartbeat that reported a
 	// non-zero throughput sample. Time-boxes the busy-worker eviction
 	// exemption in slow-node detection.

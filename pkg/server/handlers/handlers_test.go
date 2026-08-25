@@ -966,12 +966,13 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 
 	// Send a heartbeat with GPU metrics and active jobs.
 	heartbeatReq := protocol.WorkerHeartbeatRequest{
-		WorkerID:      regResp.WorkerID,
-		Status:        protocol.WorkerStatusBusy,
-		ActiveJobs:    []string{"job-1"},
-		ThroughputFPS: 42.5,
-		GPUUtilPct:    87,
-		GPUMemUsedMB:  4096,
+		WorkerID:        regResp.WorkerID,
+		Status:          protocol.WorkerStatusBusy,
+		ActiveJobs:      []string{"job-1"},
+		ThroughputFPS:   42.5,
+		GPUUtilPct:      87,
+		GPUMemUsedMB:    4096,
+		GPUMetricsValid: true,
 	}
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
 	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))

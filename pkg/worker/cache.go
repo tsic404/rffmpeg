@@ -713,6 +713,3 @@ func copyFile(src, dst string) error {
 
 	return dstFile.Sync()
 }
-
-// Ensure io is used
-var _ = io.Copy

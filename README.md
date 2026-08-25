@@ -580,11 +580,23 @@ POST /api/v1/workers/heartbeat
   "worker_id": "uuid",
   "status": "busy",
   "active_jobs": ["job_id_1"],
-  "throughput_fps": 120.5,
+  "throughput_fps": 1.2,
+  "gpu_metrics_valid": true,
   "gpu_util_percent": 87,
   "gpu_mem_used_mb": 4096
 }
+```
 
+字段说明：
+
+- `throughput_fps`：历史命名，实际单位是**每秒完成的作业数**（jobs/sec），不是帧率。
+- `gpu_util_percent`：多卡机器上是所有 GPU 利用率的**求和**（两块卡各 50% 上报 100），
+  因此多卡主机上超过 100 属于正常。
+- `gpu_metrics_valid=false` 时 `gpu_util_percent` / `gpu_mem_used_mb` 为 0，
+  含义是"本次无采样"（nvidia-smi 不可用或失败），而不是"利用率 0%"；
+  服务端会保留上一次有效采样。合法的 0% 读数始终会上报。
+
+```
 # Worker 列表（含实时健康指标）
 GET /api/v1/workers
 {
@@ -598,7 +610,7 @@ GET /api/v1/workers
         "gpu_util_percent": 87,
         "gpu_mem_used_mb": 4096,
         "active_jobs": ["job_id_1"],
-        "throughput_fps": 120.5,
+        "throughput_fps": 0.4,
         "last_seen": "2024-01-01T00:00:00Z"
       }
     }

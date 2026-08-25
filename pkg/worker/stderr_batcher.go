@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -101,21 +103,16 @@ func (b *StderrBatcher) flushLocked() {
 	}
 
 	// Combine chunks with newlines
-	combined := ""
-	for i, chunk := range b.chunks {
-		if i > 0 {
-			combined += "\n"
-		}
-		combined += chunk
-	}
+	combined := strings.Join(b.chunks, "\n")
 
 	// Track the goroutine so Close() can wait for it
 	b.wg.Add(1)
 	go func(chunk string) {
 		defer b.wg.Done()
 		if err := b.client.SendStderrChunk(b.jobID, chunk); err != nil {
-			// Log error but don't block
-			// Error is logged in the caller
+			// Non-blocking: a dropped stderr chunk must not stall the job,
+			// but the failure must be visible somewhere (TSI-2365).
+			log.Printf("Job %s: failed to send stderr batch: %v", b.jobID, err)
 		}
 	}(combined)
 

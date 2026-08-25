@@ -51,20 +51,23 @@ func sanitizeInputBaseName(rawBase string) string {
 	return result
 }
 
-// ClassifyFailure categorizes an ffmpeg execution failure into one of 6
+// ClassifyFailure categorizes an ffmpeg execution failure into one of the
 // FailureType values. stderr must be ffmpeg output — generic error text is
 // never matched against input/encoder patterns.
 //
-// exitCode and errorMessage are currently unused by the matching rules but
-// retained in the signature for API stability; callers pass the execution
-// exit code and the Go error from running ffmpeg. Classification relies on
-// stderr plus the isTimeout/isWorkerCrash flags only.
-//
-// Priority (highest first): WORKER_CRASH > TIMEOUT > DISK_FULL > INPUT_UNREACHABLE > ENCODER_UNSUPPORTED > FFMPEG_ERROR
+// Priority (highest first): WORKER_CRASH (incl. OOM-kill / SIGKILL) > TIMEOUT >
+// DISK_FULL > INPUT_UNREACHABLE > ENCODER_UNSUPPORTED > FFMPEG_ERROR
 func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout bool, isWorkerCrash bool) (protocol.FailureType, string) {
 	// Check worker crash first — highest priority
 	if isWorkerCrash {
 		return protocol.FailureWorkerCrash, "Worker process terminated unexpectedly"
+	}
+
+	// OOM kill: the kernel SIGKILLs the process (-9, exit code 137) when the
+	// cgroup/system runs out of memory. Surface it as WORKER_CRASH with an
+	// explicit reason instead of a generic FFMPEG_ERROR (TSI-2365).
+	if exitCode == 137 || isOOMKill(stderr) {
+		return protocol.FailureWorkerCrash, "Process killed by the OS out-of-memory killer (SIGKILL)"
 	}
 
 	// Check timeout
@@ -98,12 +101,12 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 // user-supplied source — if the worker cannot reach it, the job's input is
 // unreachable → INPUT_UNREACHABLE. A server file ID is fetched over the
 // worker↔server channel; failing there is infrastructure, not an input
-// problem → FFMPEG_ERROR (same rationale as reportInfraFailure).
+// problem → INFRA (TSI-2365; previously misreported as FFMPEG_ERROR).
 func ClassifyInputDownloadFailure(fileID string) protocol.FailureType {
 	if isRemoteURL(fileID) {
 		return protocol.FailureInputUnreachable
 	}
-	return protocol.FailureFFmpegError
+	return protocol.FailureInfra
 }
 
 // isDiskFull checks stderr for disk-full patterns.
@@ -114,6 +117,23 @@ func isDiskFull(stderr string) bool {
 		"Disk full",
 		"disk full",
 		"not enough space",
+	}
+	for _, p := range patterns {
+		if strings.Contains(stderr, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOOMKill checks stderr for out-of-memory kill indicators.
+func isOOMKill(stderr string) bool {
+	patterns := []string{
+		"out of memory",
+		"Out of memory",
+		"OOM",
+		"Cannot allocate memory",
+		"Killed signal", // e.g. "Killed signal 9 (SIGKILL)"
 	}
 	for _, p := range patterns {
 		if strings.Contains(stderr, p) {
@@ -134,6 +154,13 @@ func isInputUnreachable(stderr string) bool {
 		"Name or service not known",
 		"No route to host",
 		"Network is unreachable",
+		// Go net package error strings (lowercase style) — remote inputs are
+		// fetched by worker-side Go code, so its error text lands in stderr
+		// too (TSI-2365).
+		"connection refused",
+		"i/o timeout",
+		"no such host",
+		"network is unreachable",
 		"Protocol not found",
 		"Invalid data found when processing input",
 		"HTTP error 404",
@@ -177,23 +204,31 @@ func isEncoderUnsupported(stderr string) bool {
 }
 
 // extractFFmpegSummary extracts a brief summary from stderr for FFMPEG_ERROR classification.
+// Truncation is rune-safe: cutting at a byte offset can split a multi-byte
+// UTF-8 character and produce an invalid string on the wire (TSI-2365).
 func extractFFmpegSummary(stderr string) string {
+	const maxLen = 200
+	truncate := func(s string) string {
+		if len(s) <= maxLen {
+			return s
+		}
+		runes := []rune(s)
+		if len(runes) <= maxLen {
+			return s // multi-byte: fewer runes than bytes
+		}
+		return string(runes[:maxLen]) + "..."
+	}
+
 	lines := strings.Split(strings.TrimSpace(stderr), "\n")
 	// Return last non-empty line, or a truncated version
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line != "" && !strings.HasPrefix(line, "frame=") && !strings.HasPrefix(line, "size=") {
-			if len(line) > 200 {
-				line = line[:200] + "..."
-			}
-			return line
+			return truncate(line)
 		}
 	}
 	if stderr != "" {
-		if len(stderr) > 200 {
-			return stderr[:200] + "..."
-		}
-		return stderr
+		return truncate(stderr)
 	}
 	return "ffmpeg exited with non-zero status"
 }

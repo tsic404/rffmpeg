@@ -142,6 +142,33 @@ func TestReportFailureAlwaysSetsClassification(t *testing.T) {
 	}
 }
 
+// TestClassifyFailureOOMKill locks the TSI-2365 fix: OOM-killed processes
+// (exit 137 / SIGKILL text) surface as WORKER_CRASH with an explicit reason,
+// not a generic FFMPEG_ERROR.
+func TestClassifyFailureOOMKill(t *testing.T) {
+	cases := []struct {
+		name     string
+		exitCode int
+		stderr   string
+	}{
+		{"exit code 137", 137, ""},
+		{"oom stderr", 1, "ffmpeg: Cannot allocate memory"},
+		{"killed signal", -1, "Killed signal 9 (SIGKILL) on job"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, details := ClassifyFailure(tc.exitCode, tc.stderr, "", false, false)
+			if got != protocol.FailureWorkerCrash {
+				t.Errorf("exit=%d stderr=%q classified as %q, want WORKER_CRASH",
+					tc.exitCode, tc.stderr, got)
+			}
+			if details == "" {
+				t.Error("details should explain the OOM kill")
+			}
+		})
+	}
+}
+
 // TestClassifyInputDownloadFailure locks the TSI-2348 fix: a failed download
 // of a remote-URL input is the user's input being unreachable (INPUT_UNREACHABLE),
 // while a failed server-file fetch is worker↔server infrastructure (FFMPEG_ERROR).
@@ -164,8 +191,9 @@ func TestClassifyInputDownloadFailure(t *testing.T) {
 		"",
 	}
 	for _, id := range serverFileIDs {
-		if got := ClassifyInputDownloadFailure(id); got != protocol.FailureFFmpegError {
-			t.Errorf("server file ID %q classified as %q, want FFMPEG_ERROR", id, got)
+		// TSI-2365: server-channel failures are infrastructure, not ffmpeg errors.
+		if got := ClassifyInputDownloadFailure(id); got != protocol.FailureInfra {
+			t.Errorf("server file ID %q classified as %q, want INFRA", id, got)
 		}
 	}
 }
@@ -176,9 +204,9 @@ func TestClassifyInputDownloadFailure(t *testing.T) {
 // category is reserved for ffmpeg reporting unreachable inputs.
 func TestClassifyFailureInfraTextNotInputUnreachable(t *testing.T) {
 	infraMessages := []string{
-		"Failed to update job status to running: connection refused",
-		"Failed to download input file abc: Post \"http://server/files/abc\": connection refused",
-		"Failed to upload output: dial tcp 10.0.0.1:8080: connect: connection timed out",
+		"Failed to update job status to running: job directory missing",
+		"Failed to upload output: storage backend rejected the file",
+		"Failed to create job directory: read-only file system",
 	}
 	for _, msg := range infraMessages {
 		got, _ := ClassifyFailure(1, msg, msg, false, false)
