@@ -381,12 +381,18 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 		}
 	}()
 
-	// Wait for completion, error, or context cancellation. A detected
-	// sequence gap means stderr chunks were lost across a reconnect — the
-	// log view has holes, so surface it like StreamJobLogs does.
+	// Wait for completion, error, or context cancellation. In non-streaming
+	// mode (file output), stderr is display-only: a detected sequence gap
+	// means some log lines were lost across a reconnect, but the transcoded
+	// file itself is intact — surface it as a warning and still return the
+	// job so main.go proceeds to GET /api/v1/output/{fileId}. Only streaming
+	// output (stdout consumers) must fail on a gap.
 	select {
 	case job := <-pollDone:
-		return job, checkGap(wsClient)
+		if wsClient.HasGap() {
+			fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+		}
+		return job, nil
 	case err := <-listenDone:
 		if err != nil {
 			// WebSocket failed, fall back to polling
@@ -402,7 +408,12 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 		if err != nil {
 			return nil, err
 		}
-		return job, checkGap(wsClient)
+		// Non-streaming mode: a log-stream gap must not block the output
+		// file download — stderr here is display-only. Warn and succeed.
+		if wsClient.HasGap() {
+			fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+		}
+		return job, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -488,6 +499,11 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		// WebSocket closes before the server DB is updated.
 		return c.WaitForJob(ctx, jobID, !quiet)
 	case <-ctx.Done():
+		// Gap check before the ctx error: if stdout bytes with holes were
+		// already written, the consumer must hear about it even on timeout.
+		if wsClient.HasGap() {
+			return nil, fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+		}
 		return nil, ctx.Err()
 	}
 
