@@ -33,6 +33,10 @@ type Handler struct {
 	stateTable  *workerhealth.WorkerStateTable
 	scheduler   *scheduler.Scheduler // TSI-1501: scheduler reference for immediate job assignment
 	authToken   string               // Non-empty when auth is configured
+	// heartbeatTimeout mirrors the worker health monitor's knob: submit-time
+	// fail-fast treats workers whose last heartbeat is older than this as dead
+	// (TSI-2419). <=0 disables the freshness check.
+	heartbeatTimeout time.Duration
 }
 
 // New creates a new Handler
@@ -98,9 +102,20 @@ func (h *Handler) SetScheduler(sched *scheduler.Scheduler) {
 	h.scheduler = sched
 }
 
+// SetHeartbeatTimeout configures the submit-time worker freshness window
+// (TSI-2419). Should match ServerConfig.WorkerHeartbeatTimeout.
+func (h *Handler) SetHeartbeatTimeout(d time.Duration) {
+	h.heartbeatTimeout = d
+}
+
 // SetAuthToken sets the auth token for health check reporting
 func (h *Handler) SetAuthToken(token string) {
 	h.authToken = token
+}
+
+// GetDB returns the underlying database (used by tests to seed worker state).
+func (h *Handler) GetDB() *db.Database {
+	return h.db
 }
 
 // validateAuthToken validates the Authorization header against the configured auth token.
@@ -336,7 +351,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	// Instead of exact match, check if any worker has an encoder in the same codec family
 	if requestedEncoder != "" {
 		// First try exact match
-		workersWithEncoder, err := h.db.GetSchedulableWorkersByEncoder(requestedEncoder)
+		workersWithEncoder, err := h.db.GetLiveSchedulableWorkersByEncoder(requestedEncoder, h.heartbeatTimeout)
 		if err != nil {
 			log.Printf("SubmitJob: Failed to check workers by encoder %s: %v", requestedEncoder, err)
 			// Fall through to check compatible encoders
@@ -352,7 +367,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 			if enc == requestedEncoder {
 				continue // Skip the requested encoder (already checked)
 			}
-			workers, err := h.db.GetSchedulableWorkersByEncoder(enc)
+			workers, err := h.db.GetLiveSchedulableWorkersByEncoder(enc, h.heartbeatTimeout)
 			if err != nil {
 				log.Printf("SubmitJob: Failed to check workers for compatible encoder %s: %v", enc, err)
 				continue
@@ -376,15 +391,22 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 jobCreate:
 
-	// Check for any schedulable worker (not offline, not evicted) before creating the job.
-	// Busy workers count as available: the job is created in pending state and the scheduler
-	// queues it until a worker becomes idle (TSI-2204).
-	schedulableWorkers, err := h.db.GetSchedulableWorkers()
+	// Check for any live schedulable worker (not offline, not evicted, fresh
+	// heartbeat) before creating the job. Busy workers count as available: the
+	// job is created in pending state and the scheduler queues it until a
+	// worker becomes idle (TSI-2204).
+	//
+	// TSI-2419: freshness is enforced in SQL — a worker whose last heartbeat
+	// is older than the heartbeat timeout is dead in practice (the monitor
+	// only flips it offline on its next tick). Excluding such workers here
+	// fails the submission fast with "no worker available" instead of
+	// accepting the job and letting it sit pending until the no-worker job
+	// timeout (default 2m).
+	liveWorkers, err := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
 	if err != nil {
 		log.Printf("SubmitJob: Failed to check schedulable workers: %v", err)
 		// Don't fail the request on database error - let the scheduler handle it
-	} else if len(schedulableWorkers) == 0 {
-		// No workers available at all
+	} else if len(liveWorkers) == 0 {
 		writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
 			protocol.ErrCodeWorkerUnavailable,
 			"No worker available. Please ensure at least one worker is registered and online.",

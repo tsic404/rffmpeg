@@ -122,6 +122,7 @@ func main() {
 		TimeoutCheckInterval: cfg.TimeoutCheckInterval,
 		MaxJobsPerWorker:     cfg.MaxJobsPerWorker,
 		NoWorkerJobTimeout:   cfg.NoWorkerJobTimeout,
+		HeartbeatFreshness:   cfg.WorkerHeartbeatTimeout,
 	})
 
 	// Connect the scheduler to the monitor so job migration triggers rescheduling
@@ -129,6 +130,12 @@ func main() {
 
 	// Connect the scheduler to the handler for immediate job assignment (TSI-1501)
 	h.SetScheduler(jobScheduler)
+
+	// Submit-time fail-fast uses the same freshness window as the monitor:
+	// workers with stale heartbeats are treated as unavailable at submission
+	// (TSI-2419) instead of accepting jobs that would wait for the no-worker
+	// job timeout.
+	h.SetHeartbeatTimeout(cfg.WorkerHeartbeatTimeout)
 
 	jobScheduler.Start()
 	log.Printf("Job scheduler started (job timeout: %s, schedule interval: %s, timeout check interval: %s, max jobs per worker: %d, no-worker job timeout: %s)",

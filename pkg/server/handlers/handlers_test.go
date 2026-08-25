@@ -100,6 +100,32 @@ func registerTestWorker(t *testing.T, router *chi.Mux, encoders []string) string
 	return "test-worker-1"
 }
 
+// registerTestWorkerWithID registers a test worker with an explicit worker ID
+// and name, so tests can register multiple distinct workers.
+func registerTestWorkerWithID(t *testing.T, router *chi.Mux, workerID, name string, encoders []string) string {
+	workerReq := protocol.WorkerRegisterRequest{
+		WorkerID: workerID,
+		Name:     name,
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      encoders,
+			FFmpegVersion: "5.1",
+		},
+	}
+	workerBody, _ := json.Marshal(workerReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(workerBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Failed to register worker %s: status %d, body: %s", workerID, w.Code, w.Body.String())
+	}
+
+	return workerID
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -1765,5 +1791,165 @@ func TestSubmitJobExactEncoderMatchPreferred(t *testing.T) {
 	// Should succeed (200 or 201) with exact match
 	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
 		t.Errorf("Expected status 200 or 201, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TSI-2419: a registered worker whose last heartbeat is older than the
+// configured heartbeat timeout must be treated as unavailable at submission
+// time, so the CLI gets an immediate 503 instead of a pending job that only
+// fails after the no-worker job timeout (default 2m).
+func TestSubmitJobStaleHeartbeatWorkerRejected(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(90 * time.Second)
+
+	// Register a worker with the requested encoder.
+	registerTestWorker(t, router, []string{"libx264"})
+
+	// Backdate its heartbeat beyond the freshness window without waiting:
+	// the monitor would flip it offline on its next tick; submission must not
+	// depend on that having happened yet.
+	if _, err := h.GetDB().GetDB().Exec(
+		`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Minute), "test-worker-1",
+	); err != nil {
+		t.Fatalf("Failed to backdate worker heartbeat: %v", err)
+	}
+
+	fileID := uploadTestFile(t, router)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("Expected status 503 for stale-heartbeat worker, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeWorkerUnavailable {
+		t.Errorf("Expected error code 'worker_unavailable', got '%s'", errResp.Code)
+	}
+}
+
+// TSI-2419: a worker with a fresh heartbeat still counts as available even
+// when a freshness window is configured — busy workers queue (TSI-2204),
+// stale ones are the only ones filtered out.
+func TestSubmitJobFreshHeartbeatWorkerAccepted(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(90 * time.Second)
+
+	registerTestWorker(t, router, []string{"libx264"})
+
+	fileID := uploadTestFile(t, router)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Errorf("Expected job acceptance with fresh-heartbeat worker, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TSI-2419: when no freshness window is configured (<=0), heartbeat age is
+// ignored and the pre-existing behavior applies — any schedulable
+// (non-offline, non-evicted) worker makes submission succeed.
+func TestSubmitJobNoFreshnessCheckWhenDisabled(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(0)
+
+	registerTestWorker(t, router, []string{"libx264"})
+	if _, err := h.GetDB().GetDB().Exec(
+		`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Minute), "test-worker-1",
+	); err != nil {
+		t.Fatalf("Failed to backdate worker heartbeat: %v", err)
+	}
+
+	fileID := uploadTestFile(t, router)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Errorf("Expected job acceptance when freshness check disabled, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TSI-2419 regression (review blocker #1 on PR #38): the requested-encoder
+// path must apply heartbeat freshness too. A stale-heartbeat worker with the
+// requested encoder must not satisfy the exact-match check just because
+// another live worker WITHOUT that encoder exists — that combination used to
+// pass both checks, accept the job as pending, and leave it hanging until
+// the no-worker job timeout.
+func TestSubmitJobStaleEncoderWorkerWithLiveOtherWorkerRejected(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(90 * time.Second)
+
+	// Worker 1: has libx264 but its heartbeat is stale.
+	registerTestWorker(t, router, []string{"libx264"})
+	if _, err := h.GetDB().GetDB().Exec(
+		`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Minute), "test-worker-1",
+	); err != nil {
+		t.Fatalf("Failed to backdate worker heartbeat: %v", err)
+	}
+
+	// Worker 2: live, but no libx264 (different codec family to avoid the
+	// compatible-encoder fallback matching it).
+	registerTestWorkerWithID(t, router, "test-worker-2", "live-worker", []string{"libvpx-vp9"})
+
+	fileID := uploadTestFile(t, router)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("Expected status 503 when only stale worker has the encoder, got %d. Body: %s", w.Code, w.Body.String())
 	}
 }

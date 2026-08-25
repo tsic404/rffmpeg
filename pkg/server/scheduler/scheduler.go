@@ -13,7 +13,6 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/server/ratelimit"
 )
 
-// Config holds the configuration for the scheduler
 type Config struct {
 	JobTimeout           time.Duration // Maximum time a job can run before being considered timed out
 	ScheduleInterval     time.Duration // Interval for scheduling checks
@@ -24,6 +23,12 @@ type Config struct {
 	// 0 disables the check. Pending jobs queued behind busy workers are NOT
 	// affected: schedulable workers exist, so the job keeps waiting (TSI-2204).
 	NoWorkerJobTimeout time.Duration
+
+	// HeartbeatFreshness is the worker liveness window used by the starvation
+	// sweep: a worker whose last heartbeat is older than this is dead in
+	// practice even before the monitor flips it offline, so pending jobs do
+	// not keep waiting on it (TSI-2419). 0 disables the freshness filter.
+	HeartbeatFreshness time.Duration
 
 	// MaxTimeoutRetries bounds how many times checkTimeouts may requeue the
 	// same job before failing it as TIMEOUT (0 = fail on first timeout).
@@ -38,6 +43,10 @@ func DefaultConfig() Config {
 		TimeoutCheckInterval: 30 * time.Second,
 		MaxJobsPerWorker:     1, // One job at a time per worker by default
 		NoWorkerJobTimeout:   2 * time.Minute,
+
+		// HeartbeatFreshness must match ServerConfig.WorkerHeartbeatTimeout so
+		// the monitor and the scheduler agree on when a worker counts as dead.
+		HeartbeatFreshness: 90 * time.Second,
 
 		// MaxTimeoutRetries bounds how many times checkTimeouts may requeue
 		// the same job before failing it as TIMEOUT. Without a budget, a hung
@@ -441,13 +450,15 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 		return
 	}
 
-	schedulable, err := s.db.GetSchedulableWorkers()
+	schedulable, err := s.db.GetLiveSchedulableWorkers(s.config.HeartbeatFreshness)
 	if err != nil {
 		log.Printf("Scheduler: Failed to get schedulable workers: %v", err)
 		return
 	}
 	if len(schedulable) > 0 {
-		// At least one worker can still take jobs; keep waiting (TSI-2204).
+		// At least one live worker can still take jobs; keep waiting
+		// (TSI-2204). Workers with stale heartbeats don't count (TSI-2419):
+		// they would never pick up the job anyway.
 		return
 	}
 

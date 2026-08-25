@@ -1095,6 +1095,11 @@ func (d *Database) GetIdleWorkers() ([]*Worker, error) {
 // GetSchedulableWorkers retrieves all workers that are not offline and not evicted.
 // Unlike GetIdleWorkers, busy workers are included so a submitted job can be queued
 // while a worker is currently busy (TSI-2204).
+//
+// The result is NOT filtered by heartbeat freshness: a worker whose last
+// heartbeat is stale but that has not yet been marked offline still counts as
+// schedulable. Callers that need liveness (submit-time fail-fast, starvation
+// sweeps) must use GetLiveSchedulableWorkers instead (TSI-2419).
 func (d *Database) GetSchedulableWorkers() ([]*Worker, error) {
 	rows, err := d.db.Query(`
 		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
@@ -1107,6 +1112,25 @@ func (d *Database) GetSchedulableWorkers() ([]*Worker, error) {
 	defer rows.Close()
 
 	return d.scanWorkers(rows)
+}
+
+// GetLiveSchedulableWorkers returns schedulable workers with a fresh
+// heartbeat: not offline, not evicted, and last_heartbeat within freshness.
+// A worker whose heartbeat is older than the freshness window is dead in
+// practice — the health monitor only flips it offline on its next tick — so
+// callers must not treat it as available (TSI-2419). A non-positive
+// freshness disables the check (behaves like GetSchedulableWorkers).
+func (d *Database) GetLiveSchedulableWorkers(freshness time.Duration) ([]*Worker, error) {
+	freshnessClause, freshnessArgs := heartbeatFreshnessSQL(freshness)
+	rows, err := d.querySchedulable(`
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		FROM workers WHERE status != ? AND evicted = 0`+freshnessClause+`
+		ORDER BY last_heartbeat DESC
+	`, append([]any{protocol.WorkerStatusOffline}, freshnessArgs...)...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get live schedulable workers: %w", err)
+	}
+	return rows, nil
 }
 
 // GetWorkerActiveJobCount returns the number of active jobs (running or queued) for a worker
@@ -1459,19 +1483,61 @@ func (d *Database) GetIdleWorkersByEncoder(encoderName string) ([]*Worker, error
 // GetSchedulableWorkersByEncoder retrieves workers that are not offline and not evicted
 // and that have a specific encoder capability. Busy workers are included so a submitted
 // job can be queued while the worker is currently busy (TSI-2204).
+//
+// Like GetSchedulableWorkers, the result is NOT filtered by heartbeat
+// freshness; use GetLiveSchedulableWorkersByEncoder for the submit-time
+// fail-fast path (TSI-2419).
 func (d *Database) GetSchedulableWorkersByEncoder(encoderName string) ([]*Worker, error) {
-	rows, err := d.db.Query(`
-		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
-		FROM workers w, json_each(w.encoders) AS enc
-		WHERE w.status != ? AND w.evicted = 0 AND enc.value = ?
-		ORDER BY w.last_heartbeat DESC
-	`, protocol.WorkerStatusOffline, encoderName)
+	rows, err := d.querySchedulableByEncoder(encoderName, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get schedulable workers by encoder: %w", err)
 	}
-	defer rows.Close()
+	return rows, nil
+}
 
+// GetLiveSchedulableWorkersByEncoder is GetSchedulableWorkersByEncoder with a
+// heartbeat freshness window: workers whose last_heartbeat is older than
+// freshness are excluded (TSI-2419). A non-positive freshness disables the
+// check.
+func (d *Database) GetLiveSchedulableWorkersByEncoder(encoderName string, freshness time.Duration) ([]*Worker, error) {
+	rows, err := d.querySchedulableByEncoder(encoderName, freshness)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get live schedulable workers by encoder: %w", err)
+	}
+	return rows, nil
+}
+
+// heartbeatFreshnessSQL returns the SQL clause excluding workers whose
+// last_heartbeat predates now-freshness, plus its bind argument. Empty
+// clause and args for non-positive freshness.
+func heartbeatFreshnessSQL(freshness time.Duration) (string, []any) {
+	if freshness <= 0 {
+		return "", nil
+	}
+	cutoff := time.Now().Add(-freshness)
+	return " AND last_heartbeat > ?", []any{cutoff}
+}
+
+// querySchedulable runs a schedulable-worker query and scans the rows.
+func (d *Database) querySchedulable(query string, args ...any) ([]*Worker, error) {
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	return d.scanWorkers(rows)
+}
+
+// querySchedulableByEncoder runs the encoder-capability schedulable query,
+// optionally applying a heartbeat freshness window.
+func (d *Database) querySchedulableByEncoder(encoderName string, freshness time.Duration) ([]*Worker, error) {
+	freshnessClause, freshnessArgs := heartbeatFreshnessSQL(freshness)
+	return d.querySchedulable(`
+		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
+		FROM workers w, json_each(w.encoders) AS enc
+		WHERE w.status != ? AND w.evicted = 0 AND enc.value = ?`+freshnessClause+`
+		ORDER BY w.last_heartbeat DESC
+	`, append([]any{protocol.WorkerStatusOffline, encoderName}, freshnessArgs...)...)
 }
 
 // UpdateWorkerCapabilities updates the worker's capabilities (encoders, decoders, etc.)
