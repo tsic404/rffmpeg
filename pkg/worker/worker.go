@@ -22,7 +22,9 @@ import (
 // so tests can inject a fake (the concrete *Cache satisfies it).
 type cacheI interface {
 	Check(key string) (string, bool)
-	Put(key string, sourcePath string) error
+	Put(key string, sourcePath string, ttlOverride ...time.Duration) error
+	ConfirmHit(key string)
+	Cfg() CacheConfig
 	Stats() CacheStats
 	Start(ctx context.Context)
 	Stop()
@@ -430,7 +432,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// auto_hw MUST be part of the key: a --auto-hw run may upgrade the encoder
 	// (e.g. libx264 → h264_qsv), and that output must never be served to
 	// requests without --auto-hw (TSI-2352).
-	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW)
+	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, filepath.Ext(job.OutputFilename), "")
 	cached := false
 
 	// Check if output is a network URL (rtmp://, udp://, etc.)
@@ -476,6 +478,8 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				log.Printf("Job %s: failed to upload cached output (%v), falling through to normal processing", job.ID, err)
 				cached = false
 			} else {
+				// Confirm the cache hit (stats + LRU touch)
+				w.cache.ConfirmHit(cacheKey)
 				log.Printf("Uploaded cached output for job %s", job.ID)
 				cached = true
 
@@ -650,6 +654,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	}
 	args = rewrittenArgs
 
+	// Recompute cache key with the actual encoder from the rewrite result
+	// This ensures encoder-specific outputs are keyed correctly.
+	if rewriteResult != nil && rewriteResult.Performed && rewriteResult.TargetEncoder != "" {
+		cacheKey = GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, filepath.Ext(job.OutputFilename), rewriteResult.TargetEncoder)
+	}
+
 	// Pre-flight pixel format check for VAAPI encoders
 	// VAAPI has limited support for yuv444p and other high-chroma pixel formats
 	// Probe input to detect incompatible pixel format and proactively fallback
@@ -668,6 +678,8 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			if fallbackArgs != nil {
 				args = fallbackArgs
 				encoder = extractEncoderFromArgs(args)
+				// Recompute cache key with the new encoder from pixel format fallback
+				cacheKey = GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, filepath.Ext(job.OutputFilename), encoder)
 				log.Printf("[PixelFormat] Using software encoder: %s", encoder)
 				stderrHandler(fmt.Sprintf("[rffmpeg] fallback to software encoder %s\n", encoder))
 			}
@@ -841,7 +853,15 @@ uploadOutput:
 
 	// Cache the output for future requests (skip for direct mode and network URL outputs)
 	if !cached && !directMode && !isNetOutput {
-		if err := w.cache.Put(cacheKey, outputPath); err != nil {
+		// Use shorter TTL for URL-based inputs (content may change without URL changing)
+		cacheTTL := time.Duration(0)
+		for _, input := range job.InputFiles {
+			if isRemoteURL(input) {
+				cacheTTL = w.cache.Cfg().URLTTL
+				break
+			}
+		}
+		if err := w.cache.Put(cacheKey, outputPath, cacheTTL); err != nil {
 			log.Printf("Job %s: failed to cache output: %v", job.ID, err)
 			// Non-fatal — job still succeeded
 		} else {

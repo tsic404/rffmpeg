@@ -70,6 +70,7 @@ func main() {
 			MaxSizeBytes:     cfg.CacheMaxSizeMB * 1024 * 1024,
 			TTLScanInterval:  10 * time.Minute,
 			LRUCheckInterval: 5 * time.Minute,
+			URLTTL:           1 * time.Hour,
 		},
 		RetryConfig: &worker.RetryConfig{
 			MaxRetries:             cfg.RetryMaxRetries,

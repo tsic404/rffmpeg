@@ -172,7 +172,7 @@ func TestCacheIntegration_MissThenHit(t *testing.T) {
 	beforeDownloads := mockSrv.DownloadCount()
 	beforeUploads := mockSrv.UploadCount()
 
-	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW)
+	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, "", "")
 	_, hit := w.cache.Check(cacheKey)
 	if hit {
 		t.Fatal("Expected cache miss before first run")
@@ -246,7 +246,7 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
-	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW)
+	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, "", "")
 
 	_, hit := w.cache.Check(cacheKey)
 	if hit {
@@ -360,9 +360,9 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 		finalStats.Hits, finalStats.Misses, finalStats.EntryCount)
 }
 
-// TestCacheIntegration_CanonicalizationHit verifies flag order canonicalization:
-// same flags in different order → same cache key → cache hit.
-func TestCacheIntegration_CanonicalizationHit(t *testing.T) {
+// TestCacheIntegration_OrderSensitivity verifies that different flag order
+// produces different cache keys (no cache hit).
+func TestCacheIntegration_OrderSensitivity(t *testing.T) {
 	w, mockSrv := setupTestWorker(t, 24*time.Hour)
 
 	ctx := context.Background()
@@ -370,26 +370,23 @@ func TestCacheIntegration_CanonicalizationHit(t *testing.T) {
 	defer cancel()
 
 	job1 := protocol.JobInfo{
-		ID:         "test-job-canon-1",
-		InputFiles: []string{"input-canon"},
+		ID:         "test-job-order-1",
+		InputFiles: []string{"input-order"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 	w.processJob(jobCtx, job1, cancel, false)
 
 	beforeDownloads := mockSrv.DownloadCount()
 	job2 := protocol.JobInfo{
-		ID:         "test-job-canon-2",
-		InputFiles: []string{"input-canon"},
+		ID:         "test-job-order-2",
+		InputFiles: []string{"input-order"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-preset", "fast", "-c:v", "libx264"},
 	}
 	w.processJob(jobCtx, job2, cancel, false)
 
-	if mockSrv.DownloadCount() != beforeDownloads {
-		t.Error("Expected no downloads on second run — canonicalization should produce same key")
-	}
-
-	stats := w.cache.Stats()
-	if stats.Hits < 1 {
-		t.Errorf("Expected at least 1 hit, got %d", stats.Hits)
+	// Different flag order should produce different cache keys, so second run
+	// should still download inputs (cache miss for the new key)
+	if mockSrv.DownloadCount() <= beforeDownloads {
+		t.Error("Expected downloads on second run — different flag order should produce different keys")
 	}
 }

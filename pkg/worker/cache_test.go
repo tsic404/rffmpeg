@@ -12,8 +12,8 @@ func TestGenerateCacheKey_Deterministic(t *testing.T) {
 	inputSources := []string{"file-a", "file-b"}
 	args := []string{"-c:v", "libx264", "-preset", "fast", "-b:v", "2M"}
 
-	key1 := GenerateCacheKey(inputSources, args, false)
-	key2 := GenerateCacheKey(inputSources, args, false)
+	key1 := GenerateCacheKey(inputSources, args, false, "", "")
+	key2 := GenerateCacheKey(inputSources, args, false, "", "")
 
 	if key1 != key2 {
 		t.Errorf("GenerateCacheKey is not deterministic: %s != %s", key1[:16], key2[:16])
@@ -23,8 +23,8 @@ func TestGenerateCacheKey_Deterministic(t *testing.T) {
 func TestGenerateCacheKey_DifferentInputs(t *testing.T) {
 	args := []string{"-c:v", "libx264"}
 
-	key1 := GenerateCacheKey([]string{"file-a"}, args, false)
-	key2 := GenerateCacheKey([]string{"file-b"}, args, false)
+	key1 := GenerateCacheKey([]string{"file-a"}, args, false, "", "")
+	key2 := GenerateCacheKey([]string{"file-b"}, args, false, "", "")
 
 	if key1 == key2 {
 		t.Error("Different inputs should produce different keys")
@@ -34,8 +34,8 @@ func TestGenerateCacheKey_DifferentInputs(t *testing.T) {
 func TestGenerateCacheKey_DifferentArgs(t *testing.T) {
 	sources := []string{"file-a"}
 
-	key1 := GenerateCacheKey(sources, []string{"-c:v", "libx264"}, false)
-	key2 := GenerateCacheKey(sources, []string{"-c:v", "libx265"}, false)
+	key1 := GenerateCacheKey(sources, []string{"-c:v", "libx264"}, false, "", "")
+	key2 := GenerateCacheKey(sources, []string{"-c:v", "libx265"}, false, "", "")
 
 	if key1 == key2 {
 		t.Error("Different args should produce different keys")
@@ -48,31 +48,32 @@ func TestGenerateCacheKey_DifferentAutoHW(t *testing.T) {
 	sources := []string{"file-a"}
 	args := []string{"-c:v", "libx264"}
 
-	keyNoHW := GenerateCacheKey(sources, args, false)
-	keyHW := GenerateCacheKey(sources, args, true)
+	keyNoHW := GenerateCacheKey(sources, args, false, "", "")
+	keyHW := GenerateCacheKey(sources, args, true, "", "")
 
 	if keyNoHW == keyHW {
 		t.Error("auto_hw flag must produce different cache keys")
 	}
 }
 
-func TestGenerateCacheKey_Canonicalization(t *testing.T) {
+func TestGenerateCacheKey_OrderSensitivity(t *testing.T) {
 	sources := []string{"file-a"}
 
-	// Same flags in different order should produce the same key
+	// Different flag order should produce different keys
+	// (order-sensitive semantics like -ss before -i vs after -i)
 	args1 := []string{"-preset", "fast", "-c:v", "libx264"}
 	args2 := []string{"-c:v", "libx264", "-preset", "fast"}
 
-	key1 := GenerateCacheKey(sources, args1, false)
-	key2 := GenerateCacheKey(sources, args2, false)
+	key1 := GenerateCacheKey(sources, args1, false, "", "")
+	key2 := GenerateCacheKey(sources, args2, false, "", "")
 
-	if key1 != key2 {
-		t.Errorf("Canonicalization should produce same key: %s != %s", key1[:16], key2[:16])
+	if key1 == key2 {
+		t.Error("Different flag order should produce different keys")
 	}
 }
 
 func TestGenerateCacheKey_ShardingFormat(t *testing.T) {
-	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false, "", "")
 
 	if len(key) != 64 {
 		t.Errorf("Key should be 64 hex chars (SHA-256), got %d", len(key))
@@ -142,7 +143,7 @@ func TestCachePutAndCheck(t *testing.T) {
 		t.Fatalf("Failed to write source: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test-input-1"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"test-input-1"}, []string{"-c:v", "libx264"}, false, "", "")
 
 	// Check before put - should miss
 	cachedPath, hit := cache.Check(key)
@@ -176,6 +177,7 @@ func TestCachePutAndCheck(t *testing.T) {
 		t.Errorf("Shard directory %s should exist", shardDir)
 	}
 
+	cache.ConfirmHit(key)
 	// Verify stats
 	stats := cache.Stats()
 	if stats.Hits != 1 {
@@ -209,7 +211,7 @@ func TestCacheTTLExpiration(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test-ttl"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"test-ttl"}, []string{"-c:v", "libx264"}, false, "", "")
 	if err := cache.Put(key, srcPath); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
@@ -254,7 +256,7 @@ func TestCacheLRUEviction(t *testing.T) {
 	if err := os.WriteFile(srcPath1, data, 0644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
-	key1 := GenerateCacheKey([]string{"file-1"}, []string{"-c:v", "libx264"}, false)
+	key1 := GenerateCacheKey([]string{"file-1"}, []string{"-c:v", "libx264"}, false, "", "")
 	if err := cache.Put(key1, srcPath1); err != nil {
 		t.Fatalf("Put key1 failed: %v", err)
 	}
@@ -264,7 +266,7 @@ func TestCacheLRUEviction(t *testing.T) {
 	if err := os.WriteFile(srcPath2, data, 0644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
-	key2 := GenerateCacheKey([]string{"file-2"}, []string{"-c:v", "libx265"}, false)
+	key2 := GenerateCacheKey([]string{"file-2"}, []string{"-c:v", "libx265"}, false, "", "")
 	if err := cache.Put(key2, srcPath2); err != nil {
 		t.Fatalf("Put key2 failed: %v", err)
 	}
@@ -298,7 +300,7 @@ func TestCacheClear(t *testing.T) {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test-clear"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"test-clear"}, []string{"-c:v", "libx264"}, false, "", "")
 	if err := cache.Put(key, srcPath); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
@@ -326,7 +328,7 @@ func TestCacheDisabledCheckAlwaysMiss(t *testing.T) {
 		t.Fatalf("NewCache failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false, "", "")
 	_, hit := cache.Check(key)
 	if hit {
 		t.Error("Disabled cache should always miss")
@@ -339,7 +341,7 @@ func TestCacheDisabledPutNoError(t *testing.T) {
 		t.Fatalf("NewCache failed: %v", err)
 	}
 
-	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"test"}, []string{"-c:v", "libx264"}, false, "", "")
 	if err := cache.Put(key, "/nonexistent/path"); err != nil {
 		t.Errorf("Put on disabled cache should not error: %v", err)
 	}
@@ -365,8 +367,9 @@ func TestCacheStats(t *testing.T) {
 	}
 
 	// Miss
-	key := GenerateCacheKey([]string{"stats-test"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"stats-test"}, []string{"-c:v", "libx264"}, false, "", "")
 	cache.Check(key)
+	cache.ConfirmHit(key)
 	stats = cache.Stats()
 	if stats.Misses != 1 {
 		t.Errorf("Expected 1 miss, got %d", stats.Misses)
@@ -401,7 +404,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 	srcPath := filepath.Join(dir, "src.bin")
 	os.WriteFile(srcPath, []byte("concurrent test data"), 0644)
 
-	key := GenerateCacheKey([]string{"concurrent"}, []string{"-c:v", "libx264"}, false)
+	key := GenerateCacheKey([]string{"concurrent"}, []string{"-c:v", "libx264"}, false, "", "")
 	cache.Put(key, srcPath)
 
 	// Run concurrent checks
@@ -410,6 +413,7 @@ func TestCacheConcurrentAccess(t *testing.T) {
 		go func() {
 			for j := 0; j < 100; j++ {
 				cache.Check(key)
+				cache.ConfirmHit(key)
 			}
 			done <- true
 		}()
@@ -451,13 +455,13 @@ func TestCacheStartStop(t *testing.T) {
 	cache.Stop()
 }
 
-func TestCanonicalizeArgs_Sorting(t *testing.T) {
-	// Same flags in different order
+func TestCanonicalizeArgs_OrderPreserved(t *testing.T) {
+	// Different flag order should produce different strings
 	result1 := canonicalizeArgs([]string{"-preset", "fast", "-c:v", "libx264"})
 	result2 := canonicalizeArgs([]string{"-c:v", "libx264", "-preset", "fast"})
 
-	if result1 != result2 {
-		t.Errorf("Canonicalized args should be equal:\n  %s\n  %s", result1, result2)
+	if result1 == result2 {
+		t.Error("Different flag order should produce different canonicalized strings")
 	}
 }
 
@@ -521,5 +525,110 @@ func TestLRUTrackerEmpty(t *testing.T) {
 
 	if lt.len() != 0 {
 		t.Error("Empty LRU should have length 0")
+	}
+}
+
+func TestGenerateCacheKey_DifferentOutputExt(t *testing.T) {
+	sources := []string{"file-a"}
+	args := []string{"-c:v", "libx264"}
+
+	key1 := GenerateCacheKey(sources, args, false, ".mp4", "")
+	key2 := GenerateCacheKey(sources, args, false, ".mkv", "")
+
+	if key1 == key2 {
+		t.Error("Different output extensions should produce different keys")
+	}
+}
+
+func TestGenerateCacheKey_DifferentEncoder(t *testing.T) {
+	sources := []string{"file-a"}
+	args := []string{"-c:v", "libx264"}
+
+	key1 := GenerateCacheKey(sources, args, false, ".mp4", "libx264")
+	key2 := GenerateCacheKey(sources, args, false, ".mp4", "h264_qsv")
+
+	if key1 == key2 {
+		t.Error("Different encoders should produce different keys")
+	}
+}
+
+func TestCachePerEntryTTL(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+
+	cache, err := NewCache(CacheConfig{
+		Enabled: true,
+		Dir:     cacheDir,
+		TTL:     24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+	defer cache.Stop()
+
+	srcPath := filepath.Join(dir, "source.bin")
+	if err := os.WriteFile(srcPath, []byte("test data"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	key := GenerateCacheKey([]string{"test-ttl-entry"}, []string{"-c:v", "libx264"}, false, "", "")
+
+	// Put with a very short per-entry TTL (100ms)
+	if err := cache.Put(key, srcPath, 100*time.Millisecond); err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+
+	// Should hit immediately
+	if _, hit := cache.Check(key); !hit {
+		t.Error("Expected hit immediately after Put with short TTL")
+	}
+
+	// Wait for TTL to expire
+	time.Sleep(200 * time.Millisecond)
+
+	// Should miss after TTL expiry
+	if _, hit := cache.Check(key); hit {
+		t.Error("Expected miss after short TTL expiry")
+	}
+}
+
+func TestCacheConfirmHitDoesNotIncrementWithoutCall(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+
+	cache, err := NewCache(CacheConfig{
+		Enabled: true,
+		Dir:     cacheDir,
+		TTL:     24 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+	defer cache.Stop()
+
+	srcPath := filepath.Join(dir, "source.bin")
+	if err := os.WriteFile(srcPath, []byte("test data"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	key := GenerateCacheKey([]string{"test-confirm"}, []string{"-c:v", "libx264"}, false, "", "")
+	cache.Put(key, srcPath)
+
+	// Check returns true but does NOT increment Hits
+	if _, hit := cache.Check(key); !hit {
+		t.Fatal("Expected hit from Check")
+	}
+
+	// Without ConfirmHit, Hits should be 0
+	stats := cache.Stats()
+	if stats.Hits != 0 {
+		t.Errorf("Expected 0 hits without ConfirmHit, got %d", stats.Hits)
+	}
+
+	// After ConfirmHit, Hits should be 1
+	cache.ConfirmHit(key)
+	stats = cache.Stats()
+	if stats.Hits != 1 {
+		t.Errorf("Expected 1 hit after ConfirmHit, got %d", stats.Hits)
 	}
 }

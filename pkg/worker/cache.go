@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +36,11 @@ type CacheConfig struct {
 
 	// LRUCheckInterval is how often the LRU eviction check runs.
 	LRUCheckInterval time.Duration
+
+	// URLTTL is the TTL for cache entries sourced from URL-based inputs.
+	// URL content may change without the URL changing, so a shorter TTL
+	// prevents stale results from being served for extended periods.
+	URLTTL time.Duration
 }
 
 // DefaultCacheConfig returns sensible defaults for the cache configuration.
@@ -45,6 +49,7 @@ func DefaultCacheConfig() CacheConfig {
 		Dir:              "/var/cache/rffmpeg",
 		Enabled:          true,
 		TTL:              24 * time.Hour,
+		URLTTL:           1 * time.Hour,
 		MaxSizeBytes:     10 * 1024 * 1024 * 1024, // 10 GiB
 		TTLScanInterval:  10 * time.Minute,
 		LRUCheckInterval: 5 * time.Minute,
@@ -53,9 +58,10 @@ func DefaultCacheConfig() CacheConfig {
 
 // cacheEntryMeta is stored as JSON alongside each cached file.
 type cacheEntryMeta struct {
-	Key       string    `json:"key"`
-	CreatedAt time.Time `json:"created_at"`
-	Size      int64     `json:"size"`
+	Key       string        `json:"key"`
+	CreatedAt time.Time     `json:"created_at"`
+	Size      int64         `json:"size"`
+	TTL       time.Duration `json:"ttl,omitempty"`
 }
 
 // CacheStats holds cache usage statistics.
@@ -236,6 +242,11 @@ func NewCache(cfg CacheConfig) (*Cache, error) {
 }
 
 // Start begins the background eviction goroutines.
+// Cfg returns a copy of the cache configuration.
+func (c *Cache) Cfg() CacheConfig {
+	return c.cfg
+}
+
 func (c *Cache) Start(ctx context.Context) {
 	if !c.cfg.Enabled {
 		return
@@ -256,34 +267,27 @@ func (c *Cache) Stop() {
 	c.wg.Wait()
 }
 
-// GenerateCacheKey computes a deterministic cache key from input sources, ffmpeg arguments,
-// and the auto_hw flag. Key = SHA256(inputSources joined by "|" + "|" + canonicalized args + "|auto_hw=<bool>")
-// The auto_hw flag MUST be part of the key: hardware-upgraded output (--auto-hw) must never
-// be served to requests without --auto-hw, which would silently rewrite the requested encoder.
 // The first 2 hex chars of the key are used as a sharding subdirectory.
-func GenerateCacheKey(inputSources []string, args []string, autoHW bool) string {
+func GenerateCacheKey(inputSources []string, args []string, autoHW bool, outputExt string, encoder string) string {
 	canonicalArgs := canonicalizeArgs(args)
 	inputPart := strings.Join(inputSources, "|")
-	payload := inputPart + "|" + canonicalArgs + "|auto_hw=" + strconv.FormatBool(autoHW)
+	payload := inputPart + "|" + canonicalArgs + "|ext=" + outputExt + "|encoder=" + encoder + "|auto_hw=" + strconv.FormatBool(autoHW)
 
 	hash := sha256.Sum256([]byte(payload))
 	return fmt.Sprintf("%x", hash)
 }
 
-// canonicalizeArgs produces a deterministic string from ffmpeg arguments by sorting flags.
-// Input files (-i arguments) and their order are preserved at the front.
+// canonicalizeArgs produces a deterministic string from ffmpeg arguments.
+// Unlike the old sorting-based approach, this preserves the original argument order
+// to avoid breaking order-sensitive semantics (-ss before -i vs after -i, -map order, etc.).
 // Non-flag arguments (like output paths) are excluded since they vary per-run.
+// Input file markers (<INPUT_FILE>) are also excluded as they're part of InputSources.
 func canonicalizeArgs(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
 
-	type flagGroup struct {
-		flag  string
-		value string // empty for boolean flags
-	}
-
-	var groups []flagGroup
+	var tokens []string
 	i := 0
 	for i < len(args) {
 		arg := args[i]
@@ -303,69 +307,23 @@ func canonicalizeArgs(args []string) string {
 			continue
 		}
 
-		fg := flagGroup{flag: arg}
-
-		// Check for =value form
+		// Preserve the original flag-value pair
 		if idx := strings.Index(arg, "="); idx != -1 {
-			fg.flag = arg[:idx]
-			fg.value = arg[idx+1:]
+			// =value form: keep as-is
+			tokens = append(tokens, fmt.Sprintf("%d:%s", len(arg), arg))
 		} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			// Separate value form
-			if isFlagWithValueCanonical(arg) {
-				fg.value = args[i+1]
-				i++ // consume the value
-			}
+			// Separate value form: keep both flag and value together
+			// Use length-prefixed encoding to prevent token-boundary collisions
+			tokens = append(tokens, fmt.Sprintf("%d:%s", len(arg), arg), fmt.Sprintf("%d:%s", len(args[i+1]), args[i+1]))
+			i++ // consume the value
+		} else {
+			// Boolean flag or standalone flag
+			tokens = append(tokens, fmt.Sprintf("%d:%s", len(arg), arg))
 		}
-
-		groups = append(groups, fg)
 		i++
 	}
 
-	// Sort by flag name
-	sort.Slice(groups, func(a, b int) bool {
-		return groups[a].flag < groups[b].flag
-	})
-
-	// Build canonical string
-	var parts []string
-	for _, g := range groups {
-		if g.value != "" {
-			parts = append(parts, g.flag+"="+g.value)
-		} else {
-			parts = append(parts, g.flag)
-		}
-	}
-
-	return strings.Join(parts, " ")
-}
-
-// isFlagWithValueCanonical returns true if the flag takes a value argument.
-func isFlagWithValueCanonical(flag string) bool {
-	if strings.Contains(flag, "=") {
-		return false
-	}
-
-	// Strip stream specifier
-	baseFlag := flag
-	if idx := strings.Index(flag, ":"); idx != -1 {
-		baseFlag = flag[:idx]
-	}
-
-	booleanFlags := map[string]bool{
-		"-vn": true, "-an": true, "-sn": true, "-dn": true,
-		"-y": true, "-n": true,
-		"-version": true, "-buildconf": true,
-		"-formats": true, "-devices": true, "-codecs": true,
-		"-decoders": true, "-encoders": true, "-bsfs": true,
-		"-protocols": true, "-filters": true, "-pix_fmts": true,
-		"-layouts": true, "-sample_fmts": true, "-colors": true,
-		"-h": true, "-?": true, "-help": true,
-		"-benchmark": true, "-benchmark_all": true,
-		"-copyts": true, "-start_at_zero": true,
-		"-bitexact": true, "-re": true,
-		"-stdin": true,
-	}
-	return !booleanFlags[baseFlag]
+	return strings.Join(tokens, " ")
 }
 
 // keyPath returns the file path for a cache key (sharded by first 2 hex chars).
@@ -407,27 +365,49 @@ func (c *Cache) Check(key string) (string, bool) {
 		return "", false
 	}
 
-	// Check TTL
-	if time.Since(meta.CreatedAt) > c.cfg.TTL {
+	// Check TTL (use per-entry TTL from metadata if set, otherwise global config)
+	effectiveTTL := c.cfg.TTL
+	if meta.TTL > 0 {
+		effectiveTTL = meta.TTL
+	}
+	if time.Since(meta.CreatedAt) > effectiveTTL {
 		// Expired — evict it
 		c.removeEntry(key, cachePath, metaPath, meta.Size)
 		c.stats.Misses++
 		return "", false
 	}
 
-	// Cache hit
-	c.stats.Hits++
+	// Verify cached file size matches metadata
+	if info, err := os.Stat(cachePath); err != nil {
+		// File missing — treat as miss
+		c.removeEntry(key, cachePath, metaPath, meta.Size)
+		c.stats.Misses++
+		return "", false
+	} else if info.Size() != meta.Size || info.Size() == 0 {
+		// Size mismatch or zero-byte file — evict and treat as miss
+		c.removeEntry(key, cachePath, metaPath, meta.Size)
+		c.stats.Misses++
+		return "", false
+	}
 
-	// Touch LRU
-	c.lruList.touch(key)
+	// Cache hit (caller must call ConfirmHit for stats tracking)
 
 	return cachePath, true
+}
+
+// ConfirmHit records a confirmed cache hit (stats + LRU touch).
+// Should be called after successfully using the cached file.
+func (c *Cache) ConfirmHit(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stats.Hits++
+	c.lruList.touch(key)
 }
 
 // Put stores a file in the cache.
 // srcPath is the path to the source file (transcode output).
 // The source file is copied into the cache; it is not moved.
-func (c *Cache) Put(key string, srcPath string) error {
+func (c *Cache) Put(key string, srcPath string, ttlOverride ...time.Duration) error {
 	if !c.cfg.Enabled {
 		return nil
 	}
@@ -443,6 +423,7 @@ func (c *Cache) Put(key string, srcPath string) error {
 
 	cachePath := c.keyPath(key)
 	metaPath := c.metaPath(key)
+	tmpPath := cachePath + ".tmp"
 
 	// Create shard directory if needed
 	if len(key) >= 4 {
@@ -451,9 +432,16 @@ func (c *Cache) Put(key string, srcPath string) error {
 		}
 	}
 
-	// Copy source file to cache
-	if err := copyFile(srcPath, cachePath); err != nil {
+	// Copy source file to temp path first for atomicity
+	if err := copyFile(srcPath, tmpPath); err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("failed to copy file to cache: %w", err)
+	}
+
+	// Atomic rename: tmp → cachePath
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 
 	// Write metadata
@@ -461,6 +449,9 @@ func (c *Cache) Put(key string, srcPath string) error {
 		Key:       key,
 		CreatedAt: time.Now(),
 		Size:      srcInfo.Size(),
+	}
+	if len(ttlOverride) > 0 && ttlOverride[0] > 0 {
+		meta.TTL = ttlOverride[0]
 	}
 	if err := c.saveMeta(metaPath, meta); err != nil {
 		// Clean up the cache file if metadata write fails
