@@ -28,6 +28,19 @@ const (
 	WSMaxReconnectDelay = 30 * time.Second
 	WSReadTimeout       = 60 * time.Second
 	WSWriteTimeout      = 10 * time.Second
+
+	// WSPingInterval bounds how often the client pings the server. It must
+	// stay well below WSReadTimeout (and below the server's 60s read
+	// deadline) so a healthy idle connection is never reaped by either
+	// side's deadline (TSI-2414).
+	WSPingInterval = 25 * time.Second
+)
+
+// Overridable keepalive timings for regression tests; production values
+// mirror the exported consts above.
+var (
+	wsReadTimeout  = WSReadTimeout
+	wsPingInterval = WSPingInterval
 )
 
 // WSClient handles WebSocket connections for real-time log streaming
@@ -180,9 +193,18 @@ func (c *WSClient) connect(ctx context.Context) error {
 	// reset look like proven loss (TSI-2382 review blocker #1).
 	c.sawDataAfterRestart = false
 
+	// A pong from the server proves the connection is alive: push the read
+	// deadline out again. Without this, a quiet period (long transcode with
+	// no stderr/stdout output) longer than the deadline reaps an idle but
+	// healthy connection, and broadcasts sent during the forced reconnect
+	// window are lost — surfacing as a spurious seq gap (TSI-2414).
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		return nil
+	})
+
 	// Set read limit
 	conn.SetReadLimit(1 << 20) // 1MB max message size
-
 	return nil
 }
 
@@ -244,6 +266,52 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 
 // Listen starts listening for WebSocket messages
 func (c *WSClient) Listen(ctx context.Context) error {
+
+	// Client-side keepalive (TSI-2414): periodically ping the server; the
+	// server's pong handler pushes its read deadline out, and our pong
+	// handler (installed in connect) pushes ours out on every reply. A
+	// quiet period — a long transcode with no stderr/stdout traffic — used
+	// to trip the read deadline and force a reconnect whose missed
+	// broadcasts surfaced downstream as a spurious seq gap.
+	//
+	// The pinger is a dedicated goroutine rather than a select arm: the
+	// loop body blocks in ReadMessage for up to the read deadline, which
+	// can exceed the ping interval — a select arm would starve. It is
+	// deliberately NOT joined on return: a graceful server close (1000)
+	// must return promptly while the pinger may still be inside its
+	// WSWriteTimeout-bounded write. Its lifetime is bounded by ctx/done
+	// and by conn.Close() (called by Close() and on ping failure), so it
+	// never outlives the session meaningfully.
+	go func() {
+		ticker := time.NewTicker(wsPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-c.done:
+				return
+			case <-ticker.C:
+			}
+
+			c.mu.Lock()
+			conn := c.conn
+			c.mu.Unlock()
+			if conn == nil {
+				continue
+			}
+			conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(WSWriteTimeout)); err != nil {
+				// A failed keepalive write means the connection is dead:
+				// close it so the blocked ReadMessage wakes up and the
+				// normal reconnect path takes over.
+				log.Printf("WebSocket keepalive ping failed for job %s: %v", c.jobID, err)
+				conn.Close()
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -262,7 +330,7 @@ func (c *WSClient) Listen(ctx context.Context) error {
 		}
 
 		// Set read deadline
-		conn.SetReadDeadline(time.Now().Add(WSReadTimeout))
+		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
