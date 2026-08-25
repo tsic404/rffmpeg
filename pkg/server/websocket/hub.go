@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,14 @@ type Client struct {
 	mu     sync.Mutex
 	closed bool
 }
+
+// hubBroadcastBuffer is the capacity of the hub's broadcast queue.
+const hubBroadcastBuffer = 256
+
+// hubSendTimeout bounds how long any channel send into the hub may block.
+// The hub is a shared service: one stalled consumer must never wedge the
+// callers feeding it (TSI-2388).
+const hubSendTimeout = 5 * time.Second
 
 // Hub maintains the set of active WebSocket clients and broadcasts messages
 type Hub struct {
@@ -63,7 +72,7 @@ func NewHub() *Hub {
 func NewHubWithSeqStore(store SeqStore) *Hub {
 	return &Hub{
 		clients:    make(map[string]map[*Client]bool),
-		broadcast:  make(chan *BroadcastMessage, 256),
+		broadcast:  make(chan *BroadcastMessage, hubBroadcastBuffer),
 		register:   make(chan *Client, 100), // Buffered to prevent blocking
 		unregister: make(chan *Client, 100), // Buffered to prevent blocking
 		seq:        make(map[string]int64),
@@ -104,20 +113,48 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			// Full write lock, not RLock: the shed path below mutates
+			// h.clients. The invariant is "after Close, no broadcast may
+			// touch client.send" — a select-send on the closed channel
+			// panics (the default branch does NOT save you) and would kill
+			// this Run goroutine, i.e. the exact silent-server-death this
+			// fix exists for (TSI-2388 review blocker #1). Removing the
+			// client from the map synchronously here — instead of waiting
+			// for ReadPump's async Unregister — closes that window
+			// entirely.
+			h.mu.Lock()
 			clients, ok := h.clients[message.JobID]
-			h.mu.RUnlock()
 
 			if ok {
 				for client := range clients {
 					select {
 					case client.send <- message.Message:
 					default:
-						// Client buffer full, close the connection
-						h.unregister <- client
+						// Client buffer full: shed it now. Two hazards
+						// avoided:
+						//   - h.unregister <- client from inside the loop
+						//     deadlocks: Run is the only reader of that
+						//     channel, so once the buffered backlog fills,
+						//     the whole loop freezes.
+						//   - Close alone leaves the client in the map;
+						//     the next broadcast for this job would then
+						//     select-send on the closed channel — a panic,
+						//     not a default-branch skip. So delete from
+						//     the map FIRST (we hold the write lock), then
+						//     close: subsequent broadcasts can never reach
+						//     client.send again. WritePump exits on the
+						//     closed send channel; ReadPump's read error
+						//     triggers its Unregister, a no-op on an
+						//     already-removed entry.
+						delete(clients, client)
+						if len(clients) == 0 {
+							delete(h.clients, message.JobID)
+						}
+						client.Close()
 					}
 				}
 			}
+			h.mu.Unlock()
 		}
 	}
 }
@@ -132,11 +169,25 @@ func (h *Hub) Unregister(client *Client) {
 	h.unregister <- client
 }
 
-// Broadcast sends a message to all clients listening for a job
-func (h *Hub) Broadcast(jobID string, message []byte) {
-	h.broadcast <- &BroadcastMessage{
+// Broadcast sends a message to all clients listening for a job.
+//
+// TSI-2388: the send is bounded, not blocking. h.broadcast is only drained
+// by the Run loop; if that loop is wedged (or was never started), a blocking
+// send here would freeze every handler goroutine that touches a broadcast —
+// the process stays up (listeners open) but never answers another request,
+// which is exactly the "silent server death" seen in QA. A wedged or absent
+// loop means the message cannot be delivered, so callers get an error and
+// the drop is observable in the logs instead of an invisible hang.
+func (h *Hub) Broadcast(jobID string, message []byte) error {
+	msg := &BroadcastMessage{
 		JobID:   jobID,
 		Message: message,
+	}
+	select {
+	case h.broadcast <- msg:
+		return nil
+	case <-time.After(hubSendTimeout):
+		return fmt.Errorf("websocket hub not accepting broadcasts (loop stalled or stopped); dropped message for job %s", jobID)
 	}
 }
 
@@ -197,8 +248,7 @@ func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 	if err != nil {
 		return err
 	}
-	h.Broadcast(msg.JobID, data)
-	return nil
+	return h.Broadcast(msg.JobID, data)
 }
 
 // persistSeq writes the counter through to the store (best-effort) and drops
