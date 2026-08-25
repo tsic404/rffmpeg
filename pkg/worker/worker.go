@@ -666,6 +666,19 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		return
 	}
 	args = rewrittenArgs
+	// Streaming (stdout) output cannot be seeked by muxers like mp4/mov.
+	// Inject fragmented-output flags so the requested container still works
+	// instead of failing inside ffmpeg with "muxer does not support non
+	// seekable output" (TSI-2409). Runs after rewrite so the final args are
+	// what gets adjusted.
+	if job.StreamingOutput {
+		var note string
+		args, note = applyStreamableFormat(args, outputPath)
+		if note != "" {
+			log.Printf("Job %s: %s", job.ID, note)
+			progressRouter.Handler()(fmt.Sprintf("[rffmpeg] %s\n", note))
+		}
+	}
 
 	// Recompute cache key with the actual encoder from the rewrite result
 	// This ensures encoder-specific outputs are keyed correctly.
