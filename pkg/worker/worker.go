@@ -349,6 +349,11 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 	}
 }
 
+// batcherCreateHook, when non-nil, receives every StderrBatcher created on
+// the cache-hit path of processJob. Nil in production; tests use it to
+// observe batcher lifecycle (TSI-2415 leak regression).
+var batcherCreateHook func(*StderrBatcher)
+
 // processJob processes a single job
 func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel context.CancelFunc, wgTracked bool) {
 	jobFailed := false
@@ -455,6 +460,19 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		if cachePath, ok := w.cache.Check(cacheKey); ok {
 			log.Printf("Job %s: cache HIT (key=%s)", job.ID, cacheKey[:16])
 
+			// Stream the cache-hit notice through the job's stderr so CLI
+			// clients observe it, not only this worker process' own log
+			// (TSI-2349 precedent). Deferred Close guarantees the flush
+			// timer is stopped on every exit path — including the early
+			// return below when MkdirAll fails — otherwise timedFlush
+			// re-arms itself forever and leaks the timer/goroutine.
+			batcher := NewStderrBatcher(job.ID, w.client, DefaultStderrBatcherConfig())
+			if batcherCreateHook != nil {
+				batcherCreateHook(batcher)
+			}
+			defer batcher.Close()
+			batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cache HIT (key=%s)\n", job.ID, cacheKey[:16]))
+
 			// Create job-specific temp directory
 			jobDir := filepath.Join(w.tempDir, job.ID)
 			if err := os.MkdirAll(jobDir, 0755); err != nil {
@@ -477,21 +495,27 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 			if err := copyFile(cachePath, outputPath); err != nil {
 				log.Printf("Job %s: failed to copy cached file: %v", job.ID, err)
+				batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached output copy failed (%v), re-transcoding\n", job.ID, err))
 				// Fall through to normal processing
 			} else if _, err := os.Stat(outputPath); err != nil {
 				// Copy claimed success but the file is not there — degrade to
 				// a cache miss instead of reporting Completed without output.
 				log.Printf("Job %s: cached file missing after copy (%v), falling through to normal processing", job.ID, err)
+				batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached file missing after copy (%v), re-transcoding\n", job.ID, err))
 			} else if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
 				// Upload failure is recoverable by re-transcoding — fall
 				// through to normal processing instead of failing the job.
 				log.Printf("Job %s: failed to upload cached output (%v), falling through to normal processing", job.ID, err)
+				batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached output upload failed (%v), re-transcoding\n", job.ID, err))
 				cached = false
 			} else {
 				// Confirm the cache hit (stats + LRU touch)
 				w.cache.ConfirmHit(cacheKey)
 				log.Printf("Uploaded cached output for job %s", job.ID)
 				cached = true
+				// Deliver the notice before reporting completion so CLI
+				// clients always see it ahead of the terminal status.
+				batcher.Close()
 
 				// Report success with cached flag
 				if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, 0, "", cached); err != nil {
