@@ -143,8 +143,10 @@ func (h *Hub) Broadcast(jobID string, message []byte) {
 // BroadcastWSMessage stamps a per-job monotonically increasing sequence
 // number on data-bearing messages, then broadcasts to all clients for a job.
 // The counter lives for the whole job: it is only removed once the terminal
-// status broadcast (completed/failed/cancelled/timeout) has gone out, so a
-// reconnecting client's lastSeq stays meaningful across disconnect windows.
+// event broadcast (complete/error) has gone out — a terminal *status*
+// broadcast carries it forward so the trailing complete message continues the
+// numbering instead of restarting at 1 (TSI-2382) — keeping a reconnecting
+// client's lastSeq meaningful across disconnect windows.
 //
 // With a SeqStore configured, the counter is persisted on every increment
 // and restored on the first broadcast after a restart — a server restart no
@@ -164,18 +166,26 @@ func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 
 		h.mu.Lock()
 		h.ensureSeq(msg.JobID)
-		h.seq[msg.JobID]++
-		msg.Seq = h.seq[msg.JobID]
+		// A terminal-status broadcast must NOT delete the counter here:
+		// BroadcastComplete immediately follows BroadcastStatus(completed/
+		// failed/...) in the handlers, and deleting at the status step made
+		// the complete broadcast renumber from 1 — connected clients read
+		// that reset as proven data loss and failed intact jobs with a
+		// spurious gap (TSI-2382). The status carries lastSeq forward; the
+		// complete/error branch below performs the actual deletion.
 		terminal := false
 		if msg.Type == protocol.WSMsgStatus {
 			if payload, ok := msg.Data.(protocol.WSStatusPayload); ok && protocol.IsTerminalStatus(payload.Status) {
-				delete(h.seq, msg.JobID)
 				terminal = true
 			}
 		}
+		h.seq[msg.JobID]++
+		msg.Seq = h.seq[msg.JobID]
 		if msg.Type == protocol.WSMsgComplete || msg.Type == protocol.WSMsgError {
 			// Complete/error are themselves terminal events: the job will
-			// produce no further sequenced data worth tracking.
+			// produce no further sequenced data worth tracking. This is the
+			// single deletion point — after it, a genuinely new stream for
+			// the same job ID restarts at 1.
 			delete(h.seq, msg.JobID)
 			terminal = true
 		}

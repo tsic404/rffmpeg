@@ -123,7 +123,8 @@ func TestHub_SeqCounterOutlivesClientDisconnect(t *testing.T) {
 }
 
 // TestHub_SeqCounterDeletedOnTerminalBroadcast verifies the counter cleanup
-// happens exactly once the job reaches a terminal status.
+// happens exactly once the job's terminal-event broadcast (complete/error)
+// goes out.
 func TestHub_SeqCounterDeletedOnTerminalBroadcast(t *testing.T) {
 	hub := NewHub()
 	runHub(hub)
@@ -143,7 +144,7 @@ func TestHub_SeqCounterDeletedOnTerminalBroadcast(t *testing.T) {
 		t.Fatal("non-terminal status broadcast must not delete the seq counter")
 	}
 
-	// Terminal status must delete it.
+	// The complete broadcast (the terminal event) must delete it.
 	if err := hub.BroadcastComplete(jobID, 0); err != nil {
 		t.Fatalf("complete broadcast: %v", err)
 	}
@@ -167,7 +168,10 @@ func TestHub_SeqCounterDeletedOnTerminalBroadcast(t *testing.T) {
 }
 
 // TestHub_TerminalStatusVariantsAllCleanup verifies every terminal status
-// deletes the counter.
+// keeps the counter alive for the trailing complete broadcast (TSI-2382:
+// deleting at the status step renumbered the complete message from 1 and
+// clients misread that as data loss), and that the complete broadcast then
+// performs the deletion.
 func TestHub_TerminalStatusVariantsAllCleanup(t *testing.T) {
 	statuses := []protocol.JobStatus{
 		protocol.JobStatusCompleted,
@@ -186,8 +190,15 @@ func TestHub_TerminalStatusVariantsAllCleanup(t *testing.T) {
 			}
 			waitForSeq(t, hub, jobID, func(v int64, ok bool) bool { return ok && v == 1 })
 
+			// Terminal status carries the counter forward...
 			if err := hub.BroadcastStatus(jobID, st, 0, ""); err != nil {
 				t.Fatalf("status broadcast: %v", err)
+			}
+			waitForSeq(t, hub, jobID, func(v int64, ok bool) bool { return ok && v == 2 })
+
+			// ...and the trailing complete broadcast deletes it.
+			if err := hub.BroadcastComplete(jobID, 0); err != nil {
+				t.Fatalf("complete broadcast: %v", err)
 			}
 			waitForSeq(t, hub, jobID, func(_ int64, ok bool) bool { return !ok })
 		})

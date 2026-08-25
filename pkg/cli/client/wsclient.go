@@ -52,6 +52,17 @@ type WSClient struct {
 	lastSeq    int64
 	sawMessage bool // false until the first sequenced message arrives
 	gapFound   bool // set once a gap is detected; sticky for the session
+	// sawDataAfterRestart records whether any data-bearing (stderr/stdout)
+	// message arrived on the current connection. A seq==1 restart observed
+	// before any post-reconnect data is a benign renumbering (TSI-2382); the
+	// same reset after real data flowed proves messages were lost. Reset to
+	// false in connect() on every successful (re)connect.
+	sawDataAfterRestart bool
+	// terminalSeen records whether a terminal job status arrived on this
+	// session: after it, the hub may legitimately restart numbering for any
+	// trailing broadcasts (complete/error/late stderr), so seq resets are no
+	// longer evidence of data loss.
+	terminalSeen bool
 }
 
 // WSClientOption is a functional option for WSClient
@@ -162,6 +173,11 @@ func (c *WSClient) connect(ctx context.Context) error {
 	c.conn = conn
 	c.connected = true
 	c.reconnecting = false
+	// A fresh connection starts a new observation window: whether data has
+	// flowed "since the last reconnect" must be re-evaluated from zero, or
+	// the flag carried over from the dropped connection makes every seq==1
+	// reset look like proven loss (TSI-2382 review blocker #1).
+	c.sawDataAfterRestart = false
 
 	// Set read limit
 	conn.SetReadLimit(1 << 20) // 1MB max message size
@@ -284,20 +300,55 @@ func (c *WSClient) Listen(ctx context.Context) error {
 func (c *WSClient) handleMessage(msg protocol.WSMessage) {
 	if msg.Type != protocol.WSMsgHeartbeat {
 		c.mu.Lock()
+		// A terminal status ends the sequenced stream for this job: the hub
+		// deletes the counter on its terminal-event broadcast, so anything
+		// still arriving afterwards (trailing complete, stderr drained in the
+		// same worker report) may legitimately carry fresh numbering. That
+		// reset is hub bookkeeping, not lost data (TSI-2382).
+		if msg.Type == protocol.WSMsgStatus {
+			if payload, ok := msg.Data.(map[string]interface{}); ok {
+				if st, _ := payload["status"].(string); protocol.IsTerminalStatus(protocol.JobStatus(st)) {
+					c.terminalSeen = true
+				}
+			}
+		}
 		switch {
 		case !c.sawMessage:
 			// First message of the session: adopt the current sequence.
 			c.sawMessage = true
 			c.lastSeq = msg.Seq
-		case msg.Seq == 1 && c.lastSeq > 1:
-			// The server restarted its numbering mid-stream. With the
-			// counter now persisted per job this means the hub lost state
-			// (server restart/crash): everything between lastSeq and the
-			// restart is gone, so treat it as a gap — not a fresh stream.
+		case c.terminalSeen:
+			// Post-terminal messages trail the job's result; their numbering
+			// is irrelevant to gap detection — nothing before them can be
+			// lost that matters. Track but never flag.
+			c.lastSeq = msg.Seq
+		case msg.Seq == 1 && c.lastSeq > 1 && c.sawDataAfterRestart:
+			// Numbering restarted mid-stream AND data-bearing messages were
+			// already received since the restart: everything between lastSeq
+			// and the reset is gone, so treat it as a gap — not a fresh
+			// stream.
 			log.Printf("WebSocket stream sequence restarted for job %s: had seq %d, got 1 — data before server restart was lost",
 				c.jobID, c.lastSeq)
 			c.lastSeq = msg.Seq
 			c.gapFound = true
+		case msg.Seq == 1 && c.lastSeq > 1:
+			// First message after a reconnect with numbering reset to 1 (TSI-2382):
+			// the hub lost its counter (server restart/crash), but no sequenced
+			// data has arrived on this connection yet — nothing proves messages
+			// were lost between lastSeq and here. The job's terminal broadcasts
+			// may have drained during the outage; adopt the new base instead of
+			// false-flagging a gap.
+			//
+			// Adopting is a one-time amnesty for this reconnection: lastSeq
+			// becomes 1, so subsequent seq 2,3,... are contiguous by
+			// construction and the msg.Seq > lastSeq+1 branch cannot fire on
+			// this connection until another reset is observed. That is the
+			// accepted cost of not being able to distinguish "renumbered, all
+			// data intact" from "renumbered, hole at the seam" without server
+			// cooperation.
+			log.Printf("WebSocket stream renumbered to 1 after reconnect for job %s (had seq %d): server likely restarted — adopting new base",
+				c.jobID, c.lastSeq)
+			c.lastSeq = msg.Seq
 		case msg.Seq > c.lastSeq+1:
 			log.Printf("WebSocket stream gap detected for job %s: expected seq %d, got %d — data was lost",
 				c.jobID, c.lastSeq+1, msg.Seq)
@@ -305,7 +356,20 @@ func (c *WSClient) handleMessage(msg protocol.WSMessage) {
 			c.gapFound = true
 		case msg.Seq > c.lastSeq:
 			c.lastSeq = msg.Seq
+		default:
+			// Duplicate or reordered seq at/below lastSeq: nothing to adopt,
+			// and no evidence of loss.
 		}
+		c.mu.Unlock()
+	}
+
+	// Track whether real payload data has flowed on this connection: it
+	// upgrades a later seq==1 reset from "benign renumbering" to "proven
+	// loss". Reset to false in connect() when a new connection is
+	// established.
+	if msg.Type == protocol.WSMsgStderr || msg.Type == protocol.WSMsgStdout {
+		c.mu.Lock()
+		c.sawDataAfterRestart = true
 		c.mu.Unlock()
 	}
 
