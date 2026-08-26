@@ -444,11 +444,15 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		log.Printf("Job %s: direct paths mode, %d input(s)", job.ID, len(job.DirectPaths))
 	}
 
-	// Compute cache key from input files + original args (before rewrite).
-	// auto_hw MUST be part of the key: a --auto-hw run may upgrade the encoder
-	// (e.g. libx264 → h264_qsv), and that output must never be served to
-	// requests without --auto-hw (TSI-2352).
-	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, filepath.Ext(job.OutputFilename), "")
+	// Compute cache key from input files + original args, keyed on the
+	// encoder the rewrite WILL select (not the requested one). auto_hw MUST
+	// be part of the key: a --auto-hw run may upgrade the encoder (e.g.
+	// libx264 -> h264_qsv), and that output must never be served to requests
+	// without --auto-hw (TSI-2352). The Check key must use the same encoder
+	// basis as Put below — otherwise an auto-hw job caches under the rewritten
+	// encoder but checks under "" and can never hit (TSI-2430).
+	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW,
+		filepath.Ext(job.OutputFilename), w.rewriteAdapter.ResolveTargetEncoder(job.Args, job.AutoHW))
 	cached := false
 
 	// Check if output is a network URL (rtmp://, udp://, etc.)
@@ -713,12 +717,6 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			log.Printf("Job %s: %s", job.ID, note)
 			progressRouter.Handler()(fmt.Sprintf("[rffmpeg] %s\n", note))
 		}
-	}
-
-	// Recompute cache key with the actual encoder from the rewrite result
-	// This ensures encoder-specific outputs are keyed correctly.
-	if rewriteResult != nil && rewriteResult.Performed && rewriteResult.TargetEncoder != "" {
-		cacheKey = GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, filepath.Ext(job.OutputFilename), rewriteResult.TargetEncoder)
 	}
 
 	// Pre-flight pixel format check for VAAPI encoders

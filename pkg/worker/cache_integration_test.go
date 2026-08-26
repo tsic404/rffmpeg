@@ -390,3 +390,69 @@ func TestCacheIntegration_OrderSensitivity(t *testing.T) {
 		t.Error("Expected downloads on second run — different flag order should produce different keys")
 	}
 }
+
+// TestCacheIntegration_AutoHWMissThenHit verifies the auto-hw cache key
+// consistency fix (TSI-2430): with rewrite enabled and a hardware encoder
+// available, an --auto-hw job rewrites libx264 -> h264_nvenc and caches under
+// the REWRITTEN encoder key. A second identical submission must HIT instead
+// of missing again because Check used a different (encoder="") key.
+func TestCacheIntegration_AutoHWMissThenHit(t *testing.T) {
+	w, mockSrv := setupTestWorker(t, 24*time.Hour)
+
+	// Enable rewrite with an NVENC-capable worker: libx264 upgrades to h264_nvenc.
+	caps := &protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+			{Name: "libx264", Type: "video", IsHW: false},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+		},
+	}
+	w.rewriteAdapter.SetHardwareCapabilities(caps)
+	w.rewriteAdapter.config.Enabled = true
+
+	ctx := context.Background()
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	args := []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"}
+	makeJob := func(id string) protocol.JobInfo {
+		return protocol.JobInfo{
+			ID:         id,
+			InputFiles: []string{"input-autohw"},
+			Args:       args,
+			AutoHW:     true,
+		}
+	}
+
+	// Sanity: the resolved target encoder must be the rewritten one.
+	target := w.rewriteAdapter.ResolveTargetEncoder(args, true)
+	if target != "h264_nvenc" {
+		t.Fatalf("ResolveTargetEncoder = %q, want h264_nvenc", target)
+	}
+
+	// ---- First run: miss → execute → cached under rewritten-encoder key ----
+	beforeDownloads := mockSrv.DownloadCount()
+	w.processJob(jobCtx, makeJob("test-job-autohw-001"), cancel, false)
+	if mockSrv.DownloadCount() <= beforeDownloads {
+		t.Error("Expected downloads on first run (miss path)")
+	}
+
+	cacheKey := GenerateCacheKey([]string{"input-autohw"}, args, true, "", target)
+	if _, hit := w.cache.Check(cacheKey); !hit {
+		t.Fatal("Expected cache entry under rewritten-encoder key after first run")
+	}
+
+	// ---- Second run: identical submission must hit ----
+	beforeDownloads2 := mockSrv.DownloadCount()
+	w.processJob(jobCtx, makeJob("test-job-autohw-002"), cancel, false)
+	if got := mockSrv.DownloadCount() - beforeDownloads2; got != 0 {
+		t.Errorf("Expected no downloads on second identical auto-hw run (cache hit), got %d new downloads", got)
+	}
+
+	finalStats := w.cache.Stats()
+	if finalStats.Hits < 1 {
+		t.Errorf("Expected at least 1 cache hit, got %d", finalStats.Hits)
+	}
+}

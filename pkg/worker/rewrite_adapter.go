@@ -257,6 +257,41 @@ func (a *RewriteAdapter) RewriteArgs(ctx context.Context, originalArgs []string,
 	return response.RewrittenArgs, result, nil
 }
 
+// ResolveTargetEncoder predicts the encoder a rewrite would select for these
+// args without rewriting anything. It mirrors RewriteArgs' skip conditions
+// (disabled adapter, -vn, passthrough "copy") so callers can key caches on
+// the same encoder the actual rewrite will use. Returns "" when no rewrite
+// applies or no target can be determined.
+func (a *RewriteAdapter) ResolveTargetEncoder(args []string, autoHW bool) string {
+	a.mu.RLock()
+	enabled := a.config.Enabled
+	hwCaps := a.hwCaps
+	a.mu.RUnlock()
+
+	if !enabled {
+		return ""
+	}
+
+	specifiedEncoder := a.parseEncoderFromArgs(args)
+	if a.hasNoVideoFlag(args) || a.isPassthroughEncoder(specifiedEncoder) {
+		return ""
+	}
+
+	req := &rewrite.EncoderRewriteRequest{
+		OriginalArgs:         args,
+		HardwareCapabilities: *hwCaps,
+		AutoHW:               autoHW,
+		EncoderParams:        a.parseEncoderParamsFromArgs(args),
+		SpecifiedEncoder:     specifiedEncoder,
+	}
+
+	response, err := a.engine.Rewrite(context.Background(), req)
+	if err != nil || response.TargetEncoder == "" {
+		return ""
+	}
+	return string(response.TargetEncoder)
+}
+
 // RewriteResult holds the result of a rewrite operation.
 type RewriteResult struct {
 	// Performed indicates whether rewriting was performed
