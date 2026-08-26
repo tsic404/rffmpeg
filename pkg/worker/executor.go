@@ -156,8 +156,12 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderrPipe)
+		scanner.Split(splitProgressLines)
 		for scanner.Scan() {
 			line := scanner.Text()
+			if line == "" {
+				continue
+			}
 			stderr.WriteString(line)
 			stderr.WriteString("\n")
 
@@ -279,6 +283,39 @@ func hasOutputArg(args []string) bool {
 		expectingValue = isFlagWithValue(arg)
 	}
 	return false
+}
+
+// splitProgressLines is a bufio.SplitFunc that normalizes ffmpeg's
+// \r-separated -stats updates into \n-separated lines: the progress line
+// ("frame= ... time= ... speed= ...") is rewritten in place on stderr using
+// \r separators — one update roughly every 0.5s of encoded media — and the
+// default bufio.ScanLines collapses the whole run into a single token that
+// only becomes available when the next \n arrives (at job end), which starved
+// the ProgressRouter and reduced server-side progress pushes to 1-2 updates
+// per job (TSI-2425). Splitting on both keeps the streamed output identical
+// while making every intermediate update visible to the parser in real time.
+func splitProgressLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i, b := range data {
+		switch b {
+		case '\r':
+			// Swallow a following \n so a "\r\n" pair yields one empty
+			// separator instead of two.
+			n := i + 1
+			if n < len(data) && data[n] == '\n' {
+				n++
+			}
+			return n, data[:i], nil
+		case '\n':
+			return i + 1, data[:i], nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 // networkPrefixes contains URL scheme prefixes for ffmpeg network output protocols.

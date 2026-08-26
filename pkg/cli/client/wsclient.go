@@ -61,7 +61,7 @@ type WSClient struct {
 	onStderr     func(chunk string)
 	onStdout     func(chunk []byte)
 	onStatus     func(status protocol.JobStatus, exitCode int, err string)
-	onProgress   func(percent float64)
+	onProgress   func(p protocol.WSProgressPayload)
 	onComplete   func(exitCode int)
 	onError      func(errMsg string)
 	connected    bool
@@ -114,8 +114,10 @@ func WithOnStatus(handler func(status protocol.JobStatus, exitCode int, err stri
 	}
 }
 
-// WithOnProgress sets the progress handler
-func WithOnProgress(handler func(percent float64)) WSClientOption {
+// WithOnProgress sets the progress handler. The handler receives the full
+// WSProgressPayload — percent, speed, ETA and media timestamps — so callers
+// can render an ETA line instead of a bare percentage (TSI-2425).
+func WithOnProgress(handler func(p protocol.WSProgressPayload)) WSClientOption {
 	return func(c *WSClient) {
 		c.onProgress = handler
 	}
@@ -524,8 +526,14 @@ func (c *WSClient) handleMessage(msg protocol.WSMessage) {
 				if percent, ok := data["percent"].(float64); ok {
 					payload.Percent = percent
 				}
+				if speed, ok := data["speed"].(float64); ok {
+					payload.Speed = speed
+				}
+				if eta, ok := data["eta_seconds"].(float64); ok {
+					payload.EtaSeconds = int(eta)
+				}
 			}
-			c.onProgress(payload.Percent)
+			c.onProgress(payload)
 		}
 
 	case protocol.WSMsgComplete:
@@ -614,10 +622,11 @@ func StreamJobLogs(ctx context.Context, serverURL, jobID, token string, quiet bo
 				fmt.Fprintln(os.Stderr)
 			}
 		}),
-		WithOnProgress(func(percent float64) {
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "Progress: %.1f%%\n", percent)
+		WithOnProgress(func(p protocol.WSProgressPayload) {
+			if quiet {
+				return
 			}
+			fmt.Fprintln(os.Stderr, renderProgressLine(p))
 		}),
 		WithOnComplete(func(exitCode int) {
 			completeChan <- exitCode

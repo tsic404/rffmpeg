@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -615,6 +616,16 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	progressRouter := NewProgressRouter(w.client, job.ID, batcher.StderrHandler())
 	defer progressRouter.Reset()
 
+	// Seed the parser with the total media duration so percent/ETA are
+	// meaningful from the very first stats line (TSI-2425). ffmpeg's stderr
+	// header only carries a Duration: line when the input is seekable — for
+	// pipes and many network inputs it prints "Duration: N/A" and percent
+	// would stay -1 forever. Best-effort: probe failures leave the
+	// header-derived duration path in place.
+	if durationUs := w.probeInputDurationUs(jobCtx, inputPaths); durationUs > 0 {
+		progressRouter.SetDuration(durationUs)
+	}
+
 	// Rewrite args based on hardware capabilities and auto_hw setting
 	rewrittenArgs, rewriteResult, err := w.rewriteAdapter.RewriteArgs(jobCtx, args, job.AutoHW)
 
@@ -964,6 +975,48 @@ func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failu
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, failureType, failureDetails); err != nil {
 		log.Printf("Failed to report job failure: %v", err)
 	}
+}
+
+// probeInputDurationUs returns the total duration of the first local input
+// file that yields one via ffprobe, in microseconds, or 0 when none can be
+// determined (missing tool, unreadable inputs, non-local sources). Used to
+// seed the progress parser so percent/ETA work even when ffmpeg's own stderr
+// header reports "Duration: N/A" (pipes, some network inputs) — TSI-2425.
+//
+// Multi-input jobs (e.g. concat) skip over inputs that fail to probe or
+// carry no duration rather than giving up: a later input may still yield a
+// usable figure, and any estimate is better than percent staying -1 for the
+// whole job. For concat the result is the first probed segment's duration,
+// an intentional under-estimate — progress reaches 100% early instead of
+// never appearing at all.
+func (w *Worker) probeInputDurationUs(ctx context.Context, inputPaths []string) int64 {
+	for _, p := range inputPaths {
+		if p == "" || strings.HasPrefix(p, "-") {
+			continue // skip placeholders and option-like args
+		}
+		if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		result, err := w.ffprobeExecutor.Probe(ctx, p)
+		if err != nil {
+			log.Printf("Progress duration probe failed for %s, trying next input: %v", p, err)
+			continue
+		}
+		if result.Format == nil {
+			continue
+		}
+		switch d := result.Format["duration"].(type) {
+		case string:
+			if secs, err := strconv.ParseFloat(d, 64); err == nil && secs > 0 {
+				return int64(secs * 1_000_000)
+			}
+		case float64:
+			if d > 0 {
+				return int64(d * 1_000_000)
+			}
+		}
+	}
+	return 0
 }
 
 // processProbeJob handles a probe job (args[0] == "__rffmpeg_probe__").
