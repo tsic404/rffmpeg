@@ -101,6 +101,21 @@ func TestParseBasicInput(t *testing.T) {
 			wantErr:    false,
 		},
 		{
+			name:       "trailing -an boolean flag before output",
+			args:       []string{"-i", "input.mp4", "-an", "output.mp4"},
+			wantInputs: []string{"input.mp4"},
+			wantOutput: "output.mp4",
+			wantErr:    false,
+		},
+		{
+			name:       "trailing -vn -sn -dn boolean flags before output",
+			args:       []string{"-i", "input.mp4", "-vn", "-sn", "-dn", "output.mp4"},
+			wantInputs: []string{"input.mp4"},
+			wantOutput: "output.mp4",
+			wantErr:    false,
+		},
+
+		{
 			name:       "streaming output with bare dash",
 			args:       []string{"-i", "input.mp4", "-c:v", "libx264", "-f", "matroska", "-"},
 			wantInputs: []string{"input.mp4"},

@@ -19,6 +19,7 @@ var booleanFlags = map[string]bool{
 	"-y":             true,
 	"-n":             true,
 	"-stats":         true,
+	"-nostats":       true,
 	"-hide_banner":   true,
 	"-report":        true,
 	"-benchmark":     true,
@@ -29,7 +30,20 @@ var booleanFlags = map[string]bool{
 	"-frames_drop":   true,
 	"-frames_keep":   true,
 	"-stdin":         true,
-	"-map_metadata":  false, // takes value, explicitly mark as false for clarity
+	"-nostdin":       true,
+	// stream selection flags (no value)
+	"-an": true,
+	"-vn": true,
+	"-sn": true,
+	"-dn": true,
+	// misc no-value flags
+	"-re":             true,
+	"-bitexact":       true,
+	"-xerror":         true,
+	"-noautorotate":   true,
+	"-accurate_seek":  true,
+	"-seek_timestamp": true,
+	"-map_metadata":   false, // takes value, explicitly mark as false for clarity
 }
 
 // isBooleanFlag checks if an option is a boolean flag (doesn't take a value)
