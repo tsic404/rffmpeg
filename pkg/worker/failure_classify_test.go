@@ -52,6 +52,29 @@ func TestClassifyFailure(t *testing.T) {
 			isWorkerCrash: false,
 			wantType:      protocol.FailureInputUnreachable,
 		},
+
+		{
+			name:     "corrupted local file is FFMPEG_ERROR, not INPUT_UNREACHABLE",
+			exitCode: 1,
+			stderr: "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55b5e8d8c700] Invalid data found when processing input\n" +
+				"[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55b5e8d8c700] moov atom not found\n" +
+				"file.mp4: Invalid data found when processing input",
+			errorMessage:  "ffmpeg exited with code 1",
+			isTimeout:     false,
+			isWorkerCrash: false,
+			wantType:      protocol.FailureFFmpegError,
+		},
+
+		{
+			name:     "ffmpeg interrupted (Immediate exit requested) is FFMPEG_ERROR, not INPUT_UNREACHABLE",
+			exitCode: 255,
+			stderr: "[mpegts @ 0x55b5e8d8c700] Packet corrupt near timestamp\n" +
+				"stream.mpeg: Immediate exit requested",
+			errorMessage:  "ffmpeg exited with code 255",
+			isTimeout:     false,
+			isWorkerCrash: false,
+			wantType:      protocol.FailureFFmpegError,
+		},
 		{
 			name:          "input unreachable - connection refused",
 			exitCode:      1,

@@ -162,12 +162,10 @@ func isInputUnreachable(stderr string) bool {
 		"no such host",
 		"network is unreachable",
 		"Protocol not found",
-		"Invalid data found when processing input",
 		"HTTP error 404",
 		"HTTP error 403",
 		"HTTP error 401",
 		"Server returned",
-		"Immediate exit requested",
 		"end of file",
 	}
 	for _, p := range patterns {
