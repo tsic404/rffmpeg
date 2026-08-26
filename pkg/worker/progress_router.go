@@ -37,6 +37,22 @@ func (r *ProgressRouter) SetDuration(durationUs int64) {
 	r.parser.SetDuration(durationUs)
 }
 
+// SetSeekWindow narrows the progress denominator to an output window derived
+// from -ss/-t/-to so percent/ETA reflect the trimmed segment.
+func (r *ProgressRouter) SetSeekWindow(inputDurationUs, seekUs, tUs, toUs int64) {
+	r.parser.SetSeekWindow(inputDurationUs, seekUs, tUs, toUs)
+}
+
+// SendFinal sends a terminal 100% progress update to the server so CLI
+// clients always see a completed progress line even when ffmpeg's last
+// -stats frame landed at ~95%. Bypasses the throttle: the job is done.
+func (r *ProgressRouter) SendFinal() {
+	dur := r.parser.DurationUs()
+	if err := r.client.SendProgress(r.jobID, 100.0, 0, dur, dur, 0); err != nil {
+		log.Printf("Job %s: failed to send final progress update: %v", r.jobID, err)
+	}
+}
+
 // Handler returns a StderrHandler-compatible function.
 func (r *ProgressRouter) Handler() StderrHandler {
 	return func(line string) {

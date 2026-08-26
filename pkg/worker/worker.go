@@ -628,6 +628,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// header-derived duration path in place.
 	if durationUs := w.probeInputDurationUs(jobCtx, inputPaths); durationUs > 0 {
 		progressRouter.SetDuration(durationUs)
+		// For trimmed jobs (-ss/-t/-to) progress must be anchored to the
+		// output window, not the full input duration: ffmpeg's time= counts
+		// from zero within the segment, so dividing by the full duration
+		// never reaches 100% and ETA is off by orders of magnitude.
+		sw := ParseSeekWindow(args)
+		progressRouter.SetSeekWindow(durationUs, sw.SeekUs, sw.Tus, sw.ToUs)
 	}
 
 	// Rewrite args based on hardware capabilities and auto_hw setting
@@ -927,6 +933,12 @@ uploadOutput:
 			log.Printf("Job %s: cached output (key=%s)", job.ID, cacheKey[:16])
 		}
 	}
+
+	// Send a terminal 100% progress update so CLI clients always see a
+	// completed progress line even when ffmpeg's last -stats frame landed
+	// short of 100% (common for fast/short encodes that finish between
+	// stats ticks). Bypasses the router's throttle — the job is done.
+	progressRouter.SendFinal()
 
 	// Report success
 	if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, result.ExitCode, "", cached); err != nil {

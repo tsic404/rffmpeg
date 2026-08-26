@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
 )
 
 // ProgressFrame represents a parsed progress update from ffmpeg stderr.
@@ -29,43 +31,106 @@ var speedRegex = regexp.MustCompile(`speed=\s*([0-9.]+)x`)
 var durationRegex = regexp.MustCompile(`Duration:\s*(\d+):(\d+):(\d+)\.(\d+)`)
 
 // ProgressParser parses ffmpeg stderr output for progress information.
+//
+// For trimmed jobs (-ss/-t/-to) the progress must be anchored to the
+// output window, not the full input duration: ffmpeg's time= counts from
+// zero within the segment, so dividing it by the full input duration
+// never reaches 100% and ETA is off by orders of magnitude.
 type ProgressParser struct {
+	// durationUs is the total duration percent/ETA are measured against.
+	// For trimmed jobs this is the output window (min(-t, input-ss) or
+	// -to-ss), not the full input duration.
 	durationUs      int64
 	startTime       time.Time
 	lastPushTime    time.Time
 	minPushInterval time.Duration
-	// ewmaSpeed is the exponentially weighted moving average of observed
-	// speed samples, used for ETA instead of the instantaneous speed.
-	// ffmpeg's first few -stats updates report a depressed warm-up speed
-	// (encoder init), which made early ETAs overestimate by 4x or more
-	// (TSI-2433).
+	// nowFunc returns the current time. Overridden in tests to inject
+	// deterministic wall-clock progression.
+	nowFunc func() time.Time
+	// arrived. Wall-clock elapsed since then divided by media time encoded
+	// gives the true end-to-end throughput, which naturally absorbs encoder
+	// warm-up, I/O, and finalization overhead — the EWMA-speed approach
+	// missed all of these (TSI-2438 QA: +37% early, -42% late).
+	firstSampleTime time.Time
+	// ewmaSpeed is kept for display (the instantaneous speed field on
+	// WSProgressPayload) but is no longer used for ETA computation.
 	ewmaSpeed float64
 	// speedSamples counts speed observations seen since Reset. The first
-	// etaWarmupSamples frames keep EtaSeconds at 0: the smoothed value is
-	// still dominated by the warm-up spike there, and reporting nothing is
-	// better than reporting a number known to be wrong.
+	// etaWarmupSeconds of wall-clock time suppress ETA: not enough data has
+	// accumulated for a stable wall-clock rate.
 	speedSamples int
 }
 
 // etaSpeedAlpha is the EWMA smoothing factor for speed observations used in
-// ETA computation. 0.3 balances responsiveness to real mid-job speed changes
-// against suppression of transient warm-up spikes.
+// the speed field of WSProgressPayload (display only, not ETA).
 const etaSpeedAlpha = 0.3
 
-// etaWarmupSamples is how many initial progress frames omit the ETA while
-// the smoothed speed is still converging from encoder warm-up.
-const etaWarmupSamples = 3
+// etaMinWallSeconds is the minimum wall-clock seconds that must elapse
+// before the parser emits an ETA. Before this, the wall-clock rate is
+// unstable (dominated by warm-up) and reporting nothing is better than
+// reporting a number known to be wrong.
+const etaMinWallSeconds = 3.0
 
-// NewProgressParser creates a new progress parser.
 func NewProgressParser() *ProgressParser {
 	return &ProgressParser{
 		minPushInterval: 1 * time.Second, // throttle to 1 push per second
+		nowFunc:         time.Now,
 	}
+}
+
+// now returns the current time, using the injectable nowFunc if set.
+func (p *ProgressParser) now() time.Time {
+	if p.nowFunc != nil {
+		return p.nowFunc()
+	}
+	return time.Now()
 }
 
 // SetDuration sets the known total duration from an external source (e.g., prior probe).
 func (p *ProgressParser) SetDuration(durationUs int64) {
 	p.durationUs = durationUs
+}
+
+// DurationUs returns the current progress denominator (output window for
+// trimmed jobs, full input duration otherwise). Zero means unknown.
+func (p *ProgressParser) DurationUs() int64 {
+	return p.durationUs
+}
+
+// SetSeekWindow narrows the progress denominator to an output window
+// derived from -ss/-t/-to so percent and ETA reflect the trimmed segment,
+// not the full input. It must be called after SetDuration (which seeded the
+// full input duration): if seekUs/tUs is zero or negative the window is
+// left unchanged, and an explicit -t/-to that exceeds the input is clamped.
+func (p *ProgressParser) SetSeekWindow(inputDurationUs, seekUs, tUs, toUs int64) {
+	if inputDurationUs <= 0 {
+		return
+	}
+	windowUs := inputDurationUs
+	// -to is an absolute timestamp within the input; convert to a duration.
+	if toUs > 0 {
+		windowUs = toUs
+		if windowUs > inputDurationUs {
+			windowUs = inputDurationUs
+		}
+	}
+	if seekUs > 0 {
+		if seekUs >= windowUs {
+			// -ss beyond the window leaves nothing to encode; set the
+			// denominator to 0 so percent reports -1 (unknown) rather than
+			// dividing by zero or silently keeping the full input duration.
+			windowUs = 0
+		} else {
+			windowUs -= seekUs
+		}
+	}
+	if tUs > 0 && (windowUs == 0 || tUs < windowUs) {
+		windowUs = tUs
+	}
+	// Always overwrite: a degenerate window (0) must clear the full-input
+	// duration that SetDuration seeded, so percent falls back to -1 instead
+	// of reporting a meaningless ratio against the full input.
+	p.durationUs = windowUs
 }
 
 // ParseDurationLine attempts to extract Duration from an ffmpeg header line.
@@ -123,9 +188,9 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		frame.Percent = -1 // unknown
 	}
 
-	// Track the instantaneous speed for display, and fold it into the EWMA
-	// used for ETA so a depressed warm-up sample does not inflate the
-	// remaining-time estimate.
+	// Track the instantaneous speed for display (WSProgressPayload.Speed),
+	// folded into an EWMA for a stable display value. This is NOT used for
+	// ETA — see wall-clock rate below.
 	if frame.Speed > 0 {
 		p.speedSamples++
 		if p.ewmaSpeed == 0 {
@@ -135,13 +200,30 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		}
 	}
 
-	// Calculate ETA from the smoothed speed; suppressed during warm-up.
-	if durationUs > 0 && timeUs > 0 && p.speedSamples > etaWarmupSamples && p.ewmaSpeed > 0 {
-		remainingUs := durationUs - timeUs
-		if remainingUs < 0 {
-			remainingUs = 0
+	// ETA from wall-clock throughput: remaining media time divided by the
+	// overall encode rate (media done / wall elapsed). Unlike the old
+	// EWMA-speed approach this naturally absorbs encoder warm-up,
+	// finalization overhead, and I/O stalls — all of which are invisible to
+	// ffmpeg's speed= multiplier but dominate short-to-medium task timing
+	// (TSI-2438 QA: +37% early / -42% late with the old formula).
+	if durationUs > 0 && timeUs > 0 && frame.Speed > 0 {
+		now := p.now()
+		if p.firstSampleTime.IsZero() {
+			p.firstSampleTime = now
 		}
-		frame.EtaSeconds = int(float64(remainingUs) / (p.ewmaSpeed * 1_000_000))
+		wallElapsed := now.Sub(p.firstSampleTime)
+		if wallElapsed >= time.Duration(etaMinWallSeconds*float64(time.Second)) {
+			wallSec := wallElapsed.Seconds()
+			mediaSec := float64(timeUs) / 1_000_000.0
+			if mediaSec > 0 && wallSec > 0 {
+				rate := mediaSec / wallSec // media-seconds per wall-second
+				remainingMediaSec := float64(durationUs-timeUs) / 1_000_000.0
+				if remainingMediaSec < 0 {
+					remainingMediaSec = 0
+				}
+				frame.EtaSeconds = int(remainingMediaSec / rate)
+			}
+		}
 	}
 
 	return frame
@@ -149,7 +231,7 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 
 // ShouldPush returns true if enough time has elapsed since the last push.
 func (p *ProgressParser) ShouldPush() bool {
-	now := time.Now()
+	now := p.now()
 	if p.lastPushTime.IsZero() || now.Sub(p.lastPushTime) >= p.minPushInterval {
 		p.lastPushTime = now
 		return true
@@ -159,9 +241,10 @@ func (p *ProgressParser) ShouldPush() bool {
 
 // Reset resets the parser state for a new job.
 func (p *ProgressParser) Reset() {
-	p.startTime = time.Now()
+	p.startTime = p.now()
 	p.lastPushTime = time.Time{}
 	p.durationUs = 0
+	p.firstSampleTime = time.Time{}
 	p.ewmaSpeed = 0
 	p.speedSamples = 0
 }
@@ -195,6 +278,165 @@ func parseSpeed(line string) float64 {
 		return 0
 	}
 	return s
+}
+
+// parseFFmpegDurationUs parses an ffmpeg duration specification (seconds as a
+// decimal number, or HH:MM:SS[.ms] timecode) into microseconds. Returns 0
+// on any parse failure or non-positive value.
+func parseFFmpegDurationUs(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	// Timecode form: HH:MM:SS[.fraction]
+	if strings.Contains(s, ":") {
+		parts := strings.SplitN(s, ":", 3)
+		if len(parts) < 2 {
+			return 0
+		}
+		var hh, mm int
+		var rest string
+		switch len(parts) {
+		case 2:
+			mm, _ = strconv.Atoi(parts[0])
+			rest = parts[1]
+		case 3:
+			hh, _ = strconv.Atoi(parts[0])
+			mm, _ = strconv.Atoi(parts[1])
+			rest = parts[2]
+		}
+		// rest = SS[.fraction]; an empty rest (trailing colon) is invalid.
+		if rest == "" {
+			return 0
+		}
+		var ss int
+		var frac string
+		if dot := strings.IndexByte(rest, '.'); dot != -1 {
+			ss, _ = strconv.Atoi(rest[:dot])
+			frac = rest[dot+1:]
+		} else {
+			ss, _ = strconv.Atoi(rest)
+		}
+		for len(frac) < 6 {
+			frac += "0"
+		}
+		if len(frac) > 6 {
+			frac = frac[:6]
+		}
+		us, _ := strconv.ParseInt(frac, 10, 64)
+		return int64(hh)*3600_000_000 + int64(mm)*60_000_000 + int64(ss)*1_000_000 + us
+	}
+	// Plain seconds (decimal): 30, 30.5, 1.25
+	secs, err := strconv.ParseFloat(s, 64)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return int64(secs * 1_000_000)
+}
+
+// SeekWindow captures the -ss/-t/-to values extracted from ffmpeg args.
+// Each field is in microseconds; a zero value means the option was absent.
+type SeekWindow struct {
+	SeekUs int64 // -ss start offset
+	Tus    int64 // -t output duration
+	ToUs   int64 // -to absolute end timestamp
+}
+
+// ParseSeekWindow scans ffmpeg-style args for output-side -ss/-t/-to values
+// and returns them in microseconds. An option may appear as "-ss value",
+// "-ss=value", or "-ss:value" (stream-specifier form). Only output-side
+// options (those after the last -i) affect the progress window — input-side
+// -ss (before -i) is a demuxer hint and is ignored.
+//
+// The args slice is the full ffmpeg command line (including -y, -i, etc.)
+// as the worker passes it to ffmpeg. Boolean/arity decisions use the
+// generated ffmpegopts table so -ss/-t/-to are never mistaken for switches.
+func ParseSeekWindow(args []string) SeekWindow {
+	var sw SeekWindow
+	// Find the index after the last -i (output section starts there).
+	// Anything before the last -i is an input/global option; -ss there is a
+	// demuxer seek hint, not an output trim, and must not narrow the
+	// progress window. Only the exact token "-i" declares an input —
+	// "-i"-prefixed options like -init_hw_device, -ignore_unknown, and
+	// -id3v2_version are legitimate output-section options.
+	outputStart := 0
+	skipNext := false
+	for i := range len(args) {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		arg := args[i]
+		if arg == "-i" {
+			// -i and its value (next arg) belong to the input section.
+			outputStart = i + 2
+			skipNext = true
+			continue
+		}
+		// Value-taking option before the last -i: its value is part of the
+		// input section, so advance outputStart past the value. This
+		// prevents the value (e.g. a filename) from being mistaken for an
+		// output option later. Boolean flags and inline "=value" forms
+		// don't consume a separate value arg.
+		if i < outputStart && !ffmpegopts.IsBoolean(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
+			outputStart = i + 2
+			skipNext = true
+		}
+	}
+	if outputStart > len(args) {
+		outputStart = len(args)
+	}
+
+	// Walk the output section; for each target flag, grab its value from the
+	// next arg or from an inline = / : form.
+	for i := outputStart; i < len(args); i++ {
+		arg := args[i]
+		// Strip leading "-" or "--".
+		name := strings.TrimLeft(arg, "-")
+		if name == "" {
+			continue
+		}
+		// Split stream specifier: "-ss" / "-ss:0" → base "ss".
+		base := name
+		if idx := strings.IndexByte(name, ':'); idx != -1 {
+			base = name[:idx]
+		}
+		// Inline = value: "-ss=10" / "-ss:0=10".
+		var inlineVal string
+		var hasInline bool
+		if eq := strings.IndexByte(name, '='); eq != -1 {
+			inlineVal = name[eq+1:]
+			hasInline = true
+			// Re-derive base from before the stream specifier or =.
+			beforeEq := name[:eq]
+			if col := strings.IndexByte(beforeEq, ':'); col != -1 {
+				base = beforeEq[:col]
+			} else {
+				base = beforeEq
+			}
+		}
+
+		switch base {
+		case "ss", "t", "to":
+			val := ""
+			if hasInline {
+				val = inlineVal
+			} else if i+1 < len(args) {
+				val = args[i+1]
+				i++ // consume the value
+			}
+			us := parseFFmpegDurationUs(val)
+			switch base {
+			case "ss":
+				sw.SeekUs = us
+			case "t":
+				sw.Tus = us
+			case "to":
+				sw.ToUs = us
+			}
+		}
+	}
+	return sw
 }
 
 // FilterProgressLine returns true if a line contains progress information.
@@ -271,14 +513,37 @@ func VerifyETAPrecision(checkpoints [][2]int64, durationUs int64, tolerance floa
 		}
 	}
 
-	// Prime the EWMA warm-up window: real-world checkpoints arrive long
-	// after encoder warm-up, and the parser suppresses ETA for the first
-	// etaWarmupSamples updates. Feed extra updates at the first segment's
-	// speed so checkpoint predictions reflect mid-stream smoothing.
-	if len(metas) > 0 {
-		for i := 1; i <= etaWarmupSamples+1; i++ {
-			p.ParseLine(buildProgressLine(metas[0].timeUs*int64(i)/int64(etaWarmupSamples+2), metas[0].speed))
+	// Inject wall-clock time via nowFunc so the wall-clock-rate ETA has
+	// deterministic data. Feed a priming sample at t=0 (which sets
+	// firstSampleTime), then each real checkpoint at t = cumulativeWallUs
+	// so wallElapsed = cumulativeWallUs — enough to pass etaMinWallSeconds
+	// for all but the very first checkpoints (which are expected to suppress).
+	// Inject wall-clock time via nowFunc so the wall-clock-rate ETA has
+	// deterministic data. A priming sample at t=0 sets firstSampleTime,
+	// then each real checkpoint i is fed at t = cumulativeWallUs[i] so
+	// wallElapsed = cumulativeWallUs[i].
+	baseTime := time.Unix(0, 0)
+	var cpIdx int // index of the next checkpoint to feed (0 = priming)
+	p.nowFunc = func() time.Time {
+		if cpIdx == 0 {
+			// Priming call: firstSampleTime = baseTime (t=0).
+			cpIdx++
+			return baseTime
 		}
+		// Real checkpoint cpIdx-1.
+		idx := cpIdx - 1
+		cpIdx++
+		if idx < len(metas) {
+			return baseTime.Add(time.Duration(metas[idx].wallUs) * time.Microsecond)
+		}
+		return baseTime.Add(time.Duration(totalWallUs) * time.Microsecond)
+	}
+
+	// Prime: feed an initial sample at t=0 with 1s of media progress so
+	// firstSampleTime is set (the timeUs > 0 guard requires non-zero).
+	// The 1s media value is negligible vs real checkpoint times.
+	if len(metas) > 0 {
+		p.ParseLine(buildProgressLine(1_000_000, metas[0].speed))
 	}
 
 	// Parse each checkpoint line and verify ETA.
