@@ -34,7 +34,27 @@ type ProgressParser struct {
 	startTime       time.Time
 	lastPushTime    time.Time
 	minPushInterval time.Duration
+	// ewmaSpeed is the exponentially weighted moving average of observed
+	// speed samples, used for ETA instead of the instantaneous speed.
+	// ffmpeg's first few -stats updates report a depressed warm-up speed
+	// (encoder init), which made early ETAs overestimate by 4x or more
+	// (TSI-2433).
+	ewmaSpeed float64
+	// speedSamples counts speed observations seen since Reset. The first
+	// etaWarmupSamples frames keep EtaSeconds at 0: the smoothed value is
+	// still dominated by the warm-up spike there, and reporting nothing is
+	// better than reporting a number known to be wrong.
+	speedSamples int
 }
+
+// etaSpeedAlpha is the EWMA smoothing factor for speed observations used in
+// ETA computation. 0.3 balances responsiveness to real mid-job speed changes
+// against suppression of transient warm-up spikes.
+const etaSpeedAlpha = 0.3
+
+// etaWarmupSamples is how many initial progress frames omit the ETA while
+// the smoothed speed is still converging from encoder warm-up.
+const etaWarmupSamples = 3
 
 // NewProgressParser creates a new progress parser.
 func NewProgressParser() *ProgressParser {
@@ -103,13 +123,25 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		frame.Percent = -1 // unknown
 	}
 
-	// Calculate ETA
-	if durationUs > 0 && timeUs > 0 && frame.Speed > 0 {
+	// Track the instantaneous speed for display, and fold it into the EWMA
+	// used for ETA so a depressed warm-up sample does not inflate the
+	// remaining-time estimate.
+	if frame.Speed > 0 {
+		p.speedSamples++
+		if p.ewmaSpeed == 0 {
+			p.ewmaSpeed = frame.Speed
+		} else {
+			p.ewmaSpeed = etaSpeedAlpha*frame.Speed + (1-etaSpeedAlpha)*p.ewmaSpeed
+		}
+	}
+
+	// Calculate ETA from the smoothed speed; suppressed during warm-up.
+	if durationUs > 0 && timeUs > 0 && p.speedSamples > etaWarmupSamples && p.ewmaSpeed > 0 {
 		remainingUs := durationUs - timeUs
 		if remainingUs < 0 {
 			remainingUs = 0
 		}
-		frame.EtaSeconds = int(float64(remainingUs) / (frame.Speed * 1_000_000))
+		frame.EtaSeconds = int(float64(remainingUs) / (p.ewmaSpeed * 1_000_000))
 	}
 
 	return frame
@@ -130,6 +162,8 @@ func (p *ProgressParser) Reset() {
 	p.startTime = time.Now()
 	p.lastPushTime = time.Time{}
 	p.durationUs = 0
+	p.ewmaSpeed = 0
+	p.speedSamples = 0
 }
 
 // parseTimeToUs converts hh, mm, ss, ms components to microseconds.
@@ -234,6 +268,16 @@ func VerifyETAPrecision(checkpoints [][2]int64, durationUs int64, tolerance floa
 			totalWallUs = last.wallUs + int64(float64(remainingUs)/last.speed)
 		} else {
 			totalWallUs = last.wallUs
+		}
+	}
+
+	// Prime the EWMA warm-up window: real-world checkpoints arrive long
+	// after encoder warm-up, and the parser suppresses ETA for the first
+	// etaWarmupSamples updates. Feed extra updates at the first segment's
+	// speed so checkpoint predictions reflect mid-stream smoothing.
+	if len(metas) > 0 {
+		for i := 1; i <= etaWarmupSamples+1; i++ {
+			p.ParseLine(buildProgressLine(metas[0].timeUs*int64(i)/int64(etaWarmupSamples+2), metas[0].speed))
 		}
 	}
 

@@ -251,6 +251,73 @@ func TestProgressParser_ETAPrecision_BoundaryChecks(t *testing.T) {
 	}
 }
 
+// TestProgressParser_WarmupETASuppressed verifies that the first
+// etaWarmupSamples progress frames report no ETA: during encoder warm-up the
+// instantaneous speed is depressed and any ETA computed from it overestimates
+// the remaining time (TSI-2433 QA: 41s predicted vs ~10s actual at 2.3%).
+func TestProgressParser_WarmupETASuppressed(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(100 * 1_000_000)
+
+	// Warm-up samples: speed ramps 0.5x → 1.0x → 1.5x before settling.
+	warmup := []struct {
+		timeS int64
+		speed string
+	}{
+		{1, "0.50"}, {2, "1.00"}, {3, "1.50"},
+	}
+	for i, w := range warmup {
+		line := fmt.Sprintf("frame=%d fps=30 q=28.0 size=1024kB time=00:00:%02d.00 bitrate=2045.0kbits/s speed=%sx",
+			w.timeS*30, w.timeS, w.speed)
+		frame := p.ParseLine(line)
+		if frame == nil {
+			t.Fatalf("warm-up frame %d: nil", i)
+		}
+		if frame.EtaSeconds != 0 {
+			t.Errorf("warm-up frame %d (speed=%s): ETA should be suppressed, got %ds",
+				i, w.speed, frame.EtaSeconds)
+		}
+	}
+
+	// After the 3-frame suppression window the ETA appears, computed from
+	// the smoothed speed.
+	frame := p.ParseLine("frame=120 fps=30 q=28.0 size=1024kB time=00:00:04.00 bitrate=2045.0kbits/s speed=2.00x")
+	if frame == nil || frame.EtaSeconds <= 0 {
+		t.Fatalf("post-warm-up frame must carry an ETA, got %+v", frame)
+	}
+	// EWMA after samples (0.5, 1.0, 1.5, 2.0) with α=0.3: 1.2335x.
+	// Remaining 96s / 1.2335x ≈ 78s. A raw instantaneous read would give
+	// 48s; before this fix the very first frame reported an ETA derived
+	// from a warm-up speed ~4x below steady state (TSI-2433 QA).
+	wantMin, wantMax := 75, 81
+	if frame.EtaSeconds < wantMin || frame.EtaSeconds > wantMax {
+		t.Errorf("ETA = %ds, want smoothed estimate in [%d,%d]s", frame.EtaSeconds, wantMin, wantMax)
+	}
+}
+
+// TestProgressParser_ResetClearsEWMA verifies Reset drops the smoothing
+// state so a reused parser starts its warm-up suppression from scratch.
+func TestProgressParser_ResetClearsEWMA(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(100 * 1_000_000)
+
+	p.Reset()
+	p.SetDuration(100 * 1_000_000)
+	for i := int64(1); i <= 6; i++ {
+		line := fmt.Sprintf("frame=%d fps=30 q=28.0 size=1024kB time=00:00:%02d.00 bitrate=2045.0kbits/s speed=2.00x", i*30, i)
+		f := p.ParseLine(line)
+		if i <= 3 {
+			if f == nil || f.EtaSeconds != 0 {
+				t.Fatalf("frame %d: ETA must be suppressed in warm-up window, got %+v", i, f)
+			}
+			continue
+		}
+		if f == nil || f.EtaSeconds == 0 {
+			t.Fatalf("frame %d: expected ETA after warm-up, got %+v", i, f)
+		}
+	}
+}
+
 // TestProgressParser_ETAPrecision_ErrorCalculation verifies
 // the correctness of ETA math at well-known test points.
 func TestProgressParser_ETAPrecision_ErrorCalculation(t *testing.T) {
