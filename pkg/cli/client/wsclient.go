@@ -34,6 +34,13 @@ const (
 	// deadline) so a healthy idle connection is never reaped by either
 	// side's deadline (TSI-2414).
 	WSPingInterval = 25 * time.Second
+
+	// wsMaxFrameLineBytes is the maximum size of a single JSON WSMessage
+	// line inside a batched text frame. It must exceed the largest possible
+	// stdout message: StdoutBatcher concatenates up to 10 executor chunks of
+	// 32KB each and base64-encodes the result (~427KB), plus JSON overhead.
+	// 1MB matches the connection's SetReadLimit in connect().
+	wsMaxFrameLineBytes = 1 << 20
 )
 
 // Overridable keepalive timings for regression tests; production values
@@ -364,8 +371,18 @@ func (c *WSClient) Listen(ctx context.Context) error {
 			continue
 		}
 
-		// Handle multiple messages (batched)
+		// Handle multiple messages (batched). The buffer MUST be grown
+		// beyond bufio's default 64KB token limit: a single WSMsgStdout
+		// message carries up to 10×32KB of base64-encoded media data
+		// (~430KB JSON) when the worker's StdoutBatcher flushes, and the
+		// hub's WritePump may batch several messages into one frame.
+		// With the default limit Scanner aborts with ErrTooLong — silently,
+		// since the error was never checked — dropping every remaining
+		// line in the frame. The next delivered message then trips the gap
+		// detector: "expected seq N, got N+1" on short streaming jobs even
+		// though nothing was lost on the wire.
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
+		scanner.Buffer(make([]byte, 64*1024), wsMaxFrameLineBytes)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line == "" {
@@ -379,6 +396,9 @@ func (c *WSClient) Listen(ctx context.Context) error {
 			}
 
 			c.handleMessage(msg)
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("WebSocket frame dropped for job %s: %v (%d bytes)", c.jobID, err, len(data))
 		}
 	}
 }
