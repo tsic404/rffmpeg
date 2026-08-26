@@ -6,12 +6,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/tsix404/rffmpeg/pkg/encoder"
 	"github.com/tsix404/rffmpeg/pkg/encoder/rewrite"
+	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"strings"
 )
 
 // RewriteAdapter integrates the encoder rewrite engine with the Worker executor.
@@ -427,28 +428,6 @@ func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]st
 		"threads":   true, // thread count (not encoder param)
 	}
 
-	// FFmpeg boolean flags that do NOT take a value argument.
-	// Without this set, the parser would treat the next positional arg
-	// (typically the output file) as the flag's value and either lose it
-	// from the arg list or corrupt the param map.
-	booleanFFmpegFlags := map[string]bool{
-		"shortest":      true,
-		"y":             true,
-		"n":             true,
-		"vn":            true,
-		"an":            true,
-		"sn":            true,
-		"dn":            true,
-		"stats":         true,
-		"hide_banner":   true,
-		"report":        true,
-		"benchmark":     true,
-		"copyts":        true,
-		"start_at_zero": true,
-		"bitexact":      true,
-		"re":            true,
-	}
-
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 
@@ -486,7 +465,7 @@ func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]st
 			}
 
 			// Boolean flags don't consume the next arg as a value
-			if booleanFFmpegFlags[paramName] {
+			if ffmpegopts.IsBoolean(paramName) {
 				continue
 			}
 

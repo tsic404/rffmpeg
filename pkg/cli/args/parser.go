@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
 )
 
 var (
@@ -13,42 +15,10 @@ var (
 	ErrNoOutputFile = errors.New("no output file specified")
 )
 
-// booleanFlags contains FFmpeg options that don't take a value
-var booleanFlags = map[string]bool{
-	"-shortest":      true,
-	"-y":             true,
-	"-n":             true,
-	"-stats":         true,
-	"-nostats":       true,
-	"-hide_banner":   true,
-	"-report":        true,
-	"-benchmark":     true,
-	"-debug_ts":      true,
-	"-copyts":        true,
-	"-start_at_zero": true,
-	"-copyinkf":      true,
-	"-frames_drop":   true,
-	"-frames_keep":   true,
-	"-stdin":         true,
-	"-nostdin":       true,
-	// stream selection flags (no value)
-	"-an": true,
-	"-vn": true,
-	"-sn": true,
-	"-dn": true,
-	// misc no-value flags
-	"-re":             true,
-	"-bitexact":       true,
-	"-xerror":         true,
-	"-noautorotate":   true,
-	"-accurate_seek":  true,
-	"-seek_timestamp": true,
-	"-map_metadata":   false, // takes value, explicitly mark as false for clarity
-}
-
-// isBooleanFlag checks if an option is a boolean flag (doesn't take a value)
+// isBooleanFlag checks if an option is a boolean flag (doesn't take a value),
+// using the generated FFmpeg arity table in pkg/ffmpegopts.
 func isBooleanFlag(arg string) bool {
-	return booleanFlags[arg]
+	return ffmpegopts.IsBoolean(arg)
 }
 
 // ParseResult contains parsed ffmpeg arguments
@@ -56,8 +26,6 @@ type ParseResult struct {
 	InputFiles      []string
 	OutputFile      string
 	StreamingOutput bool     // true if output is "-" (stdout)
-	InputArgs       []string // arguments before output
-	OutputArgs      []string // arguments after output (codec, filters, etc.)
 	AllArgs         []string // args with <INPUT_FILE> placeholder replacing actual input paths, output path excluded
 	RawArgs         []string
 }
@@ -84,8 +52,6 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	// Track state
 	var inputFiles []string
 	var outputFile string
-	var beforeOutput []string
-	var afterOutput []string
 	var allArgs []string
 
 	// Find the last argument that looks like an output file
@@ -157,25 +123,15 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "-i") {
 			// Option that takes a value
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				// Check if next arg could be a value for this option
 				optionValue := args[i+1]
+				// Check if next arg could be a value for this option
 				if i+1 != outputCandidateIdx {
-					if len(inputFiles) == 0 || (outputFile == "" && i < outputCandidateIdx) {
-						beforeOutput = append(beforeOutput, arg, optionValue)
-					} else {
-						afterOutput = append(afterOutput, arg, optionValue)
-					}
 					allArgs = append(allArgs, arg, optionValue)
 					i += 2
 					continue
 				}
 			}
 			// Option without value (flag)
-			if len(inputFiles) == 0 || (outputFile == "" && i < outputCandidateIdx) {
-				beforeOutput = append(beforeOutput, arg)
-			} else {
-				afterOutput = append(afterOutput, arg)
-			}
 			allArgs = append(allArgs, arg)
 			i++
 			continue
@@ -205,8 +161,6 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	result.InputFiles = inputFiles
 	result.OutputFile = outputFile
 	result.StreamingOutput = streamingOutput
-	result.InputArgs = beforeOutput
-	result.OutputArgs = afterOutput
 	result.AllArgs = allArgs
 
 	return result, nil

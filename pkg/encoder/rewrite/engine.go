@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
 )
 
 // EngineCoordinator implements the RewriteEngine interface.
@@ -597,43 +598,11 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 	return result
 }
 
-// booleanFFmpegFlags lists FFmpeg options that never take a separate value.
-// Used by findOutputFilePos so a boolean flag followed by the output path
-// (e.g., "-shortest out.mp4") is not mis-paired as flag+value.
-var booleanFFmpegFlags = map[string]bool{
-	"shortest":      true,
-	"y":             true,
-	"n":             true,
-	"vn":            true,
-	"an":            true,
-	"sn":            true,
-	"dn":            true,
-	"stats":         true,
-	"hide_banner":   true,
-	"report":        true,
-	"benchmark":     true,
-	"benchmark_all": true,
-	"debug_ts":      true,
-	"copyts":        true,
-	"start_at_zero": true,
-	"bitexact":      true,
-	"re":            true,
-	"stdin":         true,
-	"copyinkf":      true,
-}
-
 // isBooleanFlagArg reports whether arg ("-flag" form) is a boolean FFmpeg
 // flag or uses the inline "-flag=value" form; neither consumes the next
-// argument.
+// argument. Arity comes from the generated table in pkg/ffmpegopts.
 func isBooleanFlagArg(arg string) bool {
-	if !strings.HasPrefix(arg, "-") {
-		return false
-	}
-	name := strings.TrimPrefix(arg, "-")
-	if strings.IndexByte(name, '=') != -1 {
-		return true // inline value form carries its own value
-	}
-	return booleanFFmpegFlags[name]
+	return ffmpegopts.IsBoolean(arg)
 }
 
 // findOutputFilePos returns the index of the output file within args: the

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
 )
 
 // StderrHandler is a callback function for processing stderr output
@@ -374,43 +376,13 @@ func isNetworkOutput(outputPath string, args []string) bool {
 }
 
 // isFlagWithValue returns true if the given ffmpeg flag takes a value argument.
-// Boolean flags (like -vn, -an, -y) don't take values and should not consume the next arg.
+// Boolean flags (like -vn, -an, -y) don't take values and should not consume the
+// next arg. Arity comes from the generated table in pkg/ffmpegopts.
 func isFlagWithValue(flag string) bool {
 	// If flag contains '=', the value is already attached (e.g., -loglevel=verbose)
 	// In this case, the flag doesn't consume the next argument
 	if strings.Contains(flag, "=") {
 		return false
 	}
-
-	// Strip any stream specifier suffix (e.g., -c:v -> -c, -b:a -> -b)
-	baseFlag := flag
-	if idx := strings.Index(flag, ":"); idx != -1 {
-		baseFlag = flag[:idx]
-	}
-
-	// Boolean flags that don't take values
-	booleanFlags := map[string]bool{
-		"-vn": true, "-an": true, "-sn": true, "-dn": true, // disable streams
-		"-y": true, "-n": true, // overwrite control
-		"-version": true, "-buildconf": true, // info flags
-		"-formats": true, "-devices": true, "-codecs": true,
-		"-decoders": true, "-encoders": true, "-bsfs": true,
-		"-protocols": true, "-filters": true, "-pix_fmts": true,
-		"-layouts": true, "-sample_fmts": true, "-colors": true,
-		"-h": true, "-?": true, "-help": true, // help flags
-		"-benchmark": true, "-benchmark_all": true,
-		"-copyts": true, "-start_at_zero": true,
-		"-bitexact": true, "-re": true,
-		"-stdin": true, "-vol": true,
-		"-discard": true, "-disposition": true,
-		"-shortest": true, "-stats": true, "-hide_banner": true,
-		"-report": true, "-debug_ts": true, "-copyinkf": true,
-	}
-
-	if booleanFlags[baseFlag] {
-		return false
-	}
-
-	// Most other flags take values
-	return true
+	return !ffmpegopts.IsBoolean(flag)
 }
