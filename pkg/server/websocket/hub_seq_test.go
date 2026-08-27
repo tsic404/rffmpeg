@@ -1,9 +1,12 @@
 package websocket
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,4 +206,78 @@ func TestHub_TerminalStatusVariantsAllCleanup(t *testing.T) {
 			waitForSeq(t, hub, jobID, func(_ int64, ok bool) bool { return !ok })
 		})
 	}
+}
+
+// TestHub_ConcurrentBroadcastsPreserveSeqOrder is the TSI-2457 regression
+// test: when multiple handler goroutines call BroadcastWSMessage
+// concurrently for the same job (e.g. a StderrBatcher timed-flush racing
+// the final SendProgress + UpdateJob sequence), the messages must reach
+// client.send in seq order. Before the fix, the broadcast-channel send
+// happened OUTSIDE h.mu — after the lock was released — so two goroutines
+// that each incremented seq could reach the channel send in any order. The
+// client would see seq N+2 before N+1 and falsely flag a gap even though
+// no data was lost on the wire.
+//
+// The test fires N concurrent broadcasts and verifies every message arrives
+// on client.send with strictly increasing seq values — no jumps.
+func TestHub_ConcurrentBroadcastsPreserveSeqOrder(t *testing.T) {
+	hub := NewHub()
+	runHub(hub)
+
+	// Use a raw client with NO WritePump: WritePump drains client.send,
+	// which would consume the messages we want to inspect. ReadPump runs
+	// so a real Unregister path exists for cleanup.
+	client := newTestClient(t, hub, "job-concurrent")
+	go client.ReadPump()
+	hub.Register(client)
+
+	// Wait for registration to complete.
+	waitForTotal(t, hub, 1)
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func(idx int) {
+			defer wg.Done()
+			_ = hub.BroadcastStderr("job-concurrent", fmt.Sprintf("chunk-%d", idx))
+		}(i)
+	}
+	wg.Wait()
+
+	// Drain client.send and collect seqs from the JSON payloads. Without a
+	// WritePump, messages accumulate in the 256-slot buffer; 50 fits easily.
+	var seqs []int64
+	deadline := time.Now().Add(2 * time.Second)
+	for len(seqs) < n && time.Now().Before(deadline) {
+		select {
+		case data := <-client.send:
+			s := extractSeq(t, data)
+			if s > 0 {
+				seqs = append(seqs, s)
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if len(seqs) != n {
+		t.Fatalf("expected %d sequenced messages, got %d", n, len(seqs))
+	}
+	for i, s := range seqs {
+		if s != int64(i+1) {
+			t.Fatalf("message %d: expected seq %d, got %d — concurrent broadcasts delivered out of order (TSI-2457)", i, i+1, s)
+		}
+	}
+}
+
+// extractSeq parses a JSON broadcast payload and returns the "seq" field,
+// or 0 if absent.
+func extractSeq(t *testing.T, data []byte) int64 {
+	t.Helper()
+	var msg struct {
+		Seq int64 `json:"seq"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("failed to unmarshal broadcast payload: %v (%s)", err, string(data))
+	}
+	return msg.Seq
 }

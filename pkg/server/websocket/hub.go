@@ -38,6 +38,10 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
+	// bcastMu serializes broadcast-channel sends so that messages for the
+	// same job are enqueued in seq order. It is independent of h.mu (which
+	// the Run loop takes) so a blocked send cannot deadlock with the loop.
+	bcastMu sync.Mutex
 	// seq tracks the next per-job message sequence number for gap detection
 	seq map[string]int64
 	// seqStore, when non-nil, persists seq counters across server restarts
@@ -205,6 +209,14 @@ func (h *Hub) Broadcast(jobID string, message []byte) error {
 // data and fail the job with a spurious gap error. Persistence happens
 // outside h.mu: the store has its own locking and must not be called under
 // the hub lock that Run-loop paths also take.
+//
+// Ordering (TSI-2457): the seq increment and the broadcast-channel send are
+// performed atomically under bcastMu. Without this, two goroutines that each
+// incremented seq under h.mu could reach the channel send in any order — the
+// client would see seq N+2 before N+1 and falsely flag a gap even though no
+// data was lost on the wire. bcastMu is independent of h.mu (which the Run
+// loop takes to drain the channel) so a blocked send cannot deadlock with
+// the loop.
 func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 	if msg.Type != protocol.WSMsgHeartbeat {
 		// Restore a persisted counter before locking, when the first
@@ -215,6 +227,11 @@ func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 		// job (each may speculatively load here; only one result wins).
 		h.prefetchSeq(msg.JobID)
 
+		// bcastMu spans the seq increment and the channel send so that
+		// concurrent broadcasts for the same job are enqueued in seq order.
+		// It is NOT taken by the Run loop, so a blocked send cannot
+		// deadlock with it.
+		h.bcastMu.Lock()
 		h.mu.Lock()
 		h.ensureSeq(msg.JobID)
 		// A terminal-status broadcast must NOT delete the counter here:
@@ -240,15 +257,26 @@ func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 			delete(h.seq, msg.JobID)
 			terminal = true
 		}
+		data, err := json.Marshal(msg)
 		h.mu.Unlock()
+		if err != nil {
+			h.bcastMu.Unlock()
+			return err
+		}
+		bcastErr := h.Broadcast(msg.JobID, data)
+		h.bcastMu.Unlock()
 
 		h.persistSeq(msg.JobID, msg.Seq, terminal)
+		return bcastErr
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	return h.Broadcast(msg.JobID, data)
+	h.bcastMu.Lock()
+	err = h.Broadcast(msg.JobID, data)
+	h.bcastMu.Unlock()
+	return err
 }
 
 // persistSeq writes the counter through to the store (best-effort) and drops
