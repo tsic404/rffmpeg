@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -524,7 +525,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 				// Report success with cached flag
 				if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, 0, "", cached); err != nil {
-					log.Printf("Failed to update job status to completed: %v", err)
+					logTerminalReportError(job.ID, "report completed", err)
 				} else {
 					log.Printf("Job %s completed from cache", job.ID)
 				}
@@ -773,7 +774,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	if jobCtx.Err() == context.Canceled {
 		log.Printf("Job %s was cancelled", job.ID)
 		// Use -1 for cancelled jobs as the exit code may not be meaningful
-		w.client.UpdateJob(job.ID, protocol.JobStatusCancelled, -1, "Job cancelled", false)
+		if err := w.client.UpdateJob(job.ID, protocol.JobStatusCancelled, -1, "Job cancelled", false); err != nil {
+			logTerminalReportError(job.ID, "report cancelled", err)
+		}
 		return
 	}
 
@@ -786,7 +789,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 		failureType, details := ClassifyFailure(result.ExitCode, result.Stderr, errMsg, true, false)
 		if err := w.client.UpdateJobWithFailure(job.ID, protocol.JobStatusTimeout, result.ExitCode, errMsg, false, string(failureType), details); err != nil {
-			log.Printf("Failed to report job timeout: %v", err)
+			logTerminalReportError(job.ID, "report timeout", err)
 		}
 		return
 	}
@@ -942,10 +945,24 @@ uploadOutput:
 
 	// Report success
 	if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, result.ExitCode, "", cached); err != nil {
-		log.Printf("Failed to update job status to completed: %v", err)
+		logTerminalReportError(job.ID, "report completed", err)
 	} else {
 		log.Printf("Job %s completed successfully", job.ID)
 	}
+}
+
+// logTerminalReportError logs an error from a terminal-status update (completed,
+// failed, timeout, cancelled). A 409 Conflict is a benign lost race — the job
+// already reached a terminal state via a concurrent path (e.g. CLI cancel
+// raced the worker's timeout report) — so it is logged at debug level instead
+// of surfacing as a server fault. Every other error is a real failure to
+// report and stays at error level.
+func logTerminalReportError(jobID, action string, err error) {
+	if IsConflict(err) {
+		slog.Debug("Job terminal report skipped (already terminal)", "job_id", jobID, "action", action, "error", err)
+		return
+	}
+	slog.Error("Failed to report terminal job status", "job_id", jobID, "action", action, "error", err)
 }
 
 // reportFailure classifies an ffmpeg execution failure and reports it to the
@@ -954,7 +971,7 @@ uploadOutput:
 func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached bool) {
 	failureType, failureDetails := ClassifyFailure(exitCode, errMsg, errMsg, false, false)
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, cached, string(failureType), failureDetails); err != nil {
-		log.Printf("Failed to report job failure: %v", err)
+		logTerminalReportError(jobID, "report failure", err)
 	}
 }
 
@@ -965,7 +982,7 @@ func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached
 // FFMPEG_ERROR is reserved for actual ffmpeg execution failures (TSI-2365).
 func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, string(protocol.FailureInfra), errMsg); err != nil {
-		log.Printf("Failed to report job failure: %v", err)
+		logTerminalReportError(jobID, "report failure", err)
 	}
 }
 
@@ -976,14 +993,14 @@ func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
 func (w *Worker) reportInputDownloadFailure(jobID string, fileID, errMsg string) {
 	failureType := ClassifyInputDownloadFailure(fileID)
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, 1, errMsg, false, string(failureType), errMsg); err != nil {
-		log.Printf("Failed to report job failure: %v", err)
+		logTerminalReportError(jobID, "report failure", err)
 	}
 }
 
 // reportFailureWithType reports a job failure with failure type classification.
 func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failureType, failureDetails string) {
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, failureType, failureDetails); err != nil {
-		log.Printf("Failed to report job failure: %v", err)
+		logTerminalReportError(jobID, "report failure", err)
 	}
 }
 
@@ -1100,7 +1117,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 
 	// Report success
 	if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, 0, "", false); err != nil {
-		log.Printf("Failed to update probe job status to completed: %v", err)
+		logTerminalReportError(job.ID, "report completed", err)
 	} else {
 		log.Printf("Probe job %s completed successfully", job.ID)
 	}

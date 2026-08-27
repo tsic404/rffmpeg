@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -19,6 +20,17 @@ import (
 
 // apiPrefix is the API version prefix for all server endpoints
 const apiPrefix = "/api/v1"
+
+// ErrJobConflict is returned when the server rejects a terminal status update
+// with HTTP 409 Conflict: the job has already reached a terminal state (or the
+// reporting worker no longer owns it). A late worker report racing a CLI
+// cancel or a concurrent completion is a benign lost race — the job's final
+// state is already correct, so callers should log at info level, not error.
+var ErrJobConflict = errors.New("job already in terminal state or not owned by this worker")
+
+// IsConflict reports whether err is a 409 Conflict from a terminal-status
+// update. Callers use it to suppress benign log noise from lost races.
+func IsConflict(err error) bool { return errors.Is(err, ErrJobConflict) }
 
 // MaxRemoteInputBytes caps the size of files downloaded from remote URLs via
 // DownloadInput. Server-side file downloads are already bounded by the
@@ -269,6 +281,14 @@ func (c *Client) UpdateJobWithFailure(jobID string, status protocol.JobStatus, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// 409 Conflict: the job already reached a terminal state (e.g. CLI
+		// cancel raced the worker's timeout/completion report) or the
+		// reporting worker no longer owns it. The final state is already
+		// correct, so surface a typed error callers can suppress instead of
+		// a generic status string that reads as a server fault.
+		if resp.StatusCode == http.StatusConflict {
+			return fmt.Errorf("%w: update job failed with status: %d", ErrJobConflict, resp.StatusCode)
+		}
 		return fmt.Errorf("update job failed with status: %d", resp.StatusCode)
 	}
 
