@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
 )
 
 // mockJobServer is a test HTTP server that handles client API calls.
@@ -146,6 +147,7 @@ func setupTestWorker(t *testing.T, cacheTTL time.Duration) (*Worker, *mockJobSer
 		lastHeartbeatTime:  time.Now(),
 		ffprobeExecutor:    NewFFprobeExecutor(""),
 		pixelFormatChecker: nil,
+		gpuDetector:        gpu.NewDetector(),
 	}
 
 	return w, mockSrv

@@ -196,7 +196,7 @@ type WorkerHeartbeatRequest struct {
 	CompletedJobs   int          `json:"completed_jobs"`
 	GPUUtilPct      float64      `json:"gpu_util_percent"` // Aggregated across all GPUs (0-100*N on multi-GPU hosts); 0 is a valid reading
 	GPUMemUsedMB    int          `json:"gpu_mem_used_mb"`
-	GPUMetricsValid bool         `json:"gpu_metrics_valid"` // True when GPUUtilPct/GPUMemUsedMB carry a fresh nvidia-smi sample
+	GPUMetricsValid bool         `json:"gpu_metrics_valid"` // True when GPUUtilPct/GPUMemUsedMB carry a fresh sample (nvidia-smi, intel_gpu_top, or amdgpu sysfs)
 }
 type WorkerHeartbeatResponse struct {
 	Message       string   `json:"message"`
@@ -353,7 +353,7 @@ type WorkerState struct {
 	WorkerID        string    `json:"worker_id"`
 	Status          string    `json:"status"` // online / offline / degraded / busy
 	GPUMemUsedMB    int       `json:"gpu_mem_used_mb,omitempty"`
-	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPU metrics reflect a fresh sample (TSI-2365)
+	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPU metrics reflect a fresh sample from any source (TSI-2365/TSI-2466)
 	GPUUtilPct      float64   `json:"gpu_util_percent,omitempty"`
 	ActiveJobs      []string  `json:"active_jobs,omitempty"`
 	ThroughputFPS   float64   `json:"throughput_fps,omitempty"`

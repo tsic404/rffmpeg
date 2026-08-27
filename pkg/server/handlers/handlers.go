@@ -1556,7 +1556,7 @@ type WorkerHealth struct {
 	Status          string   `json:"status"`
 	GPUUtilPct      float64  `json:"gpu_util_percent,omitempty"`
 	GPUMemUsedMB    int      `json:"gpu_mem_used_mb,omitempty"`
-	GPUMetricsValid bool     `json:"gpu_metrics_valid"` // True when the GPU fields carry a fresh sample; false means stale/no sample (TSI-2365)
+	GPUMetricsValid bool     `json:"gpu_metrics_valid"` // True when the GPU fields carry a fresh sample; false means stale/no sample (any GPU source)
 	ActiveJobs      []string `json:"active_jobs,omitempty"`
 	ThroughputFPS   float64  `json:"throughput_fps,omitempty"`
 	LastSeen        string   `json:"last_seen"`

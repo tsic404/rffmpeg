@@ -741,7 +741,8 @@ components:
           type: boolean
           description: >-
             True when gpu_util_percent / gpu_mem_used_mb carry a fresh
-            nvidia-smi sample. When false, both fields are 0 and mean "no
+            sample from any GPU source (nvidia-smi, intel_gpu_top, or
+            amdgpu sysfs). When false, both fields are 0 and mean "no
             sample available", not "0% utilization".
         gpu_util_percent:
           type: number

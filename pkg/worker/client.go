@@ -128,7 +128,8 @@ func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string
 // gpuMetrics carries GPU utilization samples. When Metrics.Valid is false the
 // GPU fields are sent as 0, which receivers treat as "no sample available";
 // a valid sample with UtilPct == 0 is a real 0% reading and must survive the
-// wire (TSI-2365).
+// wire (TSI-2365). Valid samples may come from nvidia-smi, intel_gpu_top, or
+// amdgpu sysfs (TSI-2466).
 func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int, gpuMetrics gpu.Metrics) ([]string, error) {
 	req := protocol.WorkerHeartbeatRequest{
 		WorkerID:        c.getWorkerID(),

@@ -37,11 +37,15 @@ type Device struct {
 }
 
 // Detector provides GPU device detection functionality.
-type Detector struct{}
+type Detector struct {
+	// sysfsRoot is the base path for sysfs reads (default "/sys"). Injected
+	// in tests to construct fake sysfs trees without touching /sys.
+	sysfsRoot string
+}
 
 // NewDetector creates a new GPU detector.
 func NewDetector() *Detector {
-	return &Detector{}
+	return &Detector{sysfsRoot: "/sys"}
 }
 
 // DetectGPUDevices detects available GPU devices on the current platform.

@@ -54,7 +54,7 @@ type WorkerHeartbeatPayload struct {
 	Status          string    `json:"status"`
 	GPUUtilPct      float64   `json:"gpu_util_percent"` // Aggregated across all GPUs (0-100*N); 0 is a valid reading
 	GPUMemUsedMB    int       `json:"gpu_mem_used_mb"`
-	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPUUtilPct/GPUMemUsedMB carry a fresh sample
+	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPUUtilPct/GPUMemUsedMB carry a fresh sample (any GPU source)
 	ActiveJobs      []string  `json:"active_jobs,omitempty"`
 	ThroughputFPS   float64   `json:"throughput_fps"` // Jobs completed per second since the last heartbeat (legacy name kept for wire compatibility)
 	QueueDepth      int       `json:"queue_depth"`
