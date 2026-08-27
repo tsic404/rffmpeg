@@ -706,6 +706,96 @@ func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 	}
 }
 
+// TSI-2473: a worker process restart generates a fresh UUID while reusing
+// the same name. The old row (offline residue) must be overwritten, not
+// duplicated — otherwise each restart accumulates a same-name entry.
+func TestCreateOrUpdateWorker_SameNameOverwritesStaleRow(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}
+
+	// First registration: worker process A with id-A and name "node-1".
+	workerA, err := database.CreateOrUpdateWorker("id-A", "node-1", caps)
+	if err != nil {
+		t.Fatalf("Failed to register worker A: %v", err)
+	}
+
+	// Simulate server restart: RecoverState marks the worker offline.
+	if _, _, err := database.RecoverState(); err != nil {
+		t.Fatalf("RecoverState failed: %v", err)
+	}
+
+	// Worker process restarted: new UUID (id-B), same name "node-1".
+	workerB, err := database.CreateOrUpdateWorker("id-B", "node-1", caps)
+	if err != nil {
+		t.Fatalf("Failed to re-register worker B with same name: %v", err)
+	}
+	if workerB.ID != "id-B" {
+		t.Errorf("Expected worker B id id-B, got %s", workerB.ID)
+	}
+
+	// Exactly one row for "node-1" must exist — the stale id-A row is gone.
+	all, err := database.GetAllWorkers()
+	if err != nil {
+		t.Fatalf("Failed to list workers: %v", err)
+	}
+	var sameName []*db.Worker
+	for _, w := range all {
+		if w.Name == "node-1" {
+			sameName = append(sameName, w)
+		}
+	}
+	if len(sameName) != 1 {
+		t.Fatalf("Expected exactly 1 worker named node-1, got %d", len(sameName))
+	}
+	if sameName[0].ID != "id-B" {
+		t.Errorf("Expected surviving row id-B, got %s", sameName[0].ID)
+	}
+
+	// The old id-A row must be gone.
+	if _, err := database.GetWorker(workerA.ID); err != protocol.ErrWorkerNotFound {
+		t.Errorf("Expected old worker A to be deleted, got %v", err)
+	}
+}
+
+// TSI-2473: when name is empty, the DELETE guard must be skipped so an
+// empty-name registration does not wipe other empty-name rows.
+func TestCreateOrUpdateWorker_EmptyNameSkipsDelete(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}
+
+	// Two workers with empty names (pre-existing, defensive).
+	if _, err := database.CreateWorker("empty-1", "", caps); err != nil {
+		t.Fatalf("Failed to create empty-1: %v", err)
+	}
+	if _, err := database.CreateWorker("empty-2", "", caps); err != nil {
+		t.Fatalf("Failed to create empty-2: %v", err)
+	}
+
+	// A third empty-name registration must NOT delete the existing rows.
+	worker3, err := database.CreateOrUpdateWorker("empty-3", "", caps)
+	if err != nil {
+		t.Fatalf("Failed to register empty-3: %v", err)
+	}
+
+	// All three rows survive — empty name does not trigger the same-name DELETE.
+	for _, id := range []string{"empty-1", "empty-2", "empty-3"} {
+		if _, err := database.GetWorker(id); err != nil {
+			t.Errorf("Expected %s to survive empty-name registration, got %v", id, err)
+		}
+	}
+	_ = worker3
+}
+
 // TSI-2366 companion fix: heartbeats and status updates from a UUID reported
 // in non-canonical format (compact/hyphenless, uppercase) must reach the
 // canonical row instead of silently matching nothing.

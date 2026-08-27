@@ -795,6 +795,33 @@ func TestWorkerReRegistration(t *testing.T) {
 	}
 }
 
+// TSI-2473: an empty worker name must be rejected at the handler. Without
+// this guard, the DB-layer DELETE would wipe unrelated empty-name rows.
+func TestRegisterWorker_RejectsEmptyName(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	regReq := protocol.WorkerRegisterRequest{
+		WorkerID: "empty-name-worker",
+		Name:     "",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for empty name, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestWorkerHeartbeat(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()

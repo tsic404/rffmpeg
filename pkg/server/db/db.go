@@ -703,8 +703,11 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 }
 
 // CreateOrUpdateWorker creates a new worker or updates an existing one on re-registration.
-// If the worker already exists, it updates capabilities, resets status to idle,
-// and clears eviction flags (TSI-1737 server restart recovery).
+// If the worker already exists (matched by id), it updates capabilities, resets status to
+// idle, and clears eviction flags (TSI-1737 server restart recovery). When the id is new
+// but the name matches an existing row, the stale row is deleted first so a worker process
+// restart (fresh UUID, same name) overwrites the old entry instead of creating a duplicate
+// (TSI-2473).
 func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCapabilities) (*Worker, error) {
 	// TSI-2346: normalize on the write path too, so the same logical UUID
 	// reported in different formats (hyphenated vs. compact, case, whitespace)
@@ -759,8 +762,29 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	}
 
 	if rows == 0 {
+		// TSI-2473: a new worker process generates a fresh UUID while
+		// reusing the same name. Matching only by id left the old row
+		// behind as offline residue, so each restart accumulated a
+		// duplicate same-name entry. Delete the stale row first so the
+		// INSERT below overwrites it instead of forking a second one.
+		// Wrap DELETE+INSERT in a transaction so a failed INSERT rolls
+		// back the DELETE (disk full / DB locked). Skip the DELETE for
+		// empty names: the handler rejects empty names, but defending
+		// here too avoids deleting unrelated empty-name rows.
+		tx, err := d.db.Begin()
+		if err != nil {
+			return nil, fmt.Errorf("failed to begin worker upsert transaction: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		if name != "" {
+			if _, err := tx.Exec(`DELETE FROM workers WHERE name = ? AND id != ?`, name, id); err != nil {
+				return nil, fmt.Errorf("failed to remove stale same-name worker: %w", err)
+			}
+		}
+
 		// Fallback: INSERT new worker
-		_, err = d.db.Exec(`
+		_, err = tx.Exec(`
 			INSERT INTO workers (id, name, status, gpu_model, encoders, decoders,
 			video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted,
 			evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at)
@@ -774,12 +798,16 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 		if err != nil {
 			return nil, fmt.Errorf("failed to create worker: %w", err)
 		}
+
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("failed to commit worker upsert: %w", err)
+		}
 	}
 
 	return d.GetWorker(id)
 }
 
-// NormalizeWorkerID canonicalizes a worker ID so lookups and ownership
+// NormalizeWorkerID canonicalizes a worker ID so that lookups and ownership
 // comparisons tolerate UUID formatting differences (hyphenated vs. compact).
 // Non-UUID IDs pass through unchanged, since registration accepts arbitrary
 // identifiers (TSI-2346).

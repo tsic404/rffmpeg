@@ -861,8 +861,12 @@ func (h *Handler) RegisterWorker(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
-
-	// Validate required fields
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "name is required", nil,
+		))
+		return
+	}
 	if len(req.Capabilities.Encoders) == 0 || req.Capabilities.FFmpegVersion == "" {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "encoders and ffmpeg_version are required", nil,
