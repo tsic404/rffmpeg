@@ -52,6 +52,24 @@ func TestClassifyFailure(t *testing.T) {
 			isWorkerCrash: false,
 			wantType:      protocol.FailureInputUnreachable,
 		},
+		{
+			name:          "output open failure - missing directory not INPUT_UNREACHABLE",
+			exitCode:      1,
+			stderr:        "[out#0/mp3 @ 0x...] Error opening output /nonexistent_dir/out.mp3: No such file or directory\nError opening output file /nonexistent_dir/out.mp3.\nError opening output files: No such file or directory\n",
+			errorMessage:  "output file not found: /nonexistent_dir/out.mp3",
+			isTimeout:     false,
+			isWorkerCrash: false,
+			wantType:      protocol.FailureFFmpegError,
+		},
+		{
+			name:          "output open failure - muxer init invalid argument",
+			exitCode:      1,
+			stderr:        "[AVFormatContext @ 0x...] Unable to choose an output format for 'output.xyz'; use a standard extension for the filename or specify the format manually.\n[out#0 @ 0x...] Error initializing the muxer for output.xyz: Invalid argument\nError opening output file output.xyz.\n",
+			errorMessage:  "ffmpeg reported critical error: corrupted or invalid input data",
+			isTimeout:     false,
+			isWorkerCrash: false,
+			wantType:      protocol.FailureFFmpegError,
+		},
 
 		{
 			name:     "corrupted local file is FFMPEG_ERROR, not INPUT_UNREACHABLE",

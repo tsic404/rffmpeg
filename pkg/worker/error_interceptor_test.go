@@ -88,6 +88,8 @@ func TestFFmpegError_IsRetryable(t *testing.T) {
 		{"device_not_found", ErrorTypeDeviceNotFound, true},
 		{"unsupported_codec", ErrorTypeUnsupportedCodec, true},
 		{"hwaccel_failed", ErrorTypeHWAccelFailed, true},
+		{"output_empty", ErrorTypeOutputEmpty, true},
+		{"output_open", ErrorTypeOutputOpen, false},
 		{"memory_allocation", ErrorTypeMemoryAllocation, false},
 		{"input_output", ErrorTypeInputOutput, false},
 		{"process_crash", ErrorTypeProcessCrash, true},
@@ -208,6 +210,18 @@ func TestErrorAnalyzer_Analyze(t *testing.T) {
 			stderr:       "",
 			exitCode:     136,
 			expectedType: ErrorTypeProcessCrash,
+		},
+		{
+			name:         "output_open_failure_exit0",
+			stderr:       "[out#0/mp3 @ 0x...] Error opening output file /nonexistent_dir/out.mp3.\nError opening output files.\n",
+			exitCode:     0,
+			expectedType: ErrorTypeOutputOpen,
+		},
+		{
+			name:         "muxer_init_failure_exit0",
+			stderr:       "[AVFormatContext @ 0x...] Unable to choose an output format for 'output.xyz'; use a standard extension for the filename or specify the format manually.\n[out#0 @ 0x...] Error initializing the muxer for output.xyz: Invalid argument\nError opening output file output.xyz.\n",
+			exitCode:     0,
+			expectedType: ErrorTypeOutputOpen,
 		},
 	}
 

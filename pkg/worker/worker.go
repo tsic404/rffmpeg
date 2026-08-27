@@ -807,10 +807,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		if info, err := os.Stat(outputPath); err != nil {
 			log.Printf("Job %s: output file not found after exit code 0: %s: %v", job.ID, outputPath, err)
 			result.Error = fmt.Errorf("output file not found: %s", outputPath)
+			result.ExitCode = 1
 			result.Stderr = "Output file not found: " + outputPath + "\n" + result.Stderr
 		} else if info.Size() == 0 {
 			log.Printf("Job %s: output file is 0 bytes after exit code 0: %s", job.ID, outputPath)
 			result.Error = fmt.Errorf("output file is empty (0 bytes): %s", outputPath)
+			result.ExitCode = 1
 			result.Stderr = "Output file is empty (0 bytes): " + outputPath + "\n" + result.Stderr
 		}
 	}
@@ -1237,6 +1239,15 @@ func ffmpegStderrIndicatesCriticalError(stderr string) bool {
 		"requested encoder",
 		"no such encoder",
 		"encoder not found",
+		// Output-open failures: ffmpeg n9 exits 0 when it cannot open or
+		// initialize the output muxer (bad path, missing directory, unknown
+		// container), so stderr is the only signal (TSI-2472).
+		"error opening output file",
+		"error opening output files",
+		"error initializing the muxer",
+		"unable to choose an output format",
+		"could not open file",
+		"could not open output",
 	}
 	for _, indicator := range criticalErrorIndicators {
 		if strings.Contains(stderrLower, indicator) {

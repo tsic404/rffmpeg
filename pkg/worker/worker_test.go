@@ -156,6 +156,21 @@ func TestFFmpegStderrIndicatesCriticalError(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "error opening output file - missing directory",
+			stderr: "[out#0/mp3 @ 0x55be9305cc00] Error opening output /nonexistent_dir/out.mp3: No such file or directory\nError opening output file /nonexistent_dir/out.mp3.\nError opening output files: No such file or directory\n",
+			want:   true,
+		},
+		{
+			name:   "error initializing the muxer - unknown container",
+			stderr: "[AVFormatContext @ 0x563fd6c0cd00] Unable to choose an output format for 'output.xyz'; use a standard extension for the filename or specify the format manually.\n[out#0 @ 0x563fd6c0cc00] Error initializing the muxer for output.xyz: Invalid argument\nError opening output file output.xyz.\n",
+			want:   true,
+		},
+		{
+			name:   "could not open output lowercase",
+			stderr: "could not open output file /tmp/jobs/job-1/output.mp3\n",
+			want:   true,
+		},
+		{
 			name:   "corrupted file",
 			stderr: "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55b5e8d8c700] corrupted file\n",
 			want:   true,

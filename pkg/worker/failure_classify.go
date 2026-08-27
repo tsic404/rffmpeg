@@ -91,6 +91,15 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 	if isDiskFull(stderr) {
 		return protocol.FailureDiskFull, "No space left on device"
 	}
+	// Check output-open failure BEFORE input unreachable: ffmpeg n9 exits 0
+	// for these (stderr: "Error opening output file", "Error initializing
+	// the muxer", etc.) but the stderr also carries "... No such file or
+	// directory", which would otherwise match isInputUnreachable's
+	// "No such file" pattern and misreport the job as an input problem
+	// when the real cause is a bad output path/missing directory (TSI-2472).
+	if isOutputOpenFailure(stderr) {
+		return protocol.FailureFFmpegError, "ffmpeg could not open or initialize the output file"
+	}
 
 	// Check input unreachable — only against ffmpeg-style stderr. Generic
 	// error text (infra failures) must not match these patterns, or a
@@ -182,6 +191,29 @@ func isInputUnreachable(stderr string) bool {
 	}
 	for _, p := range patterns {
 		if strings.Contains(stderr, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isOutputOpenFailure checks stderr for ffmpeg output-file open/muxer-init
+// failures. ffmpeg n9 exits 0 for these despite writing the error to stderr,
+// and the "... No such file or directory" tail would otherwise match
+// isInputUnreachable ("No such file") and misclassify an output-path
+// problem as an input problem (TSI-2472).
+func isOutputOpenFailure(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	patterns := []string{
+		"error opening output file",
+		"error opening output files",
+		"error initializing the muxer",
+		"unable to choose an output format",
+		"could not open file",
+		"could not open output",
+	}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
 			return true
 		}
 	}

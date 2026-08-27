@@ -50,6 +50,12 @@ const (
 	// FFmpeg exited with code 0 but produced no valid output data.
 	ErrorTypeOutputEmpty
 
+	// ErrorTypeOutputOpen indicates ffmpeg could not open or initialize the
+	// output muxer (bad path, missing directory, unknown container). ffmpeg
+	// n9 exits 0 for these failures (TSI-2472), so the worker must classify
+	// them from stderr and flip the reported exit code to non-zero.
+	ErrorTypeOutputOpen
+
 	// ErrorTypeProcessCrash indicates ffmpeg was killed by an OS signal
 	// (SIGABRT=134, SIGSEGV=139, etc.). ffmpeg n9.x sporadically self-aborts
 	// under high load / temp-space pressure without a deterministic defect;
@@ -64,6 +70,8 @@ func (e FFmpegErrorType) String() string {
 		return "invalid_argument"
 	case ErrorTypeEncoderNotFound:
 		return "encoder_not_found"
+	case ErrorTypeOutputOpen:
+		return "output_open_failure"
 	case ErrorTypeDeviceNotFound:
 		return "device_not_found"
 	case ErrorTypeUnsupportedCodec:
@@ -106,6 +114,8 @@ func (e FFmpegErrorType) Description() string {
 		return "Permission denied"
 	case ErrorTypeOutputEmpty:
 		return "Output file is empty"
+	case ErrorTypeOutputOpen:
+		return "ffmpeg could not open or initialize the output file"
 	case ErrorTypeProcessCrash:
 		return "FFmpeg process killed by OS signal (crash)"
 	default:
@@ -128,6 +138,26 @@ type ErrorPattern struct {
 // DefaultErrorPatterns returns the default error patterns for ffmpeg.
 func DefaultErrorPatterns() []ErrorPattern {
 	return []ErrorPattern{
+		{
+			Type: ErrorTypeOutputOpen,
+			Patterns: []string{
+				// ffmpeg n9 exits 0 even when it cannot open/initialize the
+				// output muxer (bad path, missing directory, unknown container
+				// extension). These lines appear on stderr but the zero exit
+				// code lets the failure slip through unless classified here.
+				// MUST be checked before ErrorTypeInvalidArgument: the muxer
+				// failure line carries "...: Invalid argument", which would
+				// otherwise match the generic errno pattern first and hide the
+				// real root cause (TSI-2472).
+				"Error opening output file",
+				"Error opening output files",
+				"Error initializing the muxer",
+				"Could not open file",
+				"could not open output",
+				"Unable to choose an output format",
+			},
+			Description: "ffmpeg could not open or initialize the output file",
+		},
 		{
 			Type: ErrorTypeInvalidArgument,
 			Patterns: []string{
@@ -306,7 +336,7 @@ func (e *FFmpegError) IsRetryable() bool {
 		ErrorTypeUnsupportedCodec, ErrorTypeHWAccelFailed, ErrorTypeOutputEmpty,
 		ErrorTypeProcessCrash:
 		return true
-	case ErrorTypeMemoryAllocation, ErrorTypeInputOutput, ErrorTypePermissionDenied:
+	case ErrorTypeOutputOpen, ErrorTypeMemoryAllocation, ErrorTypeInputOutput, ErrorTypePermissionDenied:
 		return false
 	default:
 		return false
