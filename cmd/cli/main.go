@@ -541,16 +541,31 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			// The job never reached a terminal state. Cancel it server-side so
-			// it doesn't linger, and report a clear timeout instead of hanging.
-			if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
+			// Race guard (TSI-2452): the client-side timeout may have fired
+			// even though the job already reached a terminal status on the
+			// server (e.g. a cache hit completed between the last poll and
+			// the context deadline). WaitForJobWithLogs /
+			// WaitForJobWithStreamingOutput already do a final GetJob on
+			// ctx.Done(); this is a belt-and-suspenders fallback in case a
+			// future wait variant or a WS-reconnect edge case lets the
+			// deadline through without the check. If the job is already
+			// done, proceed with the result instead of cancelling a
+			// completed job (which the server rejects with 400).
+			if terminalJob, getErr := cli.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(terminalJob.Status) {
+				job = terminalJob
+			} else {
+				// The job is genuinely not done. Cancel it server-side so it
+				// doesn't linger, and report a clear timeout.
+				if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
+				}
+				fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled (worker may be unavailable)\n", jobID, timeout)
+				return ExitError
 			}
-			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled (worker may be unavailable)\n", jobID, timeout)
 		} else {
 			fmt.Fprintf(os.Stderr, "Error waiting for job: %v\n", err)
+			return ExitError
 		}
-		return ExitError
 	}
 
 	// Handle job result

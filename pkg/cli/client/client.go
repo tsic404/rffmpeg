@@ -62,6 +62,11 @@ const (
 	RetryDelay      = 1 * time.Second
 )
 
+// Overridable poll interval for regression tests; production value mirrors
+// PollInterval. Internal tests swap this to a short duration to exercise
+// timing-sensitive code paths (e.g. the TSI-2452 race guard) without 2s waits.
+var pollInterval = PollInterval
+
 // Client is the HTTP client for rffmpeg server
 type Client struct {
 	serverURL string
@@ -325,7 +330,7 @@ func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
 // WaitForJob waits for job completion and returns exit code.
 // It polls until the job reaches a terminal status or ctx is cancelled.
 func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool) (*protocol.JobInfo, error) {
-	ticker := time.NewTicker(PollInterval)
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -397,7 +402,7 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(PollInterval):
+			case <-time.After(pollInterval):
 				job, err := c.GetJob(jobID)
 				if err != nil {
 					continue
@@ -444,6 +449,21 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 		}
 		return job, nil
 	case <-ctx.Done():
+		// Race guard (TSI-2452): the client-side timeout fired, but the
+		// job may have reached a terminal status on the server between
+		// the last poll and ctx.Done() (e.g. a cache hit). The poll
+		// goroutine may still be mid-GetJob, so pollDone is not yet
+		// written. Do a final GetJob with a fresh context — if the job
+		// is already done, return it instead of a spurious timeout.
+		// main.go also does this as a belt-and-suspenders fallback;
+		// doing it here means main.go's check is a no-op in the common
+		// case and the gap warning is preserved.
+		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+			if wsClient.HasGap() {
+				fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+			}
+			return job, nil
+		}
 		return nil, ctx.Err()
 	}
 }
@@ -501,7 +521,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(PollInterval):
+			case <-time.After(pollInterval):
 				job, err := c.GetJob(jobID)
 				if err != nil {
 					continue
@@ -529,12 +549,23 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		// WebSocket closes before the server DB is updated.
 		return c.WaitForJob(ctx, jobID, !quiet)
 	case <-ctx.Done():
-		// Gap check before the ctx error: if stdout bytes with holes were
-		// already written, the consumer must hear about it even on timeout.
-		if wsClient.HasGap() {
-			return nil, fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+		// Race guard (TSI-2452): the client-side timeout fired, but the
+		// job may have reached a terminal status on the server between
+		// the last poll and ctx.Done() (e.g. a cache hit). The poll
+		// goroutine may still be mid-GetJob, so pollDone is not yet
+		// written. Do a final GetJob with a fresh context — if the job
+		// is already done, fall through to the gap check below and
+		// return it; otherwise report the timeout/gap error.
+		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+			finalJob = job
+		} else {
+			// Gap check before the ctx error: if stdout bytes with holes
+			// were already written, the consumer must hear about it.
+			if wsClient.HasGap() {
+				return nil, fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+			}
+			return nil, ctx.Err()
 		}
-		return nil, ctx.Err()
 	}
 
 	// Gap detection: if messages were lost across a reconnect, the bytes

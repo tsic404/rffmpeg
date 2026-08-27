@@ -150,3 +150,67 @@ func TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling(t *testin
 		t.Errorf("expected status completed, got %s", job.Status)
 	}
 }
+
+// TestWaitForJobWithLogs_CtxDoneRaceWithPollDone is the TSI-2452 regression
+// test: when the client-side timeout fires after the job has already reached
+// a terminal status on the server (e.g. a cache hit completed between the
+// last poll and ctx.Done()), WaitForJobWithLogs must return the completed
+// job, not DeadlineExceeded.
+//
+// The mock server upgrades the WS (so ConnectWithReconnect succeeds and the
+// select is reached) and reports "completed" for every GetJob. The ctx
+// timeout is short — the poll goroutine may or may not write to pollDone
+// before ctx.Done(), but the race guard's final GetJob always sees the
+// terminal status and returns the job.
+//
+// The assertion is strict: the job must always be returned with status
+// completed, never an error. Without the race guard, ctx.Done() returns
+// DeadlineExceeded and the test fails.
+func TestWaitForJobWithLogs_CtxDoneRaceWithPollDone(t *testing.T) {
+	const jobID = "job-race"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/jobs/"+jobID+"/log", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Hold the WS open so WaitForJobWithLogs reaches the select — the
+		// race guard lives in the ctx.Done() case of that select.
+		<-r.Context().Done()
+		conn.Close()
+	})
+	mux.HandleFunc("/api/v1/jobs/"+jobID, func(w http.ResponseWriter, r *http.Request) {
+		// Always report completed — the race guard's final GetJob must
+		// see this terminal status and return the job.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.JobStatusResponse{
+			Job: protocol.JobInfo{
+				ID:     jobID,
+				Status: protocol.JobStatusCompleted,
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli := New(srv.URL, "")
+
+	// Very short ctx so the deadline fires before the first poll (2s)
+	// — forcing the ctx.Done() path. The race guard's final GetJob
+	// returns "completed" and the job is returned, not an error.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	job, err := cli.WaitForJobWithLogs(ctx, jobID, true)
+
+	if err != nil {
+		t.Fatalf("race guard should return completed job, got error: %v", err)
+	}
+	if job == nil {
+		t.Fatal("race guard should return completed job, got nil")
+	}
+	if job.Status != protocol.JobStatusCompleted {
+		t.Fatalf("expected status completed, got %s", job.Status)
+	}
+}
