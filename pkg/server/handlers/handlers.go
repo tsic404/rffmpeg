@@ -1042,6 +1042,26 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
+	// Check for a live schedulable worker before creating the probe job
+	// (TSI-2474). Without this, a probe dispatched to a cluster with no
+	// online workers sits pending for the entire 2-minute poll loop before
+	// returning "timeout" — the user sees a hang, not an actionable error.
+	// Failing fast mirrors the submit-time check in SubmitJob (TSI-2419).
+	liveWorkers, err := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to check worker availability", err,
+		))
+		return
+	}
+	if len(liveWorkers) == 0 {
+		writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
+			protocol.ErrCodeWorkerUnavailable,
+			"No worker available. Please ensure at least one worker is registered and online.",
+			nil,
+		))
+		return
+	}
 
 	// Create a probe job
 	inputFilesJSON, err := json.Marshal([]string{req.Input})

@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,7 +66,7 @@ func setupTest(t *testing.T) (*handlers.Handler, *chi.Mux, func()) {
 	r.Get("/api/v1/workers/{workerId}/jobs", h.PullWorkerJobs)
 	r.Get("/api/v1/workers/{workerId}", h.GetWorker)
 	r.Get("/api/v1/workers", h.ListWorkers)
-	r.Get("/api/v1/files/{fileId}", h.DownloadFile)
+	r.Post("/api/v1/probe", h.Probe)
 
 	cleanup := func() {
 		database.Close()
@@ -1951,5 +1952,134 @@ func TestSubmitJobStaleEncoderWorkerWithLiveOtherWorkerRejected(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("Expected status 503 when only stale worker has the encoder, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TSI-2474: a probe request when no live worker is available must fail
+// immediately with 503 worker_unavailable instead of dispatching a job that
+// sits pending for the entire 2-minute poll loop before returning "timeout".
+func TestProbeNoWorkerFailsImmediately(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(90 * time.Second)
+
+	// No worker registered — the cluster is empty.
+
+	probeReq := protocol.ProbeRequest{Input: "rtmp://example.com/test"}
+	body, _ := json.Marshal(probeReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected status 503 for probe with no workers, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeWorkerUnavailable {
+		t.Errorf("Expected error code 'worker_unavailable', got '%s'", errResp.Code)
+	}
+}
+
+// TSI-2474: a stale-heartbeat worker (registered but dead in practice) must
+// not satisfy the probe availability check — the probe must still fail fast.
+func TestProbeStaleHeartbeatWorkerFailsImmediately(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(90 * time.Second)
+
+	registerTestWorker(t, router, []string{"libx264"})
+	if _, err := h.GetDB().GetDB().Exec(
+		`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Minute), "test-worker-1",
+	); err != nil {
+		t.Fatalf("Failed to backdate worker heartbeat: %v", err)
+	}
+
+	// Upload a file so the input-exists check passes and the probe reaches
+	// the worker-availability check.
+	fileID := uploadTestFile(t, router)
+
+	probeReq := protocol.ProbeRequest{Input: fileID}
+	body, _ := json.Marshal(probeReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected status 503 for probe with stale worker, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeWorkerUnavailable {
+		t.Errorf("Expected error code 'worker_unavailable', got '%s'", errResp.Code)
+	}
+}
+
+// TSI-2474 happy path: a probe request when a live worker IS available must
+// pass the worker-availability guard and proceed to job creation — it must
+// NOT be rejected with 503 worker_unavailable. No worker pulls the job in
+// this test, so the handler enters its poll loop; we cancel the request
+// context to break out quickly and assert the response was not the guard's
+// 503.
+func TestProbeWithLiveWorkerProceeds(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(90 * time.Second)
+
+	// Register a worker with a fresh heartbeat.
+	registerTestWorker(t, router, []string{"libx264"})
+
+	fileID := uploadTestFile(t, router)
+
+	probeReq := protocol.ProbeRequest{Input: fileID}
+	body, _ := json.Marshal(probeReq)
+
+	// Give the request a cancellable context so the probe handler's poll
+	// loop exits via the client-gone path instead of running for 2 minutes.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequestWithContext(ctx, "POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	// Run the handler in a goroutine; cancel the context shortly after it
+	// starts so the poll loop's r.Context().Done() branch fires.
+	done := make(chan struct{})
+	go func() {
+		router.ServeHTTP(w, req)
+		close(done)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+
+	// The guard must not have rejected the probe: a 503 with
+	// worker_unavailable would mean the live worker was not seen.
+	if w.Code == http.StatusServiceUnavailable {
+		var errResp protocol.ErrorResponse
+		_ = json.NewDecoder(w.Body).Decode(&errResp)
+		if errResp.Code == protocol.ErrCodeWorkerUnavailable {
+			t.Fatalf("Probe was rejected by the worker-availability guard despite a live worker: %s (body: %s)",
+				errResp.Code, w.Body.String())
+		}
 	}
 }
