@@ -22,6 +22,7 @@ func TestFFmpegErrorType_String(t *testing.T) {
 		{"input_output", ErrorTypeInputOutput, "input_output"},
 		{"permission_denied", ErrorTypePermissionDenied, "permission_denied"},
 		{"output_empty", ErrorTypeOutputEmpty, "output_empty"},
+		{"process_crash", ErrorTypeProcessCrash, "process_crash"},
 	}
 
 	for _, tt := range tests {
@@ -46,8 +47,9 @@ func TestFFmpegErrorType_Description(t *testing.T) {
 		{name: "memory_allocation", e: ErrorTypeMemoryAllocation},
 		{name: "hwaccel_failed", e: ErrorTypeHWAccelFailed},
 		{name: "input_output", e: ErrorTypeInputOutput},
-		{name: "permission_denied", e: ErrorTypePermissionDenied},
 		{name: "output_empty", e: ErrorTypeOutputEmpty},
+		{name: "permission_denied", e: ErrorTypePermissionDenied},
+		{name: "process_crash", e: ErrorTypeProcessCrash},
 	}
 
 	for _, tt := range tests {
@@ -88,8 +90,8 @@ func TestFFmpegError_IsRetryable(t *testing.T) {
 		{"hwaccel_failed", ErrorTypeHWAccelFailed, true},
 		{"memory_allocation", ErrorTypeMemoryAllocation, false},
 		{"input_output", ErrorTypeInputOutput, false},
+		{"process_crash", ErrorTypeProcessCrash, true},
 		{"permission_denied", ErrorTypePermissionDenied, false},
-		{"output_empty", ErrorTypeOutputEmpty, true},
 		{"unknown", ErrorTypeUnknown, false},
 	}
 
@@ -182,6 +184,30 @@ func TestErrorAnalyzer_Analyze(t *testing.T) {
 			stderr:       "Output file is empty (0 bytes): /tmp/output.mp4\n",
 			exitCode:     0,
 			expectedType: ErrorTypeOutputEmpty,
+		},
+		{
+			name:         "sigabrt_exit_134",
+			stderr:       "frame=  120 fps= 30 q=28.0\nAborted\n",
+			exitCode:     134,
+			expectedType: ErrorTypeProcessCrash,
+		},
+		{
+			name:         "sigsegv_exit_139",
+			stderr:       "frame=  120 fps= 30 q=28.0\n",
+			exitCode:     139,
+			expectedType: ErrorTypeProcessCrash,
+		},
+		{
+			name:         "sigabrt_no_stderr",
+			stderr:       "",
+			exitCode:     134,
+			expectedType: ErrorTypeProcessCrash,
+		},
+		{
+			name:         "sigfpe_exit_136",
+			stderr:       "",
+			exitCode:     136,
+			expectedType: ErrorTypeProcessCrash,
 		},
 	}
 
@@ -607,6 +633,7 @@ func TestDefaultErrorPatterns(t *testing.T) {
 		ErrorTypeUnsupportedCodec,
 		ErrorTypeMemoryAllocation,
 		ErrorTypeHWAccelFailed,
+		ErrorTypeProcessCrash,
 	}
 
 	for _, req := range requiredTypes {

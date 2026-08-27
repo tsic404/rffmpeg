@@ -49,6 +49,12 @@ const (
 	// ErrorTypeOutputEmpty indicates the output file is empty (0 bytes).
 	// FFmpeg exited with code 0 but produced no valid output data.
 	ErrorTypeOutputEmpty
+
+	// ErrorTypeProcessCrash indicates ffmpeg was killed by an OS signal
+	// (SIGABRT=134, SIGSEGV=139, etc.). ffmpeg n9.x sporadically self-aborts
+	// under high load / temp-space pressure without a deterministic defect;
+	// re-running the same command succeeds, so this is retryable (TSI-2458).
+	ErrorTypeProcessCrash
 )
 
 // String returns the string representation of the error type.
@@ -66,12 +72,14 @@ func (e FFmpegErrorType) String() string {
 		return "memory_allocation"
 	case ErrorTypeHWAccelFailed:
 		return "hwaccel_failed"
+	case ErrorTypeOutputEmpty:
+		return "output_empty"
+	case ErrorTypeProcessCrash:
+		return "process_crash"
 	case ErrorTypeInputOutput:
 		return "input_output"
 	case ErrorTypePermissionDenied:
 		return "permission_denied"
-	case ErrorTypeOutputEmpty:
-		return "output_empty"
 	default:
 		return "unknown"
 	}
@@ -98,6 +106,8 @@ func (e FFmpegErrorType) Description() string {
 		return "Permission denied"
 	case ErrorTypeOutputEmpty:
 		return "Output file is empty"
+	case ErrorTypeProcessCrash:
+		return "FFmpeg process killed by OS signal (crash)"
 	default:
 		return "Unknown error"
 	}
@@ -241,6 +251,22 @@ func DefaultErrorPatterns() []ErrorPattern {
 			},
 			Description: "Output file is empty or not found",
 		},
+		{
+			Type: ErrorTypeProcessCrash,
+			Patterns: []string{
+				// glibc abort() prints "Aborted" to stderr.
+				"Aborted",
+				// Fallback for when the exit code is absent or not in
+				// signalExitCodes but stderr carries the kernel's
+				// "Killed signal N" line. The primary detection path is
+				// isSignalDeath(exitCode) in ErrorAnalyzer.Analyze; these
+				// stderr patterns cover shells/wrappers that mask the
+				// real exit code (e.g. exit 1 with "Killed signal 6").
+				"Killed signal 6",
+				"Killed signal 11",
+			},
+			Description: "FFmpeg process killed by OS signal (crash)",
+		},
 	}
 }
 
@@ -277,7 +303,8 @@ func (e *FFmpegError) Error() string {
 func (e *FFmpegError) IsRetryable() bool {
 	switch e.Type {
 	case ErrorTypeInvalidArgument, ErrorTypeEncoderNotFound, ErrorTypeDeviceNotFound,
-		ErrorTypeUnsupportedCodec, ErrorTypeHWAccelFailed, ErrorTypeOutputEmpty:
+		ErrorTypeUnsupportedCodec, ErrorTypeHWAccelFailed, ErrorTypeOutputEmpty,
+		ErrorTypeProcessCrash:
 		return true
 	case ErrorTypeMemoryAllocation, ErrorTypeInputOutput, ErrorTypePermissionDenied:
 		return false

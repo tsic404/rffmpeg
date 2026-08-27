@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -63,11 +64,22 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 		return protocol.FailureWorkerCrash, "Worker process terminated unexpectedly"
 	}
 
-	// OOM kill: the kernel SIGKILLs the process (-9, exit code 137) when the
-	// cgroup/system runs out of memory. Surface it as WORKER_CRASH with an
-	// explicit reason instead of a generic FFMPEG_ERROR (TSI-2365).
-	if exitCode == 137 || isOOMKill(stderr) {
-		return protocol.FailureWorkerCrash, "Process killed by the OS out-of-memory killer (SIGKILL)"
+	// Process killed by an OS signal (OOM-kill SIGKILL=137, or a crash
+	// signal like SIGABRT=134 / SIGSEGV=139). ffmpeg n9.x sporadically
+	// self-aborts under high load / temp-space pressure — surface it as
+	// WORKER_CRASH with an explicit reason instead of a generic
+	// FFMPEG_ERROR so the job is retryable (TSI-2458 / TSI-2365).
+	if isSignalDeath(exitCode) || isOOMKill(stderr) {
+		switch {
+		case exitCode == 137:
+			return protocol.FailureWorkerCrash, "Process killed by the OS out-of-memory killer (SIGKILL)"
+		case exitCode == 134:
+			return protocol.FailureWorkerCrash, "ffmpeg aborted (SIGABRT, exit 134) — transient crash under load"
+		case exitCode == 139:
+			return protocol.FailureWorkerCrash, "ffmpeg segfaulted (SIGSEGV, exit 139) — transient crash under load"
+		default:
+			return protocol.FailureWorkerCrash, fmt.Sprintf("ffmpeg killed by OS signal (exit %d)", exitCode)
+		}
 	}
 
 	// Check timeout

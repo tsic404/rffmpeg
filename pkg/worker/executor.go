@@ -191,8 +191,22 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 			result.ExitCode = -1
 			result.IsTimeout = true
 		} else if exitErr, ok := err.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-			result.Error = fmt.Errorf("ffmpeg exited with code %d", exitErr.ExitCode())
+			// Go's exec.ExitError.ExitCode() returns -1 when the process
+			// was killed by a signal, not the POSIX 128+signal value.
+			// Use ProcessState to detect signal death and compute the
+			// real exit code (128+signal) so downstream classifiers
+			// (ClassifyFailure, ErrorAnalyzer) can recognize SIGABRT,
+			// SIGSEGV, etc. as process crashes and trigger retry
+			// (TSI-2458). Without this, SIGABRT falls through as a
+			// generic FFMPEG_ERROR (exit -1) and the job never retries.
+			exitCode := exitErr.ExitCode()
+			if ps := exitErr.ProcessState; ps != nil {
+				if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+					exitCode = 128 + int(ws.Signal())
+				}
+			}
+			result.ExitCode = exitCode
+			result.Error = fmt.Errorf("ffmpeg exited with code %d", exitCode)
 		} else {
 			result.Error = fmt.Errorf("failed to execute ffmpeg: %w", err)
 			result.ExitCode = -1

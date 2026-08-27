@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -79,7 +80,22 @@ func (a *ErrorAnalyzer) Analyze(stderr string, exitCode int) *FFmpegError {
 		return nil
 	}
 
-	// Parse stderr lines for analysis
+	// Detect process death by OS signal BEFORE pattern matching: a signal
+	// kill (SIGABRT=134, SIGBUS=135, SIGSEGV=139, …) is a process crash
+	// regardless of stderr text. ffmpeg n9.x sporadically self-aborts under
+	// high load / temp-space pressure; classifying it as a generic unknown
+	// error made it non-retryable, failing jobs that succeed on re-run
+	// (TSI-2458).
+	if isSignalDeath(exitCode) {
+		return &FFmpegError{
+			Type:      ErrorTypeProcessCrash,
+			Message:   signalDeathMessage(exitCode, stderr),
+			ExitCode:  exitCode,
+			Stderr:    stderr,
+			Timestamp: time.Now(),
+		}
+	}
+
 	lines := strings.Split(stderr, "\n")
 
 	// Find matching error types
@@ -262,4 +278,36 @@ func ClassifyErrorType(stderr string) FFmpegErrorType {
 		return err.Type
 	}
 	return ErrorTypeUnknown
+}
+
+// signalExitCodes maps POSIX signal-death exit codes (128 + signal number)
+// to the signal name. ffmpeg is killed by one of these when it self-aborts
+// (SIGABRT from an internal assertion / glibc abort) or hits a memory
+// fault (SIGSEGV/SIGBUS). They are process crashes, not normal ffmpeg
+// errors, and are retryable (TSI-2458).
+var signalExitCodes = map[int]string{
+	134: "SIGABRT",
+	135: "SIGBUS",
+	136: "SIGFPE",
+	137: "SIGKILL", // OOM kill — also handled by isOOMKill stderr path
+	139: "SIGSEGV",
+}
+
+// isSignalDeath reports whether exitCode is a 128+signal POSIX signal death
+// for a known fatal signal. Exit codes below 128 are ffmpeg's own; unknown
+// codes ≥ 128 are left to the generic path to avoid false positives.
+func isSignalDeath(exitCode int) bool {
+	_, ok := signalExitCodes[exitCode]
+	return ok
+}
+
+// signalDeathMessage builds a human-readable message for a signal-killed
+// ffmpeg, preferring the first non-empty stderr line as context.
+func signalDeathMessage(exitCode int, stderr string) string {
+	sig := signalExitCodes[exitCode]
+	msg := fmt.Sprintf("ffmpeg killed by OS signal %s (exit %d)", sig, exitCode)
+	if first := extractFirstErrorLine(stderr); first != "" {
+		msg += ": " + first
+	}
+	return msg
 }

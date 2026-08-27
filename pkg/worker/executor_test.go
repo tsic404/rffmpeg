@@ -1,9 +1,12 @@
 package worker
 
 import (
+	"context"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestBuildArgs(t *testing.T) {
@@ -317,5 +320,47 @@ func TestFindSeparatorIndex(t *testing.T) {
 				t.Errorf("findSeparatorIndex(%v) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestExecutor_SignalDeathExitCode verifies that the executor converts a
+// signal-killed process into the POSIX 128+signal exit code. Go's
+// exec.ExitError.ExitCode() returns -1 for signal deaths; without the
+// ProcessState.Sys().(syscall.WaitStatus) conversion in ExecuteWithHandlers,
+// SIGABRT would be reported as exit -1 and never trigger the
+// isSignalDeath(134) crash classification (TSI-2458).
+func TestExecutor_SignalDeathExitCode(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not installed")
+	}
+
+	exec := NewExecutor(sh, 10*time.Second)
+	// kill -6 $$ sends SIGABRT to the shell itself.
+	result := exec.Execute(context.Background(), []string{"-c", "kill -6 $$"})
+
+	if result.ExitCode != 134 {
+		t.Fatalf("SIGABRT exit code = %d, want 134 (128+6); error=%v stderr=%q",
+			result.ExitCode, result.Error, result.Stderr)
+	}
+	if result.Error == nil {
+		t.Fatal("expected non-nil error for signal-killed process")
+	}
+}
+
+// TestExecutor_SignalDeathSegvExitCode verifies SIGSEGV (signal 11) is
+// reported as exit 139 (128+11), not -1 (TSI-2458).
+func TestExecutor_SignalDeathSegvExitCode(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not installed")
+	}
+
+	exec := NewExecutor(sh, 10*time.Second)
+	result := exec.Execute(context.Background(), []string{"-c", "kill -11 $$"})
+
+	if result.ExitCode != 139 {
+		t.Fatalf("SIGSEGV exit code = %d, want 139 (128+11); error=%v stderr=%q",
+			result.ExitCode, result.Error, result.Stderr)
 	}
 }

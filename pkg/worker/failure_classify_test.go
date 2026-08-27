@@ -192,6 +192,38 @@ func TestClassifyFailureOOMKill(t *testing.T) {
 	}
 }
 
+// TestClassifyFailureSignalDeath locks the TSI-2458 fix: ffmpeg killed by
+// an OS signal (SIGABRT=134, SIGSEGV=139, SIGKILL=137) is a process crash,
+// not a generic FFMPEG_ERROR, so the job is retryable. These sporadic
+// self-aborts happen under high load / temp-space pressure and succeed on
+// re-run.
+func TestClassifyFailureSignalDeath(t *testing.T) {
+	cases := []struct {
+		name     string
+		exitCode int
+		stderr   string
+	}{
+		{"sigabrt exit 134", 134, "frame=  120 fps= 30 q=28.0\nAborted\n"},
+		{"sigabrt exit 134 no stderr", 134, ""},
+		{"sigsegv exit 139", 139, ""},
+		{"sigbus exit 135", 135, ""},
+		{"sigfpe exit 136", 136, ""},
+		{"sigkill exit 137", 137, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, details := ClassifyFailure(tc.exitCode, tc.stderr, "", false, false)
+			if got != protocol.FailureWorkerCrash {
+				t.Errorf("exit=%d stderr=%q classified as %q, want WORKER_CRASH",
+					tc.exitCode, tc.stderr, got)
+			}
+			if details == "" {
+				t.Error("details should explain the signal death")
+			}
+		})
+	}
+}
+
 // TestClassifyInputDownloadFailure locks the TSI-2348 fix: a failed download
 // of a remote-URL input is the user's input being unreachable (INPUT_UNREACHABLE),
 // while a failed server-file fetch is worker↔server infrastructure (FFMPEG_ERROR).

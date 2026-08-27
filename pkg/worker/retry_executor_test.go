@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"testing"
 	"time"
@@ -549,5 +550,68 @@ func TestExecuteWithRetry_StdoutOutputSkipsFileValidation(t *testing.T) {
 		if entry.ErrorType == ErrorTypeOutputEmpty.String() {
 			t.Fatalf("stdout output misclassified as %s: %s", entry.ErrorType, entry.ErrorMessage)
 		}
+	}
+}
+
+// signalCrashExecutor returns a SIGABRT (exit 134) crash on the first call,
+// then success — simulating ffmpeg's sporadic self-abort under load (TSI-2458).
+type signalCrashExecutor struct {
+	called int
+}
+
+func (s *signalCrashExecutor) Execute(ctx context.Context, args []string) ExecResult {
+	s.called++
+	if s.called == 1 {
+		return ExecResult{
+			ExitCode: 134,
+			Stderr:   "frame=  120 fps= 30 q=28.0\nAborted\n",
+			Error:    fmt.Errorf("ffmpeg exited with code 134"),
+		}
+	}
+	return ExecResult{ExitCode: 0, Stdout: "ok"}
+}
+
+func (s *signalCrashExecutor) ExecuteWithHandlers(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult {
+	return s.Execute(ctx, args)
+}
+
+// TestExecuteWithRetry_SigAbortRetriesAndSucceeds locks the TSI-2458 fix:
+// a SIGABRT (exit 134) is classified as a retryable process crash, so the
+// retry executor re-runs the job and succeeds on the second attempt instead
+// of permanently failing.
+func TestExecuteWithRetry_SigAbortRetriesAndSucceeds(t *testing.T) {
+	exec := &signalCrashExecutor{}
+	re := &RetryExecutor{
+		executor:    exec,
+		interceptor: NewErrorInterceptor(),
+		pruner:      NewParamPruner(),
+		config: &RetryConfig{
+			MaxRetries:             3,
+			InitialInterval:        1 * time.Millisecond,
+			EnableSoftwareFallback: false,
+		},
+		fallback: NewEncoderFallback(),
+	}
+
+	args := []string{"-i", "input.mp4", "-c:v", "libx264", "-f", "mpegts", "pipe:1"}
+	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil)
+
+	if !result.Success {
+		t.Fatalf("expected retry success after SIGABRT, got stage=%s attempts=%d",
+			result.FinalStage, result.TotalAttempts)
+	}
+	if result.TotalAttempts < 2 {
+		t.Fatalf("expected at least 2 attempts (crash + retry), got %d", result.TotalAttempts)
+	}
+	if exec.called < 2 {
+		t.Fatalf("executor called %d times, expected ≥ 2", exec.called)
+	}
+	// Verify the crash was classified as a process crash, not a generic error.
+	if len(result.AuditTrail) == 0 {
+		t.Fatal("expected audit trail entries")
+	}
+	first := result.AuditTrail[0]
+	if first.ErrorType != ErrorTypeProcessCrash.String() {
+		t.Errorf("first attempt error type = %s, want %s", first.ErrorType, ErrorTypeProcessCrash.String())
 	}
 }
