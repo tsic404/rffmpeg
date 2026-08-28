@@ -257,35 +257,58 @@ func (w *Worker) reregister() bool {
 	return true
 }
 
-// Start starts the worker loop
+// Start starts the worker loop. Heartbeat transmission runs on an independent
+// goroutine so a long-running, high-CPU ffmpeg job can never starve it: the
+// job-poll loop is the only path that blocks on job execution, and heartbeats
+// must keep flowing at heartbeatInterval regardless of ffmpeg's CPU demand
+// (TSI-2492 — a stalled heartbeat made the server mark the worker offline and
+// migrate its still-running jobs).
 func (w *Worker) Start(ctx context.Context) {
 	// Start cache background eviction
 	w.cache.Start(ctx)
 
+	// heartbeatWG lets Start's loop wait for the heartbeat goroutine to exit
+	// before returning.
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Add(1)
+	go func() {
+		defer heartbeatWG.Done()
+		heartbeatTicker := time.NewTicker(w.heartbeatInterval)
+		defer heartbeatTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-w.stopCh:
+				return
+			case <-heartbeatTicker.C:
+				w.sendHeartbeat()
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
-
-	heartbeatTicker := time.NewTicker(w.heartbeatInterval)
-	defer heartbeatTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Worker shutting down (context cancelled)...")
+			heartbeatWG.Wait()
 			return
 		case <-w.stopCh:
 			log.Println("Worker shutting down (Stop called)...")
+			heartbeatWG.Wait()
 			return
 		case <-ticker.C:
 			// Do not accept new jobs after Stop was requested.
 			select {
 			case <-w.stopCh:
+				heartbeatWG.Wait()
 				return
 			default:
 			}
 			w.pollAndProcess(ctx)
-		case <-heartbeatTicker.C:
-			w.sendHeartbeat()
 		}
 	}
 }

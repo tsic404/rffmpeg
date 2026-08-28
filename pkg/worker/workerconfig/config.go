@@ -118,6 +118,22 @@ func DefaultConfig() *Config {
 	}
 }
 
+// Validate checks configuration invariants: the timing knobs must be positive
+// (a zero or negative interval would break the worker loop tickers and a
+// zero or negative timeout would cancel every job immediately).
+func (c *Config) Validate() error {
+	if c.HeartbeatInterval <= 0 {
+		return fmt.Errorf("heartbeat_interval must be positive")
+	}
+	if c.Timeout <= 0 {
+		return fmt.Errorf("timeout must be positive")
+	}
+	if c.PollInterval <= 0 {
+		return fmt.Errorf("poll_interval must be positive")
+	}
+	return nil
+}
+
 // LoadFromFile loads configuration from a JSON file.
 func LoadFromFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)

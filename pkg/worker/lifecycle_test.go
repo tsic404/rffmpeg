@@ -296,6 +296,131 @@ func TestStopRejectsNewJobsAndWaitsForInFlight(t *testing.T) {
 	mu.Unlock()
 }
 
+// TestHeartbeatFlowsWhileJobBlocked verifies the TSI-2492 regression: the
+// heartbeat must keep flowing while the main poll loop is blocked. In the old
+// single-loop design, a synchronous PullJobs blocked the loop and starved the
+// heartbeat ticker; the server then marked the worker offline mid-job. With
+// the heartbeat on its own goroutine, it keeps ticking while PullJobs (and a
+// job's terminal status update) are both held open.
+func TestHeartbeatFlowsWhileJobBlocked(t *testing.T) {
+	var mu sync.Mutex
+	heartbeats := 0
+	pulls := 0
+	blockJob := make(chan struct{})
+	releasePull := make(chan struct{})
+	// releaseHandlers unblocks the two httptest handlers exactly once. It must
+	// run on the t.Fatal failure paths as well as the success path: an
+	// unclosed blockJob/releasePull leaves handler goroutines stuck in
+	// <-blockJob/<-releasePull, and srv.Close (deferred) then blocks waiting
+	// for those outstanding requests, turning a fast test failure into a
+	// go test -timeout hang.
+	var releaseOnce sync.Once
+	releaseHandlers := func() {
+		releaseOnce.Do(func() {
+			close(releasePull)
+			close(blockJob)
+		})
+	}
+	secondPullStarted := make(chan struct{}, 1)
+	jobStarted := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v1/workers/heartbeat":
+			mu.Lock()
+			heartbeats++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"message":"ok","cancelled_jobs":[]}`))
+		case r.URL.Path == "/api/v1/workers/register":
+			_, _ = w.Write([]byte(`{"worker_id":"hb-test-worker"}`))
+		case r.URL.Path == "/api/v1/workers/hb-test-worker/jobs":
+			mu.Lock()
+			pulls++
+			n := pulls
+			mu.Unlock()
+			switch n {
+			case 1:
+				// First pull hands out one job whose status update blocks.
+				_, _ = w.Write([]byte(`{"jobs":[{"id":"block-job","input_files":[],"args":["-f","lavfi","-i","testsrc=duration=0.2","-f","null","-"]}]}`))
+			case 2:
+				// Second pull blocks the poll loop itself until released.
+				secondPullStarted <- struct{}{}
+				<-releasePull
+				_, _ = w.Write([]byte(`{"jobs":[]}`))
+			default:
+				_, _ = w.Write([]byte(`{"jobs":[]}`))
+			}
+		case r.URL.Path == "/api/v1/jobs/block-job":
+			jobStarted <- struct{}{}
+			<-blockJob // hold the job's final status update until released
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	// Registered after srv.Close: defer is LIFO, so on a t.Fatal failure path
+	// releaseHandlers runs FIRST and unblocks the handlers before srv.Close
+	// waits for outstanding requests. On the success path the explicit call
+	// below releases them early; the once-guard makes this deferred call a
+	// no-op there.
+	defer releaseHandlers()
+
+	w, err := New(Config{
+		ServerURL:         srv.URL,
+		PollInterval:      20 * time.Millisecond,
+		HeartbeatInterval: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if err := w.Register(protocol.WorkerCapabilities{}); err != nil {
+		t.Fatalf("Register() failed: %v", err)
+	}
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+	go w.Start(ctx)
+
+	select {
+	case <-jobStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("job was never handed out")
+	}
+
+	// Wait until the poll loop is blocked inside the second PullJobs call.
+	select {
+	case <-secondPullStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second poll never started")
+	}
+
+	// Main loop is blocked in PullJobs and the job goroutine is blocked in
+	// its status update. The heartbeat goroutine must still fire repeatedly.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := heartbeats
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			mu.Lock()
+			n = heartbeats
+			mu.Unlock()
+			t.Fatalf("heartbeats stalled at %d while loop was blocked; want >= 3", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Success path: release the handlers before w.Stop() waits on jobsWG, so
+	// the blocked job's status-update request can complete and the deferred
+	// srv.Close() below can drain. releaseHandlers is once-guarded, so the
+	// later deferred call is a no-op on this path.
+	releaseHandlers()
+	w.Stop()
+}
+
 // TestConcurrentJobs_AutoHWIsolation runs two jobs with different auto_hw
 // flags concurrently and verifies the rewrite decisions stay isolated
 // (acceptance criterion 3: no data race, no cross-job flag bleed).

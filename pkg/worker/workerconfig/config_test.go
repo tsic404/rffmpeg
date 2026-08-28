@@ -263,3 +263,46 @@ func TestConfig_DurationParsing(t *testing.T) {
 		t.Errorf("PollInterval = %v, want %v", config.PollInterval.ToDuration(), 2*time.Second)
 	}
 }
+
+func TestConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{
+			name:    "defaults valid",
+			mutate:  func(*Config) {},
+			wantErr: false,
+		},
+		{
+			name:    "zero heartbeat interval",
+			mutate:  func(c *Config) { c.HeartbeatInterval = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "negative timeout",
+			mutate:  func(c *Config) { c.Timeout = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "zero poll interval",
+			mutate:  func(c *Config) { c.PollInterval = 0 },
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.mutate(cfg)
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("Validate() = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}

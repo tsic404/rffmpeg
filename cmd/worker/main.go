@@ -51,6 +51,10 @@ func main() {
 	if *serverURL != "" {
 		cfg.ServerURL = *serverURL
 	}
+	// Validate configuration before building the worker.
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
 
 	// Create worker
 	workerCfg := worker.Config{
