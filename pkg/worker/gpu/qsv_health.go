@@ -5,6 +5,7 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -35,11 +36,15 @@ func CheckQSVHealth(renderDevicePath string) (healthy bool, errMsg string) {
 		"-f", "null",
 		"-",
 	}
-
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	// Pdeathsig reaps ffmpeg if the worker dies while a QSV health probe
+	// is in flight (TSI-2476).
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-
 	err := cmd.Run()
 	if err == nil {
 		return true, ""

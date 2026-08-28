@@ -387,3 +387,91 @@ func TestConcurrentReregisterSingleflight(t *testing.T) {
 		}
 	}
 }
+
+// TestExecutor_PdeathsigKillsChildOnParentDeath verifies that the executor
+// sets PR_SET_PDEATHSIG so ffmpeg is reaped by the kernel when the parent
+// worker dies (SIGKILL/crash), preventing orphaned ffmpeg processes from
+// outliving the worker and holding GPU/encoder resources (TSI-2476).
+//
+// The executor's ffmpeg subprocess is the DIRECT child of the worker
+// process. Pdeathsig kills that direct child the moment the parent exits.
+// We fork a helper Go process that starts the executor on `sh -c 'echo $$;
+// exec sleep 30'` (exec replaces sh with sleep, so sleep keeps sh's PID =
+// the direct child), then calls os.Exit(0). The kernel's Pdeathsig should
+// kill the direct child; the parent test verifies it is gone within 5s.
+func TestExecutor_PdeathsigKillsChildOnParentDeath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping pdeathsig test in short mode")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not installed")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not installed")
+	}
+
+	tmpDir := t.TempDir()
+	pidFile := filepath.Join(tmpDir, "child.pid")
+	helperSrc := filepath.Join(tmpDir, "pdeathsig_helper.go")
+
+	// Helper: starts an executor on `sh -c 'echo $$ > pidFile; exec
+	// sleep 30'`, lets it run briefly, then exits via os.Exit(0). The
+	// exec makes sleep the direct child (same PID as sh), so Pdeathsig
+	// targets it. The helper exit triggers the kernel Pdeathsig.
+	helper := fmt.Sprintf(`package main
+
+import (
+	"context"
+	"os"
+	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/worker"
+)
+
+func main() {
+	ex := worker.NewExecutor("sh", time.Minute)
+	args := []string{"-c", "echo $$ > %s; exec sleep 30"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		os.Exit(0)
+	}()
+	ex.ExecuteWithStderrHandler(ctx, args, nil)
+}
+`, pidFile)
+	if err := os.WriteFile(helperSrc, []byte(helper), 0644); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	helperCmd := exec.Command("go", "run", helperSrc)
+	helperCmd.Dir = "."
+	helperCmd.Stdout = os.Stderr
+	helperCmd.Stderr = os.Stderr
+	if err := helperCmd.Run(); err != nil {
+		t.Fatalf("helper run failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil || len(raw) == 0 {
+		t.Skipf("could not read child pid file: %v", err)
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(raw), "%d", &pid); err != nil || pid <= 0 {
+		t.Skipf("bad pid file content %q", raw)
+	}
+
+	// Pdeathsig should have killed the direct child on helper exit.
+	// Verify it is gone within 5s.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if err == syscall.ESRCH {
+			return // gone — Pdeathsig worked
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child pid %d still alive 5s after parent exit: %v — Pdeathsig did not kill the child", pid, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

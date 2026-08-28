@@ -85,7 +85,14 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	// Run ffmpeg in its own process group so ctx cancellation kills the whole
 	// process tree (filters may spawn helper processes that would otherwise
 	// survive as orphans holding the inherited pipe write ends).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Pdeathsig ensures ffmpeg is also killed if the worker itself dies
+	// (SIGKILL, crash): the kernel delivers the signal to the child the moment
+	// the parent exits, preventing orphaned ffmpeg processes from outliving the
+	// worker and holding GPU/encoder resources (TSI-2476).
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
 	cmd.Cancel = func() error {
 		// ctx cancellation can fire before Start() sets cmd.Process (start vs
 		// cancel race window); dereferencing nil would panic the worker.

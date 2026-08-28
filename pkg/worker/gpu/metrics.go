@@ -62,7 +62,13 @@ func (d *Detector) sampleNVIDIAMetrics() (m Metrics, ok bool) {
 	// Kill the whole process group: a bare `sleep`-style script forks a
 	// child that survives a plain ctx kill and keeps the output pipes open,
 	// blocking cmd.Output forever.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Pdeathsig ensures the metrics subprocess is reaped if the worker
+	// itself dies, preventing orphaned nvidia-smi/intel_gpu_top processes
+	// (TSI-2476).
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
 	cmd.Cancel = func() error {
 		// ctx timeout can fire before Start() sets cmd.Process (start vs
 		// cancel race window); dereferencing nil would panic the caller.
@@ -120,7 +126,10 @@ func (d *Detector) sampleIntelMetrics() (m Metrics, ok bool) {
 		"-o", "-", // stdout
 		"-s", "1000", // 1s refresh
 		"-n", "1") // single sample then exit
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
