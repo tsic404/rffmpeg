@@ -1301,3 +1301,111 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 		t.Fatalf("expected failure_type TIMEOUT, got %q", got.FailureType)
 	}
 }
+
+// TestSchedulerLoadBalancingTieBreak verifies that when multiple idle workers
+// share the same (lowest) active job count, the scheduler breaks the tie by
+// least completed jobs. Without this, the first worker in the query result
+// always won ties, starving late-registered workers (TSI-2477).
+func TestSchedulerLoadBalancingTieBreak(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	// Two idle workers with the same encoder and capacity.
+	worker1, err := database.CreateWorker("worker-1", "w1", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "5.0", MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+	worker2, err := database.CreateWorker("worker-2", "w2", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "5.0", MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker2: %v", err)
+	}
+
+	// Give worker-1 one completed job so worker-2 has the lower completed
+	// count and should win the tie.
+	if _, err := database.GetDB().Exec(`
+		INSERT INTO jobs (id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, retryable, auto_hw, progress_percent, eta_seconds, created_at, updated_at, finished_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "completed-1", protocol.JobStatusCompleted, `["f.mkv"]`, `[]`, "o.mkv", 0, "[]",
+		worker1.ID, 0, "", "", 0, 0, 0, 0,
+		time.Now().Add(-time.Hour), time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("Failed to seed completed job: %v", err)
+	}
+
+	// Both workers are idle with 0 active jobs; worker-2 has fewer completed
+	// jobs, so a single pending job must be assigned to worker-2.
+	job, err := database.CreateJob(`["f.mkv"]`, `[]`, "o.mkv", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	s := New(database, DefaultConfig())
+	s.schedulePendingJobs()
+
+	got, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if got.WorkerID.String != worker2.ID {
+		t.Errorf("tie should favor worker-2 (fewer completed jobs); got worker %q", got.WorkerID.String)
+	}
+}
+
+// TestSchedulerLoadBalancingRoundRobin verifies that consecutive jobs
+// distribute across idle workers instead of piling onto the first one
+// (TSI-2477).
+func TestSchedulerLoadBalancingRoundRobin(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	worker1, err := database.CreateWorker("worker-1", "w1", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "5.0", MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker1: %v", err)
+	}
+	worker2, err := database.CreateWorker("worker-2", "w2", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "5.0", MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create worker2: %v", err)
+	}
+
+	s := New(database, DefaultConfig())
+
+	// Submit two jobs one at a time. With MaxConcurrent=1 the first job fills
+	// one worker; the second must go to the other. The order in which workers
+	// are picked does not matter, only that BOTH workers are used.
+	job1, err := database.CreateJob(`["f1.mkv"]`, `[]`, "o1.mkv", false)
+	if err != nil {
+		t.Fatalf("Failed to create job1: %v", err)
+	}
+	s.schedulePendingJobs()
+
+	job2, err := database.CreateJob(`["f2.mkv"]`, `[]`, "o2.mkv", false)
+	if err != nil {
+		t.Fatalf("Failed to create job2: %v", err)
+	}
+	s.schedulePendingJobs()
+
+	got1, _ := database.GetJob(job1.ID)
+	got2, _ := database.GetJob(job2.ID)
+
+	if got1.WorkerID.String == got2.WorkerID.String {
+		t.Errorf("both jobs assigned to the same worker %q; expected distribution across both workers",
+			got1.WorkerID.String)
+	}
+	assigned := map[string]bool{got1.WorkerID.String: true, got2.WorkerID.String: true}
+	if !assigned[worker1.ID] || !assigned[worker2.ID] {
+		t.Errorf("expected both workers to receive a job; got %v", assigned)
+	}
+}

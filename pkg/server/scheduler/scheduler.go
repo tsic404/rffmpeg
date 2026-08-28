@@ -212,7 +212,6 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 	requestedEncoder := ExtractEncoderFromArgs(job.Args)
 
 	var bestWorker *db.Worker
-	var bestActiveCount int = -1
 	var usedFallbackEncoder string // Tracks which fallback encoder was used, if any
 
 	if requestedEncoder != "" {
@@ -222,21 +221,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 			log.Printf("Scheduler: Failed to get workers by encoder %s: %v", requestedEncoder, err)
 			// Fall back to regular scheduling
 		} else if len(workers) > 0 {
-			// Find the best worker (lowest active job count that can accept more)
-			for _, w := range workers {
-				maxJobs := w.Worker.MaxConcurrent
-				if maxJobs <= 0 {
-					maxJobs = s.config.MaxJobsPerWorker
-				}
-
-				if w.ActiveJobs < maxJobs {
-					if bestActiveCount == -1 || w.ActiveJobs < bestActiveCount {
-						bestWorker = w.Worker
-						bestActiveCount = w.ActiveJobs
-					}
-				}
-			}
-
+			bestWorker = s.selectBestWorker(workers)
 			if bestWorker != nil {
 				log.Printf("Scheduler: Job %s requests encoder %s, found worker %s with capability",
 					job.ID, requestedEncoder, bestWorker.ID)
@@ -268,20 +253,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 			log.Printf("Scheduler: Failed to get idle workers: %v", err)
 			return false
 		}
-
-		for _, w := range workers {
-			maxJobs := w.Worker.MaxConcurrent
-			if maxJobs <= 0 {
-				maxJobs = s.config.MaxJobsPerWorker
-			}
-
-			if w.ActiveJobs < maxJobs {
-				if bestActiveCount == -1 || w.ActiveJobs < bestActiveCount {
-					bestWorker = w.Worker
-					bestActiveCount = w.ActiveJobs
-				}
-			}
-		}
+		bestWorker = s.selectBestWorker(workers)
 	}
 
 	if bestWorker == nil {
@@ -312,6 +284,36 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 	}
 
 	return true
+}
+
+// selectBestWorker picks the worker with the most spare capacity (active jobs
+// furthest below its MaxConcurrent). Ties are broken by the least completed
+// job count so a late-registered worker is preferred over an earlier one that
+// would otherwise always win on the first-wins tie (TSI-2477). Callers may
+// pass an unordered slice — GetIdleWorkersWithJobCount does not sort, while
+// GetIdleWorkersByEncoderWithJobCount does — so this explicit scan makes the
+// selection robust regardless of input ordering.
+func (s *Scheduler) selectBestWorker(workers []db.WorkerWithJobCount) *db.Worker {
+	var bestWorker *db.Worker
+	var bestActive int = -1
+	var bestCompleted int
+	for _, w := range workers {
+		maxJobs := w.Worker.MaxConcurrent
+		if maxJobs <= 0 {
+			maxJobs = s.config.MaxJobsPerWorker
+		}
+		if w.ActiveJobs >= maxJobs {
+			continue
+		}
+		if bestActive == -1 ||
+			w.ActiveJobs < bestActive ||
+			(w.ActiveJobs == bestActive && w.CompletedJobs < bestCompleted) {
+			bestWorker = w.Worker
+			bestActive = w.ActiveJobs
+			bestCompleted = w.CompletedJobs
+		}
+	}
+	return bestWorker
 }
 
 // tryEncoderFallback attempts to find a worker with a compatible encoder in the same codec family.
@@ -350,23 +352,10 @@ func (s *Scheduler) tryEncoderFallback(jobID, requestedEncoder string) (*db.Work
 			continue
 		}
 
-		// Find the best worker (lowest active job count)
-		var bestWorker *db.Worker
-		bestActiveCount := -1
-
-		for _, w := range workers {
-			maxJobs := w.Worker.MaxConcurrent
-			if maxJobs <= 0 {
-				maxJobs = s.config.MaxJobsPerWorker
-			}
-
-			if w.ActiveJobs < maxJobs {
-				if bestActiveCount == -1 || w.ActiveJobs < bestActiveCount {
-					bestWorker = w.Worker
-					bestActiveCount = w.ActiveJobs
-				}
-			}
-		}
+		// Pick the worker with the most spare capacity; ties broken by
+		// least completed jobs so late-registered workers are not starved
+		// (TSI-2477).
+		bestWorker := s.selectBestWorker(workers)
 
 		if bestWorker != nil {
 			return bestWorker, fallbackEncoder

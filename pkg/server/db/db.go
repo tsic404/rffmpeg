@@ -1173,6 +1173,21 @@ func (d *Database) GetWorkerActiveJobCount(workerID string) (int, error) {
 	return count, nil
 }
 
+// GetWorkerCompletedJobCount returns the number of completed jobs for a worker.
+// The scheduler uses it to break ties between idle workers with equal active
+// counts so the worker that has done fewer jobs is preferred, preventing
+// starvation of late-registered workers (TSI-2477).
+func (d *Database) GetWorkerCompletedJobCount(workerID string) (int, error) {
+	var count int
+	err := d.db.QueryRow(`
+		SELECT COUNT(*) FROM jobs WHERE worker_id = ? AND status = ?
+	`, workerID, protocol.JobStatusCompleted).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get completed job count: %w", err)
+	}
+	return count, nil
+}
+
 func (d *Database) UpdateWorkerStatus(id string, status protocol.WorkerStatus) error {
 	id = NormalizeWorkerID(id)
 	now := time.Now()
@@ -1632,66 +1647,114 @@ func (d *Database) UpdateWorkerCapabilities(id string, caps protocol.WorkerCapab
 	return nil
 }
 
-// WorkerWithJobCount represents a worker with its active job count
+// WorkerWithJobCount represents a worker with its active and completed job counts.
+// CompletedJobs breaks ties when multiple idle workers share the same active
+// count: the worker that has done fewer jobs wins, so a late-registered worker
+// is not starved by an earlier one that always appears first (TSI-2477).
 type WorkerWithJobCount struct {
-	Worker     *Worker
-	ActiveJobs int
+	Worker        *Worker
+	ActiveJobs    int
+	CompletedJobs int
 }
 
-// GetIdleWorkersWithJobCount retrieves idle workers with their active job counts.
-// This is useful for scheduling decisions.
+// GetIdleWorkersWithJobCount retrieves idle workers with their active and
+// completed job counts. The active count drives scheduling; the completed
+// count breaks ties so late-registered workers are not starved (TSI-2477).
 func (d *Database) GetIdleWorkersWithJobCount() ([]WorkerWithJobCount, error) {
 	workers, err := d.GetIdleWorkers()
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]WorkerWithJobCount, len(workers))
-	for i, worker := range workers {
-		count, err := d.GetWorkerActiveJobCount(worker.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get active job count for worker %s: %w", worker.ID, err)
-		}
-		result[i] = WorkerWithJobCount{
-			Worker:     worker,
-			ActiveJobs: count,
-		}
-	}
-
-	return result, nil
+	return d.fillWorkerJobCounts(workers)
 }
 
-// GetIdleWorkersByEncoderWithJobCount retrieves idle workers with a specific encoder
-// and their active job counts, sorted by job count ascending.
+// GetIdleWorkersByEncoderWithJobCount retrieves idle workers with a specific
+// encoder and their active and completed job counts, sorted by active then
+// completed job count ascending.
 func (d *Database) GetIdleWorkersByEncoderWithJobCount(encoderName string) ([]WorkerWithJobCount, error) {
 	workers, err := d.GetIdleWorkersByEncoder(encoderName)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]WorkerWithJobCount, len(workers))
-	for i, worker := range workers {
-		count, err := d.GetWorkerActiveJobCount(worker.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get active job count for worker %s: %w", worker.ID, err)
-		}
-		result[i] = WorkerWithJobCount{
-			Worker:     worker,
-			ActiveJobs: count,
-		}
+	result, err := d.fillWorkerJobCounts(workers)
+	if err != nil {
+		return nil, err
 	}
 
-	// Sort by active job count ascending
 	sortWorkersByJobCount(result)
 
 	return result, nil
 }
 
-// sortWorkersByJobCount sorts workers by active job count in ascending order
+// fillWorkerJobCounts builds WorkerWithJobCount entries with active and
+// completed job counts for the given workers. It fetches both counts in a
+// single GROUP BY query instead of one COUNT per worker, so the cost is
+// constant rather than 2N (TSI-2477 review finding 1).
+func (d *Database) fillWorkerJobCounts(workers []*Worker) ([]WorkerWithJobCount, error) {
+	if len(workers) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]interface{}, len(workers))
+	for i, w := range workers {
+		ids[i] = w.ID
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	query := `SELECT worker_id, ` +
+		`SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END) AS active, ` +
+		`SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS completed ` +
+		`FROM jobs WHERE worker_id IN (` + placeholders + `) GROUP BY worker_id`
+
+	args := []interface{}{protocol.JobStatusRunning, protocol.JobStatusQueued, protocol.JobStatusCompleted}
+	args = append(args, ids...)
+
+	rows, err := d.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query worker job counts: %w", err)
+	}
+	defer rows.Close()
+
+	type counts struct {
+		active, completed int
+	}
+	stats := make(map[string]counts, len(workers))
+	for rows.Next() {
+		var id string
+		var active, completed int
+		if err := rows.Scan(&id, &active, &completed); err != nil {
+			return nil, fmt.Errorf("failed to scan worker job counts: %w", err)
+		}
+		stats[id] = counts{active: active, completed: completed}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating worker job counts: %w", err)
+	}
+
+	result := make([]WorkerWithJobCount, len(workers))
+	for i, worker := range workers {
+		c := stats[worker.ID]
+		result[i] = WorkerWithJobCount{
+			Worker:        worker,
+			ActiveJobs:    c.active,
+			CompletedJobs: c.completed,
+		}
+	}
+	return result, nil
+}
+
+// sortWorkersByJobCount sorts workers by active job count ascending, breaking
+// ties on completed job count so the worker that has done fewer jobs wins
+// (TSI-2477).
 func sortWorkersByJobCount(workers []WorkerWithJobCount) {
 	for i := 0; i < len(workers)-1; i++ {
 		for j := i + 1; j < len(workers); j++ {
-			if workers[j].ActiveJobs < workers[i].ActiveJobs {
+			if workers[j].ActiveJobs < workers[i].ActiveJobs ||
+				(workers[j].ActiveJobs == workers[i].ActiveJobs &&
+					workers[j].CompletedJobs < workers[i].CompletedJobs) {
 				workers[i], workers[j] = workers[j], workers[i]
 			}
 		}
