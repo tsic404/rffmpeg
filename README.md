@@ -71,6 +71,8 @@ go build -o bin/rffmpeg ./cmd/cli
 
 ### 启动 Worker
 
+**认证前置**：Server 采用 fail-closed 设计，未配置 `--auth-token` 时拒绝全部 API 请求。启动 Worker 前请先 `export RFFMPEG_TOKEN=<T>`（或为命令追加 `--token <T>`），令牌须与 Server 的 `--auth-token <T>` 一致。
+
 ```bash
 # 连接到本地 Server
 ./bin/worker --server http://localhost:8080/api/v1
@@ -83,6 +85,8 @@ go build -o bin/rffmpeg ./cmd/cli
 ```
 
 ### 使用 CLI 提交任务
+
+**认证前置**：CLI 提交任务前请先 `export RFFMPEG_TOKEN=<T>`（或为命令追加 `--token <T>`），令牌须与 Server 的 `--auth-token <T>` 一致；未设置凭证时会在上传阶段收到 401 并直接退出。
 
 ```bash
 # 基本转码（与原生 ffmpeg 命令兼容）
@@ -506,6 +510,8 @@ Response:
 `POST /api/v1/upload` 返回的 `file_id` 是上传文件内容的 SHA-256（`pkg/server/storage/storage.go` 的 `SaveFileByContent`；分块上传在 `complete` 时同样按最终内容哈希重命名）。缓存键 `GenerateCacheKey` 以 `inputSources`（即 `file_id` 列表）参与哈希。因此缓存是**按内容寻址**的：只要输入内容字节一致，无论它来自哪个本地路径、上传过多少次，都会得到相同的 `file_id`。就缓存键维度而言，只有内容变化（或参数/`auto_hw`/输出扩展名/编码器变化）才会改变缓存键并导致键维度的未命中；在缓存条目未过期、未被逐出、元数据完整的前提下，键相同的请求才会命中缓存——TTL 过期（默认 24h，`pkg/worker/cache.go:373`）、LRU 逐出、缓存禁用、元数据损坏或大小不符（`cache.go:386-390`）都会在键不变的情况下返回未命中。
 
 最小可复现示例：
+
+以下命令假定已配置认证令牌：先 `export RFFMPEG_TOKEN=<T>`（或为每条命令追加 `--token <T>`），令牌须与 Server 的 `--auth-token <T>` 一致。
 
 ```bash
 # 同一内容的两个 byte-identical 副本
