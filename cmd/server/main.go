@@ -136,6 +136,7 @@ func main() {
 	// (TSI-2419) instead of accepting jobs that would wait for the no-worker
 	// job timeout.
 	h.SetHeartbeatTimeout(cfg.WorkerHeartbeatTimeout)
+	h.SetStarvationConfig(cfg.NoWorkerJobTimeout, cfg.TimeoutCheckInterval)
 
 	jobScheduler.Start()
 	log.Printf("Job scheduler started (job timeout: %s, schedule interval: %s, timeout check interval: %s, max jobs per worker: %d, no-worker job timeout: %s)",

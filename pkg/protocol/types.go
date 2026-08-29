@@ -48,14 +48,21 @@ type JobInfo struct {
 	AutoHW          bool       `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
 	FailureType     string     `json:"failure_type,omitempty"`
 	FailureDetails  string     `json:"failure_details,omitempty"`
-	Timeout         *time.Time `json:"timeout,omitempty"`      // Per-job timeout (nil = use default)
-	DirectPaths     []string   `json:"direct_paths,omitempty"` // Direct output paths for pass-through mode (TSI-807)
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	FinishedAt      *time.Time `json:"finished_at,omitempty"`
-	ProgressPercent float64    `json:"progress_percent,omitempty"` // Current progress 0-100
-	EtaSeconds      int        `json:"eta_seconds,omitempty"`      // Estimated time remaining in seconds
+	Timeout         *time.Time `json:"timeout,omitempty"` // Per-job timeout (nil = use default)
+	// NoWorkerDeadline is the server-computed wall-clock time at which a
+	// still-pending/queued job will be failed as NO_WORKER_AVAILABLE by the
+	// starvation sweep (created_at + no_worker_job_timeout +
+	// timeout_check_interval). Nil for non-pending jobs or when the sweep is
+	// disabled. The CLI uses it to size its own wait window so a client-side
+	// timeout can never fire before the server verdict is observable.
+	NoWorkerDeadline *time.Time `json:"no_worker_deadline,omitempty"`
+	DirectPaths      []string   `json:"direct_paths,omitempty"` // Direct output paths for pass-through mode (TSI-807)
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	ProgressPercent  float64    `json:"progress_percent,omitempty"` // Current progress 0-100
+	EtaSeconds       int        `json:"eta_seconds,omitempty"`      // Estimated time remaining in seconds
 }
 
 type JobStatusResponse struct {

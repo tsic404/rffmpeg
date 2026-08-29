@@ -24,6 +24,14 @@ import (
 const (
 	ExitSuccess = 0
 	ExitError   = 1
+
+	// clientVerdictGrace is the margin past the server's NO_WORKER_AVAILABLE
+	// verdict deadline (learned via JobInfo.NoWorkerDeadline) that the client
+	// keeps polling so the verdict is observable before it gives up. It is NOT
+	// the whole grace window: the deadline already includes
+	// no_worker_job_timeout + timeout_check_interval, so a small margin
+	// covering the client's 2s poll is enough.
+	clientVerdictGrace = 5 * time.Second
 )
 
 var version = "1.0.0"
@@ -522,13 +530,19 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		fmt.Fprintln(os.Stderr, "Waiting for completion...")
 	}
 
-	// Wait for completion with real-time log streaming.
-	// Enforce the client-side timeout so a stuck job (e.g. a worker killed
-	// within the heartbeat window) never leaves the user waiting forever.
+	// Learn the server's NO_WORKER_AVAILABLE verdict time (if any) so the
+	// client never cancels before the starvation sweep's verdict is
+	// observable. The deadline is authoritative server config, not a local
+	// guess; a failed lookup just means the client falls back to --timeout.
+	var noWorkerDeadline *time.Time
+	if submitted, getErr := cli.GetJob(jobID); getErr == nil {
+		noWorkerDeadline = submitted.NoWorkerDeadline
+	}
+	waitDeadline, hasDeadline := clientWaitDeadline(time.Now(), timeout, noWorkerDeadline)
 	waitCtx := context.Background()
 	var cancelWait context.CancelFunc
-	if timeout > 0 {
-		waitCtx, cancelWait = context.WithTimeout(context.Background(), timeout)
+	if hasDeadline {
+		waitCtx, cancelWait = context.WithDeadline(context.Background(), waitDeadline)
 		defer cancelWait()
 	}
 
@@ -541,25 +555,39 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			// Race guard (TSI-2452): the client-side timeout may have fired
-			// even though the job already reached a terminal status on the
-			// server (e.g. a cache hit completed between the last poll and
-			// the context deadline). WaitForJobWithLogs /
+			// Race guard (TSI-2452): the client-side wait deadline may have
+			// fired even though the job already reached a terminal status on
+			// the server (e.g. a cache hit completed between the last poll
+			// and the context deadline). WaitForJobWithLogs /
 			// WaitForJobWithStreamingOutput already do a final GetJob on
 			// ctx.Done(); this is a belt-and-suspenders fallback in case a
 			// future wait variant or a WS-reconnect edge case lets the
 			// deadline through without the check. If the job is already
 			// done, proceed with the result instead of cancelling a
-			// completed job (which the server rejects with 400).
-			if terminalJob, getErr := cli.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(terminalJob.Status) {
-				job = terminalJob
+			// completed job (which the server rejects with 400). The server
+			// verdict (notably NO_WORKER_AVAILABLE) may have landed exactly
+			// at the deadline; report it as the server's judgement, not a
+			// client-side cancellation.
+			finalJob, finalErr := cli.GetJob(jobID)
+			if finalErr == nil && protocol.IsTerminalStatus(finalJob.Status) {
+				job = finalJob
 			} else {
 				// The job is genuinely not done. Cancel it server-side so it
-				// doesn't linger, and report a clear timeout.
+				// doesn't linger, and report a clear client-side timeout —
+				// distinct from a server verdict (NO_WORKER_AVAILABLE,
+				// TIMEOUT, ...) so operators can tell who gave up. The
+				// message distinguishes a job still waiting for a worker
+				// from one that had actually started but stalled, since only
+				// the former can still receive the server's starvation
+				// verdict.
 				if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
 				}
-				fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled (worker may be unavailable)\n", jobID, timeout)
+				if finalErr == nil && (finalJob.Status == protocol.JobStatusPending || finalJob.Status == protocol.JobStatusQueued) {
+					fmt.Fprintf(os.Stderr, "Error: job %s did not start within %s and was cancelled by the client (still waiting for a worker; the server may still fail it with NO_WORKER_AVAILABLE)\n", jobID, timeout)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled by the client (client gave up; the job was still running)\n", jobID, timeout)
+				}
 				return ExitError
 			}
 		} else {
@@ -568,30 +596,14 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		}
 	}
 
-	// Handle job result
-	if job.Status == protocol.JobStatusFailed {
-		fmt.Fprintf(os.Stderr, "Job failed: %s\n", job.Error)
-		// Normalize all non-zero ffmpeg exit codes to 1 (standard error exit code)
-		// This ensures consistent error handling regardless of ffmpeg's specific exit codes
-		return ExitError
-	}
-
-	if job.Status == protocol.JobStatusTimeout {
-		fmt.Fprintf(os.Stderr, "Job timed out: %s\n", job.Error)
-		return ExitError
-	}
-
-	if job.Status == protocol.JobStatusCancelled {
-		fmt.Fprintln(os.Stderr, "Job was cancelled")
-		return ExitError
-	}
-
-	// Safety net: if the job reached a non-terminal status (e.g., "running",
-	// "pending", "queued") due to a race between WebSocket close and HTTP poll,
-	// treat it as a failure rather than reporting success.
-	if job.Status != protocol.JobStatusCompleted {
-		fmt.Fprintf(os.Stderr, "Error: job ended with unexpected status: %s\n", job.Status)
-		return ExitError
+	// Handle job result: print the outcome for any non-completed terminal
+	// status and return the process exit code. reportTerminalJob
+	// special-cases NO_WORKER_AVAILABLE so a server-side starvation verdict
+	// is observationally distinct from a client-side cancellation; it
+	// returns ExitSuccess only for a completed job, which then falls through
+	// to the output download below.
+	if code := reportTerminalJob(job); code != ExitSuccess {
+		return code
 	}
 
 	// Download output files (skip in shared FS mode — files are already at local path)
@@ -639,6 +651,82 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 
 	// Return success exit code
+	return ExitSuccess
+}
+
+// clientWaitDeadline computes the client-side give-up time. timeout is the
+// per-job execution deadline; noWorkerDeadline is the server's
+// NO_WORKER_AVAILABLE verdict time for a pending/queued job. The client waits
+// until the later bound (plus clientVerdictGrace) so it never cancels before
+// the server can emit its verdict. Returns false when neither bound exists.
+//
+// The old code computed timeout+clientVerdictGrace as a duration sum, which
+// overflowed negative for a --timeout near math.MaxInt64 and made
+// context.WithTimeout expire immediately. The two bounds are now added to
+// wall-clock times separately; a duration near MaxInt64 (~292 years) plus a
+// 5s grace cannot wrap a time.Time anchored at the present (year ~2318), so
+// no clamping is needed.
+func clientWaitDeadline(now time.Time, timeout time.Duration, noWorkerDeadline *time.Time) (time.Time, bool) {
+	var deadline time.Time
+	has := false
+	if timeout > 0 {
+		deadline = now.Add(timeout)
+		has = true
+	}
+	if noWorkerDeadline != nil {
+		if !has || noWorkerDeadline.After(deadline) {
+			deadline = *noWorkerDeadline
+		}
+		has = true
+	}
+	if !has {
+		return time.Time{}, false
+	}
+	return deadline.Add(clientVerdictGrace), true
+}
+
+// reportTerminalJob prints the outcome for a terminal job status and returns
+// the process exit code. It returns ExitSuccess only for a completed job; all
+// other terminal statuses print an error to stderr and return ExitError.
+//
+// JobStatusFailed with FailureNoWorkerAvailable is the server's starvation
+// verdict (checkNoWorkerStarvation) — it must read as "the server judged this
+// failed", never "the client gave up", so operators can distinguish the two.
+func reportTerminalJob(job *protocol.JobInfo) int {
+	if job == nil {
+		fmt.Fprintln(os.Stderr, "Error: no job result returned from server")
+		return ExitError
+	}
+
+	if job.Status == protocol.JobStatusFailed {
+		if job.FailureType == string(protocol.FailureNoWorkerAvailable) {
+			fmt.Fprintf(os.Stderr, "Error: job %s failed: server reported no worker available (server-side auto_fail): %s\n", job.ID, job.Error)
+		} else {
+			fmt.Fprintf(os.Stderr, "Job failed: %s\n", job.Error)
+		}
+		// Normalize all non-zero ffmpeg exit codes to 1 (standard error exit code)
+		// This ensures consistent error handling regardless of ffmpeg's specific exit codes
+		return ExitError
+	}
+
+	if job.Status == protocol.JobStatusTimeout {
+		fmt.Fprintf(os.Stderr, "Job timed out: %s\n", job.Error)
+		return ExitError
+	}
+
+	if job.Status == protocol.JobStatusCancelled {
+		fmt.Fprintln(os.Stderr, "Job was cancelled")
+		return ExitError
+	}
+
+	// Safety net: if the job reached a non-terminal status (e.g., "running",
+	// "pending", "queued") due to a race between WebSocket close and HTTP poll,
+	// treat it as a failure rather than reporting success.
+	if job.Status != protocol.JobStatusCompleted {
+		fmt.Fprintf(os.Stderr, "Error: job ended with unexpected status: %s\n", job.Status)
+		return ExitError
+	}
+
 	return ExitSuccess
 }
 

@@ -37,6 +37,12 @@ type Handler struct {
 	// fail-fast treats workers whose last heartbeat is older than this as dead
 	// (TSI-2419). <=0 disables the freshness check.
 	heartbeatTimeout time.Duration
+	// noWorkerJobTimeout and timeoutCheckInterval mirror the scheduler's
+	// starvation knobs so GetJob/PullWorkerJobs can attach NoWorkerDeadline
+	// to unassigned pending jobs (the only status the sweep fails). <=0
+	// noWorkerJobTimeout disables the deadline.
+	noWorkerJobTimeout   time.Duration
+	timeoutCheckInterval time.Duration
 }
 
 // New creates a new Handler
@@ -71,6 +77,15 @@ func (h *Handler) SetRateLimiter(counter ratelimit.ClientJobCounter) {
 // GetRateLimiter returns the rate limiter counter.
 func (h *Handler) GetRateLimiter() ratelimit.ClientJobCounter {
 	return h.rateLimiter
+}
+
+// SetStarvationConfig mirrors the scheduler's no-worker starvation knobs so
+// job responses can carry NoWorkerDeadline without duplicating config
+// derivation. noWorkerJobTimeout <= 0 disables the deadline (matching the
+// scheduler's noWorkerEnabled gate).
+func (h *Handler) SetStarvationConfig(noWorkerJobTimeout, timeoutCheckInterval time.Duration) {
+	h.noWorkerJobTimeout = noWorkerJobTimeout
+	h.timeoutCheckInterval = timeoutCheckInterval
 }
 
 // GetWSHub returns the WebSocket hub
@@ -482,7 +497,7 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobInfo := dbJobToJobInfo(job)
+	jobInfo := h.dbJobToJobInfo(job)
 	writeJSON(w, http.StatusOK, protocol.JobStatusResponse{Job: jobInfo})
 }
 
@@ -995,7 +1010,7 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 
 	jobInfos := make([]protocol.JobInfo, len(jobs))
 	for i, job := range jobs {
-		jobInfos[i] = dbJobToJobInfo(job)
+		jobInfos[i] = h.dbJobToJobInfo(job)
 	}
 
 	writeJSON(w, http.StatusOK, protocol.WorkerJobPullResponse{
@@ -1395,7 +1410,7 @@ func isHWEncoder(name string) bool {
 }
 
 // dbJobToJobInfo converts database Job to protocol JobInfo
-func dbJobToJobInfo(job *db.Job) protocol.JobInfo {
+func (h *Handler) dbJobToJobInfo(job *db.Job) protocol.JobInfo {
 	var inputFiles, args, outputFiles, directPaths []string
 	if err := json.Unmarshal([]byte(job.InputFiles), &inputFiles); err != nil {
 		log.Printf("Failed to unmarshal input files for job %s: %v", job.ID, err)
@@ -1445,6 +1460,13 @@ func dbJobToJobInfo(job *db.Job) protocol.JobInfo {
 	}
 	if job.Timeout.Valid {
 		info.Timeout = &job.Timeout.Time
+	}
+	// Match checkNoWorkerStarvation's exact filter: pending AND unassigned.
+	// A queued job already has a worker_id and can never receive
+	// NO_WORKER_AVAILABLE, so it carries no deadline.
+	if job.Status == protocol.JobStatusPending && h.noWorkerJobTimeout > 0 {
+		d := job.CreatedAt.Add(h.noWorkerJobTimeout + h.timeoutCheckInterval)
+		info.NoWorkerDeadline = &d
 	}
 
 	return info

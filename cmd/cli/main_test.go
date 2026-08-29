@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 )
@@ -1115,5 +1116,187 @@ func TestEncoderCapabilityFlags_AllTypesConsistent(t *testing.T) {
 				t.Errorf("type %q: flags[%d] = %c, want '.'", encType, i, flags[i])
 			}
 		}
+	}
+}
+
+func TestReportTerminalJob_NoWorkerAvailable(t *testing.T) {
+	job := &protocol.JobInfo{
+		ID:          "job-noworker",
+		Status:      protocol.JobStatusFailed,
+		FailureType: string(protocol.FailureNoWorkerAvailable),
+		Error:       "no worker available for over 30s",
+	}
+
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(job)
+	})
+
+	if code != ExitError {
+		t.Fatalf("reportTerminalJob() = %d, want ExitError", code)
+	}
+	if !strings.Contains(stderr, "server reported no worker available") {
+		t.Errorf("stderr = %q, want server-judged no-worker message", stderr)
+	}
+	if !strings.Contains(stderr, job.ID) {
+		t.Errorf("stderr = %q, want job ID %q", stderr, job.ID)
+	}
+}
+
+func TestReportTerminalJob_FailedOther(t *testing.T) {
+	job := &protocol.JobInfo{
+		ID:          "job-ffmpeg",
+		Status:      protocol.JobStatusFailed,
+		FailureType: string(protocol.FailureFFmpegError),
+		Error:       "encoder crashed",
+	}
+
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(job)
+	})
+
+	if code != ExitError {
+		t.Fatalf("reportTerminalJob() = %d, want ExitError", code)
+	}
+	if !strings.Contains(stderr, "Job failed: encoder crashed") {
+		t.Errorf("stderr = %q, want generic Job failed message", stderr)
+	}
+	if strings.Contains(stderr, "no worker available") {
+		t.Errorf("stderr = %q, must not mention no-worker for non-starvation failure", stderr)
+	}
+}
+
+func TestReportTerminalJob_Completed(t *testing.T) {
+	job := &protocol.JobInfo{
+		ID:     "job-done",
+		Status: protocol.JobStatusCompleted,
+	}
+
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(job)
+	})
+
+	if code != ExitSuccess {
+		t.Fatalf("reportTerminalJob() = %d, want ExitSuccess", code)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty for completed job", stderr)
+	}
+}
+
+func TestClientWaitDeadline(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// timeout-only: deadline is now+timeout+clientVerdictGrace.
+	timeout := time.Hour
+	got, has := clientWaitDeadline(now, timeout, nil)
+	if !has {
+		t.Fatal("clientWaitDeadline(timeout-only) has = false, want true")
+	}
+	want := now.Add(timeout + clientVerdictGrace)
+	if !got.Equal(want) {
+		t.Errorf("clientWaitDeadline(timeout-only) = %v, want %v", got, want)
+	}
+
+	// no bounds: has must be false.
+	if _, has := clientWaitDeadline(now, 0, nil); has {
+		t.Error("clientWaitDeadline(no bounds) has = true, want false")
+	}
+
+	// noWorkerDeadline-only: deadline is verdict + clientVerdictGrace.
+	verdict := now.Add(2 * time.Minute)
+	got, has = clientWaitDeadline(now, 0, &verdict)
+	if !has {
+		t.Fatal("clientWaitDeadline(verdict-only) has = false, want true")
+	}
+	if !got.Equal(verdict.Add(clientVerdictGrace)) {
+		t.Errorf("clientWaitDeadline(verdict-only) = %v, want %v", got, verdict.Add(clientVerdictGrace))
+	}
+
+	// timeout later than verdict: deadline follows timeout.
+	got, _ = clientWaitDeadline(now, 3*time.Minute, &verdict)
+	if !got.Equal(now.Add(3*time.Minute + clientVerdictGrace)) {
+		t.Errorf("clientWaitDeadline(timeout later) = %v, want timeout-bound", got)
+	}
+
+	// verdict later than timeout: deadline follows verdict.
+	laterVerdict := now.Add(10 * time.Minute)
+	got, _ = clientWaitDeadline(now, 2*time.Minute, &laterVerdict)
+	if !got.Equal(laterVerdict.Add(clientVerdictGrace)) {
+		t.Errorf("clientWaitDeadline(verdict later) = %v, want verdict-bound", got)
+	}
+
+	// Overflow input must not produce a deadline in the past.
+	maxDur := time.Duration(1<<63 - 1)
+	got, has = clientWaitDeadline(now, maxDur, nil)
+	if !has {
+		t.Fatal("clientWaitDeadline(overflow) has = false, want true")
+	}
+	if got.Before(now) {
+		t.Errorf("clientWaitDeadline(overflow) = %v, wrapped into the past", got)
+	}
+}
+
+func TestReportTerminalJob_Nil(t *testing.T) {
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(nil)
+	})
+
+	if code != ExitError {
+		t.Fatalf("reportTerminalJob(nil) = %d, want ExitError", code)
+	}
+	if !strings.Contains(stderr, "no job result returned from server") {
+		t.Errorf("stderr = %q, want no-job-result message", stderr)
+	}
+}
+
+func TestReportTerminalJob_Cancelled(t *testing.T) {
+	job := &protocol.JobInfo{ID: "job-cancelled", Status: protocol.JobStatusCancelled}
+
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(job)
+	})
+
+	if code != ExitError {
+		t.Fatalf("reportTerminalJob(cancelled) = %d, want ExitError", code)
+	}
+	if !strings.Contains(stderr, "Job was cancelled") {
+		t.Errorf("stderr = %q, want cancelled message", stderr)
+	}
+}
+
+func TestReportTerminalJob_Timeout(t *testing.T) {
+	job := &protocol.JobInfo{ID: "job-timeout", Status: protocol.JobStatusTimeout, Error: "job exceeded its time limit"}
+
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(job)
+	})
+
+	if code != ExitError {
+		t.Fatalf("reportTerminalJob(timeout) = %d, want ExitError", code)
+	}
+	if !strings.Contains(stderr, "Job timed out: job exceeded its time limit") {
+		t.Errorf("stderr = %q, want timeout message", stderr)
+	}
+}
+
+func TestReportTerminalJob_UnexpectedStatus(t *testing.T) {
+	job := &protocol.JobInfo{ID: "job-pending", Status: protocol.JobStatusPending}
+
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(job)
+	})
+
+	if code != ExitError {
+		t.Fatalf("reportTerminalJob(pending) = %d, want ExitError", code)
+	}
+	if !strings.Contains(stderr, "unexpected status: pending") {
+		t.Errorf("stderr = %q, want unexpected-status message", stderr)
 	}
 }
