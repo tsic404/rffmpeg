@@ -481,18 +481,27 @@ Response:
 {
   "job": {
     "id": "uuid",
-    "status": "running",
+    "status": "completed",
     "input_files": ["file_id"],
     "args": [...],
     "output_files": ["output_file_id"],
     "worker_id": "worker_uuid",
     "exit_code": 0,
+    "cached": true,
     "created_at": "2024-01-01T00:00:00Z",
     "started_at": "2024-01-01T00:00:05Z",
-    "finished_at": null
-  }
+    "finished_at": "2024-01-01T00:00:12Z"
 }
+```
 
+### 缓存命中可观察性
+
+当任务结果命中 Worker 本地缓存时（TSI-2519）：
+
+- CLI 会在 stderr 收到 `[rffmpeg] Cache hit: <key>`（`<key>` 为完整的 64 位十六进制缓存键）。
+- 任务的 `GET /api/v1/jobs/{jobId}` 响应中 `cached` 字段为 `true`，底层 SQLite `jobs` 表新增 `cached` 列（`INTEGER DEFAULT 0`，`1` 表示命中缓存），可直接查询：`SELECT id FROM jobs WHERE cached = 1;`
+
+```
 # 取消任务
 DELETE /api/v1/jobs/{jobId}
 

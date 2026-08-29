@@ -487,7 +487,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// streaming outputs — stdout has no local file to cache)
 	if !directMode && !isNetOutput && !job.StreamingOutput {
 		if cachePath, ok := w.cache.Check(cacheKey); ok {
-			log.Printf("Job %s: cache HIT (key=%s)", job.ID, cacheKey[:16])
+			log.Printf("Job %s: cache HIT (key=%s)", job.ID, cacheKey)
 
 			// Stream the cache-hit notice through the job's stderr so CLI
 			// clients observe it, not only this worker process' own log
@@ -500,7 +500,6 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				batcherCreateHook(batcher)
 			}
 			defer batcher.Close()
-			batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cache HIT (key=%s)\n", job.ID, cacheKey[:16]))
 
 			// Create job-specific temp directory
 			jobDir := filepath.Join(w.tempDir, job.ID)
@@ -542,6 +541,10 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				w.cache.ConfirmHit(cacheKey)
 				log.Printf("Uploaded cached output for job %s", job.ID)
 				cached = true
+				// Emit the cache-hit notice only once the cached output is
+				// successfully delivered, so CLI clients never see it ahead
+				// of a re-transcoding fallback.
+				batcher.Add(fmt.Sprintf("[rffmpeg] Cache hit: %s\n", cacheKey))
 				// Deliver the notice before reporting completion so CLI
 				// clients always see it ahead of the terminal status.
 				batcher.Close()

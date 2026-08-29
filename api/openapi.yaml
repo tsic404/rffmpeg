@@ -596,6 +596,9 @@ components:
         failure_details:
           type: string
           description: Human-readable failure details.
+        cached:
+          type: boolean
+          description: Whether the result was served from the worker cache (TSI-2519).
         direct_paths:
           type: array
           items:
@@ -645,6 +648,9 @@ components:
           type: string
           enum: [INPUT_UNREACHABLE, ENCODER_UNSUPPORTED, DISK_FULL, TIMEOUT, WORKER_CRASH, FFMPEG_ERROR, NO_WORKER_AVAILABLE]
           description: Machine-readable failure category set when the job fails.
+        cached:
+          type: boolean
+          description: Whether the completed result was served from the worker cache (TSI-2519).
         failure_details:
           type: string
           description: Human-readable failure details.

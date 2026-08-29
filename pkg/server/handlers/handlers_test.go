@@ -326,6 +326,210 @@ func TestUpdateJobStatus(t *testing.T) {
 	}
 }
 
+// TestUpdateJobCachedFlag covers the TSI-2519 end-to-end contract through the
+// HTTP layer: a worker that reports a completed job with cached=true persists
+// the flag, and a CLI-style GET observes cached:true on the job.
+func TestUpdateJobCachedFlag(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	workerID := registerTestWorker(t, router, []string{"libx264"})
+
+	fileContent := []byte("test content")
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.mp4")
+	part.Write(fileContent)
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var uploadResp protocol.UploadResponse
+	json.NewDecoder(w.Body).Decode(&uploadResp)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var jobResp protocol.JobSubmitResponse
+	json.NewDecoder(w.Body).Decode(&jobResp)
+
+	// Worker pulls the job, which assigns it and marks the worker busy.
+	pullReq := httptest.NewRequest("GET", "/api/v1/workers/"+workerID+"/jobs", nil)
+	pullReq.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, pullReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Pull jobs failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	// Worker reports completion from cache (ownership-guarded terminal path).
+	updateReq := protocol.JobUpdateRequest{
+		Status:   protocol.JobStatusCompleted,
+		ExitCode: 0,
+		Cached:   true,
+		WorkerID: workerID,
+	}
+	updateBody, _ := json.Marshal(updateReq)
+	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Update job failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	// CLI-style GET must observe the cached flag.
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var statusResp protocol.JobStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&statusResp); err != nil {
+		t.Fatalf("Failed to decode status response: %v", err)
+	}
+	if !statusResp.Job.Cached {
+		t.Errorf("Expected cached=true after cache-hit completion, got false")
+	}
+
+	// A plain (non-cache) completion must leave cached=false.
+	jobReq2 := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264"},
+	}
+	jobBody2, _ := json.Marshal(jobReq2)
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody2))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var jobResp2 protocol.JobSubmitResponse
+	json.NewDecoder(w.Body).Decode(&jobResp2)
+
+	pullReq2 := httptest.NewRequest("GET", "/api/v1/workers/"+workerID+"/jobs", nil)
+	pullReq2.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, pullReq2)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Second pull failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	updateReq2 := protocol.JobUpdateRequest{
+		Status:   protocol.JobStatusCompleted,
+		ExitCode: 0,
+		WorkerID: workerID,
+	}
+	updateBody2, _ := json.Marshal(updateReq2)
+	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp2.JobID), bytes.NewReader(updateBody2))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Second update failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp2.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var statusResp2 protocol.JobStatusResponse
+	json.NewDecoder(w.Body).Decode(&statusResp2)
+	if statusResp2.Job.Cached {
+		t.Errorf("Expected cached=false after plain completion, got true")
+	}
+}
+
+// TestUpdateJobCachedFlagCoercedOnFailure guards the TSI-2519 review fix: the
+// public PATCH /api/v1/jobs/{id} endpoint must not let a client fabricate a
+// cache hit for a non-completed outcome. A failed report with cached=true
+// persists cached=false.
+func TestUpdateJobCachedFlagCoercedOnFailure(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	workerID := registerTestWorker(t, router, []string{"libx264"})
+
+	fileContent := []byte("test content")
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.mp4")
+	part.Write(fileContent)
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var uploadResp protocol.UploadResponse
+	json.NewDecoder(w.Body).Decode(&uploadResp)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var jobResp protocol.JobSubmitResponse
+	json.NewDecoder(w.Body).Decode(&jobResp)
+
+	// Worker pulls the job so it is owned and queued.
+	pullReq := httptest.NewRequest("GET", "/api/v1/workers/"+workerID+"/jobs", nil)
+	pullReq.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, pullReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Pull jobs failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	// A failed terminal report with cached=true must not persist cached.
+	updateReq := protocol.JobUpdateRequest{
+		Status:   protocol.JobStatusFailed,
+		ExitCode: 1,
+		Cached:   true,
+		WorkerID: workerID,
+	}
+	updateBody, _ := json.Marshal(updateReq)
+	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Update job failed with status %d: %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest("GET", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var statusResp protocol.JobStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&statusResp); err != nil {
+		t.Fatalf("Failed to decode status response: %v", err)
+	}
+	if statusResp.Job.Cached {
+		t.Errorf("Expected cached=false after failed completion with cached=true, got true")
+	}
+}
+
 // TestUpdateJobFailureClassification verifies the worker failure_type flow:
 // a failed update persists failure_type/failure_details, an invalid enum
 // value is rejected with 400, and completing the job clears stale fields.

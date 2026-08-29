@@ -83,7 +83,7 @@ func TestCacheHitStreamsStderrNotice(t *testing.T) {
 	n := len(stderrPatches)
 	mu.Unlock()
 
-	if !strings.Contains(combined, "cache HIT") {
+	if !strings.Contains(combined, "[rffmpeg] Cache hit:") {
 		t.Errorf("cache-hit notice not delivered via job stderr channel; got %d chunk(s): %q", n, combined)
 	}
 }

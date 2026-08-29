@@ -1,7 +1,9 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -523,5 +525,165 @@ func TestResetJobToPendingNotFound(t *testing.T) {
 	err := db.ResetJobToPending("non-existent")
 	if err == nil {
 		t.Error("Expected error for non-existent job")
+	}
+}
+
+// TestMigrationAddsCachedColumn verifies that opening a database created
+// without the cached column (pre-TSI-2519 schema) adds it via the ALTER
+// migration. The cache-hit persistence depends on this column existing on
+// upgrade paths, not only on freshly created databases.
+func TestMigrationAddsCachedColumn(t *testing.T) {
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "legacy.db")
+
+	// Build a legacy schema: a jobs table without the cached column.
+	legacy, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	_, err = legacy.Exec(`
+		CREATE TABLE jobs (
+			id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			input_files TEXT NOT NULL,
+			args TEXT NOT NULL,
+			output_filename TEXT DEFAULT '',
+			streaming_output INTEGER DEFAULT 0,
+			output_files TEXT DEFAULT '[]',
+			worker_id TEXT,
+			exit_code INTEGER,
+			error TEXT,
+			failure_type TEXT DEFAULT '',
+			failure_details TEXT DEFAULT '',
+			retryable INTEGER DEFAULT 0,
+			auto_hw INTEGER DEFAULT 0,
+			timeout DATETIME,
+			direct_paths TEXT DEFAULT '[]',
+			progress_percent REAL DEFAULT 0,
+			eta_seconds INTEGER DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			started_at DATETIME,
+			finished_at DATETIME
+		);
+	`)
+	if err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	d, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("open db through migration path: %v", err)
+	}
+	defer d.Close()
+
+	// The column must now exist; the migration ALTER is the only writer.
+	var cnt int
+	if err := d.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'cached'`).Scan(&cnt); err != nil {
+		t.Fatalf("inspect jobs columns: %v", err)
+	}
+	if cnt != 1 {
+		t.Fatalf("expected cached column after migration, got %d matches", cnt)
+	}
+}
+
+// TestCachedFlagPersistedOnTerminalUpdate guards the TSI-2519 DB contract:
+// a terminal completion recorded with the cached flag returns Cached=true
+// from GetJob; a non-cached completion stays false; non-terminal updates do
+// not set it.
+func TestCachedFlagPersistedOnTerminalUpdate(t *testing.T) {
+	d := setupTestDB(t)
+	defer d.Close()
+
+	_, err := d.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{})
+	if err != nil {
+		t.Fatalf("create worker: %v", err)
+	}
+
+	cachedJob, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("create cached job: %v", err)
+	}
+	_ = d.AssignJobToWorker(cachedJob.ID, "worker-1")
+	if err := d.UpdateJobTerminalStatusWithOwnerAndCache(cachedJob.ID, "worker-1", protocol.JobStatusCompleted, nil, nil, nil, nil, true); err != nil {
+		t.Fatalf("complete cached job: %v", err)
+	}
+	got, err := d.GetJob(cachedJob.ID)
+	if err != nil {
+		t.Fatalf("get cached job: %v", err)
+	}
+	if !got.Cached {
+		t.Errorf("expected Cached=true after cache-hit completion, got false")
+	}
+
+	plainJob, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("create plain job: %v", err)
+	}
+	_ = d.AssignJobToWorker(plainJob.ID, "worker-1")
+	if err := d.UpdateJobTerminalStatusWithOwner(plainJob.ID, "worker-1", protocol.JobStatusCompleted, nil, nil, nil, nil); err != nil {
+		t.Fatalf("complete plain job: %v", err)
+	}
+	gotPlain, err := d.GetJob(plainJob.ID)
+	if err != nil {
+		t.Fatalf("get plain job: %v", err)
+	}
+	if gotPlain.Cached {
+		t.Errorf("expected Cached=false after non-cache completion, got true")
+	}
+
+	// The unguarded path (backward-compat: no WorkerID in the report) must
+	// persist the flag identically.
+	unguardedJob, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("create unguarded job: %v", err)
+	}
+	if err := d.UpdateJobStatusWithFailureAndCache(unguardedJob.ID, protocol.JobStatusCompleted, nil, nil, nil, nil, true); err != nil {
+		t.Fatalf("complete unguarded job: %v", err)
+	}
+	gotUnguarded, err := d.GetJob(unguardedJob.ID)
+	if err != nil {
+		t.Fatalf("get unguarded job: %v", err)
+	}
+	if !gotUnguarded.Cached {
+		t.Errorf("expected Cached=true after unguarded cache-hit completion, got false")
+	}
+
+	// TSI-2519 review: cached is only meaningful for completed results.
+	// A failed/cancelled/timeout report with cached=true must persist false,
+	// since PATCH /api/v1/jobs/{id} is public and clients could otherwise
+	// fabricate cache hits for non-completed outcomes.
+	failedUnguarded, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("create failed unguarded job: %v", err)
+	}
+	if err := d.UpdateJobStatusWithFailureAndCache(failedUnguarded.ID, protocol.JobStatusFailed, nil, nil, nil, nil, true); err != nil {
+		t.Fatalf("fail unguarded job: %v", err)
+	}
+	gotFailedUnguarded, err := d.GetJob(failedUnguarded.ID)
+	if err != nil {
+		t.Fatalf("get failed unguarded job: %v", err)
+	}
+	if gotFailedUnguarded.Cached {
+		t.Errorf("expected Cached=false after failed completion with cached=true, got true")
+	}
+
+	failedGuarded, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("create failed guarded job: %v", err)
+	}
+	_ = d.AssignJobToWorker(failedGuarded.ID, "worker-1")
+	if err := d.UpdateJobTerminalStatusWithOwnerAndCache(failedGuarded.ID, "worker-1", protocol.JobStatusFailed, nil, nil, nil, nil, true); err != nil {
+		t.Fatalf("fail guarded job: %v", err)
+	}
+	gotFailedGuarded, err := d.GetJob(failedGuarded.ID)
+	if err != nil {
+		t.Fatalf("get failed guarded job: %v", err)
+	}
+	if gotFailedGuarded.Cached {
+		t.Errorf("expected Cached=false after guarded failed completion with cached=true, got true")
 	}
 }

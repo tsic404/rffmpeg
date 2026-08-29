@@ -617,9 +617,9 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 			// req.WorkerID still owns the job (running/queued). A stale
 			// terminal report from a worker that lost the job to failover
 			// returns 409 instead of overwriting the new owner's result.
-			err = h.db.UpdateJobTerminalStatusWithOwner(jobID, db.NormalizeWorkerID(req.WorkerID), req.Status, exitCode, errMsg, failureType, failureDetails)
+			err = h.db.UpdateJobTerminalStatusWithOwnerAndCache(jobID, db.NormalizeWorkerID(req.WorkerID), req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
 		} else {
-			err = h.db.UpdateJobStatusWithFailure(jobID, req.Status, exitCode, errMsg, failureType, failureDetails)
+			err = h.db.UpdateJobStatusWithFailureAndCache(jobID, req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
 		}
 		if err != nil {
 			if errors.Is(err, protocol.ErrJobNotFound) {
@@ -1489,6 +1489,7 @@ func (h *Handler) dbJobToJobInfo(job *db.Job) protocol.JobInfo {
 		StreamingOutput: job.StreamingOutput,
 		OutputFiles:     outputFiles,
 		AutoHW:          job.AutoHW,
+		Cached:          job.Cached,
 		FailureType:     job.FailureType,
 		FailureDetails:  job.FailureDetails,
 		DirectPaths:     directPaths,

@@ -46,6 +46,7 @@ type JobInfo struct {
 	ExitCode        int        `json:"exit_code,omitempty"`
 	Error           string     `json:"error,omitempty"`
 	AutoHW          bool       `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
+	Cached          bool       `json:"cached,omitempty"`  // Whether the result was served from the worker cache
 	FailureType     string     `json:"failure_type,omitempty"`
 	FailureDetails  string     `json:"failure_details,omitempty"`
 	Timeout         *time.Time `json:"timeout,omitempty"` // Per-job timeout (nil = use default)

@@ -28,6 +28,7 @@ type Job struct {
 	FailureType     string       // Classified failure type (TSI-757)
 	FailureDetails  string       // Human-readable failure detail
 	AutoHW          bool         // Enable automatic hardware encoder upgrade
+	Cached          bool         // Result was served from the worker cache (TSI-2519)
 	Timeout         sql.NullTime // Per-job timeout deadline (TSI-764)
 	DirectPaths     string       // JSON array of direct output paths for pass-through mode (TSI-807)
 	ProgressPercent float64      // Current progress percentage (0-100)
@@ -158,6 +159,7 @@ func (d *Database) initTables() error {
 			failure_details TEXT DEFAULT '',
 			retryable INTEGER DEFAULT 0,
 			auto_hw INTEGER DEFAULT 0,
+			cached INTEGER DEFAULT 0,
 			timeout DATETIME,
 			direct_paths TEXT DEFAULT '[]',
 			progress_percent REAL DEFAULT 0,
@@ -290,6 +292,7 @@ func (d *Database) initTables() error {
 		`ALTER TABLE workers ADD COLUMN evicted INTEGER DEFAULT 0`,
 		`ALTER TABLE workers ADD COLUMN evicted_at DATETIME`,
 		`ALTER TABLE jobs ADD COLUMN direct_paths TEXT DEFAULT '[]'`,
+		`ALTER TABLE jobs ADD COLUMN cached INTEGER DEFAULT 0`,
 		`ALTER TABLE workers ADD COLUMN video_encoders TEXT DEFAULT '[]'`,
 		`ALTER TABLE workers ADD COLUMN video_decoders TEXT DEFAULT '[]'`,
 		`ALTER TABLE workers ADD COLUMN hwaccels TEXT DEFAULT ''`,
@@ -342,12 +345,12 @@ func (d *Database) GetJob(id string) (*Job, error) {
 	job := &Job{}
 	err := d.db.QueryRow(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error,
-	       failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+	       failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
 	       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE id = ?
 	`, id).Scan(
 		&job.ID, &job.Status, &job.InputFiles, &job.Args, &job.OutputFilename, &job.StreamingOutput, &job.OutputFiles,
-		&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW,
+		&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW, &job.Cached,
 		&job.Timeout, &job.DirectPaths, &job.ProgressPercent, &job.EtaSeconds,
 		&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt,
 	)
@@ -385,7 +388,26 @@ func (d *Database) JobExists(id string) (bool, error) {
 // completed), so that path stays open. Everything else hitting a terminal
 // job is dropped and reported as ErrJobTerminal.
 func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
+	return d.updateJobStatusWithFailure(id, status, exitCode, errMsg, failureType, failureDetails, false)
+}
+
+// UpdateJobStatusWithFailureAndCache is UpdateJobStatusWithFailure with the
+// cached flag persisted on terminal completion (TSI-2519). cached is coerced
+// to false for any status other than completed: the column records whether a
+// completed result was served from the worker cache.
+func (d *Database) UpdateJobStatusWithFailureAndCache(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
+	return d.updateJobStatusWithFailure(id, status, exitCode, errMsg, failureType, failureDetails, cached)
+}
+
+func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
 	now := time.Now()
+
+	// TSI-2519 review: cached describes a completed result served from the
+	// worker cache. PATCH /api/v1/jobs/{id} is public, so a client can craft
+	// {status:"failed", cached:true} — coerce the flag to only completed hits.
+	if status != protocol.JobStatusCompleted {
+		cached = false
+	}
 
 	var startedAt, finishedAt *time.Time
 	if status == protocol.JobStatusRunning {
@@ -405,13 +427,14 @@ func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStat
 			UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
 			                failure_type = COALESCE(?, failure_type),
 			                failure_details = COALESCE(?, failure_details),
-			                started_at = COALESCE(started_at, ?), finished_at = ?
+			                started_at = COALESCE(started_at, ?), finished_at = ?,
+			                cached = ?
 			WHERE id = ?
 			  AND NOT EXISTS (
 			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?)
 			  )
 		`, status, now, exitCode, errMsg, failureType, failureDetails,
-			startedAt, finishedAt, id, id,
+			startedAt, finishedAt, cached, id, id,
 			protocol.JobStatusCompleted, protocol.JobStatusCancelled, protocol.JobStatusTimeout)
 	} else {
 		result, err = d.db.Exec(`
@@ -458,17 +481,32 @@ func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStat
 // protocol.ErrJobNotOwned instead of overwriting the new owner's result.
 // A report for a job already in a terminal state is equally rejected.
 func (d *Database) UpdateJobTerminalStatusWithOwner(jobID, workerID string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
+	return d.updateJobTerminalStatusWithOwner(jobID, workerID, status, exitCode, errMsg, failureType, failureDetails, false)
+}
+
+// UpdateJobTerminalStatusWithOwnerAndCache is UpdateJobTerminalStatusWithOwner
+// with the cached flag persisted on the terminal transition (TSI-2519).
+// cached is coerced to false unless the target status is completed.
+func (d *Database) UpdateJobTerminalStatusWithOwnerAndCache(jobID, workerID string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
+	return d.updateJobTerminalStatusWithOwner(jobID, workerID, status, exitCode, errMsg, failureType, failureDetails, cached)
+}
+
+func (d *Database) updateJobTerminalStatusWithOwner(jobID, workerID string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
 	now := time.Now()
 
+	// TSI-2519 review: cached means a completed result served from cache.
+	if status != protocol.JobStatusCompleted {
+		cached = false
+	}
 	finishedAt := now
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?,
 		                error = ?,
 		                failure_type = COALESCE(?, failure_type),
 		                failure_details = COALESCE(?, failure_details),
-		                finished_at = ?
+		                finished_at = ?, cached = ?
 		WHERE id = ? AND worker_id = ? AND status IN (?, ?)
-	`, status, now, exitCode, errMsg, failureType, failureDetails, finishedAt,
+	`, status, now, exitCode, errMsg, failureType, failureDetails, finishedAt, cached,
 		jobID, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
 	if err != nil {
 		return fmt.Errorf("failed to update job terminal status: %w", err)
@@ -576,7 +614,7 @@ func (d *Database) UpdateJobOutput(id string, outputFiles string) error {
 // GetPendingJobs retrieves all pending jobs
 func (d *Database) GetPendingJobs(limit int) ([]*Job, error) {
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ?
 		ORDER BY created_at ASC LIMIT ?
@@ -640,7 +678,7 @@ func (d *Database) scanJobs(rows *sql.Rows) ([]*Job, error) {
 		job := &Job{}
 		err := rows.Scan(
 			&job.ID, &job.Status, &job.InputFiles, &job.Args, &job.OutputFilename, &job.StreamingOutput, &job.OutputFiles,
-			&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW,
+			&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW, &job.Cached,
 			&job.Timeout, &job.DirectPaths, &job.ProgressPercent, &job.EtaSeconds,
 			&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt,
 		)
@@ -909,7 +947,7 @@ func (d *Database) SetWorkerIdleIfNoActiveJobs(workerID string) error {
 func (d *Database) GetJobsForWorker(workerID string, limit int) ([]*Job, error) {
 	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
 		ORDER BY created_at ASC LIMIT ?
@@ -952,7 +990,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 
 	// Get pending jobs (status = pending AND worker_id IS NULL)
 	rows, err := tx.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ? AND worker_id IS NULL
 		ORDER BY created_at ASC LIMIT ?
@@ -1213,7 +1251,7 @@ func (d *Database) UpdateWorkerStatus(id string, status protocol.WorkerStatus) e
 func (d *Database) GetTimedOutJobs(timeout time.Duration) ([]*Job, error) {
 	cutoff := time.Now().Add(-timeout)
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ? AND started_at IS NOT NULL AND started_at < ?
 	`, protocol.JobStatusRunning, cutoff)
@@ -1458,7 +1496,7 @@ func (d *Database) RemoveStaleOfflineWorkers() (int64, error) {
 // GetJobsByStatus retrieves all jobs with a specific status
 func (d *Database) GetJobsByStatus(status protocol.JobStatus, limit int) ([]*Job, error) {
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE status = ?
 		ORDER BY created_at ASC LIMIT ?
@@ -2264,7 +2302,7 @@ func (d *Database) GetMigrationEventsByWorker(workerID string, limit int) ([]*Mi
 func (d *Database) GetRunningJobsByWorker(workerID string) ([]*Job, error) {
 	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, timeout, direct_paths, progress_percent, eta_seconds,
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
 		       created_at, updated_at, started_at, finished_at
 		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
 		ORDER BY created_at ASC
