@@ -99,18 +99,61 @@ func TestGetAllEncodersInfoDedupByName(t *testing.T) {
 		t.Fatalf("GetAllEncodersInfo failed: %v", err)
 	}
 
-	// Should get 3 unique encoders (h264_nvenc deduped)
+	// Should get 3 unique encoders (h264_nvenc deduped). Both workers register
+	// identical h264_nvenc metadata, so the merged entry equals either.
 	if len(encoders) != 3 {
 		t.Fatalf("Expected 3 unique encoders, got %d: %v", len(encoders), encoders)
 	}
 
-	// Verify first occurrence is kept (worker-1's h264_nvenc)
 	names := make(map[string]bool)
 	for _, enc := range encoders {
 		names[enc.Name] = true
 	}
 	if !names["h264_nvenc"] || !names["libx264"] || !names["hevc_nvenc"] {
 		t.Errorf("Missing expected encoder names, got: %v", names)
+	}
+}
+
+// TestGetAllEncodersInfoMultiWorkerPriorityMerge (TSI-2554) covers the
+// multi-worker same-name aggregation: an earlier-registered low-priority
+// encoder must not shadow a later-registered higher-priority entry.
+func TestGetAllEncodersInfoMultiWorkerPriorityMerge(t *testing.T) {
+	db, cleanup := setupEncoderDBTest(t)
+	defer cleanup()
+
+	// Worker 1 registers first with a low-priority software entry.
+	caps1 := protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264", Description: "H.264 (software)", Type: "video", IsHW: false, Priority: 1},
+		},
+	}
+	// Worker 2 registers later with a higher-priority hardware entry.
+	caps2 := protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264", Description: "H.264 (hardware)", Type: "video", IsHW: true, Priority: 5},
+		},
+	}
+
+	if _, err := db.CreateWorker("", "worker-1", caps1); err != nil {
+		t.Fatalf("Failed to create worker 1: %v", err)
+	}
+	if _, err := db.CreateWorker("", "worker-2", caps2); err != nil {
+		t.Fatalf("Failed to create worker 2: %v", err)
+	}
+
+	encoders, err := db.GetAllEncodersInfo()
+	if err != nil {
+		t.Fatalf("GetAllEncodersInfo failed: %v", err)
+	}
+
+	if len(encoders) != 1 {
+		t.Fatalf("Expected 1 unique encoder, got %d: %v", len(encoders), encoders)
+	}
+	if !encoders[0].IsHW {
+		t.Errorf("Expected hardware encoder to win, got %+v", encoders[0])
+	}
+	if encoders[0].Priority != 5 {
+		t.Errorf("Expected priority 5 to win, got %+v", encoders[0])
 	}
 }
 
@@ -241,6 +284,49 @@ func TestGetAllDecodersInfoDedupByName(t *testing.T) {
 	}
 	if !names["h264"] || !names["hevc"] || !names["av1"] {
 		t.Errorf("Missing expected decoder names, got: %v", names)
+	}
+}
+
+// TestGetAllDecodersInfoMultiWorkerMerge (TSI-2554) covers the multi-worker
+// same-name aggregation: an earlier-registered software decoder must not
+// shadow a later-registered hardware entry.
+func TestGetAllDecodersInfoMultiWorkerMerge(t *testing.T) {
+	db, cleanup := setupEncoderDBTest(t)
+	defer cleanup()
+
+	// Worker 1 registers first with a software decoder.
+	caps1 := protocol.WorkerCapabilities{
+		VideoDecoders: []protocol.DecoderInfo{
+			{Name: "h264", Description: "H.264 decoder", Type: "video", IsHW: false},
+		},
+	}
+	// Worker 2 registers later with a hardware decoder.
+	caps2 := protocol.WorkerCapabilities{
+		VideoDecoders: []protocol.DecoderInfo{
+			{Name: "h264", Description: "H.264 decoder (HW)", Type: "video", IsHW: true},
+		},
+	}
+
+	if _, err := db.CreateWorker("", "worker-1", caps1); err != nil {
+		t.Fatalf("Failed to create worker 1: %v", err)
+	}
+	if _, err := db.CreateWorker("", "worker-2", caps2); err != nil {
+		t.Fatalf("Failed to create worker 2: %v", err)
+	}
+
+	decoders, err := db.GetAllDecodersInfo()
+	if err != nil {
+		t.Fatalf("GetAllDecodersInfo failed: %v", err)
+	}
+
+	if len(decoders) != 1 {
+		t.Fatalf("Expected 1 unique decoder, got %d: %v", len(decoders), decoders)
+	}
+	if !decoders[0].IsHW {
+		t.Errorf("Expected hardware decoder to win, got %+v", decoders[0])
+	}
+	if decoders[0].Description != "H.264 decoder (HW)" {
+		t.Errorf("Expected hardware description to win, got %+v", decoders[0])
 	}
 }
 

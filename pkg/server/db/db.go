@@ -2093,9 +2093,15 @@ func isAllDashes(s string) bool {
 }
 
 // GetAllEncodersInfo retrieves a unique list of all encoders across all workers
-// with rich metadata (name, description, type, is_hw) from the video_encoders column.
+// with rich metadata (name, description, type, is_hw, priority) from the
+// video_encoders column. Workers are scanned in registration order (rowid), so
+// an earlier-registered worker is encountered first; for encoders that multiple
+// workers expose under the same name, the entry with the highest priority wins,
+// with is_hw and then the longer description as tie-breakers. This keeps a
+// later-registered hardware/priority encoder from being shadowed by an earlier
+// low-priority entry (TSI-2554).
 func (d *Database) GetAllEncodersInfo() ([]protocol.EncoderInfo, error) {
-	rows, err := d.db.Query(`SELECT DISTINCT video_encoders FROM workers WHERE video_encoders != '[]'`)
+	rows, err := d.db.Query(`SELECT video_encoders FROM workers WHERE video_encoders != '[]' ORDER BY rowid`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all encoder info: %w", err)
 	}
@@ -2113,9 +2119,7 @@ func (d *Database) GetAllEncodersInfo() ([]protocol.EncoderInfo, error) {
 			continue
 		}
 		for _, enc := range encoders {
-			if _, exists := seen[enc.Name]; !exists {
-				seen[enc.Name] = enc
-			}
+			seen[enc.Name] = mergeEncoderInfo(seen[enc.Name], enc)
 		}
 	}
 
@@ -2130,10 +2134,41 @@ func (d *Database) GetAllEncodersInfo() ([]protocol.EncoderInfo, error) {
 	return result, nil
 }
 
+// mergeEncoderInfo picks the encoder metadata that should represent a name
+// when several workers expose the same encoder. Priority is authoritative
+// (higher wins, matching the user-defined encoder_priority order); ties break
+// on is_hw (hardware preferred) and then on the longer description, so the
+// richest metadata survives instead of whichever worker registered first.
+func mergeEncoderInfo(current, candidate protocol.EncoderInfo) protocol.EncoderInfo {
+	if current.Name == "" {
+		return candidate
+	}
+	if candidate.Priority != current.Priority {
+		if candidate.Priority > current.Priority {
+			return candidate
+		}
+		return current
+	}
+	if candidate.IsHW != current.IsHW {
+		if candidate.IsHW {
+			return candidate
+		}
+		return current
+	}
+	if len(candidate.Description) > len(current.Description) {
+		return candidate
+	}
+	return current
+}
+
 // GetAllDecodersInfo retrieves a unique list of all decoders across all workers
-// with rich metadata (name, description, type, is_hw) from the video_decoders column.
+// with rich metadata (name, description, type, is_hw) from the video_decoders
+// column. Workers are scanned in registration order (rowid); for decoders that
+// multiple workers expose under the same name, is_hw wins and then the longer
+// description, so a later-registered hardware decoder is not shadowed by an
+// earlier software entry (TSI-2554).
 func (d *Database) GetAllDecodersInfo() ([]protocol.DecoderInfo, error) {
-	rows, err := d.db.Query(`SELECT DISTINCT video_decoders FROM workers WHERE video_decoders != '[]'`)
+	rows, err := d.db.Query(`SELECT video_decoders FROM workers WHERE video_decoders != '[]' ORDER BY rowid`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all decoder info: %w", err)
 	}
@@ -2151,9 +2186,7 @@ func (d *Database) GetAllDecodersInfo() ([]protocol.DecoderInfo, error) {
 			continue
 		}
 		for _, dec := range decoders {
-			if _, exists := seen[dec.Name]; !exists {
-				seen[dec.Name] = dec
-			}
+			seen[dec.Name] = mergeDecoderInfo(seen[dec.Name], dec)
 		}
 	}
 
@@ -2166,6 +2199,26 @@ func (d *Database) GetAllDecodersInfo() ([]protocol.DecoderInfo, error) {
 		result = append(result, dec)
 	}
 	return result, nil
+}
+
+// mergeDecoderInfo picks the decoder metadata that should represent a name
+// when several workers expose the same decoder: hardware preferred, then the
+// longer description, so the richest metadata survives instead of whichever
+// worker registered first.
+func mergeDecoderInfo(current, candidate protocol.DecoderInfo) protocol.DecoderInfo {
+	if current.Name == "" {
+		return candidate
+	}
+	if candidate.IsHW != current.IsHW {
+		if candidate.IsHW {
+			return candidate
+		}
+		return current
+	}
+	if len(candidate.Description) > len(current.Description) {
+		return candidate
+	}
+	return current
 }
 
 // MigrationEvent represents a migration event record in the database.
