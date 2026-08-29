@@ -514,7 +514,7 @@ components:
       properties:
         file_id:
           type: string
-          description: Unique identifier for uploaded file
+          description: SHA-256 content hash of the uploaded file (lowercase hex, 64 chars). Identical content always yields the same file_id; the id is content-addressed, not a random UUID.
         message:
           type: string
 
@@ -1024,6 +1024,7 @@ components:
       properties:
         file_id:
           type: string
+          description: SHA-256 content hash of the assembled file (lowercase hex, 64 chars). Content-addressed, so byte-identical uploads resolve to the same file_id.
         message:
           type: string
 

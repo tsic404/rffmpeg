@@ -412,7 +412,7 @@ Content-Type: multipart/form-data
 
 Response:
 {
-  "file_id": "uuid",
+  "file_id": "<sha256>",
   "message": "File uploaded successfully"
 }
 ```
@@ -500,6 +500,25 @@ Response:
 
 - CLI 会在 stderr 收到 `[rffmpeg] Cache hit: <key>`（`<key>` 为完整的 64 位十六进制缓存键）。
 - 任务的 `GET /api/v1/jobs/{jobId}` 响应中 `cached` 字段为 `true`，底层 SQLite `jobs` 表新增 `cached` 列（`INTEGER DEFAULT 0`，`1` 表示命中缓存），可直接查询：`SELECT id FROM jobs WHERE cached = 1;`
+
+### 缓存按内容寻址
+
+`POST /api/v1/upload` 返回的 `file_id` 是上传文件内容的 SHA-256（`pkg/server/storage/storage.go` 的 `SaveFileByContent`；分块上传在 `complete` 时同样按最终内容哈希重命名）。缓存键 `GenerateCacheKey` 以 `inputSources`（即 `file_id` 列表）参与哈希。因此缓存是**按内容寻址**的：只要输入内容字节一致，无论它来自哪个本地路径、上传过多少次，都会得到相同的 `file_id`。就缓存键维度而言，只有内容变化（或参数/`auto_hw`/输出扩展名/编码器变化）才会改变缓存键并导致键维度的未命中；在缓存条目未过期、未被逐出、元数据完整的前提下，键相同的请求才会命中缓存——TTL 过期（默认 24h，`pkg/worker/cache.go:373`）、LRU 逐出、缓存禁用、元数据损坏或大小不符（`cache.go:386-390`）都会在键不变的情况下返回未命中。
+
+最小可复现示例：
+
+```bash
+# 同一内容的两个 byte-identical 副本
+cp input.mp4 copy.mp4
+
+# 两次提交：不同的本地路径，相同的内容
+./bin/rffmpeg --server http://localhost:8080/api/v1 -i input.mp4 -c:v libx264 out1.mp4
+./bin/rffmpeg --server http://localhost:8080/api/v1 -i copy.mp4  -c:v libx264 out2.mp4
+```
+
+第二次提交时 CLI 的 stderr 会出现 `[rffmpeg] Cache hit: <key>`，且该任务 `GET /api/v1/jobs/{jobId}` 的 `cached` 字段为 `true`——两次上传得到相同 `file_id`，转码参数相同，缓存键相同，输出复用第一次的结果。
+
+**为什么不把 canonicalized 本地路径放进缓存键。** 服务器拿不到可靠的原始路径：上传模式下 `file_id` 是内容哈希，本地路径只存在于 CLI 一侧，不随任务提交；唯一携带路径的是 `RFFMPEG_SHARED_FS=1` 直通模式，而 Worker 在该模式下显式跳过缓存读写（`pkg/worker/worker.go` 的 `directMode` 门控）——路径缓存既不生效也无法区分场景。若强行把路径纳入缓存键，还会把缓存从「同一内容只转码一次」退化为「每条路径转码一次」，放大存储与 CPU 成本。缓存以内容为边界是正确且可解释的：内容相同的输入本就应产生相同输出，路径只是读取位置，不应影响转码结果。
 
 ```
 # 取消任务
