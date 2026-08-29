@@ -75,7 +75,7 @@ go build -o bin/rffmpeg ./cmd/cli
 
 ```bash
 # 连接到本地 Server
-./bin/worker --server http://localhost:8080/api/v1
+./bin/worker --server http://localhost:8080
 
 # 指定 Worker 名称和支持的编码器
 ./bin/worker --name worker-1 --encoders libx264,h264_nvenc
@@ -93,7 +93,7 @@ go build -o bin/rffmpeg ./cmd/cli
 ./bin/rffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4
 
 # 指定远程 Server
-./bin/rffmpeg --server http://your-server:8080/api/v1 -i video.mkv output.mp4
+./bin/rffmpeg --server http://your-server:8080 -i video.mkv output.mp4
 
 # 静默模式
 ./bin/rffmpeg -q -i input.mp4 -vf scale=1280:720 output.mp4
@@ -195,7 +195,7 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `RFFMPEG_SERVER_URL` | Server API URL | `http://localhost:8080/api/v1` |
+| `RFFMPEG_SERVER_URL` | Server API URL | `http://localhost:8080` |
 | `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
 | `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |
 | `RFFMPEG_TEMP_DIR` | 临时文件目录 | 系统临时目录 |
@@ -299,7 +299,7 @@ CLI 和 Worker 在同一台机器上运行，文件存储在本地磁盘。
 export RFFMPEG_SHARED_FS=1
 
 # 启动 Worker（同一台机器）
-./bin/worker --server http://localhost:8080/api/v1 --name local-worker
+./bin/worker --server http://localhost:8080 --name local-worker
 
 # CLI 提交任务，输入/输出均为本地路径
 ./bin/rffmpeg -i /data/videos/input.mp4 -c:v libx264 /data/videos/output.mp4
@@ -317,7 +317,7 @@ CLI 在机器 A，Worker 在机器 B，两者通过 NFS 共享 `/mnt/media` 目�
 
 # 机器 A (CLI 端)
 export RFFMPEG_SHARED_FS=1
-./bin/rffmpeg --server http://worker-host:8080/api/v1 \
+./bin/rffmpeg --server http://worker-host:8080 \
   -i /mnt/media/videos/input.mp4 \
   -c:v libx264 \
   /mnt/media/output.mp4
@@ -325,7 +325,7 @@ export RFFMPEG_SHARED_FS=1
 # 机器 B (Worker 端)
 export RFFMPEG_SHARED_FS=1
 export RFFMPEG_SHARED_FS_ALLOWED_PREFIX="/mnt/media"
-./bin/worker --server http://localhost:8080/api/v1 --name nfs-worker
+./bin/worker --server http://localhost:8080 --name nfs-worker
 ```
 
 ##### 场景 3：Kubernetes 共享 PV
@@ -688,7 +688,7 @@ Response:
 ./bin/server --port 8080 --data-dir ./data
 
 # 2. 启动 Worker（另一个终端）
-./bin/worker --server http://localhost:8080/api/v1 \
+./bin/worker --server http://localhost:8080 \
   --name gpu-worker \
   --encoders libx264,h264_nvenc,hevc_nvenc \
   --gpu "NVIDIA RTX 3080" \
@@ -748,7 +748,7 @@ EOF
   --mtls
 
 # Worker 连接 HTTPS Server
-./bin/worker --server https://localhost:8080/api/v1
+./bin/worker --server https://localhost:8080
 ```
 
 ## 许可证

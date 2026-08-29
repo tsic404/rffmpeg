@@ -96,7 +96,7 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		ServerURL:         "http://localhost:8080/api/v1",
+		ServerURL:         "http://localhost:8080",
 		FFmpegPath:        "ffmpeg",
 		Timeout:           Duration(2 * time.Hour),
 		HeartbeatInterval: Duration(30 * time.Second),
