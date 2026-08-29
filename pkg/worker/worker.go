@@ -890,7 +890,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			progressRouter.Handler()(notification + "\n")
 
 			// Use RetryExecutor for multi-stage retry:
-			retryResult := w.retryExecutor.ExecuteWithRetry(jobCtx, args, outputPath, networkOutput, stdoutHandler)
+			retryResult := w.retryExecutor.ExecuteWithRetry(jobCtx, args, outputPath, networkOutput, stdoutHandler, progressRouter.Handler())
 
 			if retryResult.Success {
 				// Retry succeeded — use the final result
@@ -995,10 +995,13 @@ func logTerminalReportError(jobID, action string, err error) {
 
 // reportFailure classifies an ffmpeg execution failure and reports it to the
 // server. errMsg must be ffmpeg stderr or a Go error from running ffmpeg —
-// never generic infrastructure text (see reportInfraFailure).
+// never generic infrastructure text (see reportInfraFailure). The reported
+// Error is the concise classification summary, never the full stderr: the
+// complete ffmpeg log already reaches the CLI once via the live stderr stream,
+// so echoing it again in the terminal Error field duplicates it (TSI-2523).
 func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached bool) {
 	failureType, failureDetails := ClassifyFailure(exitCode, errMsg, errMsg, false, false)
-	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, cached, string(failureType), failureDetails); err != nil {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, failureDetails, cached, string(failureType), failureDetails); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
 	}
 }

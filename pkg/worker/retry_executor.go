@@ -220,7 +220,9 @@ func NewRetryExecutorWithFallback(executor *Executor, config *RetryConfig, fallb
 // is skipped since no local file is produced.
 // stdoutHandler, when non-nil (streaming jobs), receives ffmpeg stdout chunks on every
 // retry attempt so streamed data reaches the client instead of being discarded.
-func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, outputPath string, networkOutput bool, stdoutHandler StdoutHandler) *RetryResult {
+// stderrHandler, when non-nil, receives ffmpeg stderr lines on every retry attempt so
+// the full ffmpeg log streams to the CLI in real time on each attempt (TSI-2523).
+func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, outputPath string, networkOutput bool, stdoutHandler StdoutHandler, stderrHandler StderrHandler) *RetryResult {
 	result := &RetryResult{
 		AuditTrail:    make([]RetryAuditEntry, 0),
 		FinalStage:    RetryStageInitial,
@@ -265,10 +267,11 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 				log.Printf("Removed stale output from previous attempt: %s", outputPath)
 			}
 		}
-
 		// Execute
 		var execResult ExecResult
-		if stdoutHandler != nil {
+		if stderrHandler != nil {
+			execResult = e.executor.ExecuteWithHandlers(ctx, currentArgs, stdoutHandler, stderrHandler)
+		} else if stdoutHandler != nil {
 			execResult = e.executor.ExecuteWithHandlers(ctx, currentArgs, stdoutHandler, nil)
 		} else {
 			execResult = e.executor.Execute(ctx, currentArgs)
@@ -407,10 +410,11 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 		fallbackArgs := e.fallback.PrepareFallbackArgsWithSource(currentArgs, outputPath, isUserSelected)
 		if fallbackArgs != nil {
 			log.Printf("Attempting final software encoder fallback")
-
 			attemptStart := time.Now()
 			var execResult ExecResult
-			if stdoutHandler != nil {
+			if stderrHandler != nil {
+				execResult = e.executor.ExecuteWithHandlers(ctx, fallbackArgs, stdoutHandler, stderrHandler)
+			} else if stdoutHandler != nil {
 				execResult = e.executor.ExecuteWithHandlers(ctx, fallbackArgs, stdoutHandler, nil)
 			} else {
 				execResult = e.executor.Execute(ctx, fallbackArgs)

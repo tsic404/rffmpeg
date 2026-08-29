@@ -44,7 +44,7 @@ func TestExecuteWithRetry_StaleOutputFromFailedAttemptDoesNotFoolNextAttempt(t *
 
 	// ffmpeg exits 0 but writes nothing to outputPath (output goes to null).
 	args := []string{"-f", "lavfi", "-i", "testsrc=duration=0.1", "-f", "null", "-"}
-	result := re.ExecuteWithRetry(context.Background(), args, outputPath, false, nil)
+	result := re.ExecuteWithRetry(context.Background(), args, outputPath, false, nil, nil)
 
 	if result.Success {
 		t.Fatal("attempt with no real output was judged successful — stale-output cleanup is broken")
@@ -86,7 +86,7 @@ func TestExecuteWithRetry_CancelledContextSkipsSoftwareFallback(t *testing.T) {
 	cancel()
 
 	start := time.Now()
-	result := re.ExecuteWithRetry(ctx, []string{"-f", "lavfi", "-i", "testsrc=duration=5", "out.mp4"}, "", false, nil)
+	result := re.ExecuteWithRetry(ctx, []string{"-f", "lavfi", "-i", "testsrc=duration=5", "out.mp4"}, "", false, nil, nil)
 
 	if time.Since(start) > 5*time.Second {
 		t.Fatal("ExecuteWithRetry ran a full transcode despite cancelled context")

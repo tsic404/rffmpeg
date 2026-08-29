@@ -540,7 +540,7 @@ func TestExecuteWithRetry_StdoutOutputSkipsFileValidation(t *testing.T) {
 
 	// ffmpeg exits 0 writing only to stdout ("-"); no local file is created.
 	args := []string{"-f", "lavfi", "-i", "testsrc=duration=0.1", "-f", "mpegts", "-"}
-	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil)
+	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil, nil)
 
 	if !result.Success {
 		t.Fatalf("expected success for stdout output, got stage=%s attempts=%d",
@@ -594,7 +594,7 @@ func TestExecuteWithRetry_SigAbortRetriesAndSucceeds(t *testing.T) {
 	}
 
 	args := []string{"-i", "input.mp4", "-c:v", "libx264", "-f", "mpegts", "pipe:1"}
-	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil)
+	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil, nil)
 
 	if !result.Success {
 		t.Fatalf("expected retry success after SIGABRT, got stage=%s attempts=%d",
@@ -613,5 +613,93 @@ func TestExecuteWithRetry_SigAbortRetriesAndSucceeds(t *testing.T) {
 	first := result.AuditTrail[0]
 	if first.ErrorType != ErrorTypeProcessCrash.String() {
 		t.Errorf("first attempt error type = %s, want %s", first.ErrorType, ErrorTypeProcessCrash.String())
+	}
+}
+
+// recordingExecutor records, per call, whether a non-nil stderrHandler reached
+// ExecuteWithHandlers and the stderr chunk the handler received. It is used to
+// lock the TSI-2523 contract that the retry executor streams stderr on every
+// attempt, not just the first.
+type recordingExecutor struct {
+	calls   []recordingExecutorCall
+	failure bool
+}
+
+type recordingExecutorCall struct {
+	handlerSet     bool
+	streamedStderr string
+}
+
+func (r *recordingExecutor) Execute(ctx context.Context, args []string) ExecResult {
+	return r.run(ctx, args, nil, nil)
+}
+
+func (r *recordingExecutor) ExecuteWithHandlers(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult {
+	return r.run(ctx, args, stdoutHandler, stderrHandler)
+}
+
+func (r *recordingExecutor) run(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult {
+	call := recordingExecutorCall{}
+	if stderrHandler != nil {
+		call.handlerSet = true
+		stderr := "frame=  10 fps= 30 q=28.0\nAborted\n"
+		stderrHandler(stderr)
+		call.streamedStderr = stderr
+	}
+	r.calls = append(r.calls, call)
+
+	if r.failure && len(r.calls) == 1 {
+		return ExecResult{
+			ExitCode: 134,
+			Stderr:   "frame=  10 fps= 30 q=28.0\nAborted\n",
+			Error:    fmt.Errorf("ffmpeg exited with code 134"),
+		}
+	}
+	return ExecResult{ExitCode: 0, Stdout: "ok"}
+}
+
+// TestExecuteWithRetry_StreamsStderrEveryAttempt locks the TSI-2523 review
+// fix: when a stderrHandler is supplied, it must reach the executor on every
+// retry attempt so the full ffmpeg log streams live each time — the
+// deduplication contract (concise terminal Error + per-attempt streaming)
+// depends on it.
+func TestExecuteWithRetry_StreamsStderrEveryAttempt(t *testing.T) {
+	exec := &recordingExecutor{failure: true}
+	re := &RetryExecutor{
+		executor:    exec,
+		interceptor: NewErrorInterceptor(),
+		pruner:      NewParamPruner(),
+		config: &RetryConfig{
+			MaxRetries:             2,
+			InitialInterval:        1 * time.Millisecond,
+			EnableSoftwareFallback: false,
+		},
+		fallback: NewEncoderFallback(),
+	}
+
+	var streamed []string
+	handler := func(chunk string) { streamed = append(streamed, chunk) }
+
+	result := re.ExecuteWithRetry(context.Background(), []string{"-f", "lavfi", "-i", "testsrc", "-f", "mpegts", "-"}, "-", false, nil, handler)
+
+	if !result.Success {
+		t.Fatalf("expected retry success after SIGABRT, got stage=%s attempts=%d",
+			result.FinalStage, result.TotalAttempts)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", len(exec.calls))
+	}
+	for i, call := range exec.calls {
+		if !call.handlerSet {
+			t.Errorf("attempt %d: stderrHandler was nil", i+1)
+		}
+	}
+	if len(streamed) != 2 {
+		t.Fatalf("stderr handler called %d times, want 2", len(streamed))
+	}
+	for i, chunk := range streamed {
+		if chunk == "" {
+			t.Errorf("attempt %d: streamed empty stderr", i+1)
+		}
 	}
 }

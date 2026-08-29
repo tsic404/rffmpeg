@@ -1,6 +1,10 @@
 package worker
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
@@ -308,5 +312,75 @@ func TestFailureTypeIsValid(t *testing.T) {
 		if f.IsValid() {
 			t.Errorf("%q should be invalid", f)
 		}
+	}
+}
+
+// TestReportFailureStoresConciseError locks the TSI-2523 fix: reportFailure
+// must store the concise classification summary as the job's terminal Error,
+// not echo the full ffmpeg stderr — the complete log already reached the CLI
+// once via the live stderr stream, so echoing it again duplicates it.
+func TestReportFailureStoresConciseError(t *testing.T) {
+	var got protocol.JobUpdateRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	w := &Worker{client: NewClient(ts.URL, "test-worker", "")}
+	fullStderr := "ffmpeg version n9.0.1 Copyright (c) 2000-2026\n" +
+		"  Stream #0:0: Video: h264\n" +
+		"frame= 42 fps=20 q=28.0 size=100KiB time=00:00:01.68 bitrate=487.0kbits/s\n" +
+		"Conversion failed!\n"
+	w.reportFailure("job-1", 1, fullStderr, false)
+
+	if got.Error == fullStderr {
+		t.Error("Error field must not echo full stderr (TSI-2523)")
+	}
+	if got.Error != "Conversion failed!" {
+		t.Errorf("Error = %q, want concise summary", got.Error)
+	}
+	if got.FailureType != string(protocol.FailureFFmpegError) {
+		t.Errorf("failure_type = %q, want %q", got.FailureType, protocol.FailureFFmpegError)
+	}
+}
+
+// TestReportFailure_RetryExhaustedStoresConciseError locks the TSI-2523 fix on
+// the retry-exhausted path: even when worker.go prefixes the report with the
+// full "All retry attempts exhausted (…): <stderr>" banner, the terminal Error
+// must stay the concise ffmpeg summary — the full log already streamed live on
+// every attempt.
+func TestReportFailure_RetryExhaustedStoresConciseError(t *testing.T) {
+	var got protocol.JobUpdateRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	w := &Worker{client: NewClient(ts.URL, "test-worker", "")}
+	fullStderr := "ffmpeg version n9.0.1 Copyright (c) 2000-2026\n" +
+		"  Stream #0:0: Video: h264\n" +
+		"frame= 42 fps=20 q=28.0 size=100KiB time=00:00:01.68 bitrate=487.0kbits/s\n" +
+		"Conversion failed!\n"
+	errMsg := fmt.Sprintf("All retry attempts exhausted (original encoder: %s, final stage: %s): %s",
+		"h264_nvenc", "exhausted", fullStderr)
+	w.reportFailure("job-1", 1, errMsg, false)
+
+	if got.Error == fullStderr {
+		t.Error("Error field must not echo full stderr (TSI-2523)")
+	}
+	if got.Error == errMsg {
+		t.Error("Error field must not echo the retry-exhausted banner (TSI-2523)")
+	}
+	if got.Error != "Conversion failed!" {
+		t.Errorf("Error = %q, want concise summary", got.Error)
+	}
+	if got.FailureType != string(protocol.FailureFFmpegError) {
+		t.Errorf("failure_type = %q, want %q", got.FailureType, protocol.FailureFFmpegError)
 	}
 }
