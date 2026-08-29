@@ -318,6 +318,41 @@ func TestUploadFile(t *testing.T) {
 	}
 }
 
+// TestUploadFileAuthRejected verifies that an HTTP 401 rejection from the
+// upload endpoint surfaces as a readable authentication error with the status
+// code and token hint — not the misleading "failed to copy file: io:
+// read/write on closed pipe" the pipe writer would otherwise report (TSI-2598).
+func TestUploadFileAuthRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(protocol.ErrorResponse{
+			Code:    protocol.ErrCodeUnauthorized,
+			Message: "Invalid token",
+		})
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "wrong-token")
+	tmpFile := createTestFile(t, []byte("auth test content"))
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFile(tmpFile)
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty on auth rejection", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for 401 upload, got nil")
+	}
+	want := "authentication rejected (HTTP 401)"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q missing %q", err, want)
+	}
+	if !strings.Contains(err.Error(), "Invalid token") {
+		t.Errorf("error %q missing server message", err)
+	}
+}
+
 // TestUploadFileChunked tests the chunked file upload
 func TestUploadFileChunked(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)

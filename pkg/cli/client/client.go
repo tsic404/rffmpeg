@@ -173,6 +173,20 @@ func (c *Client) UploadFile(filePath string) (string, error) {
 	}
 	defer DrainAndClose(resp.Body)
 
+	// Check for an auth rejection before the pipe-writer error. The server
+	// rejects unauthenticated uploads (fail-closed token check) without
+	// draining the streaming body, so the multipart writer races the closed
+	// connection and would otherwise surface "failed to copy file: io:
+	// read/write on closed pipe", masking the real cause (TSI-2598).
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		msg := "missing or invalid token"
+		var errResp protocol.ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+			msg = errResp.Message
+		}
+		return "", fmt.Errorf("upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
+	}
+
 	// Check for errors from the goroutine
 	if err := <-errChan; err != nil {
 		return "", err
