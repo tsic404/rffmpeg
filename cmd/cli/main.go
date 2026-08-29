@@ -530,70 +530,15 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		fmt.Fprintln(os.Stderr, "Waiting for completion...")
 	}
 
-	// Learn the server's NO_WORKER_AVAILABLE verdict time (if any) so the
-	// client never cancels before the starvation sweep's verdict is
-	// observable. The deadline is authoritative server config, not a local
-	// guess; a failed lookup just means the client falls back to --timeout.
-	var noWorkerDeadline *time.Time
-	if submitted, getErr := cli.GetJob(jobID); getErr == nil {
-		noWorkerDeadline = submitted.NoWorkerDeadline
-	}
-	waitDeadline, hasDeadline := clientWaitDeadline(time.Now(), timeout, noWorkerDeadline)
-	waitCtx := context.Background()
-	var cancelWait context.CancelFunc
-	if hasDeadline {
-		waitCtx, cancelWait = context.WithDeadline(context.Background(), waitDeadline)
-		defer cancelWait()
-	}
-
-	var job *protocol.JobInfo
-	if result.StreamingOutput {
-		// Streaming output mode: receive stdout data via WebSocket
-		job, err = cli.WaitForJobWithStreamingOutput(waitCtx, jobID, quiet)
-	} else {
-		job, err = cli.WaitForJobWithLogs(waitCtx, jobID, quiet)
-	}
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			// Race guard (TSI-2452): the client-side wait deadline may have
-			// fired even though the job already reached a terminal status on
-			// the server (e.g. a cache hit completed between the last poll
-			// and the context deadline). WaitForJobWithLogs /
-			// WaitForJobWithStreamingOutput already do a final GetJob on
-			// ctx.Done(); this is a belt-and-suspenders fallback in case a
-			// future wait variant or a WS-reconnect edge case lets the
-			// deadline through without the check. If the job is already
-			// done, proceed with the result instead of cancelling a
-			// completed job (which the server rejects with 400). The server
-			// verdict (notably NO_WORKER_AVAILABLE) may have landed exactly
-			// at the deadline; report it as the server's judgement, not a
-			// client-side cancellation.
-			finalJob, finalErr := cli.GetJob(jobID)
-			if finalErr == nil && protocol.IsTerminalStatus(finalJob.Status) {
-				job = finalJob
-			} else {
-				// The job is genuinely not done. Cancel it server-side so it
-				// doesn't linger, and report a clear client-side timeout —
-				// distinct from a server verdict (NO_WORKER_AVAILABLE,
-				// TIMEOUT, ...) so operators can tell who gave up. The
-				// message distinguishes a job still waiting for a worker
-				// from one that had actually started but stalled, since only
-				// the former can still receive the server's starvation
-				// verdict.
-				if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
-				}
-				if finalErr == nil && (finalJob.Status == protocol.JobStatusPending || finalJob.Status == protocol.JobStatusQueued) {
-					fmt.Fprintf(os.Stderr, "Error: job %s did not start within %s and was cancelled by the client (still waiting for a worker; the server may still fail it with NO_WORKER_AVAILABLE)\n", jobID, timeout)
-				} else {
-					fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled by the client (client gave up; the job was still running)\n", jobID, timeout)
-				}
-				return ExitError
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "Error waiting for job: %v\n", err)
-			return ExitError
-		}
+	// The wait is a loop because the server's NO_WORKER_AVAILABLE deadline is
+	// only attached to pending/unassigned jobs: a job that was queued at
+	// submit time carries no deadline, but if its worker dies and the job
+	// reverts to pending, the next GetJob reports one. Re-reading on each
+	// iteration lets the client extend its wait to the freshly attached
+	// verdict instead of giving up before the server can emit it (TSI-2571).
+	job, code := waitForJobLoop(cli, jobID, timeout, result.StreamingOutput, quiet)
+	if code != ExitSuccess {
+		return code
 	}
 
 	// Handle job result: print the outcome for any non-completed terminal
@@ -654,6 +599,108 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	return ExitSuccess
 }
 
+// jobWaitClient is the subset of *client.Client the wait loop needs. It is an
+// interface so the loop can be driven in tests by a fake that returns a
+// scripted status sequence without a real server.
+type jobWaitClient interface {
+	GetJob(jobID string) (*protocol.JobInfo, error)
+	WaitForJobWithLogs(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error)
+	WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error)
+	CancelJob(jobID string) error
+}
+
+// waitForJobLoop waits for the job to reach a terminal status and returns it,
+// or cancels the job and returns ExitError when the client gives up. It loops
+// because the server's NO_WORKER_AVAILABLE verdict deadline is only attached
+// to pending/unassigned jobs: a job queued at submit time carries none, but if
+// its worker dies and the job reverts to pending, the next GetJob reports one.
+// Re-reading the deadline on each iteration lets the client extend its wait to
+// the freshly attached verdict instead of giving up before the server can emit
+// it (TSI-2571). The deadline is authoritative server config, not a local
+// guess; a failed GetJob lookup only means the client falls back to --timeout.
+func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, streamingOutput, quiet bool) (*protocol.JobInfo, int) {
+	var job *protocol.JobInfo
+	for {
+		var noWorkerDeadline *time.Time
+		if submitted, getErr := cli.GetJob(jobID); getErr == nil {
+			noWorkerDeadline = submitted.NoWorkerDeadline
+		}
+		waitDeadline, hasDeadline := clientWaitDeadline(time.Now(), timeout, noWorkerDeadline)
+		waitCtx := context.Background()
+		var cancelWait context.CancelFunc
+		if hasDeadline {
+			waitCtx, cancelWait = context.WithDeadline(context.Background(), waitDeadline)
+		}
+
+		var waitErr error
+		if streamingOutput {
+			job, waitErr = cli.WaitForJobWithStreamingOutput(waitCtx, jobID, quiet)
+		} else {
+			job, waitErr = cli.WaitForJobWithLogs(waitCtx, jobID, quiet)
+		}
+		if cancelWait != nil {
+			cancelWait()
+		}
+		if waitErr == nil {
+			break
+		}
+		if !errors.Is(waitErr, context.DeadlineExceeded) {
+			fmt.Fprintf(os.Stderr, "Error waiting for job: %v\n", waitErr)
+			return nil, ExitError
+		}
+
+		// Race guard (TSI-2452): the client-side wait deadline may have
+		// fired even though the job already reached a terminal status on
+		// the server (e.g. a cache hit completed between the last poll
+		// and the context deadline). WaitForJobWithLogs /
+		// WaitForJobWithStreamingOutput already do a final GetJob on
+		// ctx.Done(); this is a belt-and-suspenders fallback in case a
+		// future wait variant or a WS-reconnect edge case lets the
+		// deadline through without the check. If the job is already
+		// done, proceed with the result instead of cancelling a
+		// completed job (which the server rejects with 400). The server
+		// verdict (notably NO_WORKER_AVAILABLE) may have landed exactly
+		// at the deadline; report it as the server's judgement, not a
+		// client-side cancellation.
+		finalJob, finalErr := cli.GetJob(jobID)
+		if finalErr == nil && protocol.IsTerminalStatus(finalJob.Status) {
+			job = finalJob
+			break
+		}
+
+		// The job is not done. If the server now reports a verdict deadline
+		// later than the bound just exhausted (the job reverted to pending
+		// after its worker died), extend the wait instead of cancelling
+		// early. Compare the raw server verdict against the exhausted bound
+		// — not a recomputed now+timeout bound, which always advances with
+		// now and would loop forever. The deadline is fixed once attached,
+		// so this fires at most once.
+		if finalErr == nil && extendWaitForNoWorkerDeadline(waitDeadline, finalJob.NoWorkerDeadline) {
+			continue
+		}
+
+		// The job is genuinely not done. Cancel it server-side so it
+		// doesn't linger, and report a clear client-side timeout — distinct
+		// from a server verdict (NO_WORKER_AVAILABLE, TIMEOUT, ...) so
+		// operators can tell who gave up. The message distinguishes a job
+		// still waiting for a worker from one that had actually started but
+		// stalled. No server verdict can still be pending here: the extend
+		// guard above already continued whenever the server attached a
+		// NoWorkerDeadline, so reaching this branch means either the lookup
+		// failed or no deadline exists (sweep disabled or status not pending).
+		if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
+		}
+		if finalErr == nil && (finalJob.Status == protocol.JobStatusPending || finalJob.Status == protocol.JobStatusQueued) {
+			fmt.Fprintf(os.Stderr, "Error: job %s did not start within %s and was cancelled by the client (still waiting for a worker)\n", jobID, timeout)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled by the client (client gave up; the job was still running)\n", jobID, timeout)
+		}
+		return nil, ExitError
+	}
+	return job, ExitSuccess
+}
+
 // clientWaitDeadline computes the client-side give-up time. timeout is the
 // per-job execution deadline; noWorkerDeadline is the server's
 // NO_WORKER_AVAILABLE verdict time for a pending job. The client waits
@@ -683,6 +730,17 @@ func clientWaitDeadline(now time.Time, timeout time.Duration, noWorkerDeadline *
 		return time.Time{}, false
 	}
 	return deadline.Add(clientVerdictGrace), true
+}
+
+// extendWaitForNoWorkerDeadline reports whether the client should extend its
+// wait after the client-side deadline fired: the server must now report a
+// verdict deadline (the job reverted to pending after its worker died) that
+// is later than the bound just exhausted. Comparing the raw server verdict
+// against the exhausted bound — not a recomputed now+timeout bound, which
+// always advances with now — keeps the retry bounded: the deadline is fixed
+// once attached, so this can extend the wait at most once.
+func extendWaitForNoWorkerDeadline(exhaustedDeadline time.Time, noWorkerDeadline *time.Time) bool {
+	return noWorkerDeadline != nil && noWorkerDeadline.After(exhaustedDeadline)
 }
 
 // reportTerminalJob prints the outcome for a terminal job status and returns

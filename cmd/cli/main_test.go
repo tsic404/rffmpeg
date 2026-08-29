@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1236,6 +1237,205 @@ func TestClientWaitDeadline(t *testing.T) {
 	}
 	if got.Before(now) {
 		t.Errorf("clientWaitDeadline(overflow) = %v, wrapped into the past", got)
+	}
+}
+
+func TestExtendWaitForNoWorkerDeadline(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	exhausted := now.Add(35 * time.Second)
+
+	// No fresh deadline: do not extend (fall back to give-up).
+	if extendWaitForNoWorkerDeadline(exhausted, nil) {
+		t.Error("extendWaitForNoWorkerDeadline(nil) = true, want false")
+	}
+
+	// Fresh deadline at or before the exhausted bound: the server verdict
+	// should already be observable, so do not extend.
+	past := exhausted.Add(-time.Second)
+	if extendWaitForNoWorkerDeadline(exhausted, &past) {
+		t.Error("extendWaitForNoWorkerDeadline(verdict<exhausted) = true, want false")
+	}
+	if extendWaitForNoWorkerDeadline(exhausted, &exhausted) {
+		t.Error("extendWaitForNoWorkerDeadline(verdict==exhausted) = true, want false")
+	}
+
+	// Fresh deadline after the exhausted bound: extend so the server verdict
+	// is observable before the client gives up.
+	future := exhausted.Add(time.Minute)
+	if !extendWaitForNoWorkerDeadline(exhausted, &future) {
+		t.Error("extendWaitForNoWorkerDeadline(verdict>exhausted) = false, want true")
+	}
+}
+
+// scriptedJobClient is a fake jobWaitClient whose GetJob returns a fixed
+// status sequence, one entry per call. Its wait methods return
+// DeadlineExceeded immediately (the loop only classifies the error and
+// re-reads; the wall-clock bounds are covered by TestClientWaitDeadline and
+// TestExtendWaitForNoWorkerDeadline) while recording the context deadline so
+// the test can assert the bound actually passed to each wait.
+type scriptedJobClient struct {
+	jobID         string
+	seq           []protocol.JobInfo
+	getCalls      int
+	waitCalls     int
+	waitDeadlines []time.Time
+	cancelCalls   int
+}
+
+func (s *scriptedJobClient) GetJob(jobID string) (*protocol.JobInfo, error) {
+	if jobID != s.jobID {
+		return nil, fmt.Errorf("unexpected jobID %q, want %q", jobID, s.jobID)
+	}
+	if s.getCalls >= len(s.seq) {
+		last := s.seq[len(s.seq)-1]
+		return &last, nil
+	}
+	j := s.seq[s.getCalls]
+	s.getCalls++
+	return &j, nil
+}
+
+func (s *scriptedJobClient) WaitForJobWithLogs(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	if jobID != s.jobID {
+		return nil, fmt.Errorf("unexpected jobID %q, want %q", jobID, s.jobID)
+	}
+	s.waitCalls++
+	if d, ok := ctx.Deadline(); ok {
+		s.waitDeadlines = append(s.waitDeadlines, d)
+	}
+	return nil, context.DeadlineExceeded
+}
+
+func (s *scriptedJobClient) WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	if jobID != s.jobID {
+		return nil, fmt.Errorf("unexpected jobID %q, want %q", jobID, s.jobID)
+	}
+	s.waitCalls++
+	if d, ok := ctx.Deadline(); ok {
+		s.waitDeadlines = append(s.waitDeadlines, d)
+	}
+	return nil, context.DeadlineExceeded
+}
+
+func (s *scriptedJobClient) CancelJob(jobID string) error {
+	s.cancelCalls++
+	return nil
+}
+
+// TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert pins the TSI-2571 core
+// behavior at loop level: the client submits while the job is queued (no
+// NoWorkerDeadline), its --timeout wait fires, and the re-read after the
+// deadline observes the job reverted to pending with a fresh verdict (worker
+// died in between). The loop must extend the wait once — the second wait's
+// bound is the fresh verdict plus grace, not the exhausted fallback bound —
+// and then terminate by returning the terminal job, without cancelling it.
+func TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert(t *testing.T) {
+	now := time.Now()
+	verdict := now.Add(10 * time.Second)
+	timeout := 50 * time.Millisecond
+	jobID := "job-revert"
+
+	fake := &scriptedJobClient{
+		jobID: jobID,
+		seq: []protocol.JobInfo{
+			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusPending, NoWorkerDeadline: &verdict},
+			{ID: jobID, Status: protocol.JobStatusPending, NoWorkerDeadline: &verdict},
+			{ID: jobID, Status: protocol.JobStatusFailed, FailureType: string(protocol.FailureNoWorkerAvailable), Error: "no worker available"},
+		},
+	}
+
+	var job *protocol.JobInfo
+	var code int
+	stderr := captureStderr(func() {
+		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+	})
+
+	if code != ExitSuccess {
+		t.Fatalf("waitForJobLoop code = %d, want ExitSuccess (loop got a terminal result)", code)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty on terminal-result path", stderr)
+	}
+	if job == nil || job.Status != protocol.JobStatusFailed {
+		t.Fatalf("returned job = %+v, want failed verdict job", job)
+	}
+	if fake.getCalls != 4 {
+		t.Errorf("GetJob calls = %d, want 4 (pre-wait, post-wait, pre-wait, post-wait)", fake.getCalls)
+	}
+	if fake.waitCalls != 2 {
+		t.Errorf("wait calls = %d, want 2", fake.waitCalls)
+	}
+	if fake.cancelCalls != 0 {
+		t.Errorf("CancelJob calls = %d, want 0 (loop must extend, not cancel)", fake.cancelCalls)
+	}
+	if len(fake.waitDeadlines) != 2 {
+		t.Fatalf("wait deadlines recorded = %d, want 2", len(fake.waitDeadlines))
+	}
+	// First wait used the no-verdict fallback bound (before the fresh verdict);
+	// second wait used the fresh verdict plus grace (after it). That delta is
+	// the observable proof the loop re-read the deadline and extended once.
+	if !fake.waitDeadlines[0].Before(verdict) {
+		t.Errorf("first wait deadline = %v, want before fresh verdict %v", fake.waitDeadlines[0], verdict)
+	}
+	if !fake.waitDeadlines[1].After(verdict) {
+		t.Errorf("second wait deadline = %v, want after fresh verdict %v", fake.waitDeadlines[1], verdict)
+	}
+	if !fake.waitDeadlines[1].After(fake.waitDeadlines[0]) {
+		t.Errorf("second wait deadline %v not after first %v: wait was not extended", fake.waitDeadlines[1], fake.waitDeadlines[0])
+	}
+}
+
+// TestWaitForJobLoop_DoesNotExtendTwice pins the other half of the contract:
+// once the client has waited to the fresh verdict bound, a second
+// DeadlineExceeded with the same (fixed) verdict must NOT extend again — the
+// verdict is immutable and already included in the exhausted bound, so the
+// loop cancels. The job is pending here, so the operator message must say the
+// client is still waiting for a worker and must NOT claim the server may yet
+// fail the job with NO_WORKER_AVAILABLE (that verdict can never be pending on
+// this path — the fix for the review's blocking finding).
+func TestWaitForJobLoop_DoesNotExtendTwice(t *testing.T) {
+	now := time.Now()
+	verdict := now.Add(10 * time.Second)
+	timeout := 50 * time.Millisecond
+	jobID := "job-stuck-pending"
+
+	fake := &scriptedJobClient{
+		jobID: jobID,
+		seq: []protocol.JobInfo{
+			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusPending, NoWorkerDeadline: &verdict},
+			{ID: jobID, Status: protocol.JobStatusPending, NoWorkerDeadline: &verdict},
+			{ID: jobID, Status: protocol.JobStatusPending, NoWorkerDeadline: &verdict},
+		},
+	}
+
+	var job *protocol.JobInfo
+	var code int
+	stderr := captureStderr(func() {
+		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+	})
+
+	if code != ExitError {
+		t.Fatalf("waitForJobLoop code = %d, want ExitError (client gave up)", code)
+	}
+	if job != nil {
+		t.Errorf("returned job = %+v, want nil on give-up path", job)
+	}
+	if fake.getCalls != 4 {
+		t.Errorf("GetJob calls = %d, want 4", fake.getCalls)
+	}
+	if fake.waitCalls != 2 {
+		t.Errorf("wait calls = %d, want 2 (extension must fire at most once)", fake.waitCalls)
+	}
+	if fake.cancelCalls != 1 {
+		t.Errorf("CancelJob calls = %d, want 1", fake.cancelCalls)
+	}
+	if !strings.Contains(stderr, "still waiting for a worker") {
+		t.Errorf("stderr = %q, want pending-job give-up message", stderr)
+	}
+	if strings.Contains(stderr, "NO_WORKER_AVAILABLE") {
+		t.Errorf("stderr = %q, must not claim a server NO_WORKER_AVAILABLE verdict is still possible", stderr)
 	}
 }
 
