@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -2246,5 +2247,125 @@ func TestProbeWithLiveWorkerProceeds(t *testing.T) {
 			t.Fatalf("Probe was rejected by the worker-availability guard despite a live worker: %s (body: %s)",
 				errResp.Code, w.Body.String())
 		}
+	}
+}
+
+// TSI-2520: in shared-FS mode the CLI sends an absolute local path as the
+// probe input. The input-exists check must resolve direct paths against the
+// server's filesystem (not the storage base dir), so an existing path must
+// pass validation and reach the worker-availability guard (503 here, since
+// no worker is registered) instead of being rejected with 404.
+func TestProbeDirectPathExistsPassesInputValidation(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// No worker registered: the probe can only reach 503 if the input
+	// validation passed.
+	dir := t.TempDir()
+	absPath := filepath.Join(dir, "media.mp4")
+	if err := os.WriteFile(absPath, []byte("test video content"), 0644); err != nil {
+		t.Fatalf("Failed to create direct-path test file: %v", err)
+	}
+
+	probeReq := protocol.ProbeRequest{Input: absPath}
+	body, _ := json.Marshal(probeReq)
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 worker_unavailable after input validation passed, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TSI-2520: a direct path that does not exist on the server filesystem must
+// still be rejected with 404 before worker dispatch.
+func TestProbeDirectPathMissingRejected(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	probeReq := protocol.ProbeRequest{Input: filepath.Join(t.TempDir(), "missing.mp4")}
+	body, _ := json.Marshal(probeReq)
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for missing direct path, got %d. Body: %s", w.Code, w.Body.String())
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeNotFound {
+		t.Errorf("Expected error code 'not_found', got '%s'", errResp.Code)
+	}
+}
+
+// TestProbeDirectPathStoredInJob verifies that a shared-FS direct path input is
+// persisted as the probe job's direct_paths so the worker can probe it locally.
+// A storage file ID must keep direct_paths empty (downloaded normally), while a
+// remote URL must also keep direct_paths empty. (TSI-2520)
+func TestProbeDirectPathStoredInJob(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	h.SetHeartbeatTimeout(90 * time.Second)
+	registerTestWorker(t, router, []string{"libx264"})
+
+	dir := t.TempDir()
+	absPath := filepath.Join(dir, "media.mp4")
+	if err := os.WriteFile(absPath, []byte("test video content"), 0644); err != nil {
+		t.Fatalf("Failed to create direct-path test file: %v", err)
+	}
+
+	probeReq := protocol.ProbeRequest{Input: absPath}
+	body, _ := json.Marshal(probeReq)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, "POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		router.ServeHTTP(w, req)
+		close(done)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	<-done
+
+	rows, err := h.GetDB().GetDB().Query(`SELECT direct_paths FROM jobs`)
+	if err != nil {
+		t.Fatalf("Failed to query jobs: %v", err)
+	}
+	defer rows.Close()
+
+	var found bool
+	for rows.Next() {
+		var directPaths string
+		if err := rows.Scan(&directPaths); err != nil {
+			t.Fatalf("Failed to scan direct_paths: %v", err)
+		}
+		var paths []string
+		if err := json.Unmarshal([]byte(directPaths), &paths); err != nil {
+			t.Fatalf("direct_paths is not valid JSON: %v (%q)", err, directPaths)
+		}
+		if len(paths) == 1 && paths[0] == absPath {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows iteration failed: %v", err)
+	}
+	if !found {
+		t.Fatalf("probe job direct_paths does not contain %q", absPath)
 	}
 }

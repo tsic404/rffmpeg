@@ -1090,29 +1090,53 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 		return
 	}
 
-	// Download input files
-	if len(job.InputFiles) == 0 {
-		w.reportInfraFailure(job.ID, 1, "no input files for probe job")
-		return
-	}
-
-	// Generate a safe filename for the downloaded probe input
-	fileID := job.InputFiles[0]
+	// Resolve the probe input. Shared-FS direct paths (job.DirectPaths) are
+	// read in place after a traversal/stat check — they must never be
+	// downloaded over HTTP, which would send the absolute path to
+	// GET /api/v1/files/<path> and get rejected by ValidateFileID (TSI-2520).
+	directMode := len(job.DirectPaths) > 0
 	var inputPath string
-	if isRemoteURL(fileID) {
-		// Remote URL: sanitize the last path segment — hostile URLs
-		// must not inject path separators or oversized names.
-		baseName := sanitizeInputBaseName(filepath.Base(fileID))
-		inputPath = filepath.Join(jobDir, "input-"+baseName)
+	if directMode {
+		for _, path := range job.DirectPaths {
+			if containsPathTraversal(path) {
+				w.reportFailureWithType(job.ID, 1,
+					fmt.Sprintf("direct path contains '..' traversal: %s", path),
+					string(protocol.FailureInputUnreachable),
+					"path traversal rejected")
+				return
+			}
+			if _, err := os.Stat(path); err != nil {
+				w.reportFailureWithType(job.ID, 1,
+					fmt.Sprintf("input path unreachable: %s: %v", path, err),
+					string(protocol.FailureInputUnreachable),
+					err.Error())
+				return
+			}
+		}
+		inputPath = job.DirectPaths[0]
+		log.Printf("Probe job %s: direct path mode, probing %s", job.ID, inputPath)
 	} else {
-		inputPath = filepath.Join(jobDir, "input-"+fileID)
-	}
-	if err := w.client.DownloadInput(fileID, inputPath); err != nil {
-		w.reportInputDownloadFailure(job.ID, fileID, fmt.Sprintf("Failed to download input file %s: %v", fileID, err))
-		return
-	}
-	log.Printf("Downloaded probe input file %s to %s", fileID, inputPath)
+		if len(job.InputFiles) == 0 {
+			w.reportInfraFailure(job.ID, 1, "no input files for probe job")
+			return
+		}
 
+		// Generate a safe filename for the downloaded probe input
+		fileID := job.InputFiles[0]
+		if isRemoteURL(fileID) {
+			// Remote URL: sanitize the last path segment — hostile URLs
+			// must not inject path separators or oversized names.
+			baseName := sanitizeInputBaseName(filepath.Base(fileID))
+			inputPath = filepath.Join(jobDir, "input-"+baseName)
+		} else {
+			inputPath = filepath.Join(jobDir, "input-"+fileID)
+		}
+		if err := w.client.DownloadInput(fileID, inputPath); err != nil {
+			w.reportInputDownloadFailure(job.ID, fileID, fmt.Sprintf("Failed to download input file %s: %v", fileID, err))
+			return
+		}
+		log.Printf("Downloaded probe input file %s to %s", fileID, inputPath)
+	}
 	// Run ffprobe
 	prober := NewFFprobeExecutor("")
 	result, err := prober.Probe(ctx, inputPath)

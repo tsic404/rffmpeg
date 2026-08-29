@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -1041,6 +1042,18 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// inputExists reports whether a probe input resolves on the server. A
+// well-formed storage file ID (64-hex SHA256) is resolved through storage;
+// anything else — a direct shared-FS path or a relative filename — is
+// checked directly against the server's filesystem.
+func inputExists(store *storage.Storage, input string) bool {
+	if storage.ValidateFileID(input) {
+		return store.FileExists(input)
+	}
+	_, err := os.Stat(input)
+	return err == nil
+}
+
 // Probe handles ffprobe requests via job dispatch to workers.
 // POST /api/v1/probe
 func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
@@ -1077,8 +1090,12 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate input file exists (skip validation for remote URLs)
-	if !strings.Contains(req.Input, "://") && !h.storage.FileExists(req.Input) {
+	// Validate the input exists (skip for remote URLs). Two input semantics:
+	// a storage file ID (64-hex content hash, resolved under the server's
+	// storage dir) vs. a direct local path (shared-FS passthrough, resolved
+	// against the server's own filesystem). FileExists can only resolve the
+	// former; feeding it a direct path always 404s (TSI-2520).
+	if !strings.Contains(req.Input, "://") && !inputExists(h.storage, req.Input) {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeNotFound, "Input file not found: "+req.Input, nil,
 		))
@@ -1121,9 +1138,24 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Direct paths (shared-FS passthrough): when the input is neither a
+	// remote URL nor a storage file ID, it is a local path the worker must
+	// read directly instead of downloading over HTTP (TSI-2520).
+	directPathsJSON := "[]"
+	if !strings.Contains(req.Input, "://") && !storage.ValidateFileID(req.Input) {
+		dp, err := json.Marshal([]string{req.Input})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+				protocol.ErrCodeInternalError, "Failed to marshal direct path", err,
+			))
+			return
+		}
+		directPathsJSON = string(dp)
+	}
+
 	// Set a 60s timeout for the probe job
 	timeout := time.Now().Add(60 * time.Second)
-	job, err := h.db.CreateJobWithStreaming(string(inputFilesJSON), string(argsJSON), "probe_result.json", false, false, &timeout, "[]")
+	job, err := h.db.CreateJobWithStreaming(string(inputFilesJSON), string(argsJSON), "probe_result.json", false, false, &timeout, directPathsJSON)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to create probe job", err,
