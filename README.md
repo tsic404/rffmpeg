@@ -570,9 +570,20 @@ POST /api/v1/workers/register
     "encoders": ["libx264", "h264_nvenc"],
     "decoders": ["h264"],
     "ffmpeg_version": "ffmpeg version 5.1",
-    "max_concurrent": 2
+    "max_concurrent": 2,
+    "video_encoders": [
+      {"name": "libx264", "type": "video", "is_hw": false},
+      {"name": "h264_nvenc", "type": "video", "is_hw": true}
+    ]
   }
 }
+```
+
+`encoders` 是规范字段（必填）：注册校验、调度匹配（`json_each(w.encoders)`）与
+worker 列表响应都只使用它。`video_encoders` 是**可选的请求侧增强元数据**，
+只在 `GET /api/v1/encoders` 聚合端点为每个编码器提供 `description`/`is_hw`；
+客户端只发 `encoders` 时，服务端会按名字自动派生 `video_encoders`。上例中的
+`video_encoders` 为可选字段（仅展示富元数据形态），可整体省略。
 
 # 心跳（含 GPU 利用率与显存指标，由 nvidia-smi 采样）
 POST /api/v1/workers/heartbeat

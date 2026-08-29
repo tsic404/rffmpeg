@@ -737,6 +737,144 @@ func TestWorkerRegistration(t *testing.T) {
 	}
 }
 
+// TSI-2522: a spec-conformant client registers only the canonical encoders
+// list; the server must derive video_encoders from it so that the
+// GET /api/v1/encoders aggregation endpoint is not permanently empty.
+func TestRegisterWorker_DerivesVideoEncoders(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+	router.Get("/api/v1/encoders", h.ListAllEncoders)
+	router.Get("/api/v1/decoders", h.ListAllDecoders)
+
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "derived-worker",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264", "h264_nvenc"},
+			Decoders:      []string{"h264", "h264_cuvid"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("registration failed: %d %s", w.Code, w.Body.String())
+	}
+
+	encReq := httptest.NewRequest("GET", "/api/v1/encoders", nil)
+	encReq.Header.Set("Authorization", "Bearer test-token")
+	encW := httptest.NewRecorder()
+	router.ServeHTTP(encW, encReq)
+	if encW.Code != http.StatusOK {
+		t.Fatalf("encoders endpoint failed: %d %s", encW.Code, encW.Body.String())
+	}
+	var encResp handlers.ListEncodersResponse
+	if err := json.NewDecoder(encW.Body).Decode(&encResp); err != nil {
+		t.Fatalf("decode encoders: %v", err)
+	}
+	byName := make(map[string]protocol.EncoderInfo, len(encResp.Encoders))
+	for _, enc := range encResp.Encoders {
+		byName[enc.Name] = enc
+	}
+
+	libx264, ok := byName["libx264"]
+	if !ok {
+		t.Fatal("derived encoder libx264 missing from /api/v1/encoders")
+	}
+	if libx264.IsHW {
+		t.Errorf("libx264 IsHW = true, want false")
+	}
+	if libx264.Type != "video" {
+		t.Errorf("libx264 Type = %q, want %q", libx264.Type, "video")
+	}
+	nvenc, ok := byName["h264_nvenc"]
+	if !ok {
+		t.Fatal("derived encoder h264_nvenc missing from /api/v1/encoders")
+	}
+	if !nvenc.IsHW {
+		t.Errorf("h264_nvenc IsHW = false, want true")
+	}
+	if nvenc.Type != "video" {
+		t.Errorf("h264_nvenc Type = %q, want %q", nvenc.Type, "video")
+	}
+
+	decReq := httptest.NewRequest("GET", "/api/v1/decoders", nil)
+	decReq.Header.Set("Authorization", "Bearer test-token")
+	decW := httptest.NewRecorder()
+	router.ServeHTTP(decW, decReq)
+	if decW.Code != http.StatusOK {
+		t.Fatalf("decoders endpoint failed: %d %s", decW.Code, decW.Body.String())
+	}
+	var decResp handlers.ListDecodersResponse
+	if err := json.NewDecoder(decW.Body).Decode(&decResp); err != nil {
+		t.Fatalf("decode decoders: %v", err)
+	}
+	decByID := make(map[string]bool, len(decResp.Decoders))
+	for _, dec := range decResp.Decoders {
+		decByID[dec.Name] = true
+	}
+	if !decByID["h264_cuvid"] {
+		t.Errorf("derived decoder h264_cuvid missing from /api/v1/decoders")
+	}
+}
+
+// TestRegisterWorker_PreservesExplicitVideoEncoders verifies the derive guard:
+// a rich client that already sends video_encoders/video_decoders is not
+// overridden by the canonical flat list (len(...) == 0 branch is skipped).
+func TestRegisterWorker_PreservesExplicitVideoEncoders(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+	router.Get("/api/v1/encoders", h.ListAllEncoders)
+
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "rich-worker",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+			VideoEncoders: []protocol.EncoderInfo{
+				{Name: "libx264", Description: "rich desc", Type: "video", IsHW: false, Priority: 7},
+			},
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("registration failed: %d %s", w.Code, w.Body.String())
+	}
+
+	encReq := httptest.NewRequest("GET", "/api/v1/encoders", nil)
+	encReq.Header.Set("Authorization", "Bearer test-token")
+	encW := httptest.NewRecorder()
+	router.ServeHTTP(encW, encReq)
+	if encW.Code != http.StatusOK {
+		t.Fatalf("encoders endpoint failed: %d %s", encW.Code, encW.Body.String())
+	}
+	var encResp handlers.ListEncodersResponse
+	if err := json.NewDecoder(encW.Body).Decode(&encResp); err != nil {
+		t.Fatalf("decode encoders: %v", err)
+	}
+	if len(encResp.Encoders) != 1 {
+		t.Fatalf("encoders count = %d, want 1 (no derived duplication)", len(encResp.Encoders))
+	}
+	got := encResp.Encoders[0]
+	if got.Name != "libx264" {
+		t.Errorf("encoder name = %q, want %q", got.Name, "libx264")
+	}
+	if got.Description != "rich desc" {
+		t.Errorf("encoder description = %q, want %q (explicit value preserved)", got.Description, "rich desc")
+	}
+	if got.Priority != 7 {
+		t.Errorf("encoder priority = %d, want 7 (explicit value preserved)", got.Priority)
+	}
+}
+
 func TestWorkerReRegistration(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()

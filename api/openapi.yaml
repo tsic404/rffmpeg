@@ -674,6 +674,39 @@ components:
         message:
           type: string
 
+    EncoderInfo:
+      type: object
+      required: [name, type, is_hw]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          description: '"video", "audio", or "subtitle"'
+        is_hw:
+          type: boolean
+          description: True when hardware-accelerated
+        priority:
+          type: integer
+          description: User-defined priority; higher is preferred
+
+    DecoderInfo:
+      type: object
+      required: [name, type, is_hw]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          description: '"video", "audio", or "subtitle"'
+        is_hw:
+          type: boolean
+          description: True when hardware-accelerated
+
     WorkerCapabilities:
       type: object
       required: [encoders, ffmpeg_version]
@@ -682,10 +715,12 @@ components:
           type: string
         encoders:
           type: array
+          description: Video-only flat encoder name list (canonical field)
           items:
             type: string
         decoders:
           type: array
+          description: Video-only flat decoder name list (canonical field)
           items:
             type: string
         ffmpeg_version:
@@ -693,6 +728,16 @@ components:
         max_concurrent:
           type: integer
           default: 1
+        video_encoders:
+          type: array
+          items:
+            $ref: '#/components/schemas/EncoderInfo'
+          description: Optional request-side rich encoder metadata; consumed by GET /api/v1/encoders only
+        video_decoders:
+          type: array
+          items:
+            $ref: '#/components/schemas/DecoderInfo'
+          description: Optional request-side rich decoder metadata; consumed by GET /api/v1/decoders only
 
     WorkerRegisterRequest:
       type: object

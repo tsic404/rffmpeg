@@ -104,14 +104,21 @@ type GPUDeviceInfo struct {
 
 // WorkerCapabilities holds the complete capabilities of a worker
 type WorkerCapabilities struct {
-	// Legacy fields (retained for backward compatibility)
+	// Canonical capability fields. encoders is the normative flat list:
+	// the only encoder field that participates in scheduling, registration
+	// validation, and worker responses (video_encoders below is request-side
+	// aggregation metadata only).
 	GPUModel      string   `json:"gpu_model,omitempty"`
 	Encoders      []string `json:"encoders"`
 	Decoders      []string `json:"decoders,omitempty"`
 	FFmpegVersion string   `json:"ffmpeg_version"`
 	MaxConcurrent int      `json:"max_concurrent,omitempty"`
 
-	// Enhanced capability fields
+	// Optional request-side rich metadata. video_encoders/video_decoders are
+	// sent by workers that probe ffmpeg and are consumed only by the
+	// GET /api/v1/encoders and /api/v1/decoders aggregation endpoints. They
+	// are NOT returned in any worker response. When a client registers only
+	// the canonical flat lists, the server derives these from them.
 	VideoEncoders    []EncoderInfo   `json:"video_encoders,omitempty"`    // Video encoders with HW markers
 	VideoDecoders    []DecoderInfo   `json:"video_decoders,omitempty"`    // Video decoders with HW markers
 	HWEncoders       []string        `json:"hw_encoders,omitempty"`       // List of HW-accelerated encoder names

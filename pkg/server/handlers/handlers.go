@@ -889,6 +889,29 @@ func (h *Handler) RegisterWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Derive the optional request-side rich metadata (video_encoders /
+	// video_decoders) from the canonical flat lists when a minimal client
+	// registers without them. The rich lists feed GET /api/v1/encoders and
+	// GET /api/v1/decoders only; leaving them nil makes those endpoints return
+	// empty for every spec-conformant client (TSI-2522).
+	if len(req.Capabilities.VideoEncoders) == 0 {
+		for _, name := range req.Capabilities.Encoders {
+			req.Capabilities.VideoEncoders = append(req.Capabilities.VideoEncoders, protocol.EncoderInfo{
+				Name: name,
+				Type: "video",
+				IsHW: isHWEncoder(name),
+			})
+		}
+	}
+	if len(req.Capabilities.VideoDecoders) == 0 {
+		for _, name := range req.Capabilities.Decoders {
+			req.Capabilities.VideoDecoders = append(req.Capabilities.VideoDecoders, protocol.DecoderInfo{
+				Name: name,
+				Type: "video",
+				IsHW: isHWEncoder(name),
+			})
+		}
+	}
 	worker, err := h.db.CreateOrUpdateWorker(req.WorkerID, req.Name, req.Capabilities)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
