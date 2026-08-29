@@ -74,10 +74,21 @@ type Client struct {
 	http      *http.Client
 }
 
+// normalizeServerURL strips a trailing /api/v1 (with or without trailing
+// slashes) from a server root URL. The CLI appends /api/v1 to the root URL
+// itself, so a user-supplied "http://host/api/v1" would otherwise produce
+// "http://host/api/v1/api/v1/..." and fail with 404. Trailing slashes are
+// removed as before.
+func normalizeServerURL(serverURL string) string {
+	serverURL = strings.TrimSuffix(serverURL, "/")
+	serverURL = strings.TrimSuffix(serverURL, "/api/v1")
+	return strings.TrimSuffix(serverURL, "/")
+}
+
 // New creates a new client
 func New(serverURL, token string) *Client {
 	return &Client{
-		serverURL: strings.TrimSuffix(serverURL, "/"),
+		serverURL: normalizeServerURL(serverURL),
 		token:     token,
 		http: &http.Client{
 			Timeout: DefaultTimeout,

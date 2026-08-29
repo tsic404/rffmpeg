@@ -1502,7 +1502,7 @@ rffmpeg options:
   -sample_fmts    List sample formats (runs local ffmpeg)
   -bsfs           List bitstream filters (runs local ffmpeg)
   -colors         List color names (runs local ffmpeg)
-  --server URL    Server URL (overrides config, default: http://localhost:8080)
+  --server URL    Server root URL (overrides config, default: http://localhost:8080, no /api/v1)
   --token TOKEN   Auth token (overrides config)
   -q, --quiet     Quiet mode (suppress progress output)
   --auto-hw[=true|false]  Enable automatic hardware encoder upgrade (default: false)
