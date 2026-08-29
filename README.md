@@ -512,8 +512,8 @@ Response:
 cp input.mp4 copy.mp4
 
 # 两次提交：不同的本地路径，相同的内容
-./bin/rffmpeg --server http://localhost:8080/api/v1 -i input.mp4 -c:v libx264 out1.mp4
-./bin/rffmpeg --server http://localhost:8080/api/v1 -i copy.mp4  -c:v libx264 out2.mp4
+./bin/rffmpeg --server http://localhost:8080 -i input.mp4 -c:v libx264 out1.mp4
+./bin/rffmpeg --server http://localhost:8080 -i copy.mp4  -c:v libx264 out2.mp4
 ```
 
 第二次提交时 CLI 的 stderr 会出现 `[rffmpeg] Cache hit: <key>`，且该任务 `GET /api/v1/jobs/{jobId}` 的 `cached` 字段为 `true`——两次上传得到相同 `file_id`，转码参数相同，缓存键相同，输出复用第一次的结果。
