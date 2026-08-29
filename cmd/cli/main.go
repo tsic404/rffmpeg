@@ -656,7 +656,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 // clientWaitDeadline computes the client-side give-up time. timeout is the
 // per-job execution deadline; noWorkerDeadline is the server's
-// NO_WORKER_AVAILABLE verdict time for a pending/queued job. The client waits
+// NO_WORKER_AVAILABLE verdict time for a pending job. The client waits
 // until the later bound (plus clientVerdictGrace) so it never cancels before
 // the server can emit its verdict. Returns false when neither bound exists.
 //

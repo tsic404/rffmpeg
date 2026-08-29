@@ -40,7 +40,8 @@ type Handler struct {
 	heartbeatTimeout time.Duration
 	// noWorkerJobTimeout and timeoutCheckInterval mirror the scheduler's
 	// starvation knobs so GetJob/PullWorkerJobs can attach NoWorkerDeadline
-	// to unassigned pending jobs (the only status the sweep fails). <=0
+	// to unassigned pending jobs only when the cluster has no live
+	// schedulable worker (the exact filter the sweep fails). <=0
 	// noWorkerJobTimeout disables the deadline.
 	noWorkerJobTimeout   time.Duration
 	timeoutCheckInterval time.Duration
@@ -1548,12 +1549,24 @@ func (h *Handler) dbJobToJobInfo(job *db.Job) protocol.JobInfo {
 	if job.Timeout.Valid {
 		info.Timeout = &job.Timeout.Time
 	}
-	// Match checkNoWorkerStarvation's exact filter: pending AND unassigned.
-	// A queued job already has a worker_id and can never receive
-	// NO_WORKER_AVAILABLE, so it carries no deadline.
+	// Match checkNoWorkerStarvation's exact filter: pending AND unassigned
+	// AND the cluster has no live schedulable worker. A queued job already
+	// has a worker_id and can never receive NO_WORKER_AVAILABLE; a pending
+	// job behind a busy-but-live worker is never swept (the sweep's
+	// live-worker guard short-circuits, TSI-2204), so neither carries a
+	// deadline. A non-positive heartbeatTimeout disables the liveness
+	// filter, mirroring the sweep's HeartbeatFreshness semantics.
 	if job.Status == protocol.JobStatusPending && h.noWorkerJobTimeout > 0 {
-		d := job.CreatedAt.Add(h.noWorkerJobTimeout + h.timeoutCheckInterval)
-		info.NoWorkerDeadline = &d
+		liveWorkers, err := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
+		if err != nil {
+			// A failed lookup must not poison the response: skip the
+			// deadline (the sweep would also fail its lookup and skip the
+			// tick, so the job keeps waiting and no verdict is imminent).
+			log.Printf("dbJobToJobInfo: failed to check live schedulable workers for job %s: %v", job.ID, err)
+		} else if len(liveWorkers) == 0 {
+			d := job.CreatedAt.Add(h.noWorkerJobTimeout + h.timeoutCheckInterval)
+			info.NoWorkerDeadline = &d
+		}
 	}
 
 	return info

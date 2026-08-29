@@ -51,11 +51,14 @@ type JobInfo struct {
 	FailureDetails  string     `json:"failure_details,omitempty"`
 	Timeout         *time.Time `json:"timeout,omitempty"` // Per-job timeout (nil = use default)
 	// NoWorkerDeadline is the server-computed wall-clock time at which a
-	// still-pending/queued job will be failed as NO_WORKER_AVAILABLE by the
+	// still-pending job will be failed as NO_WORKER_AVAILABLE by the
 	// starvation sweep (created_at + no_worker_job_timeout +
-	// timeout_check_interval). Nil for non-pending jobs or when the sweep is
-	// disabled. The CLI uses it to size its own wait window so a client-side
-	// timeout can never fire before the server verdict is observable.
+	// timeout_check_interval). Nil for non-pending jobs, when the sweep is
+	// disabled, or when at least one live schedulable worker exists (a busy
+	// worker keeps the job waiting — the sweep's live-worker guard
+	// short-circuits). The CLI uses it to size its own wait window so a
+	// client-side timeout can never fire before the server verdict is
+	// observable.
 	NoWorkerDeadline *time.Time `json:"no_worker_deadline,omitempty"`
 	DirectPaths      []string   `json:"direct_paths,omitempty"` // Direct output paths for pass-through mode (TSI-807)
 	CreatedAt        time.Time  `json:"created_at"`
