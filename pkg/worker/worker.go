@@ -734,7 +734,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		log.Printf("Rewrite error for job %s: %v", job.ID, err)
 		// Fail the job if rewrite returns an error (e.g., format not available)
 		jobFailed = true
-		w.reportFailure(job.ID, 1, fmt.Sprintf("Encoder rewrite failed: %v", err), false)
+		w.reportFailure(job.ID, 1, fmt.Sprintf("Encoder rewrite failed: %v", err), false, batcher.FlushAndWait)
 		return
 	}
 	args = rewrittenArgs
@@ -880,7 +880,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			if networkOutput && intercepted.FFmpegError.Type == ErrorTypeOutputEmpty {
 				log.Printf("Job %s: network output detected, skipping output_empty retry", job.ID)
 				jobFailed = true
-				w.reportFailure(job.ID, result.ExitCode, result.Stderr, false)
+				w.reportFailure(job.ID, result.ExitCode, result.Stderr, false, batcher.FlushAndWait)
 				return
 			}
 
@@ -918,12 +918,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			errMsg := fmt.Sprintf("All retry attempts exhausted (original encoder: %s, final stage: %s): %s",
 				retryResult.OriginalEncoder, retryResult.FinalStage, retryResult.FinalResult.Stderr)
 			jobFailed = true
-			w.reportFailure(job.ID, retryResult.FinalResult.ExitCode, errMsg, false)
+			w.reportFailure(job.ID, retryResult.FinalResult.ExitCode, errMsg, false, batcher.FlushAndWait)
 			return
 		}
 
 		jobFailed = true
-		w.reportFailure(job.ID, result.ExitCode, result.Stderr, false)
+		w.reportFailure(job.ID, result.ExitCode, result.Stderr, false, batcher.FlushAndWait)
 		return
 	}
 
@@ -999,7 +999,17 @@ func logTerminalReportError(jobID, action string, err error) {
 // Error is the concise classification summary, never the full stderr: the
 // complete ffmpeg log already reaches the CLI once via the live stderr stream,
 // so echoing it again in the terminal Error field duplicates it (TSI-2523).
-func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached bool) {
+func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached bool, flush ...func()) {
+	// Flush any pending stderr before reporting the terminal failure so the
+	// tail stderr reaches the server before the terminal status PATCH. On the
+	// fast-failure path the batcher timer may not have fired yet, and the
+	// deferred batcher.Close() would flush it only after this PATCH — letting
+	// CLI clients observe the terminal status before the tail stderr (TSI-2581).
+	for _, f := range flush {
+		if f != nil {
+			f()
+		}
+	}
 	failureType, failureDetails := ClassifyFailure(exitCode, errMsg, errMsg, false, false)
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, failureDetails, cached, string(failureType), failureDetails); err != nil {
 		logTerminalReportError(jobID, "report failure", err)

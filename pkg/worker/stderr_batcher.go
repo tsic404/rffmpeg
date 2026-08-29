@@ -127,6 +127,19 @@ func (b *StderrBatcher) Flush() {
 	b.flushLocked()
 }
 
+// FlushAndWait flushes any pending chunks and blocks until all in-flight
+// stderr sends complete. Unlike Close it neither stops the flush timer nor
+// cancels the context, so callers may keep appending afterward. It exists so
+// a terminal job status can be reported after the tail stderr has actually
+// reached the server on the fast-failure path, where the batcher timer may
+// not have fired yet (TSI-2581).
+func (b *StderrBatcher) FlushAndWait() {
+	b.mu.Lock()
+	b.flushLocked()
+	b.mu.Unlock()
+	b.wg.Wait()
+}
+
 // Close stops the batcher and flushes any remaining chunks.
 // It waits for all pending goroutines to complete before returning
 // to ensure all stderr chunks are sent before subsequent status updates.
