@@ -484,6 +484,10 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 					log.Printf("Scheduler: Failed to broadcast starvation failure for job %s: %v", jobID, err)
 				}
 			}
+			// Wake in-process DB waiters (probe handler). The bulk UPDATE
+			// bypasses the terminal-status writers that normally notify, so
+			// notifyTerminal must run here too (TSI-2562).
+			s.db.NotifyTerminal(jobID)
 		}
 	}
 }

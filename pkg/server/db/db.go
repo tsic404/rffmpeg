@@ -76,7 +76,8 @@ type Worker struct {
 
 // Database wraps the SQL database connection
 type Database struct {
-	db *sql.DB
+	db       *sql.DB
+	notifier *JobNotifier
 }
 
 // sqliteDSN builds a SQLite DSN with the pragmas required for safe concurrent
@@ -113,8 +114,7 @@ func New(dbPath string) (*Database, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-
-	d := &Database{db: db}
+	d := &Database{db: db, notifier: newJobNotifier()}
 
 	// An in-memory database lives per-connection: every extra pooled
 	// connection would see its own empty database. Pin the pool to one
@@ -139,6 +139,25 @@ func (d *Database) Close() error {
 // GetDB returns the underlying sql.DB connection (for testing purposes)
 func (d *Database) GetDB() *sql.DB {
 	return d.db
+}
+
+// JobNotifier returns the per-job terminal-status notifier backing Subscribe.
+func (d *Database) JobNotifier() *JobNotifier {
+	return d.notifier
+}
+
+// NotifyTerminal wakes in-process waiters after a successful terminal-status
+// write. It is nil-safe for databases constructed without a notifier.
+func (d *Database) NotifyTerminal(jobID string) {
+	if d.notifier != nil {
+		d.notifier.Notify(jobID)
+	}
+}
+
+// notifyTerminal is the internal alias used by the DB's own terminal-status
+// writers; exported NotifyTerminal covers out-of-band writers (scheduler).
+func (d *Database) notifyTerminal(jobID string) {
+	d.NotifyTerminal(jobID)
 }
 
 // initTables creates the necessary tables
@@ -460,6 +479,7 @@ func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStat
 	if err != nil {
 		return fmt.Errorf("failed to check rows affected: %w", err)
 	}
+
 	if rows == 0 {
 		// Distinguish "job missing" from "job already terminal" so callers
 		// can treat a lost race (late report vs. concurrent cancel) as a
@@ -468,6 +488,10 @@ func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStat
 			return protocol.ErrJobNotFound
 		}
 		return protocol.ErrJobTerminal
+	}
+
+	if protocol.IsTerminalStatus(status) {
+		d.notifyTerminal(id)
 	}
 
 	return nil
@@ -519,6 +543,7 @@ func (d *Database) updateJobTerminalStatusWithOwner(jobID, workerID string, stat
 	if rows == 0 {
 		return protocol.ErrJobNotOwned
 	}
+	d.notifyTerminal(jobID)
 	return nil
 }
 
@@ -594,6 +619,7 @@ func (d *Database) CancelJob(id string) error {
 		return fmt.Errorf("cannot cancel job in status %s", job.Status)
 	}
 
+	d.notifyTerminal(id)
 	return nil
 }
 
@@ -1327,6 +1353,7 @@ func (d *Database) FailJob(id, errMsg string, failureType string) error {
 		return fmt.Errorf("cannot fail job in status %s: %w", job.Status, protocol.ErrJobTerminal)
 	}
 
+	d.notifyTerminal(id)
 	return nil
 }
 

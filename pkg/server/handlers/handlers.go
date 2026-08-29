@@ -1163,33 +1163,22 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Poll for job completion
-	var finalJob *db.Job
-	for i := 0; i < 60; i++ { // max 2 minutes (60 * 2s polls)
-		// Stop burning server resources when the client went away: cancel
-		// the dispatched probe job and return (TSI-2365).
-		select {
-		case <-r.Context().Done():
-			_ = h.db.CancelJob(job.ID)
-			return
-		case <-time.After(2 * time.Second):
-		}
-
-		j, err := h.db.GetJob(job.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-				protocol.ErrCodeInternalError, "Failed to get job status", err,
-			))
-			return
-		}
-		if protocol.IsTerminalStatus(j.Status) {
-			finalJob = j
-			break
-		}
+	// Wait for the probe job to reach a terminal state. A per-job notifier
+	// (woken by every terminal-status DB write) replaces the old 2-second
+	// poll loop, so terminal-state propagation is immediate instead of up to
+	// 2s late (TSI-2520). The overall budget mirrors the previous 60x2s loop
+	// (~2 minutes), but the probe job itself times out after 60s, so the
+	// extra headroom only matters for a late report racing the deadline.
+	const probeWaitBudget = 2 * time.Minute
+	finalJob, err := h.waitForProbeTerminal(r.Context(), job.ID, probeWaitBudget)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to get job status", err,
+		))
+		return
 	}
-
 	if finalJob == nil {
-		// Job timed out in polling
+		// Job timed out waiting for a terminal state
 		writeJSON(w, http.StatusGatewayTimeout, protocol.ProbeResponse{
 			Error:   "timeout",
 			Message: "Probe job did not complete within the timeout period",
@@ -1302,6 +1291,48 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		Streams: ffprobeResult.Streams,
 		Rffmpeg: rffmpegMeta,
 	})
+}
+
+// waitForProbeTerminal blocks until the probe job reaches a terminal state,
+// the request context is cancelled, or the overall budget elapses. It returns
+// (nil, nil) on budget exhaustion — the caller maps that to a 504 — and a
+// non-nil error only on a database failure or a cancelled request (whose job
+// is cancelled in flight, mirroring the old poll loop's client-gone path).
+func (h *Handler) waitForProbeTerminal(ctx context.Context, jobID string, waitTimeout time.Duration) (*db.Job, error) {
+	var notifyCh <-chan struct{}
+	var unsubscribe func()
+	if n := h.db.JobNotifier(); n != nil {
+		// Subscribe BEFORE the first read so a terminal write racing this
+		// function cannot fall between the read and the blocking select.
+		notifyCh, unsubscribe = n.Subscribe(jobID)
+		defer unsubscribe()
+	}
+
+	timer := time.NewTimer(waitTimeout)
+	defer timer.Stop()
+
+	for {
+		j, err := h.db.GetJob(jobID)
+		if err != nil {
+			return nil, err
+		}
+		if protocol.IsTerminalStatus(j.Status) {
+			return j, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			// Client went away: stop burning server resources and cancel
+			// the dispatched probe job (TSI-2365).
+			_ = h.db.CancelJob(jobID)
+			return nil, ctx.Err()
+		case <-timer.C:
+			return nil, nil
+		case <-notifyCh:
+			// Terminal write observed; loop re-reads the DB (the source of
+			// truth) instead of trusting the hint directly.
+		}
+	}
 }
 
 // codecFormatPriority defines the preferred encoders (HW first, then SW) for each codec format.
