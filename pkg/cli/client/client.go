@@ -178,7 +178,7 @@ func (c *Client) UploadFile(filePath string) (string, error) {
 	// draining the streaming body, so the multipart writer races the closed
 	// connection and would otherwise surface "failed to copy file: io:
 	// read/write on closed pipe", masking the real cause (TSI-2598).
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
 		var errResp protocol.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
@@ -1255,7 +1255,7 @@ func (c *Client) UploadFileChunked(filePath string, chunkSize int64) (string, er
 	// and uploadSingleChunk (TSI-2598 / TSI-2618). The init endpoint authenticates
 	// before any chunk is uploaded, so a >100MB file with a bad token fails here
 	// and never reaches the chunk endpoint (TSI-2625).
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
 		var errResp protocol.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
@@ -1457,7 +1457,7 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 	// draining the streaming body, so the multipart writer races the closed
 	// connection and would otherwise surface "chunk write failed: io:
 	// read/write on closed pipe", masking the real cause (TSI-2598).
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
 		var errResp protocol.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
