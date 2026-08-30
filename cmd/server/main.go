@@ -253,6 +253,10 @@ func main() {
 		// Health check
 		r.Get("/health", h.Health)
 
+		// Migration audit events
+		r.Get("/migrations", h.ListMigrationEvents)
+		r.Get("/migrations/{eventId}", h.GetMigrationEvent)
+
 		// Probe (ffprobe sync endpoint) — behind the job-submission rate
 		// limiter: a probe dispatches real work, so an unthrottled client can
 		// starve the queue just like unbounded job submissions (TSI-2365).

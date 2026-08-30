@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -87,8 +88,8 @@ func TestGetMigrationEventNotFound(t *testing.T) {
 	defer db.Close()
 
 	_, err := db.GetMigrationEvent("non-existent")
-	if err == nil {
-		t.Error("Expected error for non-existent event")
+	if !errors.Is(err, protocol.ErrMigrationEventNotFound) {
+		t.Errorf("Expected ErrMigrationEventNotFound, got %v", err)
 	}
 }
 

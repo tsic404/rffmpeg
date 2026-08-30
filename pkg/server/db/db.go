@@ -2318,7 +2318,7 @@ func (d *Database) GetMigrationEvent(id string) (*MigrationEvent, error) {
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("migration event not found")
+		return nil, protocol.ErrMigrationEventNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get migration event: %w", err)
@@ -2332,7 +2332,7 @@ func (d *Database) GetMigrationEvents(limit int, offset int) ([]*MigrationEvent,
 	rows, err := d.db.Query(`
 		SELECT id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at
 		FROM migration_events
-		ORDER BY timestamp DESC
+		ORDER BY timestamp DESC, id DESC
 		LIMIT ? OFFSET ?
 	`, limit, offset)
 
@@ -2367,7 +2367,7 @@ func (d *Database) GetMigrationEventsByWorker(workerID string, limit int) ([]*Mi
 		SELECT id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at
 		FROM migration_events
 		WHERE worker_id = ?
-		ORDER BY timestamp DESC
+		ORDER BY timestamp DESC, id DESC
 		LIMIT ?
 	`, workerID, limit)
 

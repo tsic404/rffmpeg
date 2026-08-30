@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/server/auth"
 	"github.com/tsix404/rffmpeg/pkg/server/db"
+	"github.com/tsix404/rffmpeg/pkg/server/migration"
 	"github.com/tsix404/rffmpeg/pkg/server/ratelimit"
 	"github.com/tsix404/rffmpeg/pkg/server/scheduler"
 	"github.com/tsix404/rffmpeg/pkg/server/storage"
@@ -1616,6 +1618,95 @@ func (h *Handler) GetWorker(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, GetWorkerResponse{Worker: dbWorkerToWorkerInfo(worker, h.workerStateMap())})
+}
+
+// ListMigrationEvents handles listing worker migration audit events.
+// GET /api/v1/migrations
+// Query params: limit (default 50, capped at 500), offset (default 0).
+func (h *Handler) ListMigrationEvents(w http.ResponseWriter, r *http.Request) {
+	limit, offset := parsePagination(r, 50, 500)
+
+	events, err := h.db.GetMigrationEvents(limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to list migration events", err,
+		))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, MigrationEventsResponse{
+		Events: migrationEventsToInfo(events),
+	})
+}
+
+// GetMigrationEvent retrieves a single worker migration audit event by ID.
+// GET /api/v1/migrations/{eventId}
+func (h *Handler) GetMigrationEvent(w http.ResponseWriter, r *http.Request) {
+	eventID := chi.URLParam(r, "eventId")
+
+	event, err := h.db.GetMigrationEvent(eventID)
+	if err != nil {
+		if errors.Is(err, protocol.ErrMigrationEventNotFound) {
+			writeError(w, http.StatusNotFound, protocol.NewProtocolError(
+				protocol.ErrCodeNotFound, "Migration event not found", err,
+			))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to get migration event", err,
+		))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, MigrationEventResponse{Event: migration.FromDBEvent(event)})
+}
+
+// migrationEventsToInfo converts db.MigrationEvent records into the public
+// migration.EventInfo slice, reusing migration.FromDBEvent so handlers and
+// workerhealth.Monitor share one conversion path.
+func migrationEventsToInfo(events []*db.MigrationEvent) []migration.EventInfo {
+	if events == nil {
+		return []migration.EventInfo{}
+	}
+	result := make([]migration.EventInfo, len(events))
+	for i, event := range events {
+		result[i] = migration.FromDBEvent(event)
+	}
+	return result
+}
+
+// MigrationEventResponse wraps a single migration event for JSON responses.
+type MigrationEventResponse struct {
+	Event migration.EventInfo `json:"event"`
+}
+
+// MigrationEventsResponse wraps a page of migration events for JSON responses.
+type MigrationEventsResponse struct {
+	Events []migration.EventInfo `json:"events"`
+}
+
+// parsePagination extracts limit/offset query parameters with defaults and a
+// cap. Non-integer values and non-positive limits fall back to the defaults;
+// the cap bounds the LIMIT sent to SQLite.
+func parsePagination(r *http.Request, defaultLimit, maxLimit int) (int, int) {
+	limit := defaultLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+
+	return limit, offset
 }
 
 // ListWorkersByEncoder handles listing workers that have a specific encoder

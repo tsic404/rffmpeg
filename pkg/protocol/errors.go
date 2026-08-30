@@ -27,6 +27,10 @@ var (
 	ErrJobNotFound       = errors.New("job not found")
 	ErrJobTerminal       = errors.New("job already in terminal state")
 	ErrRateLimitExceeded = errors.New("rate limit exceeded")
+
+	// ErrMigrationEventNotFound is returned when a migration event ID is not
+	// present in the audit log (migration_events table).
+	ErrMigrationEventNotFound = errors.New("migration event not found")
 )
 
 type ProtocolError struct {

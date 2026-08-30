@@ -1,7 +1,10 @@
 package migration
 
 import (
+	"encoding/json"
 	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/server/db"
 )
 
 // Reason represents why a job migration occurred.
@@ -51,6 +54,32 @@ type EventInfo struct {
 	RetryCount   int       `json:"retry_count"`
 	JobIDs       []string  `json:"job_ids"`
 	JobsMigrated int       `json:"jobs_migrated"`
+}
+
+// FromDBEvent converts a db.MigrationEvent into the public EventInfo.
+// The job_ids column stores a JSON array string; an unmarshal failure
+// degrades to an empty list rather than failing the whole read.
+func FromDBEvent(event *db.MigrationEvent) EventInfo {
+	var jobIDs []string
+	if err := json.Unmarshal([]byte(event.JobIDs), &jobIDs); err != nil {
+		jobIDs = []string{}
+	}
+
+	workerName := ""
+	if event.WorkerName.Valid {
+		workerName = event.WorkerName.String
+	}
+
+	return EventInfo{
+		ID:           event.ID,
+		Timestamp:    event.Timestamp,
+		WorkerID:     event.WorkerID,
+		WorkerName:   workerName,
+		Reason:       Reason(event.Reason),
+		RetryCount:   event.RetryCount,
+		JobIDs:       jobIDs,
+		JobsMigrated: event.JobsMigrated,
+	}
 }
 
 // Config holds configuration for the migration manager.

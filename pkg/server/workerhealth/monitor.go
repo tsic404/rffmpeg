@@ -1,7 +1,6 @@
 package workerhealth
 
 import (
-	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -321,26 +320,7 @@ func (m *Monitor) GetMigrationEvents(limit int, offset int) ([]migration.EventIn
 
 	result := make([]migration.EventInfo, len(events))
 	for i, event := range events {
-		var jobIDs []string
-		if err := json.Unmarshal([]byte(event.JobIDs), &jobIDs); err != nil {
-			jobIDs = []string{}
-		}
-
-		workerName := ""
-		if event.WorkerName.Valid {
-			workerName = event.WorkerName.String
-		}
-
-		result[i] = migration.EventInfo{
-			ID:           event.ID,
-			Timestamp:    event.Timestamp,
-			WorkerID:     event.WorkerID,
-			WorkerName:   workerName,
-			Reason:       migration.Reason(event.Reason),
-			RetryCount:   event.RetryCount,
-			JobIDs:       jobIDs,
-			JobsMigrated: event.JobsMigrated,
-		}
+		result[i] = migration.FromDBEvent(event)
 	}
 
 	return result, nil
@@ -355,26 +335,7 @@ func (m *Monitor) GetMigrationEventsByWorker(workerID string, limit int) ([]migr
 
 	result := make([]migration.EventInfo, len(events))
 	for i, event := range events {
-		var jobIDs []string
-		if err := json.Unmarshal([]byte(event.JobIDs), &jobIDs); err != nil {
-			jobIDs = []string{}
-		}
-
-		workerName := ""
-		if event.WorkerName.Valid {
-			workerName = event.WorkerName.String
-		}
-
-		result[i] = migration.EventInfo{
-			ID:           event.ID,
-			Timestamp:    event.Timestamp,
-			WorkerID:     event.WorkerID,
-			WorkerName:   workerName,
-			Reason:       migration.Reason(event.Reason),
-			RetryCount:   event.RetryCount,
-			JobIDs:       jobIDs,
-			JobsMigrated: event.JobsMigrated,
-		}
+		result[i] = migration.FromDBEvent(event)
 	}
 
 	return result, nil
