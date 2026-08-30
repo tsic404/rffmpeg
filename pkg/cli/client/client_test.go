@@ -353,6 +353,53 @@ func TestUploadFileAuthRejected(t *testing.T) {
 	}
 }
 
+// TestUploadFileChunkedAuthRejected verifies that an HTTP 401 rejection from
+// the chunk upload endpoint surfaces as a readable authentication error — not
+// the misleading "chunk write failed: io: read/write on closed pipe" the pipe
+// writer would otherwise report (TSI-2618).
+func TestUploadFileChunkedAuthRejected(t *testing.T) {
+	content := []byte("chunked auth test content")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/upload/init":
+			json.NewEncoder(w).Encode(protocol.ChunkUploadInitResponse{
+				UploadID:    "upload-auth-test",
+				ChunkSize:   int64(len(content)),
+				TotalChunks: 1,
+			})
+		case "/api/v1/upload/chunk/upload-auth-test/0":
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(protocol.ErrorResponse{
+				Code:    protocol.ErrCodeUnauthorized,
+				Message: "Invalid token",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "wrong-token")
+	tmpFile := createTestFile(t, content)
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(len(content)))
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty on auth rejection", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for 401 chunk upload, got nil")
+	}
+	want := "authentication rejected (HTTP 401)"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q missing %q", err, want)
+	}
+	if !strings.Contains(err.Error(), "Invalid token") {
+		t.Errorf("error %q missing server message", err)
+	}
+}
+
 // TestUploadFileChunked tests the chunked file upload
 func TestUploadFileChunked(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)

@@ -1439,6 +1439,20 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 	}
 	defer DrainAndClose(resp.Body)
 
+	// Check for an auth rejection before the pipe-writer error. The server
+	// rejects unauthenticated chunk uploads (fail-closed token check) without
+	// draining the streaming body, so the multipart writer races the closed
+	// connection and would otherwise surface "chunk write failed: io:
+	// read/write on closed pipe", masking the real cause (TSI-2598).
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		msg := "missing or invalid token"
+		var errResp protocol.ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+			msg = errResp.Message
+		}
+		return fmt.Errorf("chunk upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
+	}
+
 	if err := <-errChan; err != nil {
 		return fmt.Errorf("chunk write failed: %w", err)
 	}
