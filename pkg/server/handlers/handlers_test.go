@@ -2551,6 +2551,65 @@ func TestProbeDirectPathTraversalRejected(t *testing.T) {
 	}
 }
 
+// TSI-2718: a SubmitJob direct path containing a ".." component must be
+// rejected server-side (same shared pathutil.ContainsPathTraversal the worker
+// uses), fail-fast before job creation — the opposite of dispatching it and
+// letting the worker reject it at runtime.
+func TestSubmitJobDirectPathTraversalRejected(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{"dummy.mp4"},
+		DirectPath: []string{"../etc/passwd"},
+		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for traversal direct path, got %d. Body: %s", w.Code, w.Body.String())
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeInvalidRequest {
+		t.Errorf("Expected error code 'invalid_request', got '%s'", errResp.Code)
+	}
+}
+
+// TSI-2718: a legitimate dot-prefixed filename such as "my..video.mp4" must
+// not be false-positived by the component-level guard.
+func TestSubmitJobDirectPathDotFilenameAccepted(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// No worker is registered: reaching the worker-availability guard proves
+	// the traversal validation passed (503) rather than being rejected (400).
+	h.SetHeartbeatTimeout(0)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{"my..video.mp4"},
+		DirectPath: []string{filepath.Join(t.TempDir(), "my..video.mp4")},
+		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 worker_unavailable after traversal validation passed, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestProbeDirectPathStoredInJob verifies that a shared-FS direct path input is
 // persisted as the probe job's direct_paths so the worker can probe it locally.
 // A storage file ID must keep direct_paths empty (downloaded normally), while a

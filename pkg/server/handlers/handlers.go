@@ -350,6 +350,20 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject direct-path traversal server-side (fail-fast), so a bare API call
+	// carrying a ".." component is refused here instead of being dispatched
+	// and only rejected by the worker at runtime (TSI-2718). The shared
+	// pathutil.ContainsPathTraversal keeps this symmetric with the worker.
+	for _, path := range req.DirectPath {
+		if pathutil.ContainsPathTraversal(path) {
+			writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+				protocol.ErrCodeInvalidRequest,
+				"direct path contains '..' traversal: "+path, nil,
+			))
+			return
+		}
+	}
+
 	// Validate input files exist (skip for direct path mode and remote URLs)
 	if len(req.DirectPath) == 0 {
 		for _, fileID := range req.InputFiles {
