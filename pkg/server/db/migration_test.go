@@ -218,6 +218,14 @@ func TestMigrateJobsFromWorker(t *testing.T) {
 	_ = db.AssignJobToWorker(job2.ID, "worker-1")
 	_ = db.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
+	// Backdate job1's created_at so the TSI-2597 refresh is observable:
+	// MigrateJobsFromWorker is the same re-queue = re-submit semantic, so the
+	// starvation/NoWorkerDeadline clock must restart from migration moment.
+	migrationBackdated := time.Now().Add(-1 * time.Hour)
+	if _, err := db.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, migrationBackdated, job1.ID); err != nil {
+		t.Fatalf("Failed to backdate job1 created_at: %v", err)
+	}
+
 	// Migrate jobs
 	migratedJobIDs, err := db.MigrateJobsFromWorker("worker-1")
 	if err != nil {
@@ -242,6 +250,9 @@ func TestMigrateJobsFromWorker(t *testing.T) {
 		}
 		if job.StartedAt.Valid {
 			t.Errorf("Expected job %s started_at to be NULL", jobID)
+		}
+		if jobID == job1.ID && !job.CreatedAt.After(migrationBackdated) {
+			t.Errorf("Expected job %s created_at to be refreshed past backdated time %v, got %v", jobID, migrationBackdated, job.CreatedAt)
 		}
 	}
 }
@@ -495,6 +506,14 @@ func TestResetJobToPending(t *testing.T) {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
+	// Backdate created_at so the refresh (TSI-2597) is observable: after a
+	// failover reset the starvation/NoWorkerDeadline clock must restart from
+	// the migration moment, not the original submission.
+	backdated := time.Now().Add(-1 * time.Hour)
+	if _, err := db.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, backdated, job.ID); err != nil {
+		t.Fatalf("Failed to backdate job created_at: %v", err)
+	}
+
 	// Assign and set running
 	_ = db.AssignJobToWorker(job.ID, "worker-1")
 	_ = db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
@@ -515,6 +534,50 @@ func TestResetJobToPending(t *testing.T) {
 	}
 	if updatedJob.WorkerID.Valid {
 		t.Errorf("Expected worker_id to be NULL, got '%s'", updatedJob.WorkerID.String)
+	}
+	if !updatedJob.CreatedAt.After(backdated) {
+		t.Errorf("Expected created_at to be refreshed past backdated time %v, got %v", backdated, updatedJob.CreatedAt)
+	}
+}
+
+func TestRescheduleJobRefreshesCreatedAt(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	job, err := db.CreateJob(`["input.mkv"]`, `["-c:v","libx264"]`, "output.mkv", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Backdate created_at so the refresh (TSI-2597) is observable: a timeout
+	// requeue is a re-submit, so the starvation/NoWorkerDeadline clock must
+	// restart from the requeue moment, not the original submission.
+	backdated := time.Now().Add(-1 * time.Hour)
+	if _, err := db.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, backdated, job.ID); err != nil {
+		t.Fatalf("Failed to backdate job created_at: %v", err)
+	}
+
+	// Set running so RescheduleJob's running-only guard passes. jobs.worker_id
+	// has no FK, so a worker row is not required for this transition.
+	_ = db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+
+	err = db.RescheduleJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to reschedule job: %v", err)
+	}
+
+	updatedJob, err := db.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusPending {
+		t.Errorf("Expected status 'pending', got '%s'", updatedJob.Status)
+	}
+	if updatedJob.WorkerID.Valid {
+		t.Errorf("Expected worker_id to be NULL, got '%s'", updatedJob.WorkerID.String)
+	}
+	if !updatedJob.CreatedAt.After(backdated) {
+		t.Errorf("Expected created_at to be refreshed past backdated time %v, got %v", backdated, updatedJob.CreatedAt)
 	}
 }
 

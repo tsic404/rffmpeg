@@ -1296,10 +1296,16 @@ func (d *Database) GetTimedOutJobs(timeout time.Duration) ([]*Job, error) {
 // pending; the guarded UPDATE simply matches 0 rows and the caller logs it.
 func (d *Database) RescheduleJob(id string) error {
 	now := time.Now()
+	// TSI-2597: refresh created_at so a timeout requeue re-anchors the
+	// starvation sweep and NoWorkerDeadline clocks exactly like a failover
+	// reset does. Both "re-queue = re-submit" paths share jobs.created_at as
+	// their time base; MaxTimeoutRetries caps the requeues, so the restart
+	// cannot wait unboundedly.
 	result, err := d.db.Exec(`
-		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?
+		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?,
+		                created_at = ?
 		WHERE id = ? AND status = ?
-	`, protocol.JobStatusPending, now, id, protocol.JobStatusRunning)
+	`, protocol.JobStatusPending, now, now, id, protocol.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("failed to reschedule job: %w", err)
 	}
@@ -1409,11 +1415,18 @@ func (d *Database) ResetJobToPending(id string) error {
 	// TSI-2359: only reset jobs still in an active state. A failover sweep
 	// racing a worker's completion must not drag a finished job back to
 	// pending and re-run it.
+	//
+	// TSI-2597: refresh created_at so the starvation sweep and the
+	// NoWorkerDeadline it feeds both start from the migration moment. They
+	// share jobs.created_at as their time base, so re-anchoring it here keeps
+	// the sweep verdict and the CLI's client-side wait window consistent
+	// without touching either formula.
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?,
+		                created_at = ?,
 		                failure_type = '', failure_details = '', exit_code = NULL, error = NULL
 		WHERE id = ? AND status IN (?, ?, ?)
-	`, protocol.JobStatusPending, now, id,
+	`, protocol.JobStatusPending, now, now, id,
 		protocol.JobStatusQueued, protocol.JobStatusRunning, protocol.JobStatusPending)
 	if err != nil {
 		return fmt.Errorf("failed to reset job to pending: %w", err)
@@ -1470,11 +1483,16 @@ func (d *Database) RecoverState() (jobsReset int64, workersMarkedOffline int64, 
 	}
 	defer tx.Rollback()
 
-	// Reset running jobs to pending
+	// Reset running jobs to pending. TSI-2597: refresh created_at so the
+	// recovery requeue re-anchors the starvation sweep and NoWorkerDeadline
+	// clocks like every other requeue path — a restart clears the schedulable
+	// set, and the first starvation tick must not kill in-flight jobs on a
+	// stale pre-restart created_at.
+	now := time.Now()
 	result, err := tx.Exec(`
-		UPDATE jobs SET status = ?, updated_at = ?, worker_id = NULL, started_at = NULL
+		UPDATE jobs SET status = ?, updated_at = ?, created_at = ?, worker_id = NULL, started_at = NULL
 		WHERE status = ? OR status = ?
-	`, protocol.JobStatusPending, time.Now(), protocol.JobStatusRunning, protocol.JobStatusQueued)
+	`, protocol.JobStatusPending, now, now, protocol.JobStatusRunning, protocol.JobStatusQueued)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to reset running jobs: %w", err)
 	}
@@ -2415,11 +2433,14 @@ func (d *Database) MigrateJobsFromWorker(workerID string) ([]string, error) {
 	// Conditional reset straight from the active-state set: rows that left
 	// the running/queued set between the caller's decision and this statement
 	// are simply not touched, and RETURNING gives exactly what we migrated.
+	// TSI-2597: created_at refreshes too — this is the same re-queue =
+	// re-submit semantic as ResetJobToPending/RescheduleJob/RecoverState.
 	rows, err := tx.Query(`
-		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?
+		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?,
+		                created_at = ?
 		WHERE worker_id = ? AND status IN (?, ?)
 		RETURNING id
-	`, protocol.JobStatusPending, now, workerID,
+	`, protocol.JobStatusPending, now, now, workerID,
 		protocol.JobStatusRunning, protocol.JobStatusQueued)
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate jobs for worker %s: %w", workerID, err)

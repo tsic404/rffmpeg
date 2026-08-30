@@ -444,6 +444,14 @@ func TestRecoverState(t *testing.T) {
 		t.Fatalf("Failed to set job4 as completed: %v", err)
 	}
 
+	// Backdate job2's created_at so the recovery refresh (TSI-2597) is
+	// observable: RecoverState must re-anchor the starvation/NoWorkerDeadline
+	// clock from the restart moment, not the pre-restart submission.
+	backdated := time.Now().Add(-1 * time.Hour)
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, backdated, job2.ID); err != nil {
+		t.Fatalf("Failed to backdate job2 created_at: %v", err)
+	}
+
 	// Perform recovery
 	jobsReset, workersMarkedOffline, err := database.RecoverState()
 	if err != nil {
@@ -482,6 +490,9 @@ func TestRecoverState(t *testing.T) {
 	}
 	if retrievedJob2.WorkerID.Valid {
 		t.Errorf("Expected job2 worker_id to be NULL, got '%s'", retrievedJob2.WorkerID.String)
+	}
+	if !retrievedJob2.CreatedAt.After(backdated) {
+		t.Errorf("Expected job2 created_at to be refreshed past backdated time %v, got %v", backdated, retrievedJob2.CreatedAt)
 	}
 
 	// Verify job3 is now pending and unassigned
