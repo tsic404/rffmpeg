@@ -172,6 +172,17 @@ func writeError(w http.ResponseWriter, status int, err *protocol.ProtocolError) 
 	writeJSON(w, status, err.ToResponse())
 }
 
+// NotFound responds with the protocol-consistent JSON 404 used across the API.
+// It is wired into the chi router as r.NotFound so unmatched paths (e.g. a
+// trailing empty segment like /api/v1/migrations/) return the same
+// {"code":"not_found"} structure as resource-specific 404s such as
+// GetMigrationEvent's.
+func NotFound(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotFound, protocol.NewProtocolError(
+		protocol.ErrCodeNotFound, "Not found", nil,
+	))
+}
+
 // allowedFileTypes defines allowed file extensions for upload
 var allowedFileTypes = map[string]bool{
 	// Video formats

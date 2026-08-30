@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsix404/rffmpeg/pkg/server/handlers"
 	"github.com/tsix404/rffmpeg/pkg/server/migration"
 )
 
@@ -131,6 +133,37 @@ func TestGetMigrationEvent(t *testing.T) {
 	}
 	if resp.Event.Reason != migration.ReasonHeartbeatTimeout {
 		t.Errorf("reason = %q, want heartbeat_timeout", resp.Event.Reason)
+	}
+}
+
+func TestMigrationNotFoundConsistentJSON(t *testing.T) {
+	h, r, cleanup := setupTest(t)
+	defer cleanup()
+
+	r.Get("/api/v1/migrations/{eventId}", h.GetMigrationEvent)
+	r.NotFound(handlers.NotFound)
+
+	// The trailing empty segment falls through to the chi NotFound handler;
+	// the malformed ID is a resource-specific 404. Both must share the
+	// {"code":"not_found"} JSON structure.
+	for _, path := range []string{"/api/v1/migrations/", "/api/v1/migrations/nope"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d, want 404; body=%s", path, rec.Code, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("GET %s content-type = %q, want application/json", path, ct)
+		}
+		var resp protocol.ErrorResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("GET %s decode response: %v; body=%s", path, err, rec.Body.String())
+		}
+		if resp.Code != protocol.ErrCodeNotFound {
+			t.Errorf("GET %s code = %q, want %q", path, resp.Code, protocol.ErrCodeNotFound)
+		}
 	}
 }
 

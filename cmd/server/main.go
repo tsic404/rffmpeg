@@ -276,6 +276,10 @@ func main() {
 
 	// Root-level health check for monitoring tools (load balancers, orchestrators)
 	r.Get("/health", h.Health)
+	// Protocol-consistent JSON 404 for any unmatched path, so a trailing empty
+	// segment (e.g. /api/v1/migrations/) returns the same {"code":"not_found"}
+	// structure as resource-specific 404s (e.g. GetMigrationEvent).
+	r.NotFound(handlers.NotFound)
 
 	// Create HTTP server
 	addr := fmt.Sprintf(":%s", cfg.Port)
