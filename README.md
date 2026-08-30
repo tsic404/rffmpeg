@@ -667,6 +667,17 @@ worker 列表响应都只使用它。`video_encoders` 是**可选的请求侧增
 客户端只发 `encoders` 时，服务端会按名字自动派生 `video_encoders`。上例中的
 `video_encoders` 为可选字段（仅展示富元数据形态），可整体省略。
 
+#### 多 Worker 同名部署（清理路径与新鲜窗口语义）
+
+多个 Worker 进程可以共享同一个 `name`（例如 Deployment 的多个副本、或同一逻辑节点的重启），它们以各自独立的 `worker_id` 并存。同名行通过两条路径回收，二者互补：
+
+1. **注册时清理（register-time DELETE）**：`POST /api/v1/workers/register` 写入新 `worker_id` 前，会删除同名且 `id` 不同的 stale 行——`status = 'offline'`，或 `last_heartbeat` 早于 `--worker-heartbeat-timeout`（新鲜窗口）的"活但已死"行（crash 后未等巡检就重启的场景）。逻辑见 `pkg/server/db/db.go` 的 `CreateOrUpdateWorker`。
+2. **巡检清扫（monitor sweep）**：健康监控每 `--worker-health-check-interval`（默认 30s）运行一次：先把心跳超过 `--worker-heartbeat-timeout` 的 worker 标记为 `offline` 并迁移其任务，再把离线超过 `--worker-offline-threshold`（默认 10m）的行从 `workers` 表删除并移出内存状态表。逻辑见 `pkg/server/workerhealth/monitor.go` 的 `checkWorkers`。
+
+**新鲜窗口内的重启不会立即回收旧行**：worker crash 后若在心跳新鲜窗口内（如 <20s，默认窗口 90s）以新 `worker_id` 立即重启，旧行 `status` 仍是非 `offline` 且心跳尚未过期，注册时清理不会动它；该行会保留到巡检标记 `offline`，再经过 `--worker-offline-threshold` 后由巡检删除。这是设计使然，不是泄漏的重复行——在此期间新行已正常注册并接管调度，旧行只是等待常规回收。
+
+**并发同名 worker 不受影响**：心跳新鲜的多个同名 worker（各自持有不同 `worker_id`）在注册时互相保留，不会被清理——只有 offline 或心跳过期的同名行才会被删除。
+
 # 心跳（含 GPU 利用率与显存指标，由 nvidia-smi 采样）
 POST /api/v1/workers/heartbeat
 {
