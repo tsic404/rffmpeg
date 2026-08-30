@@ -3,7 +3,10 @@ package worker
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -69,6 +72,85 @@ func TestRegisterPreservesCountersOnReregister(t *testing.T) {
 	if registrations != 1 {
 		t.Errorf("server received %d registrations, want exactly 1", registrations)
 	}
+}
+
+func TestNewDefaultTempDirPrivate(t *testing.T) {
+	xdgBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", xdgBase)
+
+	w, err := New(Config{ServerURL: "http://localhost:1"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	want := filepath.Join(xdgBase, "rffmpeg-worker", w.ID())
+	if w.tempDir != want {
+		t.Errorf("default TempDir = %q, want %q", w.tempDir, want)
+	}
+
+	info, err := os.Stat(w.tempDir)
+	if err != nil {
+		t.Fatalf("stat %s: %v", w.tempDir, err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("default temp dir mode = %o, want 0700", got)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("default temp dir stat type = %T, want *syscall.Stat_t", info.Sys())
+	}
+	if st.Uid != uint32(os.Geteuid()) {
+		t.Errorf("default temp dir uid = %d, want %d", st.Uid, os.Geteuid())
+	}
+}
+
+func TestNewExplicitTempDirMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "worker-explicit")
+
+	w, err := New(Config{ServerURL: "http://localhost:1", TempDir: dir})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if w.tempDir != dir {
+		t.Errorf("TempDir = %q, want %q", w.tempDir, dir)
+	}
+
+	info, err := os.Stat(w.tempDir)
+	if err != nil {
+		t.Fatalf("stat %s: %v", w.tempDir, err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Errorf("explicit temp dir mode = %o, want 0755", got)
+	}
+}
+
+func TestVerifyPrivateDir(t *testing.T) {
+	t.Run("private dir accepted", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatalf("chmod %s: %v", dir, err)
+		}
+		if err := verifyPrivateDir(dir); err != nil {
+			t.Errorf("verifyPrivateDir(%q) = %v, want nil", dir, err)
+		}
+	})
+
+	t.Run("group-readable rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o750); err != nil {
+			t.Fatalf("chmod %s: %v", dir, err)
+		}
+		if err := verifyPrivateDir(dir); err == nil {
+			t.Error("verifyPrivateDir(0750) = nil, want error")
+		}
+	})
+
+	t.Run("missing dir rejected", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "missing")
+		if err := verifyPrivateDir(dir); err == nil {
+			t.Error("verifyPrivateDir(missing) = nil, want error")
+		}
+	})
 }
 
 func TestFfmpegStderrIndicatesEmptyOutput(t *testing.T) {

@@ -136,6 +136,58 @@ func TestDefaultConfigCacheDir(t *testing.T) {
 	}
 }
 
+func TestDefaultTempDirFor(t *testing.T) {
+	okCacheDir := func() (string, error) { return "/home/u/.cache", nil }
+	failCacheDir := func() (string, error) { return "", errors.New("no cache dir") }
+
+	tests := []struct {
+		name           string
+		euid           int
+		uid            int
+		userCacheDirFn func() (string, error)
+		tempDir        string
+		workerID       string
+		want           string
+	}{
+		{
+			name:           "non-root user cache dir",
+			euid:           1000,
+			uid:            1000,
+			userCacheDirFn: okCacheDir,
+			tempDir:        "/tmp",
+			workerID:       "abc-123",
+			want:           "/home/u/.cache/rffmpeg-worker/abc-123",
+		},
+		{
+			name:           "non-root user cache dir failure falls back to tmp",
+			euid:           1000,
+			uid:            1000,
+			userCacheDirFn: failCacheDir,
+			tempDir:        "/tmp",
+			workerID:       "abc-123",
+			want:           "/tmp/rffmpeg-worker-1000/abc-123",
+		},
+		{
+			name:           "root uses tmp fallback",
+			euid:           0,
+			uid:            0,
+			userCacheDirFn: okCacheDir,
+			tempDir:        "/tmp",
+			workerID:       "w",
+			want:           "/tmp/rffmpeg-worker-0/w",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := defaultTempDirFor(tt.euid, tt.uid, tt.userCacheDirFn, tt.tempDir, tt.workerID)
+			if got != tt.want {
+				t.Errorf("defaultTempDirFor(%d, %d, fn, %q, %q) = %q, want %q", tt.euid, tt.uid, tt.tempDir, tt.workerID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadFromFile(t *testing.T) {
 	// Create a temporary config file
 	tmpDir := t.TempDir()

@@ -12,12 +12,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/tsix404/rffmpeg/pkg/audit"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
 )
 
 // cacheI is the subset of the disk cache the worker job loop uses. It exists
@@ -90,8 +92,10 @@ func New(cfg Config) (*Worker, error) {
 	if cfg.WorkerID == "" {
 		cfg.WorkerID = uuid.New().String()
 	}
+	tempDirDefaulted := false
 	if cfg.TempDir == "" {
-		cfg.TempDir = filepath.Join(os.TempDir(), "rffmpeg-worker", cfg.WorkerID)
+		cfg.TempDir = workerconfig.DefaultTempDir(cfg.WorkerID)
+		tempDirDefaulted = true
 	}
 	if cfg.Name == "" {
 		cfg.Name = fmt.Sprintf("worker-%s", cfg.WorkerID[:8])
@@ -103,9 +107,21 @@ func New(cfg Config) (*Worker, error) {
 		cfg.PollInterval = 5 * time.Second // Default poll interval
 	}
 
-	// Create temp directory
-	if err := os.MkdirAll(cfg.TempDir, 0755); err != nil {
+	// Create temp directory. A defaulted path (per-user XDG dir, or the
+	// per-user fallback under a shared $TMPDIR) must be private: created 0700,
+	// then verified to catch a hostile pre-existing directory on a shared host.
+	// An explicitly configured path keeps 0755 for admin-controlled sharing.
+	mode := os.FileMode(0o755)
+	if tempDirDefaulted {
+		mode = 0o700
+	}
+	if err := os.MkdirAll(cfg.TempDir, mode); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	if tempDirDefaulted {
+		if err := verifyPrivateDir(cfg.TempDir); err != nil {
+			return nil, err
+		}
 	}
 
 	client := NewClient(cfg.ServerURL, cfg.WorkerID, cfg.Token)
@@ -154,6 +170,29 @@ func New(cfg Config) (*Worker, error) {
 		gpuDetector:        gpu.NewDetector(),
 		stopCh:             make(chan struct{}),
 	}, nil
+}
+
+// verifyPrivateDir verifies that dir is owned by the current effective user and
+// grants no group or other permissions. It guards the defaulted worker temp
+// directory on shared hosts: a pre-existing directory created by another user
+// (or with looser permissions) under a shared $TMPDIR must be rejected rather
+// than silently used for job I/O.
+func verifyPrivateDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("failed to stat temp directory: %w", err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("temp directory %q: unsupported stat type %T", dir, info.Sys())
+	}
+	if st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("temp directory %q is owned by uid %d, want %d; refusing to use non-private directory", dir, st.Uid, os.Geteuid())
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		return fmt.Errorf("temp directory %q has mode %o, want 0700; refusing to use non-private directory", dir, got)
+	}
+	return nil
 }
 
 // ID returns the worker ID

@@ -150,6 +150,31 @@ func homeOwnedBy(homeDir string, uid int) bool {
 	return st.Uid == uint32(uid)
 }
 
+// FallbackTempDir returns the per-user fallback worker temp directory under
+// tempDir. The uid suffix prevents collisions between users on a shared host.
+func FallbackTempDir(tempDir string, uid int, workerID string) string {
+	return filepath.Join(tempDir, "rffmpeg-worker-"+strconv.Itoa(uid), workerID)
+}
+
+// DefaultTempDir returns the default worker temp directory. Non-root users get
+// a per-user XDG directory (~/.cache/rffmpeg-worker/<workerID>); when that is
+// unavailable, or for root, the fallback is $TMPDIR/rffmpeg-worker-<uid>/<workerID>.
+func DefaultTempDir(workerID string) string {
+	return defaultTempDirFor(os.Geteuid(), os.Getuid(), os.UserCacheDir, os.TempDir(), workerID)
+}
+
+// defaultTempDirFor resolves the default temp directory given process identity
+// and environment accessors. Injectable for tests.
+func defaultTempDirFor(euid, uid int, userCacheDirFn func() (string, error), tempDir, workerID string) string {
+	if euid == 0 {
+		return FallbackTempDir(tempDir, uid, workerID)
+	}
+	if dir, err := userCacheDirFn(); err == nil {
+		return filepath.Join(dir, "rffmpeg-worker", workerID)
+	}
+	return FallbackTempDir(tempDir, uid, workerID)
+}
+
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
