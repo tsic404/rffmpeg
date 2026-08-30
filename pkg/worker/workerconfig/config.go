@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -93,6 +94,38 @@ type Config struct {
 	RetryEnableSoftwareFallback bool     `json:"retry_enable_software_fallback" yaml:"retry_enable_software_fallback"`
 }
 
+// FallbackCacheDir returns the per-user fallback cache directory under tempDir.
+// The uid suffix prevents collisions between users on a shared host.
+func FallbackCacheDir(tempDir string, uid int) string {
+	return filepath.Join(tempDir, "rffmpeg-"+strconv.Itoa(uid))
+}
+
+// IsFallbackCacheDir reports whether dir is the per-user fallback cache
+// directory for the current process, which must be created private (0700).
+func IsFallbackCacheDir(dir string) bool {
+	return dir == FallbackCacheDir(os.TempDir(), os.Getuid())
+}
+
+// DefaultCacheDir returns the default cache directory for the worker.
+// Root deployments (e.g. systemd) keep the FHS path /var/cache/rffmpeg;
+// non-root users get an XDG-compliant per-user directory (~/.cache/rffmpeg)
+// so first startup does not fail with a permission denied error.
+func DefaultCacheDir() string {
+	return defaultCacheDirFor(os.Geteuid(), os.Getuid(), os.UserCacheDir, os.TempDir())
+}
+
+// defaultCacheDirFor resolves the default cache directory given process
+// identity and environment accessors. Injectable for tests.
+func defaultCacheDirFor(euid, uid int, userCacheDirFn func() (string, error), tempDir string) string {
+	if euid == 0 {
+		return "/var/cache/rffmpeg"
+	}
+	if dir, err := userCacheDirFn(); err == nil {
+		return filepath.Join(dir, "rffmpeg")
+	}
+	return FallbackCacheDir(tempDir, uid)
+}
+
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -105,7 +138,7 @@ func DefaultConfig() *Config {
 		AutoDetectGPU:     true,
 		AutoDetectCodecs:  true,
 		CacheEnabled:      true,
-		CacheDir:          "/var/cache/rffmpeg",
+		CacheDir:          DefaultCacheDir(),
 		CacheTTL:          Duration(24 * time.Hour),
 		CacheMaxSizeMB:    10240, // 10 GiB
 

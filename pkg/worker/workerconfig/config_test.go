@@ -1,6 +1,7 @@
 package workerconfig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,6 +34,66 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if !config.AutoDetectCodecs {
 		t.Error("DefaultConfig() AutoDetectCodecs should be true")
+	}
+}
+
+func TestDefaultCacheDirFor(t *testing.T) {
+	errUserCacheDir := func() (string, error) { return "", errors.New("no cache dir") }
+
+	tests := []struct {
+		name           string
+		euid           int
+		uid            int
+		userCacheDirFn func() (string, error)
+		tempDir        string
+		want           string
+	}{
+		{
+			name:    "root uses FHS path",
+			euid:    0,
+			uid:     0,
+			tempDir: "/tmp",
+			want:    "/var/cache/rffmpeg",
+		},
+		{
+			name:           "non-root with XDG dir",
+			euid:           1000,
+			uid:            1000,
+			userCacheDirFn: func() (string, error) { return "/home/user/.cache", nil },
+			tempDir:        "/tmp",
+			want:           "/home/user/.cache/rffmpeg",
+		},
+		{
+			name:           "non-root fallback is uid-scoped",
+			euid:           1000,
+			uid:            1000,
+			userCacheDirFn: errUserCacheDir,
+			tempDir:        "/tmp",
+			want:           "/tmp/rffmpeg-1000",
+		},
+		{
+			name:           "different uid scopes fallback",
+			euid:           1001,
+			uid:            1001,
+			userCacheDirFn: errUserCacheDir,
+			tempDir:        "/tmp",
+			want:           "/tmp/rffmpeg-1001",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := defaultCacheDirFor(tt.euid, tt.uid, tt.userCacheDirFn, tt.tempDir)
+			if got != tt.want {
+				t.Errorf("defaultCacheDirFor(%d, %d, ...) = %q, want %q", tt.euid, tt.uid, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultConfigCacheDir(t *testing.T) {
+	if got := DefaultConfig().CacheDir; got != DefaultCacheDir() {
+		t.Errorf("DefaultConfig().CacheDir = %q, want DefaultCacheDir() = %q", got, DefaultCacheDir())
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
 )
 
 func TestGenerateCacheKey_Deterministic(t *testing.T) {
@@ -86,8 +88,8 @@ func TestCacheConfigDefaults(t *testing.T) {
 	if !cfg.Enabled {
 		t.Error("Default should have cache enabled")
 	}
-	if cfg.Dir != "/var/cache/rffmpeg" {
-		t.Errorf("Default Dir should be /var/cache/rffmpeg, got %s", cfg.Dir)
+	if cfg.Dir != workerconfig.DefaultCacheDir() {
+		t.Errorf("Default Dir should be %s, got %s", workerconfig.DefaultCacheDir(), cfg.Dir)
 	}
 	if cfg.TTL != 24*time.Hour {
 		t.Errorf("Default TTL should be 24h, got %v", cfg.TTL)
@@ -630,5 +632,23 @@ func TestCacheConfirmHitDoesNotIncrementWithoutCall(t *testing.T) {
 	stats = cache.Stats()
 	if stats.Hits != 1 {
 		t.Errorf("Expected 1 hit after ConfirmHit, got %d", stats.Hits)
+	}
+}
+
+func TestNewCacheFallbackDirMode(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	fallback := workerconfig.FallbackCacheDir(os.TempDir(), os.Getuid())
+
+	c, err := NewCache(CacheConfig{Enabled: true, Dir: fallback})
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+
+	info, err := os.Stat(c.cfg.Dir)
+	if err != nil {
+		t.Fatalf("stat %s: %v", c.cfg.Dir, err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("fallback cache dir mode = %o, want 0700", got)
 	}
 }

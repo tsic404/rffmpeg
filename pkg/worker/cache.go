@@ -13,11 +13,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
 )
 
 // CacheConfig holds configuration for the worker cache.
 type CacheConfig struct {
-	// Dir is the root cache directory (e.g., /var/cache/rffmpeg).
+	// Dir is the root cache directory. Empty means the dynamic default from
+	// workerconfig.DefaultCacheDir() (root: /var/cache/rffmpeg, else ~/.cache/rffmpeg).
 	Dir string
 
 	// Enabled controls whether caching is active.
@@ -46,7 +49,7 @@ type CacheConfig struct {
 // DefaultCacheConfig returns sensible defaults for the cache configuration.
 func DefaultCacheConfig() CacheConfig {
 	return CacheConfig{
-		Dir:              "/var/cache/rffmpeg",
+		Dir:              workerconfig.DefaultCacheDir(),
 		Enabled:          true,
 		TTL:              24 * time.Hour,
 		URLTTL:           1 * time.Hour,
@@ -201,6 +204,15 @@ func (l *lruTracker) totalSize() int64 {
 	return total
 }
 
+// cacheDirMode returns 0700 for the per-user fallback dir (shared /tmp,
+// private artifacts) and 0755 otherwise.
+func cacheDirMode(dir string) os.FileMode {
+	if workerconfig.IsFallbackCacheDir(dir) {
+		return 0o700
+	}
+	return 0o755
+}
+
 // NewCache creates a new Cache with the given configuration.
 func NewCache(cfg CacheConfig) (*Cache, error) {
 	if !cfg.Enabled {
@@ -208,7 +220,7 @@ func NewCache(cfg CacheConfig) (*Cache, error) {
 	}
 
 	if cfg.Dir == "" {
-		cfg.Dir = "/var/cache/rffmpeg"
+		cfg.Dir = workerconfig.DefaultCacheDir()
 	}
 	if cfg.TTL == 0 {
 		cfg.TTL = 24 * time.Hour
@@ -224,7 +236,7 @@ func NewCache(cfg CacheConfig) (*Cache, error) {
 	}
 
 	// Create cache directory if it doesn't exist
-	if err := os.MkdirAll(cfg.Dir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.Dir, cacheDirMode(cfg.Dir)); err != nil {
 		return nil, fmt.Errorf("failed to create cache directory %s: %w", cfg.Dir, err)
 	}
 
@@ -648,7 +660,7 @@ func (c *Cache) Clear() error {
 		return fmt.Errorf("failed to clear cache: %w", err)
 	}
 
-	if err := os.MkdirAll(c.cfg.Dir, 0755); err != nil {
+	if err := os.MkdirAll(c.cfg.Dir, cacheDirMode(c.cfg.Dir)); err != nil {
 		return fmt.Errorf("failed to recreate cache directory: %w", err)
 	}
 
