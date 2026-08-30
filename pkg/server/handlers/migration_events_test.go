@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/server/handlers"
 	"github.com/tsix404/rffmpeg/pkg/server/migration"
@@ -164,6 +165,43 @@ func TestMigrationNotFoundConsistentJSON(t *testing.T) {
 		if resp.Code != protocol.ErrCodeNotFound {
 			t.Errorf("GET %s code = %q, want %q", path, resp.Code, protocol.ErrCodeNotFound)
 		}
+	}
+}
+
+func TestMigrationMethodNotAllowedConsistentJSON(t *testing.T) {
+	h, _, cleanup := setupTest(t)
+	defer cleanup()
+
+	// Middleware must be registered before routes: chi only wraps routes that
+	// are registered after the middleware is in place.
+	r := chi.NewRouter()
+	r.Use(handlers.NormalizeMethodNotAllowed)
+	r.Get("/api/v1/migrations", h.ListMigrationEvents)
+	r.Get("/api/v1/migrations/{eventId}", h.GetMigrationEvent)
+
+	// POST matches the GET-only /api/v1/migrations path and must fall through
+	// to chi's default 405 handler, whose empty body the middleware replaces
+	// with the {"code":"method_not_allowed"} JSON while keeping the Allow
+	// header (RFC 9110 §10.2.1).
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/migrations", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/v1/migrations status = %d, want 405; body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q, want application/json", ct)
+	}
+	if allow := rec.Header().Get("Allow"); allow != "GET" {
+		t.Errorf("Allow = %q, want GET", allow)
+	}
+	var resp protocol.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.Code != "method_not_allowed" {
+		t.Errorf("code = %q, want method_not_allowed", resp.Code)
 	}
 }
 

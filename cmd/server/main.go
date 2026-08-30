@@ -179,6 +179,7 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(handlers.NormalizeMethodNotAllowed)
 
 	// Global request-body cap for JSON endpoints. Upload handlers apply
 	// their own larger MaxBytesReader before parsing multipart forms, so a
