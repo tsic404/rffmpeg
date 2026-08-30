@@ -286,6 +286,16 @@ func LoadFromEnv() *Config {
 			config.Timeout = Duration(d)
 		}
 	}
+	if heartbeatInterval := os.Getenv("RFFMPEG_HEARTBEAT_INTERVAL"); heartbeatInterval != "" {
+		if d, err := time.ParseDuration(heartbeatInterval); err == nil {
+			config.HeartbeatInterval = Duration(d)
+		}
+	}
+	if pollInterval := os.Getenv("RFFMPEG_POLL_INTERVAL"); pollInterval != "" {
+		if d, err := time.ParseDuration(pollInterval); err == nil {
+			config.PollInterval = Duration(d)
+		}
+	}
 	if maxConcurrent := os.Getenv("RFFMPEG_MAX_CONCURRENT"); maxConcurrent != "" {
 		if n, err := parseInt(maxConcurrent); err == nil && n > 0 {
 			config.MaxConcurrent = n
@@ -385,6 +395,12 @@ func Merge(fileConfig, envConfig *Config) *Config {
 		}
 		if envConfig.Timeout != DefaultConfig().Timeout {
 			result.Timeout = envConfig.Timeout
+		}
+		if envConfig.HeartbeatInterval != DefaultConfig().HeartbeatInterval {
+			result.HeartbeatInterval = envConfig.HeartbeatInterval
+		}
+		if envConfig.PollInterval != DefaultConfig().PollInterval {
+			result.PollInterval = envConfig.PollInterval
 		}
 		if envConfig.MaxConcurrent != DefaultConfig().MaxConcurrent {
 			result.MaxConcurrent = envConfig.MaxConcurrent

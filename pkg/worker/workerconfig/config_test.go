@@ -475,6 +475,67 @@ func TestMerge_NilFileConfig(t *testing.T) {
 	}
 }
 
+func TestTimingEnvOverrides(t *testing.T) {
+	t.Run("env only", func(t *testing.T) {
+		t.Setenv("RFFMPEG_HEARTBEAT_INTERVAL", "45s")
+		t.Setenv("RFFMPEG_POLL_INTERVAL", "7s")
+
+		cfg := LoadFromEnv()
+
+		if cfg.HeartbeatInterval.ToDuration() != 45*time.Second {
+			t.Errorf("HeartbeatInterval = %v, want %v", cfg.HeartbeatInterval.ToDuration(), 45*time.Second)
+		}
+		if cfg.PollInterval.ToDuration() != 7*time.Second {
+			t.Errorf("PollInterval = %v, want %v", cfg.PollInterval.ToDuration(), 7*time.Second)
+		}
+	})
+
+	t.Run("config only", func(t *testing.T) {
+		fileCfg := &Config{
+			HeartbeatInterval: Duration(60 * time.Second),
+			PollInterval:      Duration(9 * time.Second),
+		}
+
+		merged := Merge(fileCfg, LoadFromEnv())
+
+		if merged.HeartbeatInterval.ToDuration() != 60*time.Second {
+			t.Errorf("HeartbeatInterval = %v, want %v", merged.HeartbeatInterval.ToDuration(), 60*time.Second)
+		}
+		if merged.PollInterval.ToDuration() != 9*time.Second {
+			t.Errorf("PollInterval = %v, want %v", merged.PollInterval.ToDuration(), 9*time.Second)
+		}
+	})
+
+	t.Run("env overrides config", func(t *testing.T) {
+		t.Setenv("RFFMPEG_HEARTBEAT_INTERVAL", "20s")
+		t.Setenv("RFFMPEG_POLL_INTERVAL", "3s")
+		fileCfg := &Config{
+			HeartbeatInterval: Duration(60 * time.Second),
+			PollInterval:      Duration(9 * time.Second),
+		}
+
+		merged := Merge(fileCfg, LoadFromEnv())
+
+		if merged.HeartbeatInterval.ToDuration() != 20*time.Second {
+			t.Errorf("HeartbeatInterval = %v, want %v", merged.HeartbeatInterval.ToDuration(), 20*time.Second)
+		}
+		if merged.PollInterval.ToDuration() != 3*time.Second {
+			t.Errorf("PollInterval = %v, want %v", merged.PollInterval.ToDuration(), 3*time.Second)
+		}
+	})
+
+	t.Run("missing falls back to defaults", func(t *testing.T) {
+		cfg := LoadFromEnv()
+
+		if cfg.HeartbeatInterval.ToDuration() != 30*time.Second {
+			t.Errorf("HeartbeatInterval = %v, want default %v", cfg.HeartbeatInterval.ToDuration(), 30*time.Second)
+		}
+		if cfg.PollInterval.ToDuration() != 5*time.Second {
+			t.Errorf("PollInterval = %v, want default %v", cfg.PollInterval.ToDuration(), 5*time.Second)
+		}
+	})
+}
+
 func TestResolvePaths(t *testing.T) {
 	tmpDir := t.TempDir()
 	absTmpDir, err := filepath.Abs(tmpDir)
