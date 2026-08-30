@@ -40,11 +40,30 @@ func TestDefaultConfig(t *testing.T) {
 func TestDefaultCacheDirFor(t *testing.T) {
 	errUserCacheDir := func() (string, error) { return "", errors.New("no cache dir") }
 
+	// Ownership checks need a home owned by the simulated uid and a home
+	// owned by someone else. Use the real uid as the simulated identity;
+	// when running as root, simulate a non-root uid so the non-root branch is
+	// exercised and chown the owned home accordingly.
+	simUID := os.Getuid()
+	if simUID == 0 {
+		simUID = 1000
+	}
+	ownedHome := t.TempDir()
+	if os.Getuid() == 0 {
+		if err := os.Chown(ownedHome, simUID, simUID); err != nil {
+			t.Skipf("cannot create home owned by simulated uid: %v", err)
+		}
+	}
+	// "/" is root-owned, so it is foreign to any non-root uid.
+	foreignHome := "/"
+
 	tests := []struct {
 		name           string
 		euid           int
 		uid            int
 		userCacheDirFn func() (string, error)
+		xdgCacheHome   string
+		homeDir        string
 		tempDir        string
 		want           string
 	}{
@@ -56,12 +75,32 @@ func TestDefaultCacheDirFor(t *testing.T) {
 			want:    "/var/cache/rffmpeg",
 		},
 		{
-			name:           "non-root with XDG dir",
-			euid:           1000,
-			uid:            1000,
-			userCacheDirFn: func() (string, error) { return "/home/user/.cache", nil },
+			name:           "non-root with owned HOME",
+			euid:           simUID,
+			uid:            simUID,
+			userCacheDirFn: func() (string, error) { return filepath.Join(ownedHome, ".cache"), nil },
+			homeDir:        ownedHome,
 			tempDir:        "/tmp",
-			want:           "/home/user/.cache/rffmpeg",
+			want:           filepath.Join(ownedHome, ".cache", "rffmpeg"),
+		},
+		{
+			name:           "HOME owned by another user falls back",
+			euid:           simUID,
+			uid:            simUID,
+			userCacheDirFn: func() (string, error) { return "/home/other/.cache", nil },
+			homeDir:        foreignHome,
+			tempDir:        "/tmp",
+			want:           FallbackCacheDir("/tmp", simUID),
+		},
+		{
+			name:           "explicit XDG cache home bypasses HOME ownership",
+			euid:           simUID,
+			uid:            simUID,
+			userCacheDirFn: func() (string, error) { return "/tmp/xdgcache", nil },
+			xdgCacheHome:   "/tmp/xdgcache",
+			homeDir:        foreignHome,
+			tempDir:        "/tmp",
+			want:           "/tmp/xdgcache/rffmpeg",
 		},
 		{
 			name:           "non-root fallback is uid-scoped",
@@ -83,7 +122,7 @@ func TestDefaultCacheDirFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := defaultCacheDirFor(tt.euid, tt.uid, tt.userCacheDirFn, tt.tempDir)
+			got := defaultCacheDirFor(tt.euid, tt.uid, tt.userCacheDirFn, tt.xdgCacheHome, tt.homeDir, tt.tempDir)
 			if got != tt.want {
 				t.Errorf("defaultCacheDirFor(%d, %d, ...) = %q, want %q", tt.euid, tt.uid, got, tt.want)
 			}

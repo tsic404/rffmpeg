@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -109,21 +110,44 @@ func IsFallbackCacheDir(dir string) bool {
 // DefaultCacheDir returns the default cache directory for the worker.
 // Root deployments (e.g. systemd) keep the FHS path /var/cache/rffmpeg;
 // non-root users get an XDG-compliant per-user directory (~/.cache/rffmpeg)
-// so first startup does not fail with a permission denied error.
 func DefaultCacheDir() string {
-	return defaultCacheDirFor(os.Geteuid(), os.Getuid(), os.UserCacheDir, os.TempDir())
+	return defaultCacheDirFor(os.Geteuid(), os.Getuid(), os.UserCacheDir, os.Getenv("XDG_CACHE_HOME"), os.Getenv("HOME"), os.TempDir())
 }
 
 // defaultCacheDirFor resolves the default cache directory given process
 // identity and environment accessors. Injectable for tests.
-func defaultCacheDirFor(euid, uid int, userCacheDirFn func() (string, error), tempDir string) string {
+//
+// A cache dir derived from $HOME is only trusted when HOME is owned by uid;
+// $HOME pointing at another user's directory (e.g. /tmp or /) would otherwise
+// still yield an OK cache dir, narrowing the 0700 fallback protection to the
+// "no HOME at all" case. An explicit $XDG_CACHE_HOME override is trusted
+// as-is, since it does not derive from HOME.
+func defaultCacheDirFor(euid, uid int, userCacheDirFn func() (string, error), xdgCacheHome, homeDir, tempDir string) string {
 	if euid == 0 {
 		return "/var/cache/rffmpeg"
 	}
-	if dir, err := userCacheDirFn(); err == nil {
-		return filepath.Join(dir, "rffmpeg")
+	dir, err := userCacheDirFn()
+	if err != nil {
+		return FallbackCacheDir(tempDir, uid)
 	}
-	return FallbackCacheDir(tempDir, uid)
+	if xdgCacheHome == "" && !homeOwnedBy(homeDir, uid) {
+		return FallbackCacheDir(tempDir, uid)
+	}
+	return filepath.Join(dir, "rffmpeg")
+}
+
+// homeOwnedBy reports whether homeDir is owned by uid. A missing or
+// foreign-owned homeDir is not owned.
+func homeOwnedBy(homeDir string, uid int) bool {
+	info, err := os.Stat(homeDir)
+	if err != nil {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	return st.Uid == uint32(uid)
 }
 
 // DefaultConfig returns a Config with sensible defaults.
