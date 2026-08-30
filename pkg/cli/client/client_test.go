@@ -400,6 +400,45 @@ func TestUploadFileChunkedAuthRejected(t *testing.T) {
 	}
 }
 
+// TestUploadFileChunkedInitAuthRejected verifies that an HTTP 401 rejection from
+// the init endpoint surfaces with the status code and server message. A >100MB
+// file with a bad token fails here before any chunk is uploaded, so this is the
+// error an operator actually sees for large-file auth failures (TSI-2625).
+func TestUploadFileChunkedInitAuthRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/upload/init" {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(protocol.ErrorResponse{
+				Code:    protocol.ErrCodeUnauthorized,
+				Message: "Invalid token",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "wrong-token")
+	tmpFile := createTestFile(t, []byte("large file init auth test"))
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(1))
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty on auth rejection", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for 401 init, got nil")
+	}
+	want := "authentication rejected (HTTP 401)"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q missing %q", err, want)
+	}
+	if !strings.Contains(err.Error(), "Invalid token") {
+		t.Errorf("error %q missing server message", err)
+	}
+}
+
 // TestUploadFileChunked tests the chunked file upload
 func TestUploadFileChunked(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)

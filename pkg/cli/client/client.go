@@ -1251,6 +1251,19 @@ func (c *Client) UploadFileChunked(filePath string, chunkSize int64) (string, er
 	}
 	defer DrainAndClose(resp.Body)
 
+	// Surface auth rejections with the status code first, matching UploadFile
+	// and uploadSingleChunk (TSI-2598 / TSI-2618). The init endpoint authenticates
+	// before any chunk is uploaded, so a >100MB file with a bad token fails here
+	// and never reaches the chunk endpoint (TSI-2625).
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		msg := "missing or invalid token"
+		var errResp protocol.ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+			msg = errResp.Message
+		}
+		return "", fmt.Errorf("init failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		var errResp protocol.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
