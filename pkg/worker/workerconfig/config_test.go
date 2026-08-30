@@ -418,6 +418,42 @@ func TestMerge_InvalidEnvBoolKeepsFileValue(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_AutoDetectSymmetric(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"true", true},
+		{"1", true},
+		{"TRUE", true},
+		{"yes", true},
+		{"on", true},
+		{"false", false},
+		{"0", false},
+		{"False", false},
+		{"no", false},
+		{"off", false},
+		// Invalid values must not flip the flag: DefaultConfig() starts with
+		// both auto-detect flags enabled, so the current value stays true.
+		{"banana", true},
+		{"2", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("RFFMPEG_AUTO_DETECT_GPU", tc.value)
+			t.Setenv("RFFMPEG_AUTO_DETECT_CODECS", tc.value)
+
+			cfg := LoadFromEnv()
+			if cfg.AutoDetectGPU != tc.want {
+				t.Errorf("AutoDetectGPU = %v, want %v (env=%q)", cfg.AutoDetectGPU, tc.want, tc.value)
+			}
+			if cfg.AutoDetectCodecs != tc.want {
+				t.Errorf("AutoDetectCodecs = %v, want %v (env=%q)", cfg.AutoDetectCodecs, tc.want, tc.value)
+			}
+		})
+	}
+}
+
 func TestMerge_NilFileConfig(t *testing.T) {
 	envConfig := DefaultConfig()
 	envConfig.WorkerID = "env-worker-id"
