@@ -75,13 +75,9 @@ go build -o bin/rffmpeg ./cmd/cli
 
 ```bash
 # 连接到本地 Server
-./bin/worker -server-url http://localhost:8080
+./bin/worker --server-url http://localhost:8080
 
-# 指定 Worker 名称和支持的编码器
-./bin/worker --name worker-1 --encoders libx264,h264_nvenc
-
-# 使用 GPU 加速
-./bin/worker --gpu "NVIDIA RTX 3080" --encoders h264_nvenc,hevc_nvenc
+# 更多配置（名称、编码器、GPU、超时等）见「Worker 配置」——通过配置文件或环境变量设置
 ```
 
 ### 使用 CLI 提交任务
@@ -195,32 +191,54 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
+| `RFFMPEG_CONFIG` | Worker 配置文件路径（JSON） | 未设置 |
 | `RFFMPEG_SERVER_URL` | Server API URL | `http://localhost:8080` |
+| `RFFMPEG_TOKEN` | 认证令牌（server 启用认证时必填） | - |
 | `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
 | `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |
 | `RFFMPEG_TEMP_DIR` | 临时文件目录 | 系统临时目录 |
 | `RFFMPEG_FFMPEG_PATH` | FFmpeg 可执行文件路径 | `ffmpeg` |
-| `RFFMPEG_ENCODERS` | 支持的编码器（逗号分隔） | `libx264` |
-| `RFFMPEG_DECODERS` | 支持的解码器（逗号分隔） | - |
-| `RFFMPEG_GPU_MODEL` | GPU 型号名称 | - |
-| `RFFMPEG_FFMPEG_VERSION` | FFmpeg 版本 | 自动检测 |
+| `RFFMPEG_TIMEOUT` | 作业执行超时 | `2h` |
+| `RFFMPEG_MAX_CONCURRENT` | 最大并发作业数 | `1` |
+| `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（`false`/`0` 禁用） | `true` |
+| `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（`false`/`0` 禁用） | `true` |
+| `RFFMPEG_CACHE_ENABLED` | 启用文件缓存 | `true` |
+| `RFFMPEG_CACHE_DIR` | 缓存目录 | 自动（`~/.cache/rffmpeg` 或 `/var/cache/rffmpeg`） |
+| `RFFMPEG_CACHE_TTL` | 缓存 TTL | `24h` |
+| `RFFMPEG_CACHE_MAX_SIZE_MB` | 缓存最大大小（MiB） | `10240` |
+| `RFFMPEG_RETRY_MAX_RETRIES` | 作业重试次数 | `3` |
+| `RFFMPEG_RETRY_INITIAL_INTERVAL` | 重试初始间隔 | `1s` |
+| `RFFMPEG_RETRY_EXPONENTIAL_BACKOFF` | 是否指数退避 | `false` |
+| `RFFMPEG_RETRY_MAX_INTERVAL` | 重试最大间隔 | `30s` |
+| `RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK` | 允许软件编码回退 | `true` |
 
 #### 命令行参数
 
 ```bash
 ./bin/worker --help
-  -server-url string        Server URL (/api/v1 suffix optional)
-  --name string             Worker name (auto-generated if empty)
-  --id string               Worker ID (auto-generated if empty)
-  --temp-dir string         Temporary directory for files
-  --ffmpeg string           Path to ffmpeg binary
-  --timeout duration        Job execution timeout (default: 2h)
-  --heartbeat-interval duration Heartbeat interval (default: 30s)
-  --poll-interval duration  Job polling interval (default: 5s)
-  --encoders string         Comma-separated list of supported encoders
-  --decoders string         Comma-separated list of supported decoders
-  --gpu string              GPU model name
-  --max-concurrent int      Maximum concurrent jobs (default: 1)
+  -config string
+        Path to worker config file (JSON)
+  -server-url string
+        Server URL (overrides config file and RFFMPEG_SERVER_URL env)
+  -token string
+        Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
+```
+
+Worker 其余配置项（名称、临时目录、FFmpeg 路径、编码器、GPU、超时、并发、缓存等）通过配置文件或环境变量设置，worker 不提供对应的 CLI flag。
+
+#### 配置文件
+
+```json
+{
+  "server_url": "http://localhost:8080",
+  "token": "your-auth-token",
+  "name": "worker-1",
+  "auto_detect_codecs": false,
+  "manual_encoders": ["libx264", "h264_nvenc"],
+  "auto_detect_gpu": false,
+  "manual_gpu_model": "NVIDIA RTX 3080",
+  "max_concurrent": 1
+}
 ```
 
 ### CLI 配置
@@ -299,7 +317,8 @@ CLI 和 Worker 在同一台机器上运行，文件存储在本地磁盘。
 export RFFMPEG_SHARED_FS=1
 
 # 启动 Worker（同一台机器）
-./bin/worker -server-url http://localhost:8080 --name local-worker
+export RFFMPEG_WORKER_NAME=local-worker
+./bin/worker --server-url http://localhost:8080
 
 # CLI 提交任务，输入/输出均为本地路径
 ./bin/rffmpeg -i /data/videos/input.mp4 -c:v libx264 /data/videos/output.mp4
@@ -325,7 +344,8 @@ export RFFMPEG_SHARED_FS=1
 # 机器 B (Worker 端)
 export RFFMPEG_SHARED_FS=1
 export RFFMPEG_SHARED_FS_ALLOWED_PREFIX="/mnt/media"
-./bin/worker -server-url http://localhost:8080 --name nfs-worker
+export RFFMPEG_WORKER_NAME=nfs-worker
+./bin/worker --server-url http://localhost:8080
 ```
 
 ##### 场景 3：Kubernetes 共享 PV
@@ -688,11 +708,18 @@ Response:
 ./bin/server --port 8080 --data-dir ./data
 
 # 2. 启动 Worker（另一个终端）
-./bin/worker -server-url http://localhost:8080 \
-  --name gpu-worker \
-  --encoders libx264,h264_nvenc,hevc_nvenc \
-  --gpu "NVIDIA RTX 3080" \
-  --max-concurrent 2
+cat > worker.json << EOF
+{
+  "server_url": "http://localhost:8080",
+  "name": "gpu-worker",
+  "auto_detect_codecs": false,
+  "manual_encoders": ["libx264", "h264_nvenc", "hevc_nvenc"],
+  "auto_detect_gpu": false,
+  "manual_gpu_model": "NVIDIA RTX 3080",
+  "max_concurrent": 2
+}
+EOF
+./bin/worker --config worker.json
 
 # 3. 提交转码任务（客户端）
 ./bin/rffmpeg -i my_video.mp4 \
@@ -748,7 +775,7 @@ EOF
   --mtls
 
 # Worker 连接 HTTPS Server
-./bin/worker -server-url https://localhost:8080
+./bin/worker --server-url https://localhost:8080
 ```
 
 ## 许可证
