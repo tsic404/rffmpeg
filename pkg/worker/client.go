@@ -18,8 +18,8 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
 )
 
-// apiPrefix is the API version prefix for all server endpoints
-const apiPrefix = "/api/v1"
+// apiSuffix is the canonical API path appended to a normalized root URL.
+const apiSuffix = "/api/v1"
 
 // ErrJobConflict is returned when the server rejects a terminal status update
 // with HTTP 409 Conflict: the job has already reached a terminal state (or the
@@ -48,10 +48,10 @@ type Client struct {
 }
 
 // NewClient creates a new client for server communication.
-// The baseURL should be the server address (e.g., "http://localhost:8080").
-// If baseURL does not already end with /api/v1, it will be appended automatically.
+// The baseURL should be the server address (e.g., "http://localhost:8080");
+// a user-supplied trailing /api/v1 (with or without trailing slashes) is
+// stripped so each request builder can re-append it as the canonical prefix.
 func NewClient(baseURL, workerID, token string) *Client {
-	// Normalize baseURL: ensure it ends with /api/v1 for backward compatibility
 	normalizedURL := normalizeBaseURL(baseURL)
 
 	return &Client{
@@ -67,15 +67,16 @@ func NewClient(baseURL, workerID, token string) *Client {
 	}
 }
 
-// normalizeBaseURL ensures the baseURL ends with /api/v1.
-// This provides backward compatibility for users who provide the server URL
-// without the /api/v1 prefix (e.g., "http://localhost:8080" instead of "http://localhost:8080/api/v1").
+// normalizeBaseURL strips a trailing /api/v1 (with or without trailing
+// slashes) from a server root URL. Each request builder appends its own
+// /api/v1-relative path, so a user-supplied "http://host/api/v1" would
+// otherwise produce "http://host/api/v1/api/v1/..." and fail with 404.
+// This mirrors the CLI's normalizeServerURL so both sides accept the same
+// URLs.
 func normalizeBaseURL(baseURL string) string {
 	baseURL = strings.TrimSuffix(baseURL, "/")
-	if strings.HasSuffix(baseURL, apiPrefix) {
-		return baseURL
-	}
-	return baseURL + apiPrefix
+	baseURL = strings.TrimSuffix(baseURL, apiSuffix)
+	return strings.TrimSuffix(baseURL, "/")
 }
 
 // setAuthHeader sets the Authorization header if a token is configured
@@ -158,7 +159,7 @@ func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, th
 
 // PullJobs pulls pending jobs assigned to this worker
 func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
-	url := fmt.Sprintf("%s/workers/%s/jobs", c.baseURL, c.getWorkerID())
+	url := fmt.Sprintf("%s%s/workers/%s/jobs", c.baseURL, apiSuffix, c.getWorkerID())
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -202,7 +203,7 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 		// No auth header for external URLs
 	} else {
 		// Server file ID — fetch from server
-		downloadURL = fmt.Sprintf("%s/files/%s", c.baseURL, fileID)
+		downloadURL = fmt.Sprintf("%s%s/files/%s", c.baseURL, apiSuffix, fileID)
 		req, err = http.NewRequest("GET", downloadURL, nil)
 		if err != nil {
 			return fmt.Errorf("failed to create request: %w", err)
@@ -262,7 +263,7 @@ func (c *Client) UpdateJobWithFailure(jobID string, status protocol.JobStatus, e
 		WorkerID:       c.workerID, // ownership guard: server rejects stale reports from a worker that lost the job
 	}
 
-	url := fmt.Sprintf("%s/jobs/%s", c.baseURL, jobID)
+	url := fmt.Sprintf("%s%s/jobs/%s", c.baseURL, apiSuffix, jobID)
 	jsonBody, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
@@ -305,7 +306,7 @@ func (c *Client) SendStderrChunk(jobID string, chunk string) error {
 		WorkerID:    c.workerID,
 	}
 
-	url := fmt.Sprintf("%s/jobs/%s", c.baseURL, jobID)
+	url := fmt.Sprintf("%s%s/jobs/%s", c.baseURL, apiSuffix, jobID)
 	jsonBody, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
@@ -341,7 +342,7 @@ func (c *Client) SendStdoutChunk(jobID string, chunk []byte) error {
 		WorkerID:    c.workerID,
 	}
 
-	url := fmt.Sprintf("%s/jobs/%s", c.baseURL, jobID)
+	url := fmt.Sprintf("%s%s/jobs/%s", c.baseURL, apiSuffix, jobID)
 	jsonBody, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
@@ -396,7 +397,7 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 		pw.CloseWithError(writer.Close())
 	}()
 
-	url := fmt.Sprintf("%s/jobs/%s/output", c.baseURL, jobID)
+	url := fmt.Sprintf("%s%s/jobs/%s/output", c.baseURL, apiSuffix, jobID)
 	httpReq, err := http.NewRequest("POST", url, pr)
 	if err != nil {
 		pr.Close()
@@ -424,7 +425,7 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 
 // doRequest is a helper for making JSON requests
 func (c *Client) doRequest(method, path string, body interface{}) (*http.Response, error) {
-	url := c.baseURL + path
+	url := c.baseURL + apiSuffix + path
 
 	var reqBody io.Reader
 	if body != nil {
