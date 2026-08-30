@@ -57,6 +57,7 @@ type Worker struct {
 	auditRecorder      audit.AuditRecorder
 	auditNotifier      audit.Notifier
 	gpuDetector        *gpu.Detector
+	allowedPrefixes    []string // Parsed RFFMPEG_SHARED_FS_ALLOWED_PREFIX allow-list (nil = unlimited)
 
 	// regMu guards id/client.workerID updates and serializes re-registration:
 	// poll failures and heartbeat failures can both trigger reregister()
@@ -74,17 +75,18 @@ type Worker struct {
 
 // Config holds worker configuration
 type Config struct {
-	ServerURL         string
-	WorkerID          string
-	Name              string
-	Token             string // Auth token for server communication
-	TempDir           string
-	FFmpegPath        string
-	Timeout           time.Duration
-	HeartbeatInterval time.Duration // Interval between heartbeats
-	PollInterval      time.Duration // Interval for polling jobs
-	CacheConfig       CacheConfig   // Cache configuration
-	RetryConfig       *RetryConfig  // Retry configuration
+	ServerURL             string
+	WorkerID              string
+	Name                  string
+	Token                 string // Auth token for server communication
+	TempDir               string
+	FFmpegPath            string
+	Timeout               time.Duration
+	HeartbeatInterval     time.Duration // Interval between heartbeats
+	PollInterval          time.Duration // Interval for polling jobs
+	CacheConfig           CacheConfig   // Cache configuration
+	RetryConfig           *RetryConfig  // Retry configuration
+	SharedFSAllowedPrefix string        // Comma-separated path prefixes allowed in pass-through mode; empty = unlimited
 }
 
 // New creates a new worker
@@ -149,6 +151,10 @@ func New(cfg Config) (*Worker, error) {
 	// disabled yuv444p-style fallback for VAAPI encoders).
 	ffprobeExecutor := NewFFprobeExecutor("")
 	pixelFormatChecker := NewPixelFormatChecker(ffprobeExecutor)
+	// Parse the pass-through path allow-list once. Empty entries and
+	// surrounding whitespace are dropped so an env value like
+	// "/data/media, /mnt/nfs" behaves as the two intended prefixes.
+	allowedPrefixes := parseAllowedPrefixes(cfg.SharedFSAllowedPrefix)
 
 	return &Worker{
 		id:                 cfg.WorkerID,
@@ -161,6 +167,7 @@ func New(cfg Config) (*Worker, error) {
 		tempDir:            cfg.TempDir,
 		activeJobs:         make(map[string]context.CancelFunc),
 		heartbeatInterval:  cfg.HeartbeatInterval,
+		allowedPrefixes:    allowedPrefixes,
 		pollInterval:       cfg.PollInterval,
 		lastHeartbeatTime:  time.Now(),
 		ffprobeExecutor:    ffprobeExecutor,
@@ -495,7 +502,10 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Check for direct paths (shared FS mode)
 	directMode := len(job.DirectPaths) > 0
 	if directMode {
-		// Validate direct paths: reject path traversal
+		// Validate direct paths: reject path traversal, resolve symlinks, and
+		// enforce the allow-list against the real path. The symlink resolution
+		// closes the bypass where a symlink inside an allowed prefix pointed at
+		// a path outside every prefix (TSI-2646).
 		for _, path := range job.DirectPaths {
 			if containsPathTraversal(path) {
 				jobFailed = true
@@ -505,12 +515,10 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 					"path traversal rejected", flushStderr)
 				return
 			}
-			if _, err := os.Stat(path); err != nil {
+			if v := w.validateDirectInputPath(path); v != nil {
 				jobFailed = true
-				w.reportFailureWithType(job.ID, 1,
-					fmt.Sprintf("input path unreachable: %s: %v", path, err),
-					string(protocol.FailureInputUnreachable),
-					err.Error(), flushStderr)
+				w.reportFailureWithType(job.ID, 1, v.msg,
+					string(protocol.FailureInputUnreachable), v.details, flushStderr)
 				return
 			}
 		}
@@ -672,6 +680,27 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	} else if outputFilename == "" {
 		outputFilename = "output"
+	}
+	// Validate the direct output path BEFORE computing outputPath and building
+	// args. A relative output used to be joined to jobDir and silently skipped
+	// the allow-list check; it is now rejected as non-absolute (TSI-2646).
+	if directMode && outputFilename != "-" && !isRemoteURL(outputFilename) {
+		// Defense in depth: traversal must be rejected independently of the
+		// allow-list so the check never depends on the path not existing.
+		if containsPathTraversal(outputFilename) {
+			jobFailed = true
+			w.reportFailureWithType(job.ID, 1,
+				fmt.Sprintf("output path contains '..' traversal: %s", outputFilename),
+				string(protocol.FailureInputUnreachable),
+				"path traversal rejected", flushStderr)
+			return
+		}
+		if v := w.validateDirectOutputPath(outputFilename); v != nil {
+			jobFailed = true
+			w.reportFailureWithType(job.ID, 1, v.msg,
+				string(protocol.FailureInputUnreachable), v.details, flushStderr)
+			return
+		}
 	}
 	var outputPath string
 	if outputFilename == "-" || isRemoteURL(outputFilename) {
@@ -1185,11 +1214,9 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 					"path traversal rejected")
 				return
 			}
-			if _, err := os.Stat(path); err != nil {
-				w.reportFailureWithType(job.ID, 1,
-					fmt.Sprintf("input path unreachable: %s: %v", path, err),
-					string(protocol.FailureInputUnreachable),
-					err.Error())
+			if v := w.validateDirectInputPath(path); v != nil {
+				w.reportFailureWithType(job.ID, 1, v.msg,
+					string(protocol.FailureInputUnreachable), v.details)
 				return
 			}
 		}
@@ -1318,6 +1345,137 @@ func containsPathTraversal(path string) bool {
 		}
 	}
 	return false
+}
+
+// parseAllowedPrefixes splits a comma-separated allow-list into trimmed,
+// non-empty, cleaned path prefixes. It returns nil when the raw value is
+// empty — nil means "no restriction", matching the documented default.
+func parseAllowedPrefixes(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	prefixes := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		cleaned := filepath.Clean(p)
+		// Resolve symlinks in the configured prefix so a symlinked mount is
+		// compared against the same real path as the resolved candidate path.
+		// A prefix that does not exist can never match an existing path, so
+		// falling back to the cleaned value is safe.
+		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+			cleaned = resolved
+		}
+		prefixes = append(prefixes, cleaned)
+	}
+	if len(prefixes) == 0 {
+		return nil
+	}
+	return prefixes
+}
+
+// pathAllowed reports whether path is inside one of the configured prefixes.
+// A path exactly equal to a prefix is allowed; a sibling sharing the prefix
+// as a bare string (e.g. /data/media2 vs /data/media) is not, thanks to the
+// trailing separator boundary. An empty prefix list means unrestricted.
+func (w *Worker) pathAllowed(path string) bool {
+	if len(w.allowedPrefixes) == 0 {
+		return true
+	}
+	cleaned := filepath.Clean(path)
+	for _, prefix := range w.allowedPrefixes {
+		if cleaned == prefix || strings.HasPrefix(cleaned, prefix+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// directPathViolation describes a rejected direct input/output path.
+// msg is the user-visible error; details is the machine-readable reason.
+type directPathViolation struct {
+	msg     string
+	details string
+}
+
+// validateDirectInputPath resolves symlinks in path and checks it against the
+// allow-list. It must be called only after containsPathTraversal has cleared
+// the path. The resolved real path is checked, so a symlink inside an allowed
+// prefix pointing outside every prefix is rejected (TSI-2646).
+func (w *Worker) validateDirectInputPath(path string) *directPathViolation {
+	if !filepath.IsAbs(path) {
+		return &directPathViolation{
+			msg:     fmt.Sprintf("direct path must be absolute: %s", path),
+			details: "non-absolute direct path",
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return &directPathViolation{
+			msg:     fmt.Sprintf("input path unreachable: %s: %v", path, err),
+			details: err.Error(),
+		}
+	}
+	if !w.pathAllowed(resolved) {
+		return &directPathViolation{
+			msg:     fmt.Sprintf("direct path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s", path),
+			details: "path not in allowed prefix",
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return &directPathViolation{
+			msg:     fmt.Sprintf("input path unreachable: %s: %v", path, err),
+			details: err.Error(),
+		}
+	}
+	return nil
+}
+
+// validateDirectOutputPath resolves symlinks in path (or its parent when the
+// file does not exist yet) and checks it against the allow-list. It must be
+// called only after containsPathTraversal has cleared the path.
+func (w *Worker) validateDirectOutputPath(path string) *directPathViolation {
+	if !filepath.IsAbs(path) {
+		return &directPathViolation{
+			msg:     fmt.Sprintf("direct output path must be absolute: %s", path),
+			details: "non-absolute direct output path",
+		}
+	}
+	resolved, err := resolveOutputRealPath(path)
+	if err != nil {
+		return &directPathViolation{
+			msg:     fmt.Sprintf("output path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s: %v", path, err),
+			details: err.Error(),
+		}
+	}
+	if !w.pathAllowed(resolved) {
+		return &directPathViolation{
+			msg:     fmt.Sprintf("output path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s", path),
+			details: "path not in allowed prefix",
+		}
+	}
+	return nil
+}
+
+// resolveOutputRealPath returns the symlink-free real path for an output path.
+// An existing final component (file, symlink, etc.) is resolved in full; a
+// not-yet-existing file has its parent directory resolved and the base name
+// re-joined, so a symlinked parent is checked against the real target.
+func resolveOutputRealPath(path string) (string, error) {
+	if _, err := os.Lstat(path); err == nil {
+		return filepath.EvalSymlinks(path)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	realParent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(realParent, filepath.Base(path)), nil
 }
 
 // ffmpegStderrIndicatesEmptyOutput checks ffmpeg stderr for indicators that the

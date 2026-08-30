@@ -58,15 +58,16 @@ func main() {
 
 	// Create worker
 	workerCfg := worker.Config{
-		ServerURL:         cfg.ServerURL,
-		WorkerID:          cfg.WorkerID,
-		Name:              cfg.Name,
-		Token:             cfg.Token,
-		TempDir:           cfg.TempDir,
-		FFmpegPath:        cfg.FFmpegPath,
-		Timeout:           cfg.Timeout.ToDuration(),
-		HeartbeatInterval: cfg.HeartbeatInterval.ToDuration(),
-		PollInterval:      cfg.PollInterval.ToDuration(),
+		SharedFSAllowedPrefix: cfg.SharedFSAllowedPrefix,
+		ServerURL:             cfg.ServerURL,
+		WorkerID:              cfg.WorkerID,
+		Name:                  cfg.Name,
+		Token:                 cfg.Token,
+		TempDir:               cfg.TempDir,
+		FFmpegPath:            cfg.FFmpegPath,
+		Timeout:               cfg.Timeout.ToDuration(),
+		HeartbeatInterval:     cfg.HeartbeatInterval.ToDuration(),
+		PollInterval:          cfg.PollInterval.ToDuration(),
 		CacheConfig: worker.CacheConfig{
 			Enabled:          cfg.CacheEnabled,
 			Dir:              cfg.CacheDir,

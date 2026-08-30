@@ -186,8 +186,9 @@ func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 }
 
 // DownloadInput downloads an input file from the server or directly from a remote URL.
-// If fileID contains "://", it is treated as a remote URL and downloaded directly.
-// Otherwise, it is treated as a server-side file ID and fetched from the server.
+// If fileID is a remote URL per isRemoteURL (scheme-prefixed, excluding the local
+// "file" scheme), it is downloaded directly. Otherwise, it is treated as a
+// server-side file ID and fetched from the server.
 func (c *Client) DownloadInput(fileID, destPath string) error {
 	var downloadURL string
 	var req *http.Request

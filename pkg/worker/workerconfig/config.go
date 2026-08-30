@@ -94,6 +94,8 @@ type Config struct {
 	RetryUseExponentialBackoff  bool     `json:"retry_use_exponential_backoff" yaml:"retry_use_exponential_backoff"`
 	RetryMaxInterval            Duration `json:"retry_max_interval" yaml:"retry_max_interval"`
 	RetryEnableSoftwareFallback bool     `json:"retry_enable_software_fallback" yaml:"retry_enable_software_fallback"`
+	// Shared filesystem mode
+	SharedFSAllowedPrefix string `json:"shared_fs_allowed_prefix" yaml:"shared_fs_allowed_prefix"` // Comma-separated path prefixes allowed in pass-through mode; empty = unlimited
 }
 
 // FallbackCacheDir returns the per-user fallback cache directory under tempDir.
@@ -318,6 +320,11 @@ func LoadFromEnv() *Config {
 		}
 	}
 
+	// Shared filesystem mode
+	if prefix := os.Getenv("RFFMPEG_SHARED_FS_ALLOWED_PREFIX"); prefix != "" {
+		config.SharedFSAllowedPrefix = prefix
+	}
+
 	// Retry environment variables
 	if retryMaxRetries := os.Getenv("RFFMPEG_RETRY_MAX_RETRIES"); retryMaxRetries != "" {
 		if n, err := parseInt(retryMaxRetries); err == nil && n > 0 {
@@ -369,6 +376,9 @@ func Merge(fileConfig, envConfig *Config) *Config {
 		}
 		if envConfig.TempDir != "" {
 			result.TempDir = envConfig.TempDir
+		}
+		if envConfig.SharedFSAllowedPrefix != "" {
+			result.SharedFSAllowedPrefix = envConfig.SharedFSAllowedPrefix
 		}
 		if envConfig.FFmpegPath != "" && envConfig.FFmpegPath != DefaultConfig().FFmpegPath {
 			result.FFmpegPath = envConfig.FFmpegPath
