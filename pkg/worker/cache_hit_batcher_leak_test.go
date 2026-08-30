@@ -67,6 +67,15 @@ func TestCacheHitMkdirAllFailureDoesNotLeakBatcher(t *testing.T) {
 	}
 	w.processJob(jobCtx, job2, cancel, false)
 
+	// TSI-2666 review-fix: the failed cache-hit run must not advance the
+	// completion counters. The first run was a real success (total=1); the
+	// second failing run must leave totalJobsCompleted untouched at 1.
+	// jobsCompleted is a per-heartbeat-interval counter that the idle
+	// heartbeat resets, so only the lifetime counter is asserted here.
+	if _, total := readWorkerCounters(w); total != 1 {
+		t.Errorf("totalJobsCompleted advanced on cache-hit MkdirAll failure: got %d, want 1", total)
+	}
+
 	if leaked == nil {
 		t.Fatal("cache-hit path did not create a StderrBatcher; hook not invoked")
 	}

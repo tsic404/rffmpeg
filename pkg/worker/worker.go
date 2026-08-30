@@ -432,6 +432,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		// keeps serving other in-flight jobs.
 		if r := recover(); r != nil {
 			log.Printf("Job %s: panic recovered: %v\n%s", job.ID, r, debug.Stack())
+			// A panic means the job did not complete: mark it failed so the
+			// completion counters below are not advanced for a crashed job.
+			jobFailed = true
 			w.reportFailureWithType(job.ID, -1,
 				fmt.Sprintf("worker panic during job processing: %v", r),
 				string(protocol.FailureWorkerCrash),
@@ -495,6 +498,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		// Validate direct paths: reject path traversal
 		for _, path := range job.DirectPaths {
 			if containsPathTraversal(path) {
+				jobFailed = true
 				w.reportFailureWithType(job.ID, 1,
 					fmt.Sprintf("direct path contains '..' traversal: %s", path),
 					string(protocol.FailureInputUnreachable),
@@ -502,6 +506,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				return
 			}
 			if _, err := os.Stat(path); err != nil {
+				jobFailed = true
 				w.reportFailureWithType(job.ID, 1,
 					fmt.Sprintf("input path unreachable: %s: %v", path, err),
 					string(protocol.FailureInputUnreachable),
@@ -548,6 +553,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// Create job-specific temp directory
 			jobDir := filepath.Join(w.tempDir, job.ID)
 			if err := os.MkdirAll(jobDir, 0755); err != nil {
+				jobFailed = true
 				w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err))
 				return
 			}
@@ -614,6 +620,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Create job-specific temp directory
 	jobDir := filepath.Join(w.tempDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
+		jobFailed = true
 		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err))
 		return
 	}
@@ -622,6 +629,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Update job status to running
 	if err := w.client.UpdateJob(job.ID, protocol.JobStatusRunning, 0, "", false); err != nil {
 		log.Printf("Failed to update job status to running: %v", err)
+		jobFailed = true
 		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to update job status to running: %v", err))
 		return
 	}
@@ -645,6 +653,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				inputPath = filepath.Join(jobDir, "input-"+fileID)
 			}
 			if err := w.client.DownloadInput(fileID, inputPath); err != nil {
+				jobFailed = true
 				w.reportInputDownloadFailure(job.ID, fileID, fmt.Sprintf("Failed to download input file %s: %v", fileID, err))
 				return
 			}
@@ -848,6 +857,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		if err := w.client.UpdateJob(job.ID, protocol.JobStatusCancelled, -1, "Job cancelled", false); err != nil {
 			logTerminalReportError(job.ID, "report cancelled", err)
 		}
+		jobFailed = true
 		return
 	}
 
@@ -862,6 +872,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		if err := w.client.UpdateJobWithFailure(job.ID, protocol.JobStatusTimeout, result.ExitCode, errMsg, false, string(failureType), details); err != nil {
 			logTerminalReportError(job.ID, "report timeout", err)
 		}
+		jobFailed = true
 		return
 	}
 

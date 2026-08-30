@@ -185,9 +185,17 @@ func TestProcessJob_PanicReportedWorkerSurvives(t *testing.T) {
 
 	w.mu.Lock()
 	_, stillActive := w.activeJobs[job.ID]
+	jobsCompleted := w.jobsCompleted
+	totalJobsCompleted := w.totalJobsCompleted
 	w.mu.Unlock()
 	if stillActive {
 		t.Error("job still registered in activeJobs after panic recovery")
+	}
+	// TSI-2666: a panic-recovered job must not advance the completion
+	// counters — only successful jobs may inflate completed_jobs.
+	if jobsCompleted != 0 || totalJobsCompleted != 0 {
+		t.Errorf("completion counters advanced after panic: jobsCompleted=%d totalJobsCompleted=%d, want 0/0",
+			jobsCompleted, totalJobsCompleted)
 	}
 }
 
