@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -231,6 +232,20 @@ func LoadFromFile(path string) (*Config, error) {
 	return config, nil
 }
 
+// parseBoolEnv parses a boolean environment variable. It accepts 1/true/yes/on
+// and 0/false/no/off (case-insensitive). The second return value reports
+// whether the value was a recognized boolean.
+func parseBoolEnv(value string) (bool, bool) {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // LoadFromEnv loads configuration from environment variables.
 func LoadFromEnv() *Config {
 	config := DefaultConfig()
@@ -263,11 +278,15 @@ func LoadFromEnv() *Config {
 			config.MaxConcurrent = n
 		}
 	}
-	if autoDetectGPU := os.Getenv("RFFMPEG_AUTO_DETECT_GPU"); autoDetectGPU == "false" || autoDetectGPU == "0" {
-		config.AutoDetectGPU = false
+	if v := os.Getenv("RFFMPEG_AUTO_DETECT_GPU"); v != "" {
+		if parsed, ok := parseBoolEnv(v); ok {
+			config.AutoDetectGPU = parsed
+		}
 	}
-	if autoDetectCodecs := os.Getenv("RFFMPEG_AUTO_DETECT_CODECS"); autoDetectCodecs == "false" || autoDetectCodecs == "0" {
-		config.AutoDetectCodecs = false
+	if v := os.Getenv("RFFMPEG_AUTO_DETECT_CODECS"); v != "" {
+		if parsed, ok := parseBoolEnv(v); ok {
+			config.AutoDetectCodecs = parsed
+		}
 	}
 
 	// Cache environment variables
@@ -350,14 +369,19 @@ func Merge(fileConfig, envConfig *Config) *Config {
 			result.MaxConcurrent = envConfig.MaxConcurrent
 		}
 		// Auto-detect booleans only override when the env var is explicitly
-		// set. Unconditionally copying from envConfig would clobber a file's
-		// false with LoadFromEnv's default true, disabling manual encoder /
-		// decoder / GPU config (TSI-2640).
-		if os.Getenv("RFFMPEG_AUTO_DETECT_GPU") != "" {
-			result.AutoDetectGPU = envConfig.AutoDetectGPU
+		// set to a recognized boolean. Copying envConfig unconditionally would
+		// clobber a file's false with LoadFromEnv's default true (TSI-2640);
+		// a non-empty but invalid value (e.g. "banana") must not count as an
+		// explicit override either (TSI-2662).
+		if v := os.Getenv("RFFMPEG_AUTO_DETECT_GPU"); v != "" {
+			if parsed, ok := parseBoolEnv(v); ok {
+				result.AutoDetectGPU = parsed
+			}
 		}
-		if os.Getenv("RFFMPEG_AUTO_DETECT_CODECS") != "" {
-			result.AutoDetectCodecs = envConfig.AutoDetectCodecs
+		if v := os.Getenv("RFFMPEG_AUTO_DETECT_CODECS"); v != "" {
+			if parsed, ok := parseBoolEnv(v); ok {
+				result.AutoDetectCodecs = parsed
+			}
 		}
 
 		// Cache settings

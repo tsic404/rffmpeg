@@ -256,8 +256,8 @@ Usage of ./bin/worker:
 | `RFFMPEG_FFMPEG_PATH` | FFmpeg 可执行文件路径 | `ffmpeg` |
 | `RFFMPEG_TIMEOUT` | 任务执行超时时间 | `2h` |
 | `RFFMPEG_MAX_CONCURRENT` | 最大并发任务数 | `1` |
-| `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（`false`/`0` 关闭） | `true` |
-| `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（`false`/`0` 关闭） | `true` |
+| `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |
+| `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（同上布尔值语义） | `true` |
 | `RFFMPEG_CACHE_ENABLED` | 启用任务文件缓存（`false`/`0` 关闭） | `true` |
 | `RFFMPEG_CACHE_DIR` | 缓存目录 | 自动（`/var/cache/rffmpeg` 或 `~/.cache/rffmpeg`） |
 | `RFFMPEG_CACHE_TTL` | 缓存 TTL | `24h` |

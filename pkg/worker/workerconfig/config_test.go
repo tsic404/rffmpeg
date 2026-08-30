@@ -368,6 +368,56 @@ func TestMerge_PreservesFileAutoDetectAndManualWhenEnvUnset(t *testing.T) {
 	}
 }
 
+func TestMerge_EnvOverridesFileAutoDetect(t *testing.T) {
+	// An explicitly set env var must override the file value in both
+	// directions, and parsing must be case-insensitive (TSI-2662).
+	fileConfig := &Config{
+		AutoDetectGPU:    false,
+		AutoDetectCodecs: true,
+	}
+
+	os.Setenv("RFFMPEG_AUTO_DETECT_GPU", "TRUE")
+	os.Setenv("RFFMPEG_AUTO_DETECT_CODECS", "false")
+	defer func() {
+		os.Unsetenv("RFFMPEG_AUTO_DETECT_GPU")
+		os.Unsetenv("RFFMPEG_AUTO_DETECT_CODECS")
+	}()
+
+	merged := Merge(fileConfig, LoadFromEnv())
+
+	if !merged.AutoDetectGPU {
+		t.Error("AutoDetectGPU = false, want true (env true overrides file false)")
+	}
+	if merged.AutoDetectCodecs {
+		t.Error("AutoDetectCodecs = true, want false (env false overrides file true)")
+	}
+}
+
+func TestMerge_InvalidEnvBoolKeepsFileValue(t *testing.T) {
+	// A non-empty but unrecognized env boolean must not count as an explicit
+	// override; the file value survives (TSI-2662).
+	fileConfig := &Config{
+		AutoDetectGPU:    false,
+		AutoDetectCodecs: true,
+	}
+
+	os.Setenv("RFFMPEG_AUTO_DETECT_GPU", "banana")
+	os.Setenv("RFFMPEG_AUTO_DETECT_CODECS", "banana")
+	defer func() {
+		os.Unsetenv("RFFMPEG_AUTO_DETECT_GPU")
+		os.Unsetenv("RFFMPEG_AUTO_DETECT_CODECS")
+	}()
+
+	merged := Merge(fileConfig, LoadFromEnv())
+
+	if merged.AutoDetectGPU {
+		t.Error("AutoDetectGPU = true, want false (invalid env value must not override file false)")
+	}
+	if !merged.AutoDetectCodecs {
+		t.Error("AutoDetectCodecs = false, want true (invalid env value must not override file true)")
+	}
+}
+
 func TestMerge_NilFileConfig(t *testing.T) {
 	envConfig := DefaultConfig()
 	envConfig.WorkerID = "env-worker-id"
