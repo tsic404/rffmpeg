@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/tsix404/rffmpeg/pkg/pathutil"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/server/auth"
 	"github.com/tsix404/rffmpeg/pkg/server/db"
@@ -1063,6 +1064,12 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 func inputExists(store *storage.Storage, input string) bool {
 	if storage.ValidateFileID(input) {
 		return store.FileExists(input)
+	}
+	// Reject a direct path containing a ".." component before os.Stat resolves
+	// it. A bare API call can otherwise bypass the worker-side traversal guard
+	// (TSI-2706). The check lives in pathutil so both sides share one semantic.
+	if pathutil.ContainsPathTraversal(input) {
+		return false
 	}
 	_, err := os.Stat(input)
 	return err == nil

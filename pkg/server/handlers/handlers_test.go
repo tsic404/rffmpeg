@@ -2510,6 +2510,47 @@ func TestProbeDirectPathMissingRejected(t *testing.T) {
 	}
 }
 
+// TSI-2706: a bare-API probe input containing a ".." component must be
+// rejected server-side (same shared pathutil.ContainsPathTraversal the worker
+// uses), even when the cleaned path would stat to an existing file.
+func TestProbeDirectPathTraversalRejected(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	dir := t.TempDir()
+	absPath := filepath.Join(dir, "media.mp4")
+	if err := os.WriteFile(absPath, []byte("test video content"), 0644); err != nil {
+		t.Fatalf("Failed to create direct-path test file: %v", err)
+	}
+	// The ".." parent must exist so os.Stat would resolve the cleaned path to
+	// an existing file — proving the rejection comes from the traversal guard,
+	// not from a missing file.
+	if err := os.MkdirAll(filepath.Join(dir, "subdir"), 0755); err != nil {
+		t.Fatalf("Failed to create traversal parent dir: %v", err)
+	}
+	// String concatenation: filepath.Join would clean the ".." away before
+	// it reaches the server-side guard.
+	traversal := filepath.Join(dir, "subdir") + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "media.mp4"
+	probeReq := protocol.ProbeRequest{Input: traversal}
+	body, _ := json.Marshal(probeReq)
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for traversal direct path, got %d. Body: %s", w.Code, w.Body.String())
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeNotFound {
+		t.Errorf("Expected error code 'not_found', got '%s'", errResp.Code)
+	}
+}
+
 // TestProbeDirectPathStoredInJob verifies that a shared-FS direct path input is
 // persisted as the probe job's direct_paths so the worker can probe it locally.
 // A storage file ID must keep direct_paths empty (downloaded normally), while a

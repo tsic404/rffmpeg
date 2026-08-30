@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tsix404/rffmpeg/pkg/audit"
+	"github.com/tsix404/rffmpeg/pkg/pathutil"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
 	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
@@ -507,7 +508,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		// closes the bypass where a symlink inside an allowed prefix pointed at
 		// a path outside every prefix (TSI-2646).
 		for _, path := range job.DirectPaths {
-			if containsPathTraversal(path) {
+			if pathutil.ContainsPathTraversal(path) {
 				jobFailed = true
 				w.reportFailureWithType(job.ID, 1,
 					fmt.Sprintf("direct path contains '..' traversal: %s", path),
@@ -687,7 +688,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	if directMode && outputFilename != "-" && !isRemoteURL(outputFilename) {
 		// Defense in depth: traversal must be rejected independently of the
 		// allow-list so the check never depends on the path not existing.
-		if containsPathTraversal(outputFilename) {
+		if pathutil.ContainsPathTraversal(outputFilename) {
 			jobFailed = true
 			w.reportFailureWithType(job.ID, 1,
 				fmt.Sprintf("output path contains '..' traversal: %s", outputFilename),
@@ -1207,7 +1208,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 	var inputPath string
 	if directMode {
 		for _, path := range job.DirectPaths {
-			if containsPathTraversal(path) {
+			if pathutil.ContainsPathTraversal(path) {
 				w.reportFailureWithType(job.ID, 1,
 					fmt.Sprintf("direct path contains '..' traversal: %s", path),
 					string(protocol.FailureInputUnreachable),
@@ -1332,21 +1333,6 @@ func (w *Worker) cleanupJobDir(dir string) {
 	}
 }
 
-// containsPathTraversal checks whether any component of a path is exactly
-// ".." (path traversal attempt). Unlike a raw substring search, legitimate
-// filenames such as "my..video.mp4" or "a..b/c.mp4" are not false-positived
-// (TSI-2365).
-func containsPathTraversal(path string) bool {
-	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
-		return r == '/' || r == '\\'
-	}) {
-		if part == ".." {
-			return true
-		}
-	}
-	return false
-}
-
 // parseAllowedPrefixes splits a comma-separated allow-list into trimmed,
 // non-empty, cleaned path prefixes. It returns nil when the raw value is
 // empty — nil means "no restriction", matching the documented default.
@@ -1403,9 +1389,9 @@ type directPathViolation struct {
 }
 
 // validateDirectInputPath resolves symlinks in path and checks it against the
-// allow-list. It must be called only after containsPathTraversal has cleared
-// the path. The resolved real path is checked, so a symlink inside an allowed
-// prefix pointing outside every prefix is rejected (TSI-2646).
+// allow-list. It must be called only after pathutil.ContainsPathTraversal has
+// cleared the path. The resolved real path is checked, so a symlink inside an
+// allowed prefix pointing outside every prefix is rejected (TSI-2646).
 func (w *Worker) validateDirectInputPath(path string) *directPathViolation {
 	if !filepath.IsAbs(path) {
 		return &directPathViolation{
@@ -1437,7 +1423,7 @@ func (w *Worker) validateDirectInputPath(path string) *directPathViolation {
 
 // validateDirectOutputPath resolves symlinks in path (or its parent when the
 // file does not exist yet) and checks it against the allow-list. It must be
-// called only after containsPathTraversal has cleared the path.
+// called only after pathutil.ContainsPathTraversal has cleared the path.
 func (w *Worker) validateDirectOutputPath(path string) *directPathViolation {
 	if !filepath.IsAbs(path) {
 		return &directPathViolation{
