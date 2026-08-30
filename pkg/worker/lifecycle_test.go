@@ -477,7 +477,17 @@ func TestConcurrentReregisterSingleflight(t *testing.T) {
 		}
 		mu.Lock()
 		registrations++
+		first := registrations == 1
 		mu.Unlock()
+		if first {
+			// Keep the winning registration in flight long enough for every
+			// other caller to reach reregister()'s singleflight window and
+			// coalesce onto it. A fast httptest server can otherwise answer
+			// before the later goroutines are scheduled, so each of them sees
+			// the registration as already finished and issues its own request
+			// ("want exactly 1" flakes).
+			time.Sleep(100 * time.Millisecond)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"worker_id":"singleflight-worker"}`))
 	}))
@@ -489,15 +499,18 @@ func TestConcurrentReregisterSingleflight(t *testing.T) {
 	}
 
 	const n = 20
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	results := make([]bool, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			<-start
 			results[i] = w.reregister()
 		}(i)
 	}
+	close(start)
 	wg.Wait()
 
 	mu.Lock()
