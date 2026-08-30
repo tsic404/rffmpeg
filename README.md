@@ -75,7 +75,7 @@ go build -o bin/rffmpeg ./cmd/cli
 
 ```bash
 # 连接到本地 Server
-./bin/worker --server http://localhost:8080
+./bin/worker -server-url http://localhost:8080
 
 # 指定 Worker 名称和支持的编码器
 ./bin/worker --name worker-1 --encoders libx264,h264_nvenc
@@ -209,7 +209,7 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 
 ```bash
 ./bin/worker --help
-  --server string           Server URL (/api/v1 suffix optional)
+  -server-url string        Server URL (/api/v1 suffix optional)
   --name string             Worker name (auto-generated if empty)
   --id string               Worker ID (auto-generated if empty)
   --temp-dir string         Temporary directory for files
@@ -299,7 +299,7 @@ CLI 和 Worker 在同一台机器上运行，文件存储在本地磁盘。
 export RFFMPEG_SHARED_FS=1
 
 # 启动 Worker（同一台机器）
-./bin/worker --server http://localhost:8080 --name local-worker
+./bin/worker -server-url http://localhost:8080 --name local-worker
 
 # CLI 提交任务，输入/输出均为本地路径
 ./bin/rffmpeg -i /data/videos/input.mp4 -c:v libx264 /data/videos/output.mp4
@@ -325,7 +325,7 @@ export RFFMPEG_SHARED_FS=1
 # 机器 B (Worker 端)
 export RFFMPEG_SHARED_FS=1
 export RFFMPEG_SHARED_FS_ALLOWED_PREFIX="/mnt/media"
-./bin/worker --server http://localhost:8080 --name nfs-worker
+./bin/worker -server-url http://localhost:8080 --name nfs-worker
 ```
 
 ##### 场景 3：Kubernetes 共享 PV
@@ -688,7 +688,7 @@ Response:
 ./bin/server --port 8080 --data-dir ./data
 
 # 2. 启动 Worker（另一个终端）
-./bin/worker --server http://localhost:8080 \
+./bin/worker -server-url http://localhost:8080 \
   --name gpu-worker \
   --encoders libx264,h264_nvenc,hevc_nvenc \
   --gpu "NVIDIA RTX 3080" \
@@ -748,7 +748,7 @@ EOF
   --mtls
 
 # Worker 连接 HTTPS Server
-./bin/worker --server https://localhost:8080
+./bin/worker -server-url https://localhost:8080
 ```
 
 ## 许可证
