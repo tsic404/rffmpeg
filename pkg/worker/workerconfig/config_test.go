@@ -256,6 +256,10 @@ func TestMerge(t *testing.T) {
 		AutoDetectGPU: false,
 	}
 
+	// Merge only overrides booleans when the env var is actually set (TSI-2640).
+	os.Setenv("RFFMPEG_AUTO_DETECT_GPU", "false")
+	defer os.Unsetenv("RFFMPEG_AUTO_DETECT_GPU")
+
 	merged := Merge(fileConfig, envConfig)
 
 	// Env should override file
@@ -274,6 +278,41 @@ func TestMerge(t *testing.T) {
 	// File values should be preserved if not overridden
 	if len(merged.EncoderPriority) != 2 {
 		t.Errorf("EncoderPriority length = %d, want 2", len(merged.EncoderPriority))
+	}
+}
+
+func TestMerge_PreservesFileAutoDetectAndManualWhenEnvUnset(t *testing.T) {
+	// Regression test for TSI-2640: a config file's false auto-detect flags and
+	// manual overrides must survive a merge against LoadFromEnv defaults when
+	// RFFMPEG_AUTO_DETECT_* are not set.
+	fileConfig := &Config{
+		AutoDetectGPU:       false,
+		AutoDetectCodecs:    false,
+		ManualEncoders:      []string{"libx264", "h264_nvenc"},
+		ManualDecoders:      []string{"h264"},
+		ManualGPUModel:      "NVIDIA RTX 3080",
+		ManualFFmpegVersion: "6.1",
+	}
+
+	merged := Merge(fileConfig, DefaultConfig())
+
+	if merged.AutoDetectGPU {
+		t.Error("AutoDetectGPU should stay false (file value)")
+	}
+	if merged.AutoDetectCodecs {
+		t.Error("AutoDetectCodecs should stay false (file value)")
+	}
+	if len(merged.ManualEncoders) != 2 {
+		t.Errorf("ManualEncoders length = %d, want 2", len(merged.ManualEncoders))
+	}
+	if len(merged.ManualDecoders) != 1 {
+		t.Errorf("ManualDecoders length = %d, want 1", len(merged.ManualDecoders))
+	}
+	if merged.ManualGPUModel != "NVIDIA RTX 3080" {
+		t.Errorf("ManualGPUModel = %q, want %q", merged.ManualGPUModel, "NVIDIA RTX 3080")
+	}
+	if merged.ManualFFmpegVersion != "6.1" {
+		t.Errorf("ManualFFmpegVersion = %q, want %q", merged.ManualFFmpegVersion, "6.1")
 	}
 }
 

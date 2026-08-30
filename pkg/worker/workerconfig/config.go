@@ -324,9 +324,16 @@ func Merge(fileConfig, envConfig *Config) *Config {
 		if envConfig.MaxConcurrent != DefaultConfig().MaxConcurrent {
 			result.MaxConcurrent = envConfig.MaxConcurrent
 		}
-		// Env flags always override for boolean
-		result.AutoDetectGPU = envConfig.AutoDetectGPU
-		result.AutoDetectCodecs = envConfig.AutoDetectCodecs
+		// Auto-detect booleans only override when the env var is explicitly
+		// set. Unconditionally copying from envConfig would clobber a file's
+		// false with LoadFromEnv's default true, disabling manual encoder /
+		// decoder / GPU config (TSI-2640).
+		if os.Getenv("RFFMPEG_AUTO_DETECT_GPU") != "" {
+			result.AutoDetectGPU = envConfig.AutoDetectGPU
+		}
+		if os.Getenv("RFFMPEG_AUTO_DETECT_CODECS") != "" {
+			result.AutoDetectCodecs = envConfig.AutoDetectCodecs
+		}
 
 		// Cache settings
 		if envConfig.CacheDir != "" && envConfig.CacheDir != DefaultConfig().CacheDir {
