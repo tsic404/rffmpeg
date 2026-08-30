@@ -1211,12 +1211,12 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 				w.reportFailureWithType(job.ID, 1,
 					fmt.Sprintf("direct path contains '..' traversal: %s", path),
 					string(protocol.FailureInputUnreachable),
-					"path traversal rejected")
+					"path traversal rejected", nil)
 				return
 			}
 			if v := w.validateDirectInputPath(path); v != nil {
 				w.reportFailureWithType(job.ID, 1, v.msg,
-					string(protocol.FailureInputUnreachable), v.details)
+					string(protocol.FailureInputUnreachable), v.details, nil)
 				return
 			}
 		}
