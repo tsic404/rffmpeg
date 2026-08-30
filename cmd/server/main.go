@@ -47,6 +47,13 @@ func main() {
 	}
 
 	log.Printf("Configuration: %s", cfg)
+	// Create the data directory if it does not exist (TSI-2606): sqlite
+	// refuses to open a database whose parent directory is missing, and the
+	// resulting "unable to open database file" error gives no actionable
+	// hint. MkdirAll keeps --data-dir runnable out of the box.
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		log.Fatalf("Failed to create data directory %s: %v", cfg.DataDir, err)
+	}
 
 	// Initialize database
 	dbPath := fmt.Sprintf("%s/rffmpeg.db", cfg.DataDir)
