@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"log"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,7 +17,9 @@ type EncoderFallback struct {
 
 	// softwareFallbackChain maps a software encoder to its next fallback alternative.
 	// When a software encoder chosen as a fallback is also unavailable, the chain
-	// provides an alternative instead of giving up. Example: libx265 -> libx264.
+	// provides an alternative instead of giving up. Entries MUST stay within the
+	// same codec family (e.g. libaom-av1 -> libsvtav1); cross-format transitions
+	// are rejected at read time by GetAlternativeSoftwareEncoder.
 	softwareFallbackChain map[string]string
 }
 
@@ -96,19 +99,16 @@ func defaultFormatEncodersMap() map[string][]string {
 // encoder chosen as a fallback is itself unavailable. This enables multi-step
 // fallback instead of giving up after the first software encoder fails.
 // Each entry maps "current encoder" -> "next fallback to try".
+//
+// Only same-format transitions are allowed: silently re-encoding across codec
+// families (e.g. AV1 -> H.264) changes the requested output format and is
+// rejected rather than performed implicitly (TSI-2671).
 func defaultSoftwareFallbackChain() map[string]string {
 	return map[string]string{
-		// H.265/HEVC software fallback chain: libx265 -> libx264
-		"libx265": "libx264",
-
-		// VP9 software fallback chain: libvpx-vp9 -> libx264
-		"libvpx-vp9": "libx264",
-
-		// AV1 software fallback chain: libaom-av1 -> libsvtav1 -> libx264
+		// AV1 software fallback chain (same format): libaom-av1 -> libsvtav1
 		"libaom-av1": "libsvtav1",
-		"libsvtav1":  "libx264",
 
-		// H.264 software fallback chain: libx264rgb -> libx264
+		// H.264 software fallback chain (same format): libx264rgb -> libx264
 		"libx264rgb": "libx264",
 	}
 }
@@ -417,13 +417,37 @@ func (f *EncoderFallback) GetAvailableSoftwareEncoders(format string) []string {
 
 // GetAlternativeSoftwareEncoder returns the next software encoder to try when
 // the given encoder (which was itself chosen as a system fallback) is unavailable.
-// This enables multi-step fallback chains (e.g., libx265 -> libx264).
-// Returns empty string if no alternative is configured.
+// This enables multi-step fallback chains (e.g., libaom-av1 -> libsvtav1).
+//
+// Cross-format transitions are refused: when the chained encoder belongs to a
+// different codec family than the current one, the lookup returns empty instead
+// of silently downgrading the requested output format (TSI-2671).
+// Returns empty string if no alternative is configured or the configured
+// alternative would change the codec family.
 func (f *EncoderFallback) GetAlternativeSoftwareEncoder(encoder string) string {
-	if next, ok := f.softwareFallbackChain[encoder]; ok {
-		return next
+	next, ok := f.softwareFallbackChain[encoder]
+	if !ok || next == encoder {
+		return ""
 	}
-	return ""
+	if f.IsCrossFormatFallback(encoder, next) {
+		log.Printf("Refusing cross-format fallback: %s (%s) -> %s (%s)",
+			encoder, f.GetEncoderFormat(encoder), next, f.GetEncoderFormat(next))
+		return ""
+	}
+	return next
+}
+
+// IsCrossFormatFallback reports whether 'to' belongs to a different codec
+// family than 'from' (e.g. libsvtav1 (av1) -> libx264 (h264)). Unknown encoder
+// formats are treated as compatible so a fallback is never blocked when the
+// family cannot be determined.
+func (f *EncoderFallback) IsCrossFormatFallback(from, to string) bool {
+	fromFmt := f.GetEncoderFormat(from)
+	toFmt := f.GetEncoderFormat(to)
+	if fromFmt == "" || toFmt == "" {
+		return false
+	}
+	return fromFmt != toFmt
 }
 
 // AddSoftwareFallbackChain adds a fallback chain entry: when 'from' is unavailable,

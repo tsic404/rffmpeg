@@ -7,15 +7,12 @@ import (
 func TestDefaultSoftwareFallbackChain(t *testing.T) {
 	chain := defaultSoftwareFallbackChain()
 
-	// Verify well-known chain entries exist
+	// Verify well-known same-family chain entries exist
 	tests := []struct {
 		from     string
 		expected string
 	}{
-		{"libx265", "libx264"},
-		{"libvpx-vp9", "libx264"},
 		{"libaom-av1", "libsvtav1"},
-		{"libsvtav1", "libx264"},
 		{"libx264rgb", "libx264"},
 	}
 
@@ -25,6 +22,13 @@ func TestDefaultSoftwareFallbackChain(t *testing.T) {
 				t.Errorf("defaultSoftwareFallbackChain()[%q] = %q, want %q", tt.from, got, tt.expected)
 			}
 		})
+	}
+
+	// Cross-format transitions must not be configured (TSI-2671).
+	for _, cross := range []string{"libx265", "libvpx-vp9", "libsvtav1"} {
+		if got, ok := chain[cross]; ok {
+			t.Errorf("defaultSoftwareFallbackChain()[%q] = %q, want absent (cross-format)", cross, got)
+		}
 	}
 }
 
@@ -36,11 +40,11 @@ func TestEncoderFallback_GetAlternativeSoftwareEncoder(t *testing.T) {
 		encoder  string
 		expected string
 	}{
-		{"libx265 -> libx264", "libx265", "libx264"},
-		{"libvpx-vp9 -> libx264", "libvpx-vp9", "libx264"},
 		{"libaom-av1 -> libsvtav1", "libaom-av1", "libsvtav1"},
-		{"libsvtav1 -> libx264", "libsvtav1", "libx264"},
 		{"libx264rgb -> libx264", "libx264rgb", "libx264"},
+		{"no fallback for libx265", "libx265", ""},
+		{"no fallback for libvpx-vp9", "libvpx-vp9", ""},
+		{"no fallback for libsvtav1", "libsvtav1", ""},
 		{"no fallback for libx264", "libx264", ""},
 		{"no fallback for unknown", "unknown_encoder", ""},
 	}
@@ -91,16 +95,12 @@ func TestEncoderFallback_PrepareFallbackArgs_IsUserSelected(t *testing.T) {
 		t.Errorf("PrepareFallbackArgs should return nil for user-selected software encoder, got %v", got2)
 	}
 
-	// System-chosen libx265 (isUserSelected=false): chained fallback applies.
+	// System-chosen libx265 (isUserSelected=false): cross-format chain is refused,
+	// so no alternative is available (TSI-2671).
 	args3 := []string{"-i", "input.mp4", "-c:v", "libx265", "output.mp4"}
-	got3 := fallback.PrepareFallbackArgs(args3, "output.mp4", false)
-	if got3 == nil {
-		t.Fatal("PrepareFallbackArgs returned nil for system-fallback encoder — expected chained fallback")
+	if got3 := fallback.PrepareFallbackArgs(args3, "output.mp4", false); got3 != nil {
+		t.Errorf("PrepareFallbackArgs should return nil for cross-format fallback, got %v", got3)
 	}
-	if encoder := extractEncoderFromArgs(got3); encoder != "libx264" {
-		t.Errorf("encoder = %q, want %q (chained from libx265)", encoder, "libx264")
-	}
-
 	// System-chosen libx264 (end of chain): nil.
 	if got4 := fallback.PrepareFallbackArgs(args2, "output.mp4", false); got4 != nil {
 		t.Errorf("PrepareFallbackArgs should return nil for end-of-chain, got %v", got4)
@@ -133,16 +133,11 @@ func TestEncoderFallback_PrepareFallbackArgsWithSource_UserSelected(t *testing.T
 func TestEncoderFallback_PrepareFallbackArgsWithSource_SystemFallback(t *testing.T) {
 	fallback := NewEncoderFallback()
 
-	// System-selected fallback encoder (e.g., libx265) — should trigger chained fallback
+	// System-selected fallback encoder (e.g., libx265) — cross-format chain is
+	// refused, so no alternative is available (TSI-2671).
 	args := []string{"-i", "input.mp4", "-c:v", "libx265", "output.mp4"}
-	got := fallback.PrepareFallbackArgsWithSource(args, "output.mp4", false)
-	if got == nil {
-		t.Fatal("PrepareFallbackArgsWithSource returned nil for system-fallback encoder — expected chained fallback")
-	}
-
-	encoder := extractEncoderFromArgs(got)
-	if encoder != "libx264" {
-		t.Errorf("encoder = %q, want %q (chained from libx265)", encoder, "libx264")
+	if got := fallback.PrepareFallbackArgsWithSource(args, "output.mp4", false); got != nil {
+		t.Errorf("PrepareFallbackArgsWithSource should return nil for cross-format fallback, got %v", got)
 	}
 
 	// System-selected libx264 (end of chain): should return nil (no further fallback)
@@ -223,10 +218,10 @@ func TestEncoderFallback_buildFallbackArgs_OutputPathPreservation(t *testing.T) 
 func TestEncoderFallback_SoftwareFallbackChain_MultiStep(t *testing.T) {
 	fallback := NewEncoderFallback()
 
-	// AV1 multi-step chain: libaom-av1 -> libsvtav1 -> libx264 -> (end)
+	// AV1 same-format chain: libaom-av1 -> libsvtav1 -> (end; cross-format refused)
 	args := []string{"-i", "input.mp4", "-c:v", "libaom-av1", "output.mp4"}
 
-	// Step 1: as system fallback, libaom-av1 should chain to libsvtav1
+	// Step 1: as system fallback, libaom-av1 should chain to libsvtav1 (same family)
 	got := fallback.PrepareFallbackArgsWithSource(args, "output.mp4", false)
 	if got == nil {
 		t.Fatal("step 1: PrepareFallbackArgsWithSource returned nil")
@@ -235,18 +230,52 @@ func TestEncoderFallback_SoftwareFallbackChain_MultiStep(t *testing.T) {
 		t.Errorf("step 1 encoder = %q, want libsvtav1", enc)
 	}
 
-	// Step 2: as system fallback, libsvtav1 should chain to libx264
-	got2 := fallback.PrepareFallbackArgsWithSource(got, "output.mp4", false)
-	if got2 == nil {
-		t.Fatal("step 2: PrepareFallbackArgsWithSource returned nil")
+	// Step 2: libsvtav1 has no same-family alternative, and the cross-format
+	// transition to libx264 must be refused (TSI-2671).
+	if got2 := fallback.PrepareFallbackArgsWithSource(got, "output.mp4", false); got2 != nil {
+		t.Errorf("step 2: should return nil (cross-format fallback refused), got %v", got2)
 	}
-	if enc := extractEncoderFromArgs(got2); enc != "libx264" {
-		t.Errorf("step 2 encoder = %q, want libx264", enc)
+}
+
+func TestEncoderFallback_IsCrossFormatFallback(t *testing.T) {
+	fallback := NewEncoderFallback()
+
+	tests := []struct {
+		name     string
+		from     string
+		to       string
+		expected bool
+	}{
+		{"av1 to h264 is cross-format", "libsvtav1", "libx264", true},
+		{"hevc to h264 is cross-format", "libx265", "libx264", true},
+		{"vp9 to h264 is cross-format", "libvpx-vp9", "libx264", true},
+		{"av1 to av1 is same-format", "libaom-av1", "libsvtav1", false},
+		{"h264 to h264 is same-format", "libx264rgb", "libx264", false},
+		{"unknown source treated as compatible", "unknown_encoder", "libx264", false},
+		{"unknown target treated as compatible", "libx265", "unknown_encoder", false},
 	}
 
-	// Step 3: libx264 is the end of chain
-	got3 := fallback.PrepareFallbackArgsWithSource(got2, "output.mp4", false)
-	if got3 != nil {
-		t.Errorf("step 3: should return nil at end of chain, got %v", got3)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fallback.IsCrossFormatFallback(tt.from, tt.to); got != tt.expected {
+				t.Errorf("IsCrossFormatFallback(%q, %q) = %v, want %v", tt.from, tt.to, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestEncoderFallback_CrossFormatChainEntryRefused(t *testing.T) {
+	fallback := NewEncoderFallback()
+
+	// A custom cross-format entry must be refused by GetAlternativeSoftwareEncoder.
+	fallback.AddSoftwareFallbackChain("libsvtav1", "libx264")
+	if got := fallback.GetAlternativeSoftwareEncoder("libsvtav1"); got != "" {
+		t.Errorf("GetAlternativeSoftwareEncoder(libsvtav1) = %q, want empty (cross-format refused)", got)
+	}
+
+	// Same-family custom entry still works.
+	fallback.AddSoftwareFallbackChain("libx264rgb", "libx264")
+	if got := fallback.GetAlternativeSoftwareEncoder("libx264rgb"); got != "libx264" {
+		t.Errorf("GetAlternativeSoftwareEncoder(libx264rgb) = %q, want libx264", got)
 	}
 }
