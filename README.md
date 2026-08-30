@@ -77,7 +77,11 @@ go build -o bin/rffmpeg ./cmd/cli
 # 连接到本地 Server
 ./bin/worker --server-url http://localhost:8080
 
-# 更多配置（名称、编码器、GPU、超时等）见「Worker 配置」——通过配置文件或环境变量设置
+# 通过 JSON 配置文件指定完整配置（名称、编码器、GPU 等）
+./bin/worker --config worker.json
+
+# 通过环境变量覆盖配置项（如名称、最大并发）
+RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 ```
 
 ### 使用 CLI 提交任务
@@ -187,59 +191,84 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 
 ### Worker 配置
 
-#### 环境变量
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `RFFMPEG_CONFIG` | Worker 配置文件路径（JSON） | 未设置 |
-| `RFFMPEG_SERVER_URL` | Server API URL | `http://localhost:8080` |
-| `RFFMPEG_TOKEN` | 认证令牌（server 启用认证时必填） | - |
-| `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
-| `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |
-| `RFFMPEG_TEMP_DIR` | 临时文件目录 | 系统临时目录 |
-| `RFFMPEG_FFMPEG_PATH` | FFmpeg 可执行文件路径 | `ffmpeg` |
-| `RFFMPEG_TIMEOUT` | 作业执行超时 | `2h` |
-| `RFFMPEG_MAX_CONCURRENT` | 最大并发作业数 | `1` |
-| `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（`false`/`0` 禁用） | `true` |
-| `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（`false`/`0` 禁用） | `true` |
-| `RFFMPEG_CACHE_ENABLED` | 启用文件缓存 | `true` |
-| `RFFMPEG_CACHE_DIR` | 缓存目录 | 自动（`~/.cache/rffmpeg` 或 `/var/cache/rffmpeg`） |
-| `RFFMPEG_CACHE_TTL` | 缓存 TTL | `24h` |
-| `RFFMPEG_CACHE_MAX_SIZE_MB` | 缓存最大大小（MiB） | `10240` |
-| `RFFMPEG_RETRY_MAX_RETRIES` | 作业重试次数 | `3` |
-| `RFFMPEG_RETRY_INITIAL_INTERVAL` | 重试初始间隔 | `1s` |
-| `RFFMPEG_RETRY_EXPONENTIAL_BACKOFF` | 是否指数退避 | `false` |
-| `RFFMPEG_RETRY_MAX_INTERVAL` | 重试最大间隔 | `30s` |
-| `RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK` | 允许软件编码回退 | `true` |
+Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提供少数覆盖项。优先级：命令行 flag > 环境变量 > 配置文件 > 默认值。
 
 #### 命令行参数
 
+Worker 仅定义以下 3 个 flag（见 `cmd/worker/main.go:25`）：
+
 ```bash
 ./bin/worker --help
+Usage of ./bin/worker:
   -config string
-        Path to worker config file (JSON)
+    Path to worker config file (JSON)
   -server-url string
-        Server URL (overrides config file and RFFMPEG_SERVER_URL env)
+    Server URL (overrides config file and RFFMPEG_SERVER_URL env)
   -token string
-        Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
+    Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
 ```
 
-Worker 其余配置项（名称、临时目录、FFmpeg 路径、编码器、GPU、超时、并发、缓存等）通过配置文件或环境变量设置，worker 不提供对应的 CLI flag。
+#### 配置文件 (JSON)
 
-#### 配置文件
+名称、编码器、GPU 等其余配置项均通过 JSON 配置文件（或对应环境变量）设置：
 
 ```json
 {
   "server_url": "http://localhost:8080",
-  "token": "your-auth-token",
   "name": "worker-1",
-  "auto_detect_codecs": false,
-  "manual_encoders": ["libx264", "h264_nvenc"],
-  "auto_detect_gpu": false,
-  "manual_gpu_model": "NVIDIA RTX 3080",
-  "max_concurrent": 1
+  "token": "<与 Server --auth-token 一致的令牌>",
+  "temp_dir": "",
+  "ffmpeg_path": "ffmpeg",
+  "timeout": "2h",
+  "heartbeat_interval": "30s",
+  "poll_interval": "5s",
+  "max_concurrent": 1,
+  "auto_detect_gpu": true,
+  "auto_detect_codecs": true,
+  "manual_encoders": ["libx264"],
+  "manual_decoders": [],
+  "manual_gpu_model": "",
+  "manual_ffmpeg_version": "",
+  "encoder_priority": [],
+  "encoder_blacklist": [],
+  "cache_enabled": true,
+  "cache_dir": "",
+  "cache_ttl": "24h",
+  "cache_max_size_mb": 10240,
+  "retry_max_retries": 3,
+  "retry_initial_interval": "1s",
+  "retry_use_exponential_backoff": false,
+  "retry_max_interval": "30s",
+  "retry_enable_software_fallback": true
 }
 ```
+
+#### 环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `RFFMPEG_CONFIG` | JSON 配置文件路径（即 `-config`） | - |
+| `RFFMPEG_SERVER_URL` | Server API URL | `http://localhost:8080` |
+| `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
+| `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |
+| `RFFMPEG_TOKEN` | API 认证令牌（须与 Server 一致） | - |
+| `RFFMPEG_TEMP_DIR` | 临时文件目录 | 系统临时目录 |
+| `RFFMPEG_FFMPEG_PATH` | FFmpeg 可执行文件路径 | `ffmpeg` |
+| `RFFMPEG_TIMEOUT` | 任务执行超时时间 | `2h` |
+| `RFFMPEG_MAX_CONCURRENT` | 最大并发任务数 | `1` |
+| `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（`false`/`0` 关闭） | `true` |
+| `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（`false`/`0` 关闭） | `true` |
+| `RFFMPEG_CACHE_ENABLED` | 启用任务文件缓存（`false`/`0` 关闭） | `true` |
+| `RFFMPEG_CACHE_DIR` | 缓存目录 | 自动（`/var/cache/rffmpeg` 或 `~/.cache/rffmpeg`） |
+| `RFFMPEG_CACHE_TTL` | 缓存 TTL | `24h` |
+| `RFFMPEG_CACHE_MAX_SIZE_MB` | 缓存最大大小 (MiB) | `10240` |
+| `RFFMPEG_RETRY_MAX_RETRIES` | 任务重试次数 | `3` |
+| `RFFMPEG_RETRY_INITIAL_INTERVAL` | 重试初始间隔 | `1s` |
+| `RFFMPEG_RETRY_EXPONENTIAL_BACKOFF` | 指数退避（`true`/`1` 开启） | `false` |
+| `RFFMPEG_RETRY_MAX_INTERVAL` | 重试最大间隔 | `30s` |
+| `RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK` | 软件编码回退（`false`/`0` 关闭） | `true` |
+
+编码器/GPU 等能力默认由 Worker 自动探测；如需手动指定，通过配置文件的 `manual_encoders`/`manual_decoders`/`manual_gpu_model`/`manual_ffmpeg_version` 字段（配合 `auto_detect_gpu: false`/`auto_detect_codecs: false`）设置，或使用 `encoder_priority`/`encoder_blacklist` 调整优先级与黑名单。
 
 ### CLI 配置
 
