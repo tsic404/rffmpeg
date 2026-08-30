@@ -138,3 +138,68 @@ exit 1
 			stderrIdx, failedIdx, recorded)
 	}
 }
+
+// TestReportFailureWithTypeFlushesBeforeTerminalStatus locks the TSI-2594 fix:
+// reportFailureWithType must run its optional flush callback before issuing the
+// terminal failed PATCH, so pending tail stderr reaches the server first.
+func TestReportFailureWithTypeFlushesBeforeTerminalStatus(t *testing.T) {
+	var mu sync.Mutex
+	var events []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(wr http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			wr.WriteHeader(http.StatusOK)
+			return
+		}
+		var req protocol.JobUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request body: %v", err)
+			wr.WriteHeader(http.StatusOK)
+			return
+		}
+		mu.Lock()
+		if req.Status != "" {
+			events = append(events, "status:"+string(req.Status))
+		}
+		if req.StderrChunk != "" {
+			events = append(events, "stderr:"+req.StderrChunk)
+		}
+		mu.Unlock()
+		wr.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "worker-1", "")
+	batcher := NewStderrBatcher("job-1", client, DefaultStderrBatcherConfig())
+	defer batcher.Close()
+	batcher.Add("tail line\n")
+
+	w := &Worker{client: client}
+	w.reportFailureWithType("job-1", 1, "boom",
+		string(protocol.FailureWorkerCrash), "panic", batcher.FlushAndWait)
+
+	mu.Lock()
+	recorded := append([]string(nil), events...)
+	mu.Unlock()
+
+	stderrIdx, failedIdx := -1, -1
+	for i, ev := range recorded {
+		if strings.HasPrefix(ev, "stderr:") && strings.Contains(ev, "tail line") {
+			stderrIdx = i
+		}
+		if ev == "status:failed" {
+			failedIdx = i
+		}
+	}
+
+	if stderrIdx == -1 {
+		t.Fatalf("tail stderr chunk not captured; events=%v", recorded)
+	}
+	if failedIdx == -1 {
+		t.Fatalf("terminal failed status not captured; events=%v", recorded)
+	}
+	if stderrIdx > failedIdx {
+		t.Fatalf("stderr chunk arrived after terminal status: stderr=%d failed=%d events=%v",
+			stderrIdx, failedIdx, recorded)
+	}
+}

@@ -382,6 +382,11 @@ var batcherCreateHook func(*StderrBatcher)
 // processJob processes a single job
 func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel context.CancelFunc, wgTracked bool) {
 	jobFailed := false
+	// flushStderr is assigned only after the main stderr batcher is created;
+	// the pre-batcher direct-path failures report with a nil flush, which is
+	// an idempotent no-op. The panic-recovery defer cannot reference the
+	// batcher directly because it may not exist yet.
+	var flushStderr func()
 	defer func() {
 		// Recover from panics so a single bad job cannot take down the whole
 		// worker process; the job is reported as WORKER_CRASH and the worker
@@ -391,7 +396,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			w.reportFailureWithType(job.ID, -1,
 				fmt.Sprintf("worker panic during job processing: %v", r),
 				string(protocol.FailureWorkerCrash),
-				fmt.Sprintf("%v", r))
+				fmt.Sprintf("%v", r), flushStderr)
 		}
 
 		w.mu.Lock()
@@ -454,14 +459,14 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				w.reportFailureWithType(job.ID, 1,
 					fmt.Sprintf("direct path contains '..' traversal: %s", path),
 					string(protocol.FailureInputUnreachable),
-					"path traversal rejected")
+					"path traversal rejected", flushStderr)
 				return
 			}
 			if _, err := os.Stat(path); err != nil {
 				w.reportFailureWithType(job.ID, 1,
 					fmt.Sprintf("input path unreachable: %s: %v", path, err),
 					string(protocol.FailureInputUnreachable),
-					err.Error())
+					err.Error(), flushStderr)
 				return
 			}
 		}
@@ -642,6 +647,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// rewrite returns an error (e.g., nonexistent codec).
 	batcher := NewStderrBatcher(job.ID, w.client, DefaultStderrBatcherConfig())
 	defer batcher.Close()
+	flushStderr = batcher.FlushAndWait
 
 	// Create progress router to parse stderr for progress/ETA and send periodic updates
 	progressRouter := NewProgressRouter(w.client, job.ID, batcher.StderrHandler())
@@ -1038,8 +1044,16 @@ func (w *Worker) reportInputDownloadFailure(jobID string, fileID, errMsg string)
 	}
 }
 
-// reportFailureWithType reports a job failure with failure type classification.
-func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failureType, failureDetails string) {
+// reportFailureWithType reports a job failure with an explicit failure type
+// and details. The optional flush callbacks run before the terminal PATCH so
+// any pending tail stderr reaches the server first (TSI-2594); a nil callback
+// is a safe no-op for paths where no stderr batcher exists yet.
+func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failureType, failureDetails string, flush ...func()) {
+	for _, f := range flush {
+		if f != nil {
+			f()
+		}
+	}
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, failureType, failureDetails); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
 	}
