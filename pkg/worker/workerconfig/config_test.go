@@ -567,6 +567,41 @@ func TestConfigValidate(t *testing.T) {
 			mutate:  func(c *Config) { c.PollInterval = 0 },
 			wantErr: true,
 		},
+		{
+			name:    "auto detect codecs disabled without manual encoders",
+			mutate:  func(c *Config) { c.AutoDetectCodecs = false },
+			wantErr: true,
+		},
+		{
+			name: "auto detect codecs disabled without manual decoders",
+			mutate: func(c *Config) {
+				c.AutoDetectCodecs = false
+				c.ManualEncoders = []string{"libx264"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "auto detect codecs disabled with manual overrides",
+			mutate: func(c *Config) {
+				c.AutoDetectCodecs = false
+				c.ManualEncoders = []string{"libx264"}
+				c.ManualDecoders = []string{"h264"}
+			},
+			wantErr: false,
+		},
+		{
+			name:    "auto detect gpu disabled without manual gpu model",
+			mutate:  func(c *Config) { c.AutoDetectGPU = false },
+			wantErr: true,
+		},
+		{
+			name: "auto detect gpu disabled with manual gpu model",
+			mutate: func(c *Config) {
+				c.AutoDetectGPU = false
+				c.ManualGPUModel = "NVIDIA RTX 3080"
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -203,7 +203,9 @@ func DefaultConfig() *Config {
 
 // Validate checks configuration invariants: the timing knobs must be positive
 // (a zero or negative interval would break the worker loop tickers and a
-// zero or negative timeout would cancel every job immediately).
+// zero or negative timeout would cancel every job immediately), and disabling
+// auto-detection requires explicit manual overrides (otherwise the worker
+// would silently report the auto-detected capabilities it was told to skip).
 func (c *Config) Validate() error {
 	if c.HeartbeatInterval <= 0 {
 		return fmt.Errorf("heartbeat_interval must be positive")
@@ -213,6 +215,15 @@ func (c *Config) Validate() error {
 	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll_interval must be positive")
+	}
+	if !c.AutoDetectCodecs && len(c.ManualEncoders) == 0 {
+		return fmt.Errorf("manual_encoders must be non-empty when auto_detect_codecs is disabled")
+	}
+	if !c.AutoDetectCodecs && len(c.ManualDecoders) == 0 {
+		return fmt.Errorf("manual_decoders must be non-empty when auto_detect_codecs is disabled")
+	}
+	if !c.AutoDetectGPU && c.ManualGPUModel == "" {
+		return fmt.Errorf("manual_gpu_model must be non-empty when auto_detect_gpu is disabled")
 	}
 	return nil
 }
