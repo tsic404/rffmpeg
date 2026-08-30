@@ -439,6 +439,151 @@ func TestUploadFileChunkedInitAuthRejected(t *testing.T) {
 	}
 }
 
+// TestUploadFileNonOKEmptyMessage verifies that a non-200 upload response with
+// a JSON body whose message field is empty falls back to a status-code error
+// instead of degrading to "upload failed: " with no diagnostic (TSI-2664).
+func TestUploadFileNonOKEmptyMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(protocol.ErrorResponse{Code: "busy"})
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, []byte("non-ok empty message"))
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFile(tmpFile)
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for 503 upload, got nil")
+	}
+	if want := "upload failed with status 503"; err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// TestUploadFileChunkedInitNonOKEmptyMessage verifies that a non-200 init
+// response with an empty message falls back to a status-code error (TSI-2664).
+func TestUploadFileChunkedInitNonOKEmptyMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/upload/init" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(protocol.ErrorResponse{Code: "busy"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, []byte("init non-ok empty message"))
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(1))
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for 503 init, got nil")
+	}
+	if want := "init failed with status 503"; err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// TestUploadFileChunkedCompleteNonOKEmptyMessage verifies that a non-200
+// complete response with an empty message falls back to a status-code error
+// (TSI-2664).
+func TestUploadFileChunkedCompleteNonOKEmptyMessage(t *testing.T) {
+	content := []byte("complete non-ok empty message")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/upload/init":
+			json.NewEncoder(w).Encode(protocol.ChunkUploadInitResponse{
+				UploadID:    "complete-non-ok",
+				ChunkSize:   int64(len(content)),
+				TotalChunks: 1,
+			})
+		case "/api/v1/upload/chunk/complete-non-ok/0":
+			io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(protocol.ChunkUploadResponse{
+				UploadID:   "complete-non-ok",
+				ChunkIndex: 0,
+			})
+		case "/api/v1/upload/complete":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(protocol.ErrorResponse{Code: "busy"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, content)
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(len(content)))
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for 503 complete, got nil")
+	}
+	if want := "complete failed with status 503"; err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// TestUploadFileChunkedChunkNonOKEmptyMessage verifies that a non-200 chunk
+// response with an empty message falls back to a status-code error (TSI-2664).
+// 403 is used instead of 503 so the chunk retry loop does not retry the error.
+func TestUploadFileChunkedChunkNonOKEmptyMessage(t *testing.T) {
+	content := []byte("chunk non-ok empty message")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/upload/init":
+			json.NewEncoder(w).Encode(protocol.ChunkUploadInitResponse{
+				UploadID:    "chunk-non-ok",
+				ChunkSize:   int64(len(content)),
+				TotalChunks: 1,
+			})
+		case "/api/v1/upload/chunk/chunk-non-ok/0":
+			io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(protocol.ErrorResponse{Code: "forbidden"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, content)
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(len(content)))
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for 403 chunk, got nil")
+	}
+	if want := "chunk upload failed with status 403"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q missing %q", err, want)
+	}
+}
+
 // TestUploadFileChunked tests the chunked file upload
 func TestUploadFileChunked(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)

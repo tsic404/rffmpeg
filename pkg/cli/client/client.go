@@ -194,7 +194,7 @@ func (c *Client) UploadFile(filePath string) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
 			return "", fmt.Errorf("upload failed: %s", errResp.Message)
 		}
 		return "", fmt.Errorf("upload failed with status %d", resp.StatusCode)
@@ -1266,7 +1266,7 @@ func (c *Client) UploadFileChunked(filePath string, chunkSize int64) (string, er
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
 			return "", fmt.Errorf("init failed: %s", errResp.Message)
 		}
 		return "", fmt.Errorf("init failed with status %d", resp.StatusCode)
@@ -1314,7 +1314,7 @@ func (c *Client) UploadFileChunked(filePath string, chunkSize int64) (string, er
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
 			return "", fmt.Errorf("complete failed: %s", errResp.Message)
 		}
 		return "", fmt.Errorf("complete failed with status %d", resp.StatusCode)
@@ -1472,7 +1472,7 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
 			return fmt.Errorf("chunk upload failed: %s", errResp.Message)
 		}
 		return fmt.Errorf("chunk upload failed with status %d", resp.StatusCode)
