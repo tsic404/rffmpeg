@@ -927,7 +927,7 @@ func (h *Handler) RegisterWorker(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	worker, err := h.db.CreateOrUpdateWorker(req.WorkerID, req.Name, req.Capabilities)
+	worker, err := h.db.CreateOrUpdateWorker(req.WorkerID, req.Name, req.Capabilities, h.heartbeatTimeout)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to register worker", err,

@@ -122,7 +122,7 @@ func TestUpdateWorkerHeartbeatUUIDFormatMismatch(t *testing.T) {
 	if _, err := database.CreateOrUpdateWorker(hyphenated, "heartbeat-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
 		FFmpegVersion: "5.1.2",
-	}); err != nil {
+	}, 90*time.Second); err != nil {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 
@@ -315,7 +315,7 @@ func TestGetWorkerUUIDFormatMismatch(t *testing.T) {
 	if _, err := database.CreateOrUpdateWorker(hyphenated, "uuid-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
 		FFmpegVersion: "5.1.2",
-	}); err != nil {
+	}, 90*time.Second); err != nil {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 
@@ -340,7 +340,7 @@ func TestGetWorkerUUIDFormatMismatch(t *testing.T) {
 	if _, err := database.CreateOrUpdateWorker(compact, "uuid-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
 		FFmpegVersion: "5.1.2",
-	}); err != nil {
+	}, 90*time.Second); err != nil {
 		t.Fatalf("Failed to re-register worker via compact UUID: %v", err)
 	}
 	all, err := database.GetAllWorkers()
@@ -563,7 +563,7 @@ func TestCreateOrUpdateWorker(t *testing.T) {
 		Encoders:      []string{"libx264", "h264_nvenc"},
 		FFmpegVersion: "6.0.0",
 	}
-	worker2, err := database.CreateOrUpdateWorker(worker1.ID, "test-worker", updatedCaps)
+	worker2, err := database.CreateOrUpdateWorker(worker1.ID, "test-worker", updatedCaps, 90*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to upsert worker: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestCreateOrUpdateWorker(t *testing.T) {
 	}
 
 	// Test creating a brand new worker with CreateOrUpdateWorker
-	worker3, err := database.CreateOrUpdateWorker("", "new-worker", caps)
+	worker3, err := database.CreateOrUpdateWorker("", "new-worker", caps, 90*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to create new worker via upsert: %v", err)
 	}
@@ -682,11 +682,11 @@ func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 		FFmpegVersion: "5.1.2",
 	}
 
-	returning, err := database.CreateOrUpdateWorker("worker-returning", "returning-worker", caps)
+	returning, err := database.CreateOrUpdateWorker("worker-returning", "returning-worker", caps, 90*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to register returning worker: %v", err)
 	}
-	if _, err := database.CreateOrUpdateWorker("worker-gone", "gone-worker", caps); err != nil {
+	if _, err := database.CreateOrUpdateWorker("worker-gone", "gone-worker", caps, 90*time.Second); err != nil {
 		t.Fatalf("Failed to register departing worker: %v", err)
 	}
 
@@ -697,7 +697,7 @@ func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 
 	// The returning worker re-registers and is recreated as idle; the absent
 	// worker's offline row is swept as residue in the same recovery pass.
-	if _, err := database.CreateOrUpdateWorker(returning.ID, "returning-worker", caps); err != nil {
+	if _, err := database.CreateOrUpdateWorker(returning.ID, "returning-worker", caps, 90*time.Second); err != nil {
 		t.Fatalf("Failed to re-register returning worker: %v", err)
 	}
 	removed, err := database.RemoveStaleOfflineWorkers()
@@ -730,7 +730,7 @@ func TestCreateOrUpdateWorker_SameNameOverwritesStaleRow(t *testing.T) {
 	}
 
 	// First registration: worker process A with id-A and name "node-1".
-	workerA, err := database.CreateOrUpdateWorker("id-A", "node-1", caps)
+	workerA, err := database.CreateOrUpdateWorker("id-A", "node-1", caps, 90*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to register worker A: %v", err)
 	}
@@ -741,7 +741,7 @@ func TestCreateOrUpdateWorker_SameNameOverwritesStaleRow(t *testing.T) {
 	}
 
 	// Worker process restarted: new UUID (id-B), same name "node-1".
-	workerB, err := database.CreateOrUpdateWorker("id-B", "node-1", caps)
+	workerB, err := database.CreateOrUpdateWorker("id-B", "node-1", caps, 90*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to re-register worker B with same name: %v", err)
 	}
@@ -793,7 +793,7 @@ func TestCreateOrUpdateWorker_EmptyNameSkipsDelete(t *testing.T) {
 	}
 
 	// A third empty-name registration must NOT delete the existing rows.
-	worker3, err := database.CreateOrUpdateWorker("empty-3", "", caps)
+	worker3, err := database.CreateOrUpdateWorker("empty-3", "", caps, 90*time.Second)
 	if err != nil {
 		t.Fatalf("Failed to register empty-3: %v", err)
 	}
@@ -805,6 +805,128 @@ func TestCreateOrUpdateWorker_EmptyNameSkipsDelete(t *testing.T) {
 		}
 	}
 	_ = worker3
+}
+
+// TSI-2670: two concurrently running workers may legitimately share a name
+// while holding distinct IDs. The same-name DELETE in CreateOrUpdateWorker
+// must only remove stale offline residue, never a live (idle/busy) row —
+// otherwise each registration deletes the other live worker and they ping-pong
+// between 404 and re-register every poll cycle.
+func TestCreateOrUpdateWorker_SameNameKeepsLiveRows(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}
+
+	// Two live workers, same name "node-1", distinct IDs.
+	workerA, err := database.CreateOrUpdateWorker("id-A", "node-1", caps, 90*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to register worker A: %v", err)
+	}
+	workerB, err := database.CreateOrUpdateWorker("id-B", "node-1", caps, 90*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to register worker B: %v", err)
+	}
+
+	// Both live rows must survive: the second registration must not delete
+	// the first live worker's row.
+	for _, id := range []string{workerA.ID, workerB.ID} {
+		if _, err := database.GetWorker(id); err != nil {
+			t.Errorf("Expected live worker %s to survive same-name registration, got %v", id, err)
+		}
+	}
+
+	// Re-registration of either live worker (the poll-cycle upsert) must keep
+	// the other live row intact as well.
+	if _, err := database.CreateOrUpdateWorker(workerA.ID, "node-1", caps, 90*time.Second); err != nil {
+		t.Fatalf("Failed to re-register worker A: %v", err)
+	}
+	if _, err := database.GetWorker(workerB.ID); err != nil {
+		t.Errorf("Expected live worker B to survive worker A re-registration, got %v", err)
+	}
+
+	all, err := database.GetAllWorkers()
+	if err != nil {
+		t.Fatalf("Failed to list workers: %v", err)
+	}
+	var sameName []*db.Worker
+	for _, w := range all {
+		if w.Name == "node-1" {
+			sameName = append(sameName, w)
+		}
+	}
+	if len(sameName) != 2 {
+		t.Errorf("Expected 2 live workers named node-1, got %d", len(sameName))
+	}
+}
+
+// TSI-2670 review follow-up: a crashed worker's stale live row (idle/busy
+// with a heartbeat older than the freshness window) must be swept on same-name
+// re-registration, while a genuinely live same-name row with a fresh heartbeat
+// survives. This closes the window where a dead worker's row kept receiving
+// scheduler dispatches until the health monitor's next tick.
+func TestCreateOrUpdateWorker_SameNameRemovesExpiredLiveRow(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}
+	const heartbeatTimeout = 90 * time.Second
+
+	// Two live same-name workers, distinct IDs.
+	workerA, err := database.CreateOrUpdateWorker("id-A", "node-1", caps, heartbeatTimeout)
+	if err != nil {
+		t.Fatalf("Failed to register worker A: %v", err)
+	}
+	workerB, err := database.CreateOrUpdateWorker("id-B", "node-1", caps, heartbeatTimeout)
+	if err != nil {
+		t.Fatalf("Failed to register worker B: %v", err)
+	}
+
+	// Simulate worker B crashing: its row stays live (idle) but its heartbeat
+	// goes stale past the freshness window before the health monitor tick.
+	if _, err := database.GetDB().Exec(
+		"UPDATE workers SET last_heartbeat = ? WHERE id = ?",
+		time.Now().Add(-2*time.Minute), workerB.ID,
+	); err != nil {
+		t.Fatalf("Failed to backdate worker B heartbeat: %v", err)
+	}
+
+	// A restarted worker process re-registers under the same name with a new ID.
+	workerC, err := database.CreateOrUpdateWorker("id-C", "node-1", caps, heartbeatTimeout)
+	if err != nil {
+		t.Fatalf("Failed to re-register worker C: %v", err)
+	}
+
+	// The live row (A) and the new row (C) survive; the expired-live row (B) is gone.
+	if _, err := database.GetWorker(workerA.ID); err != nil {
+		t.Errorf("Expected live worker A to survive, got %v", err)
+	}
+	if _, err := database.GetWorker(workerB.ID); err == nil {
+		t.Error("Expected expired-live worker B to be removed, but it still exists")
+	}
+	if _, err := database.GetWorker(workerC.ID); err != nil {
+		t.Errorf("Expected re-registered worker C to exist, got %v", err)
+	}
+
+	all, err := database.GetAllWorkers()
+	if err != nil {
+		t.Fatalf("Failed to list workers: %v", err)
+	}
+	var sameName []*db.Worker
+	for _, w := range all {
+		if w.Name == "node-1" {
+			sameName = append(sameName, w)
+		}
+	}
+	if len(sameName) != 2 {
+		t.Errorf("Expected 2 workers named node-1 (A + C), got %d", len(sameName))
+	}
 }
 
 // TSI-2366 companion fix: heartbeats and status updates from a UUID reported
@@ -820,7 +942,7 @@ func TestHeartbeatAndStatusNormalizeUUID(t *testing.T) {
 	if _, err := database.CreateOrUpdateWorker(hyphenated, "uuid-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
 		FFmpegVersion: "5.1.2",
-	}); err != nil {
+	}, 90*time.Second); err != nil {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 
@@ -874,7 +996,7 @@ func TestJobReadPathsNormalizeUUID(t *testing.T) {
 	if _, err := database.CreateOrUpdateWorker(hyphenated, "uuid-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
 		FFmpegVersion: "5.1.2",
-	}); err != nil {
+	}, 90*time.Second); err != nil {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 

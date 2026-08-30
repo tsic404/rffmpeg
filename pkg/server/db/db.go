@@ -769,10 +769,15 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 // CreateOrUpdateWorker creates a new worker or updates an existing one on re-registration.
 // If the worker already exists (matched by id), it updates capabilities, resets status to
 // idle, and clears eviction flags (TSI-1737 server restart recovery). When the id is new
-// but the name matches an existing row, the stale row is deleted first so a worker process
-// restart (fresh UUID, same name) overwrites the old entry instead of creating a duplicate
-// (TSI-2473).
-func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCapabilities) (*Worker, error) {
+// but the name matches stale residue of the same logical worker — an offline row, or a
+// live row whose heartbeat has expired (crashed before the health monitor swept it) — that
+// stale row is deleted first so a worker process restart (fresh UUID, same name) overwrites
+// the old entry instead of creating a duplicate (TSI-2473, TSI-2670). Live same-name rows
+// with a fresh heartbeat belong to concurrently running workers and are never deleted.
+//
+// heartbeatTimeout is the worker freshness window; <=0 disables the heartbeat-staleness
+// test and deletes only offline residue.
+func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCapabilities, heartbeatTimeout time.Duration) (*Worker, error) {
 	// TSI-2346: normalize on the write path too, so the same logical UUID
 	// reported in different formats (hyphenated vs. compact, case, whitespace)
 	// converges on one row instead of forking into unreachable duplicates.
@@ -826,15 +831,18 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	}
 
 	if rows == 0 {
-		// TSI-2473: a new worker process generates a fresh UUID while
-		// reusing the same name. Matching only by id left the old row
-		// behind as offline residue, so each restart accumulated a
-		// duplicate same-name entry. Delete the stale row first so the
-		// INSERT below overwrites it instead of forking a second one.
-		// Wrap DELETE+INSERT in a transaction so a failed INSERT rolls
-		// back the DELETE (disk full / DB locked). Skip the DELETE for
-		// empty names: the handler rejects empty names, but defending
-		// here too avoids deleting unrelated empty-name rows.
+		// TSI-2473/TSI-2670: a new worker process generates a fresh UUID while
+		// reusing the same name. The old row is stale residue of the same
+		// logical worker and must be deleted before the INSERT so a restart
+		// overwrites it instead of forking a duplicate. Stale means EITHER
+		// offline (the health monitor already flagged it) OR live-but-dead
+		// (last heartbeat older than the freshness window — a crash followed
+		// by an immediate restart lands here before the monitor's next tick).
+		// A live row with a fresh heartbeat is a concurrently running worker
+		// and must survive. Wrap DELETE+INSERT in a transaction so a failed
+		// INSERT rolls back the DELETE. Skip the DELETE for empty names: the
+		// handler rejects empty names, but defending here too avoids deleting
+		// unrelated empty-name rows.
 		tx, err := d.db.Begin()
 		if err != nil {
 			return nil, fmt.Errorf("failed to begin worker upsert transaction: %w", err)
@@ -842,8 +850,17 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 		defer tx.Rollback() //nolint:errcheck
 
 		if name != "" {
-			if _, err := tx.Exec(`DELETE FROM workers WHERE name = ? AND id != ?`, name, id); err != nil {
-				return nil, fmt.Errorf("failed to remove stale same-name worker: %w", err)
+			if heartbeatTimeout > 0 {
+				cutoff := now.Add(-heartbeatTimeout)
+				if _, err := tx.Exec(`DELETE FROM workers WHERE name = ? AND id != ? AND (status = ? OR last_heartbeat < ?)`,
+					name, id, protocol.WorkerStatusOffline, cutoff); err != nil {
+					return nil, fmt.Errorf("failed to remove stale same-name worker: %w", err)
+				}
+			} else {
+				if _, err := tx.Exec(`DELETE FROM workers WHERE name = ? AND id != ? AND status = ?`,
+					name, id, protocol.WorkerStatusOffline); err != nil {
+					return nil, fmt.Errorf("failed to remove stale same-name worker: %w", err)
+				}
 			}
 		}
 
