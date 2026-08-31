@@ -285,24 +285,47 @@ func findSeparatorIndex(args []string) int {
 	return -1
 }
 
-// hasOutputArg checks if the args already contain an output file argument
-// An output file is a positional argument (doesn't start with '-') that is not
-// a value following a flag. We track when we expect a value after a flag.
+// hasOutputArg checks if the args already contain an output file argument.
+//
+// ffmpeg grammar: inputs are introduced by -i/--input, outputs are bare
+// positional tokens (or "-" for stdout). A bare token is only a *clear*
+// output when it appears in the output section, i.e. after at least one
+// "-i <input>" pair. Before the first input, bare tokens are inputs whose
+// "-i" was omitted by the caller — treating them as outputs would suppress
+// the server-appended output path and leave ffmpeg with no input (TSI-2722).
 // Note: This function does NOT handle "--" separator - use BuildArgs for that.
 func hasOutputArg(args []string) bool {
 	expectingValue := false
+	seenInput := false
 	for _, arg := range args {
 		if expectingValue {
-			// This arg is a value for the previous flag, not an output file
+			// This arg is a value for the previous flag, not an output file.
 			expectingValue = false
 			continue
 		}
-		// If an arg doesn't start with '-', it's likely an output file
-		if !strings.HasPrefix(arg, "-") {
+		if arg == "-i" || arg == "--input" {
+			// The next token is the input path.
+			seenInput = true
+			expectingValue = true
+			continue
+		}
+		if !seenInput {
+			// Still in the input section. A bare token here is an input whose
+			// "-i" was omitted by the caller (the parser also accepts the first
+			// positional as an input); it marks the end of the input section but
+			// is never an output. Flag values must still be consumed so a later
+			// "-i <input>" is tracked correctly.
+			if !strings.HasPrefix(arg, "-") {
+				seenInput = true
+				continue
+			}
+			expectingValue = isFlagWithValue(arg)
+			continue
+		}
+		// Output section: "-" is stdout, any other bare token is an output file.
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
 			return true
 		}
-		// Check if this flag expects a value (flags that take arguments)
-		// Only set expectingValue for flags that actually take values
 		expectingValue = isFlagWithValue(arg)
 	}
 	return false

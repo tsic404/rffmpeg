@@ -89,6 +89,13 @@ func TestBuildArgs(t *testing.T) {
 			outputPath: "/tmp/output/merged.mp4",
 			want:       []string{"-y", "-i", "/tmp/downloaded/video.mp4", "-i", "/tmp/downloaded/audio.m4a", "-c:v", "libx264", "-c:a", "aac", "-shortest", "/tmp/output/merged.mp4"},
 		},
+		{
+			name:       "input placeholder missing -i still gets server output appended",
+			jobArgs:    []string{"-c:v", "libx264", "<INPUT_FILE>"},
+			inputPaths: []string{"/tmp/downloaded/input.mp4"},
+			outputPath: "/tmp/output.mp4",
+			want:       []string{"-y", "-c:v", "libx264", "/tmp/downloaded/input.mp4", "/tmp/output.mp4"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -234,6 +241,21 @@ func TestHasOutputArg(t *testing.T) {
 		{
 			name: "map flag with output after value",
 			args: []string{"-i", "input.mp4", "-map", "0:v", "output.mp4"},
+			want: true,
+		},
+		{
+			name: "input file without -i is not an output",
+			args: []string{"-c:v", "libx264", "input.mp4"},
+			want: false,
+		},
+		{
+			name: "encoder params and input without -i is not an output",
+			args: []string{"-c:v", "libx264", "-preset", "ultrafast", "input.mp4"},
+			want: false,
+		},
+		{
+			name: "stdout dash output after input",
+			args: []string{"-i", "input.mp4", "-f", "mp4", "-"},
 			want: true,
 		},
 		{
