@@ -2610,6 +2610,139 @@ func TestSubmitJobDirectPathDotFilenameAccepted(t *testing.T) {
 	}
 }
 
+// TSI-2721: a SubmitJob output filename containing a ".." component must be
+// rejected server-side in direct mode, symmetric with the worker's directMode
+// output guard — refused before dispatch instead of by the worker at runtime.
+func TestSubmitJobOutputFilenameTraversalRejected(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles:     []string{"dummy.mp4"},
+		DirectPath:     []string{"/srv/media/input.mp4"},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "../etc/passwd",
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for traversal output filename, got %d. Body: %s", w.Code, w.Body.String())
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeInvalidRequest {
+		t.Errorf("Expected error code 'invalid_request', got '%s'", errResp.Code)
+	}
+}
+
+// TSI-2721: a remote output URL containing a ".." path segment must not be
+// false-positived by the component-level guard — the worker passes remote
+// outputs through unchanged, so the server mirrors that exemption.
+func TestSubmitJobOutputFilenameRemoteURLExempt(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// No worker is registered: reaching the worker-availability guard proves
+	// the traversal validation passed (503) rather than being rejected (400).
+	h.SetHeartbeatTimeout(0)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles:     []string{"dummy.mp4"},
+		DirectPath:     []string{"/srv/media/input.mp4"},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "rtmp://example.com/live/../stream",
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 worker_unavailable after traversal validation passed, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TSI-2721: a "file://" output or a local path with a mid-string "://" must be
+// treated as local, not remote — the worker's IsRemoteURL predicate excludes the
+// file scheme and anchors the scheme at the start. Both must be rejected as
+// traversal server-side rather than being exempted and refused by the worker.
+func TestSubmitJobOutputFilenameLocalSchemeRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+	}{
+		{"file url traversal", "file:///etc/../tmp/x.mp4"},
+		{"mid-string scheme traversal", "/data/media/x://y/../../etc/passwd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, router, cleanup := setupTest(t)
+			defer cleanup()
+
+			jobReq := protocol.JobSubmitRequest{
+				InputFiles:     []string{"dummy.mp4"},
+				DirectPath:     []string{"/srv/media/input.mp4"},
+				Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+				OutputFilename: tc.out,
+			}
+			jobBody, _ := json.Marshal(jobReq)
+			req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Expected 400 for local-scheme traversal output, got %d. Body: %s", w.Code, w.Body.String())
+			}
+			var errResp protocol.ErrorResponse
+			if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+				t.Fatalf("Failed to decode error response: %v", err)
+			}
+			if errResp.Code != protocol.ErrCodeInvalidRequest {
+				t.Errorf("Expected error code 'invalid_request', got '%s'", errResp.Code)
+			}
+		})
+	}
+}
+
+// TSI-2721: a legitimate dot-prefixed output filename such as "my..video.mp4"
+// must not be false-positived by the component-level guard in direct mode.
+func TestSubmitJobOutputFilenameDotFilenameAccepted(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// No worker is registered: reaching the worker-availability guard proves
+	// the traversal validation passed (503) rather than being rejected (400).
+	h.SetHeartbeatTimeout(0)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles:     []string{"dummy.mp4"},
+		DirectPath:     []string{"/srv/media/input.mp4"},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "my..video.mp4",
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 worker_unavailable after traversal validation passed, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestProbeDirectPathStoredInJob verifies that a shared-FS direct path input is
 // persisted as the probe job's direct_paths so the worker can probe it locally.
 // A storage file ID must keep direct_paths empty (downloaded normally), while a

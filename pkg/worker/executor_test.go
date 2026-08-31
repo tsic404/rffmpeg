@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/tsix404/rffmpeg/pkg/pathutil"
 )
 
 func TestBuildArgs(t *testing.T) {
@@ -106,14 +108,14 @@ func TestBuildArgs(t *testing.T) {
 func TestStreamingOutputPath(t *testing.T) {
 	resolve := func(outputFilename string, streamingOutput bool) string {
 		if streamingOutput {
-			if outputFilename == "" || isRemoteURL(outputFilename) {
+			if outputFilename == "" || pathutil.IsRemoteURL(outputFilename) {
 				outputFilename = "-"
 			}
 		} else if outputFilename == "" {
 			outputFilename = "output"
 		}
 		var outputPath string
-		if outputFilename == "-" || isRemoteURL(outputFilename) {
+		if outputFilename == "-" || pathutil.IsRemoteURL(outputFilename) {
 			outputPath = outputFilename
 		} else if filepath.IsAbs(outputFilename) {
 			outputPath = outputFilename

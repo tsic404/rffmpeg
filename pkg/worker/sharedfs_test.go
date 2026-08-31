@@ -353,7 +353,7 @@ func TestProcessJob_DirectOutputOutsideAllowedPrefixFails(t *testing.T) {
 // fix: a direct-mode "file://" output is a local ffmpeg protocol path, not a
 // remote URL, so it must fall through to direct-output validation and be
 // rejected as non-absolute instead of being passed to ffmpeg verbatim. Before
-// the fix, isRemoteURL matched "file://" and the allow-list gate was skipped,
+// the fix, pathutil.IsRemoteURL matched "file://" and the allow-list gate was skipped,
 // letting ffmpeg's native file protocol write to /etc/passwd.
 func TestProcessJob_DirectOutputFileURLRejected(t *testing.T) {
 	base := t.TempDir()

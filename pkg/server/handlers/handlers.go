@@ -364,6 +364,23 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Reject output-filename traversal server-side, symmetric with the worker's
+	// directMode output guard (TSI-2721). The worker only stats the output path
+	// in direct mode and passes "-" and remote URLs through unchanged, so those
+	// are exempt here too — using the same shared pathutil.IsRemoteURL predicate
+	// (anchored scheme + "file" exclusion) so the two layers never drift; a ".."
+	// component in a direct-mode local output is refused before dispatch instead
+	// of by the worker at runtime.
+	if len(req.DirectPath) > 0 && req.OutputFilename != "-" && !pathutil.IsRemoteURL(req.OutputFilename) {
+		if pathutil.ContainsPathTraversal(req.OutputFilename) {
+			writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+				protocol.ErrCodeInvalidRequest,
+				"output filename contains '..' traversal: "+req.OutputFilename, nil,
+			))
+			return
+		}
+	}
+
 	// Validate input files exist (skip for direct path mode and remote URLs)
 	if len(req.DirectPath) == 0 {
 		for _, fileID := range req.InputFiles {

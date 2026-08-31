@@ -539,7 +539,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	// Check if output is a network URL (rtmp://, udp://, etc.)
 	// Cache is not applicable for streaming/network outputs
-	isNetOutput := isRemoteURL(job.OutputFilename)
+	isNetOutput := pathutil.IsRemoteURL(job.OutputFilename)
 
 	// Check cache before any work (skip for direct mode, network outputs, and
 	// streaming outputs — stdout has no local file to cache)
@@ -653,7 +653,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// For remote URLs (http://, https://, etc.), extract the base filename
 			// from the URL path. For server file IDs, use the fileID directly.
 			var inputPath string
-			if isRemoteURL(fileID) {
+			if pathutil.IsRemoteURL(fileID) {
 				// Remote URL: sanitize the last path segment — hostile URLs
 				// must not inject path separators or oversized names.
 				baseName := sanitizeInputBaseName(filepath.Base(fileID))
@@ -676,7 +676,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// file makes ffmpeg produce a local file and the CLI receive nothing.
 	outputFilename := job.OutputFilename
 	if job.StreamingOutput {
-		if outputFilename == "" || isRemoteURL(outputFilename) {
+		if outputFilename == "" || pathutil.IsRemoteURL(outputFilename) {
 			outputFilename = "-"
 		}
 	} else if outputFilename == "" {
@@ -685,7 +685,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Validate the direct output path BEFORE computing outputPath and building
 	// args. A relative output used to be joined to jobDir and silently skipped
 	// the allow-list check; it is now rejected as non-absolute (TSI-2646).
-	if directMode && outputFilename != "-" && !isRemoteURL(outputFilename) {
+	if directMode && outputFilename != "-" && !pathutil.IsRemoteURL(outputFilename) {
 		// Defense in depth: traversal must be rejected independently of the
 		// allow-list so the check never depends on the path not existing.
 		if pathutil.ContainsPathTraversal(outputFilename) {
@@ -704,7 +704,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	}
 	var outputPath string
-	if outputFilename == "-" || isRemoteURL(outputFilename) {
+	if outputFilename == "-" || pathutil.IsRemoteURL(outputFilename) {
 		// ffmpeg stdout ("-") or network URL (rtmp://, udp://, etc.) — pass directly
 		outputPath = outputFilename
 	} else if filepath.IsAbs(outputFilename) {
@@ -1016,7 +1016,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 uploadOutput:
 
 	// Upload output file (skip for streaming output, direct mode jobs, and network URL outputs)
-	isNetOutput = isRemoteURL(outputPath)
+	isNetOutput = pathutil.IsRemoteURL(outputPath)
 	if !job.StreamingOutput && !directMode && !isNetOutput {
 		if _, err := os.Stat(outputPath); err == nil {
 			if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
@@ -1038,7 +1038,7 @@ uploadOutput:
 		// Use shorter TTL for URL-based inputs (content may change without URL changing)
 		cacheTTL := time.Duration(0)
 		for _, input := range job.InputFiles {
-			if isRemoteURL(input) {
+			if pathutil.IsRemoteURL(input) {
 				cacheTTL = w.cache.Cfg().URLTTL
 				break
 			}
@@ -1231,7 +1231,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 
 		// Generate a safe filename for the downloaded probe input
 		fileID := job.InputFiles[0]
-		if isRemoteURL(fileID) {
+		if pathutil.IsRemoteURL(fileID) {
 			// Remote URL: sanitize the last path segment — hostile URLs
 			// must not inject path separators or oversized names.
 			baseName := sanitizeInputBaseName(filepath.Base(fileID))

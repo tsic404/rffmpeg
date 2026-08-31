@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tsix404/rffmpeg/pkg/pathutil"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
 )
@@ -186,7 +187,7 @@ func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 }
 
 // DownloadInput downloads an input file from the server or directly from a remote URL.
-// If fileID is a remote URL per isRemoteURL (scheme-prefixed, excluding the local
+// If fileID is a remote URL per pathutil.IsRemoteURL (scheme-prefixed, excluding the local
 // "file" scheme), it is downloaded directly. Otherwise, it is treated as a
 // server-side file ID and fetched from the server.
 func (c *Client) DownloadInput(fileID, destPath string) error {
@@ -194,7 +195,7 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 	var req *http.Request
 	var err error
 
-	if isRemoteURL(fileID) {
+	if pathutil.IsRemoteURL(fileID) {
 		// Remote URL — download directly
 		downloadURL = fileID
 		req, err = http.NewRequest("GET", downloadURL, nil)
