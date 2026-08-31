@@ -1112,10 +1112,13 @@ func (d *Database) MarkOfflineWorkers(heartbeatTimeout time.Duration) (int64, er
 	return result.RowsAffected()
 }
 
-// RemoveOfflineWorkers removes workers that have been offline longer than the
-// threshold and returns their IDs so callers can evict them from in-memory
-// state (the WorkerStateTable) — stale table entries previously kept feeding
-// dead nodes into slow-node median calculations.
+// RemoveOfflineWorkers removes offline workers whose last_heartbeat predates
+// the cutoff (now - offlineThreshold) and returns their IDs so callers can
+// evict them from in-memory state (the WorkerStateTable) — stale table entries
+// previously kept feeding dead nodes into slow-node median calculations.
+// MarkOfflineWorkers does not reset last_heartbeat, so the threshold is
+// measured from the last heartbeat, not from when the worker was marked
+// offline.
 func (d *Database) RemoveOfflineWorkers(offlineThreshold time.Duration) ([]string, error) {
 	cutoff := time.Now().Add(-offlineThreshold)
 
