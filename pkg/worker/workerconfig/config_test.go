@@ -313,11 +313,14 @@ func TestMerge(t *testing.T) {
 		MaxConcurrent:         4,
 		AutoDetectGPU:         false,
 		SharedFSAllowedPrefix: "/mnt/nfs",
+		setKeys: map[string]bool{
+			envServerURL:             true,
+			envWorkerID:              true,
+			envMaxConcurrent:         true,
+			envAutoDetectGPU:         true,
+			envSharedFSAllowedPrefix: true,
+		},
 	}
-
-	// Merge only overrides booleans when the env var is actually set (TSI-2640).
-	os.Setenv("RFFMPEG_AUTO_DETECT_GPU", "false")
-	defer os.Unsetenv("RFFMPEG_AUTO_DETECT_GPU")
 
 	merged := Merge(fileConfig, envConfig)
 
@@ -464,9 +467,45 @@ func TestLoadFromEnv_AutoDetectSymmetric(t *testing.T) {
 	}
 }
 
+func TestMerge_InvalidNumericEnvKeepsFileValue(t *testing.T) {
+	// A non-empty but unparseable numeric env var must not count as an
+	// explicit override; the file value survives.
+	fileConfig := &Config{
+		MaxConcurrent: 3,
+	}
+
+	os.Setenv("RFFMPEG_MAX_CONCURRENT", "garbage")
+	defer os.Unsetenv("RFFMPEG_MAX_CONCURRENT")
+
+	merged := Merge(fileConfig, LoadFromEnv())
+
+	if merged.MaxConcurrent != 3 {
+		t.Errorf("MaxConcurrent = %d, want 3 (invalid env value must not override file)", merged.MaxConcurrent)
+	}
+}
+
+func TestMerge_EnvExplicitDefaultOverridesFile(t *testing.T) {
+	// TSI-2693 deliberate semantics change: an env var explicitly set to the
+	// default value counts as an explicit override under the setKeys contract,
+	// so it now overrides a differing file value. The old DefaultConfig()
+	// comparison silently kept the file value here.
+	fileConfig := &Config{
+		Timeout: Duration(1 * time.Hour),
+	}
+
+	t.Setenv("RFFMPEG_TIMEOUT", "2h") // == DefaultConfig().Timeout
+
+	merged := Merge(fileConfig, LoadFromEnv())
+
+	if merged.Timeout != Duration(2*time.Hour) {
+		t.Errorf("Timeout = %v, want 2h (env explicitly set to default must override file)", time.Duration(merged.Timeout))
+	}
+}
+
 func TestMerge_NilFileConfig(t *testing.T) {
 	envConfig := DefaultConfig()
 	envConfig.WorkerID = "env-worker-id"
+	envConfig.setKeys = map[string]bool{envWorkerID: true}
 
 	merged := Merge(nil, envConfig)
 

@@ -12,6 +12,34 @@ import (
 	"time"
 )
 
+// Environment variable names. LoadFromEnv records which of these were
+// explicitly set (see Config.setKeys); Merge reads the same names so the two
+// halves of the env-override contract cannot drift apart.
+const (
+	envServerURL               = "RFFMPEG_SERVER_URL"
+	envWorkerID                = "RFFMPEG_WORKER_ID"
+	envWorkerName              = "RFFMPEG_WORKER_NAME"
+	envToken                   = "RFFMPEG_TOKEN"
+	envTempDir                 = "RFFMPEG_TEMP_DIR"
+	envFFmpegPath              = "RFFMPEG_FFMPEG_PATH"
+	envTimeout                 = "RFFMPEG_TIMEOUT"
+	envHeartbeatInterval       = "RFFMPEG_HEARTBEAT_INTERVAL"
+	envPollInterval            = "RFFMPEG_POLL_INTERVAL"
+	envMaxConcurrent           = "RFFMPEG_MAX_CONCURRENT"
+	envAutoDetectGPU           = "RFFMPEG_AUTO_DETECT_GPU"
+	envAutoDetectCodecs        = "RFFMPEG_AUTO_DETECT_CODECS"
+	envSharedFSAllowedPrefix   = "RFFMPEG_SHARED_FS_ALLOWED_PREFIX"
+	envCacheEnabled            = "RFFMPEG_CACHE_ENABLED"
+	envCacheDir                = "RFFMPEG_CACHE_DIR"
+	envCacheTTL                = "RFFMPEG_CACHE_TTL"
+	envCacheMaxSizeMB          = "RFFMPEG_CACHE_MAX_SIZE_MB"
+	envRetryMaxRetries         = "RFFMPEG_RETRY_MAX_RETRIES"
+	envRetryInitialInterval    = "RFFMPEG_RETRY_INITIAL_INTERVAL"
+	envRetryExponentialBackoff = "RFFMPEG_RETRY_EXPONENTIAL_BACKOFF"
+	envRetryMaxInterval        = "RFFMPEG_RETRY_MAX_INTERVAL"
+	envRetrySoftwareFallback   = "RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK"
+)
+
 // Duration is a custom type that can parse duration strings from JSON
 type Duration time.Duration
 
@@ -96,6 +124,12 @@ type Config struct {
 	RetryEnableSoftwareFallback bool     `json:"retry_enable_software_fallback" yaml:"retry_enable_software_fallback"`
 	// Shared filesystem mode
 	SharedFSAllowedPrefix string `json:"shared_fs_allowed_prefix" yaml:"shared_fs_allowed_prefix"` // Comma-separated path prefixes allowed in pass-through mode; empty = unlimited
+
+	// setKeys records which environment variables LoadFromEnv observed as an
+	// explicit override. Merge consults only this map — never os.Getenv — so
+	// it stays a pure function of its arguments. Unexported: file configs and
+	// hand-built configs simply have no overrides.
+	setKeys map[string]bool
 }
 
 // FallbackCacheDir returns the per-user fallback cache directory under tempDir.
@@ -259,199 +293,228 @@ func parseBoolEnv(value string) (bool, bool) {
 	}
 }
 
-// LoadFromEnv loads configuration from environment variables.
+// LoadFromEnv loads configuration from environment variables. Config.setKeys
+// records which variables were set to an applicable value; Merge consults only
+// that map, so it never re-reads the process environment.
 func LoadFromEnv() *Config {
 	config := DefaultConfig()
+	config.setKeys = make(map[string]bool)
 
-	if url := os.Getenv("RFFMPEG_SERVER_URL"); url != "" {
+	if url := os.Getenv(envServerURL); url != "" {
 		config.ServerURL = url
+		config.setKeys[envServerURL] = true
 	}
-	if id := os.Getenv("RFFMPEG_WORKER_ID"); id != "" {
+	if id := os.Getenv(envWorkerID); id != "" {
 		config.WorkerID = id
+		config.setKeys[envWorkerID] = true
 	}
-	if name := os.Getenv("RFFMPEG_WORKER_NAME"); name != "" {
+	if name := os.Getenv(envWorkerName); name != "" {
 		config.Name = name
+		config.setKeys[envWorkerName] = true
 	}
-	if token := os.Getenv("RFFMPEG_TOKEN"); token != "" {
+	if token := os.Getenv(envToken); token != "" {
 		config.Token = token
+		config.setKeys[envToken] = true
 	}
-	if tempDir := os.Getenv("RFFMPEG_TEMP_DIR"); tempDir != "" {
+	if tempDir := os.Getenv(envTempDir); tempDir != "" {
 		config.TempDir = tempDir
+		config.setKeys[envTempDir] = true
 	}
-	if ffmpeg := os.Getenv("RFFMPEG_FFMPEG_PATH"); ffmpeg != "" {
+	if ffmpeg := os.Getenv(envFFmpegPath); ffmpeg != "" {
 		config.FFmpegPath = ffmpeg
+		config.setKeys[envFFmpegPath] = true
 	}
-	if timeout := os.Getenv("RFFMPEG_TIMEOUT"); timeout != "" {
+	if timeout := os.Getenv(envTimeout); timeout != "" {
 		if d, err := time.ParseDuration(timeout); err == nil {
 			config.Timeout = Duration(d)
+			config.setKeys[envTimeout] = true
 		}
 	}
-	if heartbeatInterval := os.Getenv("RFFMPEG_HEARTBEAT_INTERVAL"); heartbeatInterval != "" {
+	if heartbeatInterval := os.Getenv(envHeartbeatInterval); heartbeatInterval != "" {
 		if d, err := time.ParseDuration(heartbeatInterval); err == nil {
 			config.HeartbeatInterval = Duration(d)
+			config.setKeys[envHeartbeatInterval] = true
 		}
 	}
-	if pollInterval := os.Getenv("RFFMPEG_POLL_INTERVAL"); pollInterval != "" {
+	if pollInterval := os.Getenv(envPollInterval); pollInterval != "" {
 		if d, err := time.ParseDuration(pollInterval); err == nil {
 			config.PollInterval = Duration(d)
+			config.setKeys[envPollInterval] = true
 		}
 	}
-	if maxConcurrent := os.Getenv("RFFMPEG_MAX_CONCURRENT"); maxConcurrent != "" {
+	if maxConcurrent := os.Getenv(envMaxConcurrent); maxConcurrent != "" {
 		if n, err := parseInt(maxConcurrent); err == nil && n > 0 {
 			config.MaxConcurrent = n
+			config.setKeys[envMaxConcurrent] = true
 		}
 	}
-	if v := os.Getenv("RFFMPEG_AUTO_DETECT_GPU"); v != "" {
+	if v := os.Getenv(envAutoDetectGPU); v != "" {
 		if parsed, ok := parseBoolEnv(v); ok {
 			config.AutoDetectGPU = parsed
+			config.setKeys[envAutoDetectGPU] = true
 		}
 	}
-	if v := os.Getenv("RFFMPEG_AUTO_DETECT_CODECS"); v != "" {
+	if v := os.Getenv(envAutoDetectCodecs); v != "" {
 		if parsed, ok := parseBoolEnv(v); ok {
 			config.AutoDetectCodecs = parsed
+			config.setKeys[envAutoDetectCodecs] = true
 		}
 	}
 
 	// Cache environment variables
-	if cacheEnabled := os.Getenv("RFFMPEG_CACHE_ENABLED"); cacheEnabled == "false" || cacheEnabled == "0" {
-		config.CacheEnabled = false
+	if cacheEnabled := os.Getenv(envCacheEnabled); cacheEnabled != "" {
+		// Only "false"/"0" disables; any other value keeps the default true.
+		// Any non-empty value counts as an explicit set, matching the
+		// pre-existing override rule in Merge.
+		if cacheEnabled == "false" || cacheEnabled == "0" {
+			config.CacheEnabled = false
+		}
+		config.setKeys[envCacheEnabled] = true
 	}
-	if cacheDir := os.Getenv("RFFMPEG_CACHE_DIR"); cacheDir != "" {
+	if cacheDir := os.Getenv(envCacheDir); cacheDir != "" {
 		config.CacheDir = cacheDir
+		config.setKeys[envCacheDir] = true
 	}
-	if cacheTTL := os.Getenv("RFFMPEG_CACHE_TTL"); cacheTTL != "" {
+	if cacheTTL := os.Getenv(envCacheTTL); cacheTTL != "" {
 		if d, err := time.ParseDuration(cacheTTL); err == nil {
 			config.CacheTTL = Duration(d)
+			config.setKeys[envCacheTTL] = true
 		}
 	}
-	if cacheMaxSize := os.Getenv("RFFMPEG_CACHE_MAX_SIZE_MB"); cacheMaxSize != "" {
+	if cacheMaxSize := os.Getenv(envCacheMaxSizeMB); cacheMaxSize != "" {
 		if n, err := parseInt(cacheMaxSize); err == nil && n > 0 {
 			config.CacheMaxSizeMB = int64(n)
+			config.setKeys[envCacheMaxSizeMB] = true
 		}
 	}
 
 	// Shared filesystem mode
-	if prefix := os.Getenv("RFFMPEG_SHARED_FS_ALLOWED_PREFIX"); prefix != "" {
+	if prefix := os.Getenv(envSharedFSAllowedPrefix); prefix != "" {
 		config.SharedFSAllowedPrefix = prefix
+		config.setKeys[envSharedFSAllowedPrefix] = true
 	}
 
 	// Retry environment variables
-	if retryMaxRetries := os.Getenv("RFFMPEG_RETRY_MAX_RETRIES"); retryMaxRetries != "" {
+	if retryMaxRetries := os.Getenv(envRetryMaxRetries); retryMaxRetries != "" {
 		if n, err := parseInt(retryMaxRetries); err == nil && n > 0 {
 			config.RetryMaxRetries = n
+			config.setKeys[envRetryMaxRetries] = true
 		}
 	}
-	if retryInitialInterval := os.Getenv("RFFMPEG_RETRY_INITIAL_INTERVAL"); retryInitialInterval != "" {
+	if retryInitialInterval := os.Getenv(envRetryInitialInterval); retryInitialInterval != "" {
 		if d, err := time.ParseDuration(retryInitialInterval); err == nil {
 			config.RetryInitialInterval = Duration(d)
+			config.setKeys[envRetryInitialInterval] = true
 		}
 	}
-	if v := os.Getenv("RFFMPEG_RETRY_EXPONENTIAL_BACKOFF"); v == "true" || v == "1" {
-		config.RetryUseExponentialBackoff = true
+	if v := os.Getenv(envRetryExponentialBackoff); v != "" {
+		if v == "true" || v == "1" {
+			config.RetryUseExponentialBackoff = true
+		}
+		config.setKeys[envRetryExponentialBackoff] = true
 	}
-	if retryMaxInterval := os.Getenv("RFFMPEG_RETRY_MAX_INTERVAL"); retryMaxInterval != "" {
+	if retryMaxInterval := os.Getenv(envRetryMaxInterval); retryMaxInterval != "" {
 		if d, err := time.ParseDuration(retryMaxInterval); err == nil {
 			config.RetryMaxInterval = Duration(d)
+			config.setKeys[envRetryMaxInterval] = true
 		}
 	}
-	if v := os.Getenv("RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK"); v == "false" || v == "0" {
-		config.RetryEnableSoftwareFallback = false
+	if v := os.Getenv(envRetrySoftwareFallback); v != "" {
+		if v == "false" || v == "0" {
+			config.RetryEnableSoftwareFallback = false
+		}
+		config.setKeys[envRetrySoftwareFallback] = true
 	}
 
 	return config
 }
 
 // Merge merges file config with environment config (env takes precedence).
+// A field is copied from envConfig only when envConfig.setKeys marks its
+// environment variable as explicitly set. Merge never reads the process
+// environment, so it is a pure function of its arguments and directly
+// testable with hand-built Config values.
 func Merge(fileConfig, envConfig *Config) *Config {
 	result := &Config{}
 
 	// Start with file config
 	if fileConfig != nil {
 		*result = *fileConfig
+		// Env overrides are tracked only on envConfig; the merged result never
+		// carries its own override map.
+		result.setKeys = nil
 	}
 
-	// Override with env config values if set
+	// Override with env config values if explicitly set
 	if envConfig != nil {
-		if envConfig.ServerURL != "" && envConfig.ServerURL != DefaultConfig().ServerURL {
+		if envConfig.setKeys[envServerURL] {
 			result.ServerURL = envConfig.ServerURL
 		}
-		if envConfig.WorkerID != "" {
+		if envConfig.setKeys[envWorkerID] {
 			result.WorkerID = envConfig.WorkerID
 		}
-		if envConfig.Name != "" {
+		if envConfig.setKeys[envWorkerName] {
 			result.Name = envConfig.Name
 		}
-		if envConfig.Token != "" {
+		if envConfig.setKeys[envToken] {
 			result.Token = envConfig.Token
 		}
-		if envConfig.TempDir != "" {
+		if envConfig.setKeys[envTempDir] {
 			result.TempDir = envConfig.TempDir
 		}
-		if envConfig.SharedFSAllowedPrefix != "" {
+		if envConfig.setKeys[envSharedFSAllowedPrefix] {
 			result.SharedFSAllowedPrefix = envConfig.SharedFSAllowedPrefix
 		}
-		if envConfig.FFmpegPath != "" && envConfig.FFmpegPath != DefaultConfig().FFmpegPath {
+		if envConfig.setKeys[envFFmpegPath] {
 			result.FFmpegPath = envConfig.FFmpegPath
 		}
-		if envConfig.Timeout != DefaultConfig().Timeout {
+		if envConfig.setKeys[envTimeout] {
 			result.Timeout = envConfig.Timeout
 		}
-		if envConfig.HeartbeatInterval != DefaultConfig().HeartbeatInterval {
+		if envConfig.setKeys[envHeartbeatInterval] {
 			result.HeartbeatInterval = envConfig.HeartbeatInterval
 		}
-		if envConfig.PollInterval != DefaultConfig().PollInterval {
+		if envConfig.setKeys[envPollInterval] {
 			result.PollInterval = envConfig.PollInterval
 		}
-		if envConfig.MaxConcurrent != DefaultConfig().MaxConcurrent {
+		if envConfig.setKeys[envMaxConcurrent] {
 			result.MaxConcurrent = envConfig.MaxConcurrent
 		}
-		// Auto-detect booleans only override when the env var is explicitly
-		// set to a recognized boolean. Copying envConfig unconditionally would
-		// clobber a file's false with LoadFromEnv's default true (TSI-2640);
-		// a non-empty but invalid value (e.g. "banana") must not count as an
-		// explicit override either (TSI-2662).
-		if v := os.Getenv("RFFMPEG_AUTO_DETECT_GPU"); v != "" {
-			if parsed, ok := parseBoolEnv(v); ok {
-				result.AutoDetectGPU = parsed
-			}
+		if envConfig.setKeys[envAutoDetectGPU] {
+			result.AutoDetectGPU = envConfig.AutoDetectGPU
 		}
-		if v := os.Getenv("RFFMPEG_AUTO_DETECT_CODECS"); v != "" {
-			if parsed, ok := parseBoolEnv(v); ok {
-				result.AutoDetectCodecs = parsed
-			}
+		if envConfig.setKeys[envAutoDetectCodecs] {
+			result.AutoDetectCodecs = envConfig.AutoDetectCodecs
 		}
 
 		// Cache settings
-		if envConfig.CacheDir != "" && envConfig.CacheDir != DefaultConfig().CacheDir {
+		if envConfig.setKeys[envCacheEnabled] {
+			result.CacheEnabled = envConfig.CacheEnabled
+		}
+		if envConfig.setKeys[envCacheDir] {
 			result.CacheDir = envConfig.CacheDir
 		}
-		if envConfig.CacheEnabled != result.CacheEnabled {
-			// Only override if explicitly changed in env
-			if os.Getenv("RFFMPEG_CACHE_ENABLED") != "" {
-				result.CacheEnabled = envConfig.CacheEnabled
-			}
-		}
-		if envConfig.CacheTTL != DefaultConfig().CacheTTL {
+		if envConfig.setKeys[envCacheTTL] {
 			result.CacheTTL = envConfig.CacheTTL
 		}
-		if envConfig.CacheMaxSizeMB != DefaultConfig().CacheMaxSizeMB {
+		if envConfig.setKeys[envCacheMaxSizeMB] {
 			result.CacheMaxSizeMB = envConfig.CacheMaxSizeMB
 		}
 
 		// Retry settings
-		if envConfig.RetryMaxRetries != 0 && envConfig.RetryMaxRetries != DefaultConfig().RetryMaxRetries {
+		if envConfig.setKeys[envRetryMaxRetries] {
 			result.RetryMaxRetries = envConfig.RetryMaxRetries
 		}
-		if envConfig.RetryInitialInterval != 0 && envConfig.RetryInitialInterval != DefaultConfig().RetryInitialInterval {
+		if envConfig.setKeys[envRetryInitialInterval] {
 			result.RetryInitialInterval = envConfig.RetryInitialInterval
 		}
-		if os.Getenv("RFFMPEG_RETRY_EXPONENTIAL_BACKOFF") != "" {
+		if envConfig.setKeys[envRetryExponentialBackoff] {
 			result.RetryUseExponentialBackoff = envConfig.RetryUseExponentialBackoff
 		}
-		if envConfig.RetryMaxInterval != 0 && envConfig.RetryMaxInterval != DefaultConfig().RetryMaxInterval {
+		if envConfig.setKeys[envRetryMaxInterval] {
 			result.RetryMaxInterval = envConfig.RetryMaxInterval
 		}
-		if os.Getenv("RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK") != "" {
+		if envConfig.setKeys[envRetrySoftwareFallback] {
 			result.RetryEnableSoftwareFallback = envConfig.RetryEnableSoftwareFallback
 		}
 	}
