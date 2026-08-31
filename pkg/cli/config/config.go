@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 const (
@@ -15,6 +16,10 @@ type Config struct {
 	ServerURL string `json:"server_url"`
 	Token     string `json:"token,omitempty"`
 	SharedFS  bool   `json:"shared_fs,omitempty"` // Shared filesystem mode: skip upload/download
+	// MaxRetries bounds the CLI's WS/HTTP retry loops (RFFMPEG_MAX_RETRIES).
+	// nil means "unset" (fall back to client.DefaultMaxRetries); a non-nil 0
+	// means "no retries" — fail fast instead of silently falling back.
+	MaxRetries *int `json:"max_retries,omitempty"`
 }
 
 // Load reads configuration from file
@@ -30,7 +35,6 @@ func Load() (*Config, error) {
 		filepath.Join(os.Getenv("HOME"), ".rffmpeg.json"),
 		"/etc/rffmpeg.json",
 	}
-
 	for _, path := range configPaths {
 		if data, err := os.ReadFile(path); err == nil {
 			if err := json.Unmarshal(data, cfg); err != nil {
@@ -38,6 +42,11 @@ func Load() (*Config, error) {
 			}
 			break
 		}
+	}
+
+	// Negative max_retries in the config file is invalid: treat it as unset.
+	if cfg.MaxRetries != nil && *cfg.MaxRetries < 0 {
+		cfg.MaxRetries = nil
 	}
 
 	// Environment variables override config file
@@ -49,6 +58,11 @@ func Load() (*Config, error) {
 	}
 	if sharedFS := os.Getenv("RFFMPEG_SHARED_FS"); sharedFS != "" {
 		cfg.SharedFS = sharedFS == "1" || sharedFS == "true"
+	}
+	if mr := os.Getenv("RFFMPEG_MAX_RETRIES"); mr != "" {
+		if n, err := strconv.Atoi(mr); err == nil && n >= 0 {
+			cfg.MaxRetries = &n
+		}
 	}
 
 	return cfg, nil

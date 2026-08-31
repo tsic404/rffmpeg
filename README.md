@@ -100,7 +100,12 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 
 # 指定任务超时时间
 ./bin/rffmpeg --timeout 30m -i input.mp4 -c:v libx264 output.mp4
+
+# 调整连接中断后的重试次数（默认 14 次，约 5 分钟；也可用环境变量 RFFMPEG_MAX_RETRIES）
+./bin/rffmpeg --max-retries 5 -i input.mp4 -c:v libx264 output.mp4
 ```
+
+**连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。重试次数达到上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / 配置文件 `"max_retries"`，默认 14 次、约 5 分钟）后 CLI 以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。三个通道均支持 `0`：显式设为 `0` 表示**不重试、首次失败即退出**，不会被静默回落为默认值。
 
 ## 配置说明
 
@@ -284,7 +289,8 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 ```json
 {
   "server_url": "http://localhost:8080", // /api/v1 suffix is optional
-  "token": "your-auth-token"
+  "token": "your-auth-token",
+  "max_retries": 14
 }
 ```
 
@@ -294,6 +300,7 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 |--------|------|--------|
 | `RFFMPEG_SERVER_URL` | Server URL | `http://localhost:8080` |
 | `RFFMPEG_TOKEN` | 认证令牌（server 启用认证时必填） | - |
+| `RFFMPEG_MAX_RETRIES` | WS/HTTP 重试次数上限（连接中断后） | `14`（约 5 分钟） |
 
 #### 认证
 

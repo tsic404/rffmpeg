@@ -66,6 +66,10 @@ type WSClient struct {
 	onError      func(errMsg string)
 	connected    bool
 	reconnecting bool
+	// maxRetries bounds the reconnect loop (--max-retries / RFFMPEG_MAX_RETRIES).
+	// NewWSClient defaults it to DefaultMaxRetries; WithWSMaxRetries(0) means
+	// "no retries" — fail fast after the first failed attempt.
+	maxRetries int
 	// lastSeq is the highest sequence number seen. A received Seq greater
 	// than lastSeq+1 means messages were lost during a reconnect — output
 	// has a hole and the stream must not silently continue.
@@ -137,6 +141,17 @@ func WithOnError(handler func(errMsg string)) WSClientOption {
 	}
 }
 
+// WithWSMaxRetries bounds the WebSocket reconnect loop (--max-retries /
+// RFFMPEG_MAX_RETRIES). 0 means "no retries" — fail fast after the first
+// failed attempt.
+func WithWSMaxRetries(n int) WSClientOption {
+	return func(c *WSClient) {
+		if n >= 0 {
+			c.maxRetries = n
+		}
+	}
+}
+
 // NewWSClient creates a new WebSocket client
 func NewWSClient(serverURL, jobID, token string, opts ...WSClientOption) *WSClient {
 	// Convert HTTP URL to WebSocket URL
@@ -144,10 +159,11 @@ func NewWSClient(serverURL, jobID, token string, opts ...WSClientOption) *WSClie
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 
 	client := &WSClient{
-		serverURL: wsURL,
-		jobID:     jobID,
-		token:     token,
-		done:      make(chan struct{}),
+		serverURL:  wsURL,
+		jobID:      jobID,
+		token:      token,
+		done:       make(chan struct{}),
+		maxRetries: DefaultMaxRetries,
 	}
 
 	for _, opt := range opts {
@@ -230,12 +246,16 @@ func (e *HandshakeError) Error() string {
 }
 
 // ConnectWithReconnect establishes a WebSocket connection with automatic reconnection.
-// Transient failures retry with exponential backoff; a 4xx handshake rejection
-// (bad token, unknown job, forbidden) is permanent and aborts immediately —
-// no retry interval can fix it.
+// Transient failures retry with exponential backoff up to maxRetries attempts
+// (--max-retries / RFFMPEG_MAX_RETRIES); a 4xx handshake rejection (bad token,
+// unknown job, forbidden) is permanent and aborts immediately — no retry
+// interval can fix it. When the retry budget is spent it returns an error
+// wrapping ErrRetriesExhausted so callers can surface a distinct exit code.
 func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 	reconnectDelay := WSReconnectDelay
+	maxRetries := c.maxRetries
 
+	retries := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -255,6 +275,11 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 			return err
 		}
 
+		if retries >= maxRetries {
+			return fmt.Errorf("%w: WebSocket connection failed after %d retries: %v", ErrRetriesExhausted, retries, err)
+		}
+		retries++
+
 		log.Printf("WebSocket connection failed: %v, retrying in %v...", err, reconnectDelay)
 
 		select {
@@ -271,6 +296,27 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 			reconnectDelay = WSMaxReconnectDelay
 		}
 	}
+}
+
+// retryBudget returns the total wall-clock time spent on maxRetries WebSocket
+// reconnect attempts under the exponential-backoff schedule (1s, 2s, 4s, 8s,
+// 16s, then 30s cap). The HTTP status-poll fallback reuses the same budget so
+// both retry paths give up after roughly the same amount of contact loss
+// (TSI-2697).
+func retryBudget(maxRetries int) time.Duration {
+	if maxRetries <= 0 {
+		return 0
+	}
+	delay := WSReconnectDelay
+	var total time.Duration
+	for i := 0; i < maxRetries; i++ {
+		total += delay
+		delay *= 2
+		if delay > WSMaxReconnectDelay {
+			delay = WSMaxReconnectDelay
+		}
+	}
+	return total
 }
 
 // Listen starts listening for WebSocket messages

@@ -14,6 +14,7 @@ func TestLoadDefault(t *testing.T) {
 	os.Unsetenv("RFFMPEG_SERVER_URL")
 	os.Unsetenv("RFFMPEG_TOKEN")
 	os.Unsetenv("RFFMPEG_SHARED_FS")
+	os.Unsetenv("RFFMPEG_MAX_RETRIES")
 
 	cfg, err := Load()
 	if err != nil {
@@ -49,11 +50,42 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadMaxRetriesEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	os.Unsetenv("RFFMPEG_MAX_RETRIES")
+
+	if cfg, _ := Load(); cfg.MaxRetries != nil {
+		t.Errorf("Load() MaxRetries = %v, want nil when unset", cfg.MaxRetries)
+	}
+
+	os.Setenv("RFFMPEG_MAX_RETRIES", "7")
+	defer os.Unsetenv("RFFMPEG_MAX_RETRIES")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.MaxRetries == nil || *cfg.MaxRetries != 7 {
+		t.Errorf("Load() MaxRetries = %v, want 7", cfg.MaxRetries)
+	}
+
+	// Non-numeric values are ignored, leaving the field unset.
+	os.Setenv("RFFMPEG_MAX_RETRIES", "abc")
+	if cfg, _ := Load(); cfg.MaxRetries != nil {
+		t.Errorf("Load() MaxRetries = %v, want nil for non-numeric env", cfg.MaxRetries)
+	}
+
+	// 0 = no retries: it must be honored, not ignored.
+	os.Setenv("RFFMPEG_MAX_RETRIES", "0")
+	if cfg, _ := Load(); cfg.MaxRetries == nil || *cfg.MaxRetries != 0 {
+		t.Errorf("Load() MaxRetries = %v, want 0 for zero env", cfg.MaxRetries)
+	}
+}
+
 func TestLoadConfigFile(t *testing.T) {
 	// Create temp config file
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "rffmpeg.json")
-	configContent := `{"server_url": "http://config.example.com", "token": "config-token"}`
+	configContent := `{"server_url": "http://config.example.com", "token": "config-token", "max_retries": 7}`
 	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}
@@ -66,6 +98,7 @@ func TestLoadConfigFile(t *testing.T) {
 	os.Unsetenv("RFFMPEG_SERVER_URL")
 	os.Unsetenv("RFFMPEG_TOKEN")
 	os.Unsetenv("RFFMPEG_SHARED_FS")
+	os.Unsetenv("RFFMPEG_MAX_RETRIES")
 
 	cfg, err := Load()
 	if err != nil {
@@ -74,6 +107,9 @@ func TestLoadConfigFile(t *testing.T) {
 
 	if cfg.ServerURL != "http://config.example.com" {
 		t.Errorf("Load() ServerURL = %v, want http://config.example.com", cfg.ServerURL)
+	}
+	if cfg.MaxRetries == nil || *cfg.MaxRetries != 7 {
+		t.Errorf("Load() MaxRetries = %v, want 7 from config file", cfg.MaxRetries)
 	}
 }
 

@@ -670,9 +670,46 @@ func TestParseArgsTimeout(t *testing.T) {
 // TestParseArgs_MissingValue verifies that value-taking flags without a value
 // are a hard error instead of silently falling back to defaults (TSI-2365).
 func TestParseArgs_MissingValue(t *testing.T) {
-	for _, flag := range []string{"--server", "-server", "--token", "-token", "--timeout", "-timeout"} {
+	for _, flag := range []string{"--server", "-server", "--token", "-token", "--timeout", "-timeout", "--max-retries", "-max-retries"} {
 		if _, err := parseArgs([]string{flag}); err == nil {
 			t.Errorf("parseArgs(%q) expected error for missing value, got nil", flag)
+		}
+	}
+}
+
+// TestParseArgs_MaxRetries verifies --max-retries parsing and validation.
+func TestParseArgs_MaxRetries(t *testing.T) {
+	opts, err := parseArgs([]string{"--max-retries", "7", "-i", "in.mp4", "out.mp4"})
+	if err != nil {
+		t.Fatalf("parseArgs unexpected error: %v", err)
+	}
+	if opts.MaxRetries != 7 {
+		t.Errorf("MaxRetries = %d, want 7", opts.MaxRetries)
+	}
+	if !opts.MaxRetriesSet {
+		t.Errorf("MaxRetriesSet = false, want true when flag present")
+	}
+
+	opts, err = parseArgs([]string{"-max-retries", "3", "-i", "in.mp4", "out.mp4"})
+	if err != nil {
+		t.Fatalf("parseArgs(-max-retries) unexpected error: %v", err)
+	}
+	if opts.MaxRetries != 3 {
+		t.Errorf("MaxRetries = %d, want 3", opts.MaxRetries)
+	}
+
+	// 0 = no retries, and must be distinguishable from "flag absent".
+	opts, err = parseArgs([]string{"--max-retries", "0", "-i", "in.mp4", "out.mp4"})
+	if err != nil {
+		t.Fatalf("parseArgs(--max-retries 0) unexpected error: %v", err)
+	}
+	if opts.MaxRetries != 0 || !opts.MaxRetriesSet {
+		t.Errorf("MaxRetries = %d (set=%v), want 0 (set=true)", opts.MaxRetries, opts.MaxRetriesSet)
+	}
+
+	for _, bad := range []string{"-1", "abc"} {
+		if _, err := parseArgs([]string{"--max-retries", bad}); err == nil {
+			t.Errorf("parseArgs(--max-retries %s) expected error, got nil", bad)
 		}
 	}
 }

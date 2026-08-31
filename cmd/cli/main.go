@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,12 @@ import (
 const (
 	ExitSuccess = 0
 	ExitError   = 1
+	// ExitDisconnected is returned when a job was submitted successfully but
+	// the client lost contact with the server after its retry budget was
+	// spent. The job keeps running server-side; query its final status via
+	// GET /api/v1/jobs/{id}. Distinct from ExitError, which also covers
+	// submission-phase failures where no job exists to query (TSI-2697).
+	ExitDisconnected = 2
 
 	// clientVerdictGrace is the margin past the server's NO_WORKER_AVAILABLE
 	// verdict deadline (learned via JobInfo.NoWorkerDeadline) that the client
@@ -38,16 +45,18 @@ var version = "1.0.0"
 
 // Options holds the rffmpeg-specific options extracted from the command line.
 type Options struct {
-	ServerURL   string
-	Token       string
-	Quiet       bool
-	ShowHelp    bool
-	ShowVersion bool
-	AutoHW      bool
-	IsProbe     bool
-	ProbeInput  string
-	Timeout     time.Duration
-	FmpegArgs   []string
+	ServerURL     string
+	Token         string
+	Quiet         bool
+	ShowHelp      bool
+	ShowVersion   bool
+	AutoHW        bool
+	IsProbe       bool
+	ProbeInput    string
+	Timeout       time.Duration
+	MaxRetries    int
+	MaxRetriesSet bool
+	FmpegArgs     []string
 
 	// Info flags
 	ShowEncoders   bool
@@ -142,6 +151,19 @@ func parseArgs(argList []string) (*Options, error) {
 			}
 			warnDuplicate(arg)
 			opts.Timeout = parsed
+			i++
+		case "--max-retries", "-max-retries":
+			val, err := needValue(i, arg)
+			if err != nil {
+				return nil, err
+			}
+			n, perr := strconv.Atoi(val)
+			if perr != nil || n < 0 {
+				return nil, fmt.Errorf("invalid max-retries value: %s (must be a non-negative integer, 0 = no retries)", val)
+			}
+			warnDuplicate(arg)
+			opts.MaxRetries = n
+			opts.MaxRetriesSet = true
 			i++
 
 		case "-encoders", "--encoders":
@@ -308,6 +330,12 @@ func run() int {
 	if opts.Token != "" {
 		cfg.Token = opts.Token
 	}
+	maxRetries := client.DefaultMaxRetries
+	if opts.MaxRetriesSet {
+		maxRetries = opts.MaxRetries
+	} else if cfg.MaxRetries != nil {
+		maxRetries = *cfg.MaxRetries
+	}
 
 	// Detect shared filesystem mode
 	sharedFS := cfg.IsSharedFS()
@@ -316,7 +344,7 @@ func run() int {
 	}
 
 	// Create client
-	cli := client.New(cfg.ServerURL, cfg.Token)
+	cli := client.New(cfg.ServerURL, cfg.Token, client.WithMaxRetries(maxRetries))
 
 	// Check server health
 	if err := cli.HealthCheck(); err != nil {
@@ -643,6 +671,11 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 		}
 		if waitErr == nil {
 			break
+		}
+		var retriesExhausted *client.RetriesExhaustedError
+		if errors.As(waitErr, &retriesExhausted) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", retriesExhausted)
+			return nil, ExitDisconnected
 		}
 		if !errors.Is(waitErr, context.DeadlineExceeded) {
 			fmt.Fprintf(os.Stderr, "Error waiting for job: %v\n", waitErr)
@@ -1565,6 +1598,7 @@ rffmpeg options:
   -q, --quiet     Quiet mode (suppress progress output)
   --auto-hw[=true|false]  Enable automatic hardware encoder upgrade (default: false)
   --timeout DURATION      Job execution timeout (e.g., 30s, 5m, 2h)
+  --max-retries N         Max WS reconnect attempts / HTTP poll retry budget (default: 14, ~5 min; 0 = no retries)
 
 ffmpeg options:
   All standard ffmpeg options are supported and passed through to the server.

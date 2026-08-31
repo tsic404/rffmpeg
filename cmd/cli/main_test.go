@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsix404/rffmpeg/pkg/cli/client"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 )
 
@@ -1436,6 +1438,45 @@ func TestWaitForJobLoop_DoesNotExtendTwice(t *testing.T) {
 	}
 	if strings.Contains(stderr, "NO_WORKER_AVAILABLE") {
 		t.Errorf("stderr = %q, must not claim a server NO_WORKER_AVAILABLE verdict is still possible", stderr)
+	}
+}
+
+// disconnectedJobClient is a jobWaitClient whose wait methods report that the
+// retry budget was spent after the job was submitted.
+type disconnectedJobClient struct {
+	jobID string
+}
+
+func (d *disconnectedJobClient) GetJob(jobID string) (*protocol.JobInfo, error) {
+	return &protocol.JobInfo{ID: jobID, Status: protocol.JobStatusRunning}, nil
+}
+
+func (d *disconnectedJobClient) WaitForJobWithLogs(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	return nil, &client.RetriesExhaustedError{JobID: d.jobID, Cause: errors.New("boom")}
+}
+
+func (d *disconnectedJobClient) WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	return nil, &client.RetriesExhaustedError{JobID: d.jobID, Cause: errors.New("boom")}
+}
+
+func (d *disconnectedJobClient) CancelJob(jobID string) error { return nil }
+
+// TestWaitForJobLoop_RetriesExhausted maps a RetriesExhaustedError to
+// ExitDisconnected — the job was submitted but the client lost contact after
+// its retry budget, which operators must distinguish from ExitError (TSI-2697).
+func TestWaitForJobLoop_RetriesExhausted(t *testing.T) {
+	fake := &disconnectedJobClient{jobID: "job-lost"}
+
+	var code int
+	stderr := captureStderr(func() {
+		_, code = waitForJobLoop(fake, "job-lost", 0, false, true)
+	})
+
+	if code != ExitDisconnected {
+		t.Fatalf("waitForJobLoop code = %d, want ExitDisconnected", code)
+	}
+	if !strings.Contains(stderr, "GET /api/v1/jobs/job-lost") {
+		t.Errorf("stderr = %q, want final-status query hint", stderr)
 	}
 }
 
