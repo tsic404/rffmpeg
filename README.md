@@ -265,15 +265,15 @@ Usage of ./bin/worker:
 | `RFFMPEG_POLL_INTERVAL` | Worker 任务轮询间隔 | `5s` |
 | `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |
 | `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（同上布尔值语义） | `true` |
-| `RFFMPEG_CACHE_ENABLED` | 启用任务文件缓存（`false`/`0` 关闭） | `true` |
+| `RFFMPEG_CACHE_ENABLED` | 启用任务文件缓存（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |
 | `RFFMPEG_CACHE_DIR` | 缓存目录 | 自动（`/var/cache/rffmpeg` 或 `~/.cache/rffmpeg`） |
 | `RFFMPEG_CACHE_TTL` | 缓存 TTL | `24h` |
 | `RFFMPEG_CACHE_MAX_SIZE_MB` | 缓存最大大小 (MiB) | `10240` |
 | `RFFMPEG_RETRY_MAX_RETRIES` | 任务重试次数 | `3` |
 | `RFFMPEG_RETRY_INITIAL_INTERVAL` | 重试初始间隔 | `1s` |
-| `RFFMPEG_RETRY_EXPONENTIAL_BACKOFF` | 指数退避（`true`/`1` 开启） | `false` |
+| `RFFMPEG_RETRY_EXPONENTIAL_BACKOFF` | 指数退避（同上布尔值语义） | `false` |
 | `RFFMPEG_RETRY_MAX_INTERVAL` | 重试最大间隔 | `30s` |
-| `RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK` | 软件编码回退（`false`/`0` 关闭） | `true` |
+| `RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK` | 软件编码回退（同上布尔值语义） | `true` |
 
 编码器/GPU 等能力默认由 Worker 自动探测；如需手动指定，通过配置文件的 `manual_encoders`/`manual_decoders`/`manual_gpu_model`/`manual_ffmpeg_version` 字段（配合 `auto_detect_gpu: false`/`auto_detect_codecs: false`）设置，或使用 `encoder_priority`/`encoder_blacklist` 调整优先级与黑名单。
 

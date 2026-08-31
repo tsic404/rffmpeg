@@ -467,6 +467,114 @@ func TestLoadFromEnv_AutoDetectSymmetric(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_BoolSymmetric(t *testing.T) {
+	// TSI-2731: the three legacy boolean env vars now follow the same
+	// symmetric parseBoolEnv contract as the auto-detect flags — only a
+	// recognized boolean counts as an explicit set (written to setKeys).
+	// Unrecognized values neither flip the flag nor override a file value,
+	// so each field keeps its default.
+	cases := []struct {
+		value                            string
+		wantCache, wantExp, wantFallback bool
+		wantSet                          bool
+	}{
+		{"true", true, true, true, true},
+		{"1", true, true, true, true},
+		{"TRUE", true, true, true, true},
+		{"yes", true, true, true, true},
+		{"on", true, true, true, true},
+		{"false", false, false, false, true},
+		{"0", false, false, false, true},
+		{"False", false, false, false, true},
+		{"no", false, false, false, true},
+		{"off", false, false, false, true},
+		// Invalid values keep defaults: cache enabled, exponential backoff
+		// disabled, software fallback enabled — and write no setKeys entry.
+		{"banana", true, false, true, false},
+		{"2", true, false, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("RFFMPEG_CACHE_ENABLED", tc.value)
+			t.Setenv("RFFMPEG_RETRY_EXPONENTIAL_BACKOFF", tc.value)
+			t.Setenv("RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK", tc.value)
+
+			cfg := LoadFromEnv()
+			if cfg.CacheEnabled != tc.wantCache {
+				t.Errorf("CacheEnabled = %v, want %v (env=%q)", cfg.CacheEnabled, tc.wantCache, tc.value)
+			}
+			if cfg.RetryUseExponentialBackoff != tc.wantExp {
+				t.Errorf("RetryUseExponentialBackoff = %v, want %v (env=%q)", cfg.RetryUseExponentialBackoff, tc.wantExp, tc.value)
+			}
+			if cfg.RetryEnableSoftwareFallback != tc.wantFallback {
+				t.Errorf("RetryEnableSoftwareFallback = %v, want %v (env=%q)", cfg.RetryEnableSoftwareFallback, tc.wantFallback, tc.value)
+			}
+			if got := cfg.setKeys[envCacheEnabled]; got != tc.wantSet {
+				t.Errorf("setKeys[envCacheEnabled] = %v, want %v (env=%q)", got, tc.wantSet, tc.value)
+			}
+			if got := cfg.setKeys[envRetryExponentialBackoff]; got != tc.wantSet {
+				t.Errorf("setKeys[envRetryExponentialBackoff] = %v, want %v (env=%q)", got, tc.wantSet, tc.value)
+			}
+			if got := cfg.setKeys[envRetrySoftwareFallback]; got != tc.wantSet {
+				t.Errorf("setKeys[envRetrySoftwareFallback] = %v, want %v (env=%q)", got, tc.wantSet, tc.value)
+			}
+		})
+	}
+}
+
+func TestMerge_BoolEnvOverridesFileSymmetric(t *testing.T) {
+	// A recognized boolean must override the file value in both directions
+	// (TSI-2731): true -> false and false -> true.
+	fileConfig := &Config{
+		CacheEnabled:                false,
+		RetryUseExponentialBackoff:  true,
+		RetryEnableSoftwareFallback: false,
+	}
+
+	t.Setenv("RFFMPEG_CACHE_ENABLED", "true")
+	t.Setenv("RFFMPEG_RETRY_EXPONENTIAL_BACKOFF", "0")
+	t.Setenv("RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK", "true")
+
+	merged := Merge(fileConfig, LoadFromEnv())
+
+	if !merged.CacheEnabled {
+		t.Error("CacheEnabled = false, want true (env true overrides file false)")
+	}
+	if merged.RetryUseExponentialBackoff {
+		t.Error("RetryUseExponentialBackoff = true, want false (env false overrides file true)")
+	}
+	if !merged.RetryEnableSoftwareFallback {
+		t.Error("RetryEnableSoftwareFallback = false, want true (env true overrides file false)")
+	}
+}
+
+func TestMerge_InvalidLegacyBoolEnvKeepsFileValue(t *testing.T) {
+	// TSI-2731: the three legacy boolean env vars now follow the numeric
+	// fields' rule — an unrecognized value does not count as an explicit
+	// override, so the file value survives.
+	fileConfig := &Config{
+		CacheEnabled:                false,
+		RetryUseExponentialBackoff:  true,
+		RetryEnableSoftwareFallback: false,
+	}
+
+	t.Setenv("RFFMPEG_CACHE_ENABLED", "banana")
+	t.Setenv("RFFMPEG_RETRY_EXPONENTIAL_BACKOFF", "banana")
+	t.Setenv("RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK", "banana")
+
+	merged := Merge(fileConfig, LoadFromEnv())
+
+	if merged.CacheEnabled {
+		t.Error("CacheEnabled = true, want false (invalid env value must not override file false)")
+	}
+	if !merged.RetryUseExponentialBackoff {
+		t.Error("RetryUseExponentialBackoff = false, want true (invalid env value must not override file true)")
+	}
+	if merged.RetryEnableSoftwareFallback {
+		t.Error("RetryEnableSoftwareFallback = true, want false (invalid env value must not override file false)")
+	}
+}
+
 func TestMerge_InvalidNumericEnvKeepsFileValue(t *testing.T) {
 	// A non-empty but unparseable numeric env var must not count as an
 	// explicit override; the file value survives.

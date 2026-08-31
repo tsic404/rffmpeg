@@ -362,14 +362,14 @@ func LoadFromEnv() *Config {
 	}
 
 	// Cache environment variables
-	if cacheEnabled := os.Getenv(envCacheEnabled); cacheEnabled != "" {
-		// Only "false"/"0" disables; any other value keeps the default true.
-		// Any non-empty value counts as an explicit set, matching the
-		// pre-existing override rule in Merge.
-		if cacheEnabled == "false" || cacheEnabled == "0" {
-			config.CacheEnabled = false
+	if v := os.Getenv(envCacheEnabled); v != "" {
+		// Only a recognized boolean counts as an explicit set (TSI-2731):
+		// "false"/"0"/"no"/"off" disable, "true"/"1"/"yes"/"on" keep the
+		// default true, and any other value leaves the default untouched.
+		if parsed, ok := parseBoolEnv(v); ok {
+			config.CacheEnabled = parsed
+			config.setKeys[envCacheEnabled] = true
 		}
-		config.setKeys[envCacheEnabled] = true
 	}
 	if cacheDir := os.Getenv(envCacheDir); cacheDir != "" {
 		config.CacheDir = cacheDir
@@ -408,10 +408,10 @@ func LoadFromEnv() *Config {
 		}
 	}
 	if v := os.Getenv(envRetryExponentialBackoff); v != "" {
-		if v == "true" || v == "1" {
-			config.RetryUseExponentialBackoff = true
+		if parsed, ok := parseBoolEnv(v); ok {
+			config.RetryUseExponentialBackoff = parsed
+			config.setKeys[envRetryExponentialBackoff] = true
 		}
-		config.setKeys[envRetryExponentialBackoff] = true
 	}
 	if retryMaxInterval := os.Getenv(envRetryMaxInterval); retryMaxInterval != "" {
 		if d, err := time.ParseDuration(retryMaxInterval); err == nil {
@@ -420,10 +420,10 @@ func LoadFromEnv() *Config {
 		}
 	}
 	if v := os.Getenv(envRetrySoftwareFallback); v != "" {
-		if v == "false" || v == "0" {
-			config.RetryEnableSoftwareFallback = false
+		if parsed, ok := parseBoolEnv(v); ok {
+			config.RetryEnableSoftwareFallback = parsed
+			config.setKeys[envRetrySoftwareFallback] = true
 		}
-		config.setKeys[envRetrySoftwareFallback] = true
 	}
 
 	return config
