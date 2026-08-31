@@ -159,6 +159,19 @@ func DrainAndClose(body io.ReadCloser) error {
 	return closeErr
 }
 
+// parseErrorResponse decodes a non-200 response body as protocol.ErrorResponse
+// and reports whether it carried a usable (non-empty) server message. Callers
+// fall back to a status-code error when it reports false, so an empty or
+// undecodable body never degrades to a bare "<op> failed: " with no diagnostic
+// (TSI-2730).
+func parseErrorResponse(body io.Reader) (protocol.ErrorResponse, bool) {
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(body).Decode(&errResp); err != nil || errResp.Message == "" {
+		return protocol.ErrorResponse{}, false
+	}
+	return errResp, true
+}
+
 // UploadFile uploads a file to the server using streaming to avoid loading
 // large files entirely into memory.
 func (c *Client) UploadFile(filePath string) (string, error) {
@@ -230,8 +243,7 @@ func (c *Client) UploadFile(filePath string) (string, error) {
 	// read/write on closed pipe", masking the real cause (TSI-2598).
 	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			msg = errResp.Message
 		}
 		return "", fmt.Errorf("upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
@@ -243,8 +255,7 @@ func (c *Client) UploadFile(filePath string) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return "", fmt.Errorf("upload failed: %s", errResp.Message)
 		}
 		return "", fmt.Errorf("upload failed with status %d", resp.StatusCode)
@@ -350,8 +361,7 @@ func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, 
 			}
 			return "", fmt.Errorf("rate limit exceeded (HTTP 429)")
 		}
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return "", fmt.Errorf("job submission failed [%s]: %s", errResp.Code, errResp.Message)
 		}
 		return "", fmt.Errorf("job submission failed with status %d", resp.StatusCode)
@@ -387,8 +397,7 @@ func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("get job failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("get job failed with status %d", resp.StatusCode)
@@ -938,8 +947,7 @@ func (c *Client) ListWorkers() ([]WorkerInfo, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list workers failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list workers failed with status %d", resp.StatusCode)
@@ -975,8 +983,7 @@ func (c *Client) GetWorker(workerID string) (*WorkerInfo, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("get worker failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("get worker failed with status %d", resp.StatusCode)
@@ -1010,8 +1017,7 @@ func (c *Client) ListAllEncoders() ([]protocol.EncoderInfo, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list encoders failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list encoders failed with status %d", resp.StatusCode)
@@ -1043,8 +1049,7 @@ func (c *Client) ListAllDecoders() ([]protocol.DecoderInfo, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list decoders failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list decoders failed with status %d", resp.StatusCode)
@@ -1077,8 +1082,7 @@ func (c *Client) ListAllHwaccels() ([]string, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list hwaccels failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list hwaccels failed with status %d", resp.StatusCode)
@@ -1123,8 +1127,7 @@ func (c *Client) ListAllFilters(jsonOut bool) ([]string, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list filters failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list filters failed with status %d", resp.StatusCode)
@@ -1179,8 +1182,7 @@ func (c *Client) ListAllPixFmts(jsonOut bool) ([]string, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list pix_fmts failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list pix_fmts failed with status %d", resp.StatusCode)
@@ -1235,8 +1237,7 @@ func (c *Client) ListAllFormats(jsonOut bool) ([]string, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list formats failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list formats failed with status %d", resp.StatusCode)
@@ -1287,8 +1288,7 @@ func (c *Client) ListWorkersByEncoder(encoderName string) ([]WorkerInfo, error) 
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return nil, fmt.Errorf("list workers by encoder failed: %s", errResp.Message)
 		}
 		return nil, fmt.Errorf("list workers by encoder failed with status %d", resp.StatusCode)
@@ -1378,16 +1378,14 @@ func (c *Client) UploadFileChunked(filePath string, chunkSize int64) (string, er
 	// and never reaches the chunk endpoint (TSI-2625).
 	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			msg = errResp.Message
 		}
 		return "", fmt.Errorf("init failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return "", fmt.Errorf("init failed: %s", errResp.Message)
 		}
 		return "", fmt.Errorf("init failed with status %d", resp.StatusCode)
@@ -1434,8 +1432,7 @@ func (c *Client) UploadFileChunked(filePath string, chunkSize int64) (string, er
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return "", fmt.Errorf("complete failed: %s", errResp.Message)
 		}
 		return "", fmt.Errorf("complete failed with status %d", resp.StatusCode)
@@ -1580,8 +1577,7 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 	// read/write on closed pipe", masking the real cause (TSI-2598).
 	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			msg = errResp.Message
 		}
 		return fmt.Errorf("chunk upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
@@ -1592,8 +1588,7 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp protocol.ErrorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Message != "" {
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return fmt.Errorf("chunk upload failed: %s", errResp.Message)
 		}
 		return fmt.Errorf("chunk upload failed with status %d", resp.StatusCode)

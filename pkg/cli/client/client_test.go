@@ -584,6 +584,83 @@ func TestUploadFileChunkedChunkNonOKEmptyMessage(t *testing.T) {
 	}
 }
 
+// TestNonUploadNonOKEmptyMessage verifies that every non-upload endpoint falls
+// back to a status-code error when a non-200 JSON body has an empty message,
+// instead of degrading to a bare "... failed: " suffix (TSI-2730).
+func TestNonUploadNonOKEmptyMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(protocol.ErrorResponse{Code: "busy"})
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+
+	tests := []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{"SubmitJob", func() error {
+			_, err := c.SubmitJob([]string{"in.mp4"}, []string{"-c", "copy"}, "out.mp4", false)
+			return err
+		}, "job submission failed with status 503"},
+		{"GetJob", func() error {
+			_, err := c.GetJob("job-1")
+			return err
+		}, "get job failed with status 503"},
+		{"ListWorkers", func() error {
+			_, err := c.ListWorkers()
+			return err
+		}, "list workers failed with status 503"},
+		{"GetWorker", func() error {
+			_, err := c.GetWorker("w1")
+			return err
+		}, "get worker failed with status 503"},
+		{"ListAllEncoders", func() error {
+			_, err := c.ListAllEncoders()
+			return err
+		}, "list encoders failed with status 503"},
+		{"ListAllDecoders", func() error {
+			_, err := c.ListAllDecoders()
+			return err
+		}, "list decoders failed with status 503"},
+		{"ListAllHwaccels", func() error {
+			_, err := c.ListAllHwaccels()
+			return err
+		}, "list hwaccels failed with status 503"},
+		{"ListAllFilters", func() error {
+			_, err := c.ListAllFilters(false)
+			return err
+		}, "list filters failed with status 503"},
+		{"ListAllPixFmts", func() error {
+			_, err := c.ListAllPixFmts(false)
+			return err
+		}, "list pix_fmts failed with status 503"},
+		{"ListAllFormats", func() error {
+			_, err := c.ListAllFormats(false)
+			return err
+		}, "list formats failed with status 503"},
+		{"ListWorkersByEncoder", func() error {
+			_, err := c.ListWorkersByEncoder("h264")
+			return err
+		}, "list workers by encoder failed with status 503"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.call()
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if err.Error() != tt.want {
+				t.Errorf("error = %q, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 // TestUploadFileChunked tests the chunked file upload
 func TestUploadFileChunked(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
