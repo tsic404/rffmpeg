@@ -321,3 +321,106 @@ func TestProcessJob_RetryTimeoutClassifiedAsTimeout(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// writeAlwaysRetryableFailFFmpeg creates an executable that immediately exits
+// with a retryable "Unknown encoder" error on every invocation, so the retry
+// executor keeps failing fast and spends the budget in its backoff interval.
+func writeAlwaysRetryableFailFFmpeg(dir string) (string, error) {
+	scriptPath := filepath.Join(dir, "always-retryable-ffmpeg")
+	script := "#!/bin/sh\necho \"Unknown encoder 'h264_fake'\" >&2\nexit 1\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+		return "", fmt.Errorf("write always-retryable script: %w", err)
+	}
+	return scriptPath, nil
+}
+
+// TestProcessJob_RetryBackoffBudgetExhaustionClassifiedAsTimeout is the
+// TSI-2684 backoff-interval regression test. Every attempt fails retryably
+// immediately, so the execution budget (150ms) is exhausted inside the retry
+// executor's applyRetryInterval wait (1s default), not inside an attempt:
+// FinalResult.IsTimeout stays false and only execCtx.Err() reports
+// DeadlineExceeded. The retry-exhausted path must still report TIMEOUT.
+func TestProcessJob_RetryBackoffBudgetExhaustionClassifiedAsTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	ffmpegPath, err := writeAlwaysRetryableFailFFmpeg(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockSrv := newOutputOpenMockServer()
+	defer mockSrv.Close()
+
+	cacheDir := filepath.Join(tmpDir, "cache")
+	cache, err := NewCache(CacheConfig{Enabled: true, Dir: cacheDir, TTL: 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+	t.Cleanup(func() { cache.Stop() })
+
+	workerTempDir := filepath.Join(tmpDir, "worker-temp")
+	if err := os.MkdirAll(workerTempDir, 0755); err != nil {
+		t.Fatalf("mkdir worker-temp: %v", err)
+	}
+
+	executor := NewExecutor(ffmpegPath, 30*time.Second)
+	client := NewClient(mockSrv.URL, "test-worker-001", "")
+
+	rewriteAdapter := NewRewriteAdapter()
+	rewriteAdapter.config.Enabled = false
+
+	w := &Worker{
+		id:                 "test-worker-001",
+		name:               "test-worker",
+		client:             client,
+		executor:           executor,
+		retryExecutor:      NewRetryExecutor(executor, DefaultRetryConfig()),
+		rewriteAdapter:     rewriteAdapter,
+		cache:              cache,
+		tempDir:            workerTempDir,
+		activeJobs:         make(map[string]context.CancelFunc),
+		heartbeatInterval:  30 * time.Second,
+		pollInterval:       5 * time.Second,
+		lastHeartbeatTime:  time.Now(),
+		ffprobeExecutor:    NewFFprobeExecutor(""),
+		pixelFormatChecker: nil,
+		gpuDetector:        gpu.NewDetector(),
+	}
+
+	src := filepath.Join(tmpDir, "input.mkv")
+	if err := os.WriteFile(src, []byte("dummy"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Short budget: the initial + first retry attempts fail immediately, then
+	// the budget expires during the 1s backoff interval.
+	timeout := time.Now().Add(150 * time.Millisecond)
+	job := protocol.JobInfo{
+		ID:             "test-job-retry-backoff-timeout",
+		DirectPaths:    []string{src},
+		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "h264_fake"},
+		OutputFilename: filepath.Join(tmpDir, "out.mkv"),
+		Timeout:        &timeout,
+	}
+
+	ctx := context.Background()
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	w.processJob(jobCtx, job, cancel, false)
+
+	// Terminal update must be TIMEOUT, not FFMPEG_ERROR.
+	mockSrv.mu.Lock()
+	body := mockSrv.terminalBody
+	mockSrv.mu.Unlock()
+	var update protocol.JobUpdateRequest
+	if err := json.Unmarshal(body, &update); err != nil {
+		t.Fatalf("failed to parse terminal update: %v\nbody: %s", err, body)
+	}
+	if update.Status != protocol.JobStatusTimeout {
+		t.Errorf("Status = %q, want %q", update.Status, protocol.JobStatusTimeout)
+	}
+	if update.FailureType != string(protocol.FailureTimeout) {
+		t.Errorf("FailureType = %q, want %q", update.FailureType, protocol.FailureTimeout)
+	}
+}

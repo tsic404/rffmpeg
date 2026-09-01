@@ -914,7 +914,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	// Check for timeout
 	if result.IsTimeout {
-		w.reportJobTimeout(job.ID, result)
+		w.reportJobTimeout(job.ID, result, batcher.FlushAndWait)
 		jobFailed = true
 		return
 	}
@@ -1012,13 +1012,23 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				}
 				goto uploadOutput
 			}
-			// Retry attempts share the same execCtx budget as the initial run:
-			// a timeout landing inside ExecuteWithRetry surfaces on the final
-			// ExecResult's IsTimeout flag, not the initial result. Report it as
-			// TIMEOUT — the exhausted branch below would otherwise misclassify
-			// it as FFMPEG_ERROR (TSI-2684).
-			if retryResult.FinalResult.IsTimeout {
-				w.reportJobTimeout(job.ID, retryResult.FinalResult)
+			// Retry attempts share the same execCtx budget as the initial run.
+			// The budget can expire inside an attempt (FinalResult.IsTimeout) or
+			// during the retry backoff interval (execCtx DeadlineExceeded with a
+			// non-timeout FinalResult — the loop breaks at the next ctx.Err()
+			// check before running again). Both mean the ffmpeg execution budget
+			// was exhausted and must be reported TIMEOUT, not FFMPEG_ERROR
+			// (TSI-2684).
+			if retryResult.FinalResult.IsTimeout || execCtx.Err() == context.DeadlineExceeded {
+				timeoutResult := retryResult.FinalResult
+				if !timeoutResult.IsTimeout {
+					timeoutResult = ExecResult{
+						ExitCode:  -1,
+						IsTimeout: true,
+						Error:     fmt.Errorf("ffmpeg command timed out after %v", execTimeout),
+					}
+				}
+				w.reportJobTimeout(job.ID, timeoutResult, batcher.FlushAndWait)
 				jobFailed = true
 				return
 			}
@@ -1129,9 +1139,16 @@ func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached
 // (TSI-2684). Shared by the initial-execution path and the retry-exhausted
 // path so a timeout landing inside ExecuteWithRetry is classified identically
 // to one on the first attempt — otherwise the exhausted branch's isTimeout=false
-// would misreport it as FFMPEG_ERROR.
-func (w *Worker) reportJobTimeout(jobID string, result ExecResult) {
+// would misreport it as FFMPEG_ERROR. Flush callbacks run before the terminal
+// PATCH so pending tail stderr reaches the server first (TSI-2581, mirroring
+// reportFailure); a nil callback is a safe no-op.
+func (w *Worker) reportJobTimeout(jobID string, result ExecResult, flush ...func()) {
 	log.Printf("Job %s timed out", jobID)
+	for _, f := range flush {
+		if f != nil {
+			f()
+		}
+	}
 	errMsg := ""
 	if result.Error != nil {
 		errMsg = result.Error.Error()
