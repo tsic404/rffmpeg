@@ -19,6 +19,7 @@ import (
 	"github.com/tsix404/rffmpeg/pkg/cli/args"
 	"github.com/tsix404/rffmpeg/pkg/cli/client"
 	"github.com/tsix404/rffmpeg/pkg/cli/config"
+	"github.com/tsix404/rffmpeg/pkg/pathutil"
 	"github.com/tsix404/rffmpeg/pkg/protocol"
 )
 
@@ -432,7 +433,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 			}
 			// Validate that the file exists
 			if err := args.ValidateFileExists(absPath); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error validating input %s: %v\n", inputFile, err)
 				return ExitError
 			}
 			if !quiet {
@@ -512,25 +513,18 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	if !quiet {
 		fmt.Fprintln(os.Stderr, "Submitting job...")
 	}
-
 	// Extract output filename for the server.
 	// In shared FS mode, send the full absolute path so the Worker writes
 	// directly to the CLI-specified path instead of its own temp directory.
-	// For network URLs (rtmp://, udp://, etc.), pass the full URL directly.
+	// Network URLs (rtmp://, srt://, https://, udp://, etc.) pass through
+	// as-is in both modes — resolving them as local paths would corrupt the
+	// URL (TSI-2690).
 	outputFilename := ""
 	if result.OutputFile != "" {
-		if sharedFS {
-			absOut, err := args.GetAbsPath(result.OutputFile)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving output path %s: %v\n", result.OutputFile, err)
-				return ExitError
-			}
-			outputFilename = absOut
-		} else if strings.Contains(result.OutputFile, "://") {
-			// Network URL (rtmp://, rtsp://, udp://, etc.) — pass through as-is
-			outputFilename = result.OutputFile
-		} else {
-			outputFilename = filepath.Base(result.OutputFile)
+		outputFilename, err = resolveOutputFilename(result.OutputFile, sharedFS)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving output path %s: %v\n", result.OutputFile, err)
+			return ExitError
 		}
 	}
 
@@ -625,6 +619,26 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 	// Return success exit code
 	return ExitSuccess
+}
+
+// resolveOutputFilename determines the output filename sent to the server for
+// the given ffmpeg output argument.
+//
+// Network URLs (rtmp://, srt://, https://, udp://, etc.) pass through
+// unchanged in both modes, because treating them as local paths would corrupt
+// the URL (TSI-2690). Local paths — including file:// and paths that merely
+// contain "://" mid-string — are not remote: in shared FS mode they are
+// resolved to absolute paths so the Worker writes directly to the CLI-specified
+// path, otherwise they are reduced to their base name since the Worker writes
+// into its own job directory and the CLI downloads the result afterward.
+func resolveOutputFilename(outputFile string, sharedFS bool) (string, error) {
+	if pathutil.IsRemoteURL(outputFile) {
+		return outputFile, nil
+	}
+	if sharedFS {
+		return args.GetAbsPath(outputFile)
+	}
+	return filepath.Base(outputFile), nil
 }
 
 // jobWaitClient is the subset of *client.Client the wait loop needs. It is an
@@ -843,7 +857,7 @@ func runProbe(cli *client.Client, input string, quiet bool, sharedFS bool) int {
 		}
 		// Validate that the file exists
 		if err := args.ValidateFileExists(absPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error validating input %s: %v\n", input, err)
 			return ExitError
 		}
 		if !quiet {

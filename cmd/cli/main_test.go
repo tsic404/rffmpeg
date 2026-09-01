@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1187,6 +1188,108 @@ func TestReportTerminalJob_Completed(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("stderr = %q, want empty for completed job", stderr)
 	}
+}
+
+// TestResolveOutputFilename locks the TSI-2690 fix: in shared FS mode network
+// output URLs must pass through unchanged instead of being mangled into a
+// local path, while local paths (including file:// and paths that merely
+// contain "://" mid-string) are still resolved to absolute paths.
+func TestResolveOutputFilename(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		sharedFS bool
+		want     string
+		wantErr  bool
+	}{
+		{
+			name:     "shared FS rtmp URL passes through",
+			output:   "rtmp://127.0.0.1:1935/live/X",
+			sharedFS: true,
+			want:     "rtmp://127.0.0.1:1935/live/X",
+		},
+		{
+			name:     "shared FS srt URL passes through",
+			output:   "srt://host:9000?mode=listener",
+			sharedFS: true,
+			want:     "srt://host:9000?mode=listener",
+		},
+		{
+			name:     "shared FS https URL passes through",
+			output:   "https://cdn.example.com/out.mkv",
+			sharedFS: true,
+			want:     "https://cdn.example.com/out.mkv",
+		},
+		{
+			name:     "shared FS udp URL passes through",
+			output:   "udp://239.0.0.1:1234",
+			sharedFS: true,
+			want:     "udp://239.0.0.1:1234",
+		},
+		{
+			name:     "shared FS local path resolved absolute",
+			output:   "output.mp4",
+			sharedFS: true,
+			want:     mustAbs(t, "output.mp4"),
+		},
+		{
+			name:     "shared FS file URL resolved absolute",
+			output:   "file://" + mustAbs(t, "output.mp4"),
+			sharedFS: true,
+			want:     mustAbs(t, "output.mp4"),
+		},
+		{
+			name:     "shared FS mid-string scheme stays local",
+			output:   "/data/media/x://out.mp4",
+			sharedFS: true,
+			want:     "/data/media/x://out.mp4",
+		},
+		{
+			name:     "non-shared FS rtmp URL passes through",
+			output:   "rtmp://127.0.0.1:1935/live/X",
+			sharedFS: false,
+			want:     "rtmp://127.0.0.1:1935/live/X",
+		},
+		{
+			name:     "non-shared FS local path keeps base name",
+			output:   "dir/output.mp4",
+			sharedFS: false,
+			want:     "output.mp4",
+		},
+		{
+			name:     "non-shared FS file URL keeps base name",
+			output:   "file://" + mustAbs(t, "out.mkv"),
+			sharedFS: false,
+			want:     "out.mkv",
+		},
+		{
+			name:     "non-shared FS mid-string scheme keeps base name",
+			output:   "/data/media/x://out.mp4",
+			sharedFS: false,
+			want:     "out.mp4",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveOutputFilename(tt.output, tt.sharedFS)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("resolveOutputFilename(%q, %v) error = %v, wantErr %v", tt.output, tt.sharedFS, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("resolveOutputFilename(%q, %v) = %q, want %q", tt.output, tt.sharedFS, got, tt.want)
+			}
+		})
+	}
+}
+
+// mustAbs resolves p to an absolute path for test expectations.
+func mustAbs(t *testing.T, p string) string {
+	t.Helper()
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q): %v", p, err)
+	}
+	return abs
 }
 
 func TestClientWaitDeadline(t *testing.T) {
