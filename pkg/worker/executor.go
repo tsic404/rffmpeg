@@ -227,7 +227,15 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 
 // BuildArgs constructs ffmpeg arguments from job parameters and input/output paths
 // It replaces <INPUT_FILE> placeholders in jobArgs with actual input file paths
-// and prepends -y flag to enable output file overwriting (required for retry support)
+// and prepends -y flag to enable output file overwriting (required for retry support).
+//
+// jobArgs is a trusted passthrough channel: unlike DirectPaths and
+// OutputFilename, it is deliberately NOT subject to the
+// RFFMPEG_SHARED_FS_ALLOWED_PREFIX allow-list. ffmpeg arguments can carry
+// paths in many forms (multiple -i, -map_metadata, filter paths, a dozen+
+// network protocols), so enumerating them would rewrite passthrough
+// semantics. Direct (shared-FS) mode is therefore a trust mode: the caller
+// that submits Args must itself be trusted (TSI-2674).
 func BuildArgs(jobArgs []string, inputPaths []string, outputPath string) []string {
 	args := make([]string, 0, len(jobArgs)+5)
 

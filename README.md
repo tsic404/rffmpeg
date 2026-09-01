@@ -435,9 +435,11 @@ Worker 在启动 ffmpeg 前会执行以下检查：
 
 ##### 信任模式说明
 
-`RFFMPEG_SHARED_FS=1` 本质上是信任模式——用户需确保 CLI 和 Worker 之间的路径一致且可达。建议：
-- 在生产环境中始终配置 `RFFMPEG_SHARED_FS_ALLOWED_PREFIX` 限制可访问范围
+`RFFMPEG_SHARED_FS=1` 本质上是信任模式——用户需确保 CLI 和 Worker 之间的路径一致且可达，并且提交任务的一方（CLI）可信。建议：
 - 仅对受信任的网络环境启用（如内网、Kubernetes 集群内部）
+- 在生产环境中始终配置 `RFFMPEG_SHARED_FS_ALLOWED_PREFIX`，将直通输入路径（`direct_path` / `DirectPaths`）与输出文件名（`OutputFilename`）限制在允许的前缀内
+
+`RFFMPEG_SHARED_FS_ALLOWED_PREFIX` 白名单**仅覆盖**上述两条路径字段，**不覆盖**用户 `Args` 内携带的路径：`Args` 是透传给 ffmpeg 的高级参数通道，ffmpeg 支持十余种协议与大量可携带路径的选项（多次 `-i`、`-map_metadata`、滤镜内路径等），穷举校验会重写透传语义，不可行。任何模式下 `Args` 内路径都不受白名单约束，唯一控制是保证 CLI 本身可信；如需真正限制，可在 worker 侧对 `Args` token 做校验（另开 issue）。
 
 #### 错误处理
 
