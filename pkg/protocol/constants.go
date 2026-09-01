@@ -38,4 +38,5 @@ const (
 	ErrCodeUploadFailed      ErrorCode = "upload_failed"
 	ErrCodeDownloadFailed    ErrorCode = "download_failed"
 	ErrCodeRateLimitExceeded ErrorCode = "rate_limit_exceeded"
+	ErrCodeUpgradeRequired   ErrorCode = "upgrade_required"
 )

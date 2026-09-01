@@ -327,6 +327,8 @@ paths:
       responses:
         '101':
           description: WebSocket connection established
+        '426':
+          $ref: '#/components/responses/UpgradeRequired'
 
   /jobs/{jobId}/output:
     post:
@@ -1089,6 +1091,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     InternalError:
       description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UpgradeRequired:
+      description: WebSocket upgrade required
       content:
         application/json:
           schema:
