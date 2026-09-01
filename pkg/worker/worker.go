@@ -111,9 +111,10 @@ func New(cfg Config) (*Worker, error) {
 		cfg.PollInterval = 5 * time.Second // Default poll interval
 	}
 
-	// Create temp directory. A defaulted path (per-user XDG dir, or the
-	// per-user fallback under a shared $TMPDIR) must be private: created 0700,
-	// then verified to catch a hostile pre-existing directory on a shared host.
+	// Create temp directory. A defaulted path (root FHS path, per-user XDG
+	// dir, or the per-user fallback under a shared $TMPDIR) must be private:
+	// created 0700, then verified to catch a hostile pre-existing directory on
+	// a shared host.
 	// An explicitly configured path keeps 0755 for admin-controlled sharing.
 	mode := os.FileMode(0o755)
 	if tempDirDefaulted {
@@ -124,6 +125,14 @@ func New(cfg Config) (*Worker, error) {
 	}
 	if tempDirDefaulted {
 		if err := verifyPrivateDir(cfg.TempDir); err != nil {
+			return nil, err
+		}
+		// The leaf's parent is the first directory below the trusted base
+		// (/var/tmp, $TMPDIR, or the user cache dir). MkdirAll leaves a
+		// pre-existing parent untouched, so a foreign-owned or loose-mode
+		// parent under a sticky base could rename or replace the leaf after
+		// the leaf check passes. Verify it too.
+		if err := verifyPrivateDir(filepath.Dir(cfg.TempDir)); err != nil {
 			return nil, err
 		}
 	}
@@ -183,10 +192,16 @@ func New(cfg Config) (*Worker, error) {
 
 // verifyPrivateDir verifies that dir is owned by the current effective user and
 // grants no group or other permissions. It guards the defaulted worker temp
-// directory on shared hosts: a pre-existing directory created by another user
-// (or with looser permissions) under a shared $TMPDIR must be rejected rather
-// than silently used for job I/O.
+// directory and its parent on shared hosts: a pre-existing directory created by
+// another user (or with looser permissions) under a shared $TMPDIR or /var/tmp
+// must be rejected rather than silently used for job I/O.
 func verifyPrivateDir(dir string) error {
+	return verifyPrivateDirAs(dir, os.Geteuid())
+}
+
+// verifyPrivateDirAs is verifyPrivateDir with an injectable expected owner uid,
+// so the owner-mismatch branch is testable without chowning to another user.
+func verifyPrivateDirAs(dir string, euid int) error {
 	info, err := os.Stat(dir)
 	if err != nil {
 		return fmt.Errorf("failed to stat temp directory: %w", err)
@@ -195,8 +210,8 @@ func verifyPrivateDir(dir string) error {
 	if !ok {
 		return fmt.Errorf("temp directory %q: unsupported stat type %T", dir, info.Sys())
 	}
-	if st.Uid != uint32(os.Geteuid()) {
-		return fmt.Errorf("temp directory %q is owned by uid %d, want %d; refusing to use non-private directory", dir, st.Uid, os.Geteuid())
+	if st.Uid != uint32(euid) {
+		return fmt.Errorf("temp directory %q is owned by uid %d, want %d; refusing to use non-private directory", dir, st.Uid, euid)
 	}
 	if got := info.Mode().Perm(); got != 0o700 {
 		return fmt.Errorf("temp directory %q has mode %o, want 0700; refusing to use non-private directory", dir, got)

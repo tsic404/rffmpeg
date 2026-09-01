@@ -144,6 +144,14 @@ func IsFallbackCacheDir(dir string) bool {
 	return dir == FallbackCacheDir(os.TempDir(), os.Getuid())
 }
 
+// FHS primary directories for root (euid == 0) deployments. CacheDir uses
+// RootCacheDir; TempDir uses RootTempDirBase as the shared base under which
+// each worker gets its own <workerID> subdirectory.
+const (
+	RootCacheDir    = "/var/cache/rffmpeg"
+	RootTempDirBase = "/var/tmp/rffmpeg-worker"
+)
+
 // DefaultCacheDir returns the default cache directory for the worker.
 // Root deployments (e.g. systemd) keep the FHS path /var/cache/rffmpeg;
 // non-root users get an XDG-compliant per-user directory (~/.cache/rffmpeg)
@@ -161,7 +169,7 @@ func DefaultCacheDir() string {
 // as-is, since it does not derive from HOME.
 func defaultCacheDirFor(euid, uid int, userCacheDirFn func() (string, error), xdgCacheHome, homeDir, tempDir string) string {
 	if euid == 0 {
-		return "/var/cache/rffmpeg"
+		return RootCacheDir
 	}
 	dir, err := userCacheDirFn()
 	if err != nil {
@@ -193,9 +201,10 @@ func FallbackTempDir(tempDir string, uid int, workerID string) string {
 	return filepath.Join(tempDir, "rffmpeg-worker-"+strconv.Itoa(uid), workerID)
 }
 
-// DefaultTempDir returns the default worker temp directory. Non-root users get
-// a per-user XDG directory (~/.cache/rffmpeg-worker/<workerID>); when that is
-// unavailable, or for root, the fallback is $TMPDIR/rffmpeg-worker-<uid>/<workerID>.
+// DefaultTempDir returns the default worker temp directory. Root deployments
+// (e.g. systemd) keep the FHS path /var/tmp/rffmpeg-worker/<workerID>; non-root
+// users get a per-user XDG directory (~/.cache/rffmpeg-worker/<workerID>), or
+// the fallback $TMPDIR/rffmpeg-worker-<uid>/<workerID> when XDG is unavailable.
 func DefaultTempDir(workerID string) string {
 	return defaultTempDirFor(os.Geteuid(), os.Getuid(), os.UserCacheDir, os.TempDir(), workerID)
 }
@@ -204,7 +213,7 @@ func DefaultTempDir(workerID string) string {
 // and environment accessors. Injectable for tests.
 func defaultTempDirFor(euid, uid int, userCacheDirFn func() (string, error), tempDir, workerID string) string {
 	if euid == 0 {
-		return FallbackTempDir(tempDir, uid, workerID)
+		return filepath.Join(RootTempDirBase, workerID)
 	}
 	if dir, err := userCacheDirFn(); err == nil {
 		return filepath.Join(dir, "rffmpeg-worker", workerID)

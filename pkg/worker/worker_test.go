@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
 )
 
 // TestRegisterPreservesCountersOnReregister verifies that an automatic
@@ -82,8 +83,13 @@ func TestNewDefaultTempDirPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(w.tempDir) })
 
 	want := filepath.Join(xdgBase, "rffmpeg-worker", w.ID())
+	if os.Geteuid() == 0 {
+		// Root deployments ignore XDG_CACHE_HOME and use the FHS primary path.
+		want = filepath.Join(workerconfig.RootTempDirBase, w.ID())
+	}
 	if w.tempDir != want {
 		t.Errorf("default TempDir = %q, want %q", w.tempDir, want)
 	}
@@ -124,6 +130,25 @@ func TestNewExplicitTempDirMode(t *testing.T) {
 	}
 }
 
+func TestNewRejectsNonPrivateParentTempDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root uses FHS primary path, not XDG_CACHE_HOME")
+	}
+	xdgBase := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", xdgBase)
+
+	// Pre-create the first directory below the trusted base with loose mode;
+	// MkdirAll will not tighten it, so the parent check must reject it.
+	parent := filepath.Join(xdgBase, "rffmpeg-worker")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+
+	if _, err := New(Config{ServerURL: "http://localhost:1"}); err == nil {
+		t.Fatal("New() = nil error, want rejection of non-private parent dir")
+	}
+}
+
 func TestVerifyPrivateDir(t *testing.T) {
 	t.Run("private dir accepted", func(t *testing.T) {
 		dir := t.TempDir()
@@ -151,8 +176,29 @@ func TestVerifyPrivateDir(t *testing.T) {
 			t.Error("verifyPrivateDir(missing) = nil, want error")
 		}
 	})
-}
 
+	foreignUID := os.Geteuid() + 1
+
+	t.Run("leaf owner mismatch rejected", func(t *testing.T) {
+		leaf := filepath.Join(t.TempDir(), "rffmpeg-worker", "w")
+		if err := os.MkdirAll(leaf, 0o700); err != nil {
+			t.Fatalf("MkdirAll %s: %v", leaf, err)
+		}
+		if err := verifyPrivateDirAs(leaf, foreignUID); err == nil {
+			t.Errorf("verifyPrivateDirAs(%q, uid=%d) = nil, want owner-mismatch error", leaf, foreignUID)
+		}
+	})
+
+	t.Run("parent owner mismatch rejected", func(t *testing.T) {
+		parent := filepath.Join(t.TempDir(), "rffmpeg-worker")
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			t.Fatalf("MkdirAll %s: %v", parent, err)
+		}
+		if err := verifyPrivateDirAs(parent, foreignUID); err == nil {
+			t.Errorf("verifyPrivateDirAs(%q, uid=%d) = nil, want owner-mismatch error", parent, foreignUID)
+		}
+	})
+}
 func TestFfmpegStderrIndicatesEmptyOutput(t *testing.T) {
 	tests := []struct {
 		name   string

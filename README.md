@@ -265,7 +265,7 @@ Usage of ./bin/worker:
 | `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
 | `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |
 | `RFFMPEG_TOKEN` | API 认证令牌（须与 Server 一致） | - |
-| `RFFMPEG_TEMP_DIR` | 临时文件目录 | `~/.cache/rffmpeg-worker/<workerID>`（XDG 私有）<br>`$TMPDIR/rffmpeg-worker-<uid>/<workerID>`（root 或 XDG 不可用时的 fallback） |
+| `RFFMPEG_TEMP_DIR` | 临时文件目录 | `/var/tmp/rffmpeg-worker/<workerID>`（root 部署 FHS 主路径）<br>`~/.cache/rffmpeg-worker/<workerID>`（XDG 私有）<br>`$TMPDIR/rffmpeg-worker-<uid>/<workerID>`（XDG 不可用时的 fallback） |
 | `RFFMPEG_FFMPEG_PATH` | FFmpeg 可执行文件路径 | `ffmpeg` |
 | `RFFMPEG_TIMEOUT` | 任务执行超时时间 | `2h` |
 | `RFFMPEG_MAX_CONCURRENT` | 最大并发任务数 | `1` |

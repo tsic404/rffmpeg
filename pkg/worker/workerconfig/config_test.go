@@ -72,7 +72,7 @@ func TestDefaultCacheDirFor(t *testing.T) {
 			euid:    0,
 			uid:     0,
 			tempDir: "/tmp",
-			want:    "/var/cache/rffmpeg",
+			want:    RootCacheDir,
 		},
 		{
 			name:           "non-root with owned HOME",
@@ -168,13 +168,13 @@ func TestDefaultTempDirFor(t *testing.T) {
 			want:           "/tmp/rffmpeg-worker-1000/abc-123",
 		},
 		{
-			name:           "root uses tmp fallback",
+			name:           "root uses FHS primary path",
 			euid:           0,
 			uid:            0,
 			userCacheDirFn: okCacheDir,
 			tempDir:        "/tmp",
 			workerID:       "w",
-			want:           "/tmp/rffmpeg-worker-0/w",
+			want:           filepath.Join(RootTempDirBase, "w"),
 		},
 	}
 
