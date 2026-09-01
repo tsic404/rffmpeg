@@ -736,6 +736,29 @@ GET /api/v1/workers
 GET /api/v1/workers/{workerId}/jobs
 ```
 
+### 迁移与淘汰审计事件
+
+`migration_events` 与 `worker_eviction_events` 是服务端审计表，记录的是**非正常的调度事件**，
+不是每次 worker 退出都会写入。
+
+- `migration_events` 仅在作业被从某个 worker **迁移回 pending** 时写入，当前实现只有
+  `reason=heartbeat_timeout` 一种触发路径：worker 心跳超时（`worker_heartbeat_timeout`，默认
+  `90s`）被标记为 offline，其上 running/queued 作业迁回 pending；这包括 worker 进程退出
+  （优雅退出或崩溃）后未上报终态的作业——它们在服务端停留 `running`，直到心跳超时被迁移。
+- 作业执行超过 `job_timeout`（默认 `30m`）即 FAIL（`FailureTimeout`），当前实现不重排，
+  不写 `reason=job_timeout` 迁移事件。
+- `worker_eviction_events` 仅在慢节点检测中写入：worker 的 EWMA 吞吐低于集群中位数 /
+  `SlowNodeThreshold=3.0`（即低于中位数 1/3）被淘汰（`event_type=evicted`）；已 evicted 的 worker
+  在吞吐恢复到中位数 / `RecoveryThreshold=1.5` 后重新入池（`event_type=recovered`）。单 worker
+  集群、或完成作业数少于预热门槛（`MinJobsForEviction=5`）时不会产生淘汰事件。
+
+**worker 优雅退出本身不写迁移事件，在飞作业经心跳超时迁移。** 当前 `cmd/worker/main.go` 收到
+SIGTERM/SIGINT 后仅 `cancel()` 并退出主循环（不调用 `w.Stop()`），既不等待在飞作业结束，也无法上报
+`cancelled`；进程退出后这些作业在服务端仍停留 `running`，直到健康监控在心跳超时
+（`worker_heartbeat_timeout`，默认 `90s`）后把它们迁回 `pending`，并写入 `reason=heartbeat_timeout`
+事件。因此迁移事件并非发生在退出瞬间，而是发生在随后的心跳超时；要让优雅退出后的作业尽快触发
+迁移，应停发心跳超过 `worker_heartbeat_timeout`（或直接 `kill -9`）。
+
 ### 健康检查
 
 ```
