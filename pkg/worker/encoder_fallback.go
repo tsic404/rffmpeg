@@ -432,6 +432,21 @@ func (f *EncoderFallback) GetEncoderFormat(encoder string) string {
 	return ""
 }
 
+// GetEncoderFamily resolves the codec family used by the cross-format
+// fallback guard. Unlike GetEncoderFormat, which returns the granular codec
+// format, this merges the VP8 and VP9 subfamilies into a single "vpx" family
+// so that libvpx -> libvpx-vp9 is treated as a same-family transition
+// (TSI-2760). The merge keys on the parsed format, not the literal encoder
+// name, so vp9_vaapi, vp8_vaapi and the bare vp9/vp8 names also resolve to
+// "vpx". Unknown encoders still resolve to "".
+func (f *EncoderFallback) GetEncoderFamily(encoder string) string {
+	format := f.GetEncoderFormat(encoder)
+	if format == "vp8" || format == "vp9" {
+		return "vpx"
+	}
+	return format
+}
+
 // GetAvailableSoftwareEncoders returns available software encoders for a given format.
 func (f *EncoderFallback) GetAvailableSoftwareEncoders(format string) []string {
 	if encoders, ok := f.formatEncoders[format]; ok {
@@ -460,20 +475,20 @@ func (f *EncoderFallback) GetAlternativeSoftwareEncoder(encoder string) string {
 		return ""
 	}
 
-	fromFmt := f.GetEncoderFormat(encoder)
-	toFmt := f.GetEncoderFormat(next)
-	if fromFmt == "" || toFmt == "" {
+	fromFamily := f.GetEncoderFamily(encoder)
+	toFamily := f.GetEncoderFamily(next)
+	if fromFamily == "" || toFamily == "" {
 		// An encoder whose codec family cannot be determined must not be
 		// silently chained: a cross-family transition could otherwise slip
 		// through the format guard (TSI-2685). Log which side is unknown and
 		// refuse the transition.
-		log.Printf("Refusing fallback %q -> %q: unknown encoder format (from=%q, to=%q)",
-			encoder, next, fromFmt, toFmt)
+		log.Printf("Refusing fallback %q -> %q: unknown encoder family (from=%q, to=%q)",
+			encoder, next, fromFamily, toFamily)
 		return ""
 	}
-	if fromFmt != toFmt {
+	if fromFamily != toFamily {
 		log.Printf("Refusing cross-format fallback: %q (%q) -> %q (%q)",
-			encoder, fromFmt, next, toFmt)
+			encoder, fromFamily, next, toFamily)
 		return ""
 	}
 	return next
@@ -485,12 +500,12 @@ func (f *EncoderFallback) GetAlternativeSoftwareEncoder(encoder string) string {
 // cross-format so an unknown encoder is never silently chained across an
 // undetermined family boundary (TSI-2685).
 func (f *EncoderFallback) IsCrossFormatFallback(from, to string) bool {
-	fromFmt := f.GetEncoderFormat(from)
-	toFmt := f.GetEncoderFormat(to)
-	if fromFmt == "" || toFmt == "" {
+	fromFamily := f.GetEncoderFamily(from)
+	toFamily := f.GetEncoderFamily(to)
+	if fromFamily == "" || toFamily == "" {
 		return true
 	}
-	return fromFmt != toFmt
+	return fromFamily != toFamily
 }
 
 // AddSoftwareFallbackChain adds a fallback chain entry: when 'from' is unavailable,

@@ -259,6 +259,8 @@ func TestEncoderFallback_IsCrossFormatFallback(t *testing.T) {
 		{"vp9 to h264 is cross-format", "libvpx-vp9", "libx264", true},
 		{"av1 to av1 is same-format", "libaom-av1", "libsvtav1", false},
 		{"h264 to h264 is same-format", "libx264rgb", "libx264", false},
+		{"vpx subfamily merge: libvpx to libvpx-vp9", "libvpx", "libvpx-vp9", false},
+		{"vp9_vaapi to libvpx-vp9 is same-family", "vp9_vaapi", "libvpx-vp9", false},
 		{"unknown source is cross-format (refused)", "unknown_encoder", "libx264", true},
 		{"unknown target is cross-format (refused)", "libx265", "unknown_encoder", true},
 	}
@@ -267,6 +269,34 @@ func TestEncoderFallback_IsCrossFormatFallback(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := fallback.IsCrossFormatFallback(tt.from, tt.to); got != tt.expected {
 				t.Errorf("IsCrossFormatFallback(%q, %q) = %v, want %v", tt.from, tt.to, got, tt.expected)
+			}
+		})
+	}
+}
+func TestEncoderFallback_GetEncoderFamily(t *testing.T) {
+	fallback := NewEncoderFallback()
+
+	tests := []struct {
+		name     string
+		encoder  string
+		expected string
+	}{
+		{"libvpx is vpx family", "libvpx", "vpx"},
+		{"libvpx-vp9 is vpx family", "libvpx-vp9", "vpx"},
+		{"vp9_vaapi is vpx family", "vp9_vaapi", "vpx"},
+		{"bare vp9 is vpx family", "vp9", "vpx"},
+		{"vp8_vaapi is vpx family", "vp8_vaapi", "vpx"},
+		{"bare vp8 is vpx family", "vp8", "vpx"},
+		{"h264 keeps granular format", "libx264", "h264"},
+		{"hevc keeps granular format", "libx265", "hevc"},
+		{"av1 keeps granular format", "libsvtav1", "av1"},
+		{"unknown encoder is empty", "unknown_encoder", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fallback.GetEncoderFamily(tt.encoder); got != tt.expected {
+				t.Errorf("GetEncoderFamily(%q) = %q, want %q", tt.encoder, got, tt.expected)
 			}
 		})
 	}
@@ -285,6 +315,22 @@ func TestEncoderFallback_CrossFormatChainEntryRefused(t *testing.T) {
 	fallback.AddSoftwareFallbackChain("libx264rgb", "libx264")
 	if got := fallback.GetAlternativeSoftwareEncoder("libx264rgb"); got != "libx264" {
 		t.Errorf("GetAlternativeSoftwareEncoder(libx264rgb) = %q, want libx264", got)
+	}
+}
+func TestEncoderFallback_VPXSubfamilyChainEntryAccepted(t *testing.T) {
+	fallback := NewEncoderFallback()
+
+	// libvpx (vp8) -> libvpx-vp9 (vp9) shares the vpx prefix and must be
+	// accepted as a same-family transition (TSI-2760).
+	fallback.AddSoftwareFallbackChain("libvpx", "libvpx-vp9")
+	if got := fallback.GetAlternativeSoftwareEncoder("libvpx"); got != "libvpx-vp9" {
+		t.Errorf("GetAlternativeSoftwareEncoder(libvpx) = %q, want libvpx-vp9 (same vpx family)", got)
+	}
+
+	// The reverse direction is also within the vpx family.
+	fallback.AddSoftwareFallbackChain("libvpx-vp9", "libvpx")
+	if got := fallback.GetAlternativeSoftwareEncoder("libvpx-vp9"); got != "libvpx" {
+		t.Errorf("GetAlternativeSoftwareEncoder(libvpx-vp9) = %q, want libvpx (same vpx family)", got)
 	}
 }
 
