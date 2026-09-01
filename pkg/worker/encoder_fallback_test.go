@@ -1,6 +1,10 @@
 package worker
 
 import (
+	"bytes"
+	"log"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -61,18 +65,22 @@ func TestEncoderFallback_GetAlternativeSoftwareEncoder(t *testing.T) {
 func TestEncoderFallback_AddSoftwareFallbackChain(t *testing.T) {
 	fallback := NewEncoderFallback()
 
-	// Add a custom chain entry
-	fallback.AddSoftwareFallbackChain("custom_encoder", "fallback_encoder")
-
-	if got := fallback.GetAlternativeSoftwareEncoder("custom_encoder"); got != "fallback_encoder" {
-		t.Errorf("GetAlternativeSoftwareEncoder after AddSoftwareFallbackChain = %q, want %q", got, "fallback_encoder")
+	// Same-family custom entry is accepted at read time.
+	fallback.AddSoftwareFallbackChain("libx264", "libx264rgb")
+	if got := fallback.GetAlternativeSoftwareEncoder("libx264"); got != "libx264rgb" {
+		t.Errorf("GetAlternativeSoftwareEncoder after AddSoftwareFallbackChain = %q, want %q", got, "libx264rgb")
 	}
 
-	// Overwrite an existing chain entry
-	fallback.AddSoftwareFallbackChain("libx265", "custom_fallback")
+	// Unknown-format entries are refused at read time (TSI-2685).
+	fallback.AddSoftwareFallbackChain("custom_encoder", "fallback_encoder")
+	if got := fallback.GetAlternativeSoftwareEncoder("custom_encoder"); got != "" {
+		t.Errorf("unknown-format chain entry = %q, want empty (refused)", got)
+	}
 
-	if got := fallback.GetAlternativeSoftwareEncoder("libx265"); got != "custom_fallback" {
-		t.Errorf("overwritten chain entry = %q, want %q", got, "custom_fallback")
+	// Overwriting an entry with a cross-format target is refused at read time.
+	fallback.AddSoftwareFallbackChain("libx265", "libx264")
+	if got := fallback.GetAlternativeSoftwareEncoder("libx265"); got != "" {
+		t.Errorf("cross-format overwritten chain entry = %q, want empty (refused)", got)
 	}
 }
 
@@ -251,8 +259,8 @@ func TestEncoderFallback_IsCrossFormatFallback(t *testing.T) {
 		{"vp9 to h264 is cross-format", "libvpx-vp9", "libx264", true},
 		{"av1 to av1 is same-format", "libaom-av1", "libsvtav1", false},
 		{"h264 to h264 is same-format", "libx264rgb", "libx264", false},
-		{"unknown source treated as compatible", "unknown_encoder", "libx264", false},
-		{"unknown target treated as compatible", "libx265", "unknown_encoder", false},
+		{"unknown source is cross-format (refused)", "unknown_encoder", "libx264", true},
+		{"unknown target is cross-format (refused)", "libx265", "unknown_encoder", true},
 	}
 
 	for _, tt := range tests {
@@ -277,5 +285,22 @@ func TestEncoderFallback_CrossFormatChainEntryRefused(t *testing.T) {
 	fallback.AddSoftwareFallbackChain("libx264rgb", "libx264")
 	if got := fallback.GetAlternativeSoftwareEncoder("libx264rgb"); got != "libx264" {
 		t.Errorf("GetAlternativeSoftwareEncoder(libx264rgb) = %q, want libx264", got)
+	}
+}
+
+func TestEncoderFallback_UnknownFormatChainEntryLogged(t *testing.T) {
+	fallback := NewEncoderFallback()
+	fallback.AddSoftwareFallbackChain("unknown_encoder", "libx264")
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	if got := fallback.GetAlternativeSoftwareEncoder("unknown_encoder"); got != "" {
+		t.Fatalf("GetAlternativeSoftwareEncoder(unknown_encoder) = %q, want empty (refused)", got)
+	}
+
+	if !strings.Contains(buf.String(), "unknown_encoder") {
+		t.Errorf("expected warning to name unknown encoder, got log output: %q", buf.String())
 	}
 }

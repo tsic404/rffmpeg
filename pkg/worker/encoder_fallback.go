@@ -377,9 +377,21 @@ func (f *EncoderFallback) isHardwareSpecificParam(param string) bool {
 }
 
 // GetEncoderFormat extracts the codec format from an encoder name.
-// Returns the format (h264, hevc, vp9, etc.) or empty string if unknown.
+// Returns the format (h264, hevc, vp9, av1, vp8, mpeg2video, mpeg4, mjpeg,
+// opus, mp3, aac, vorbis, flac, wav, pcm) or empty string if unknown.
 func (f *EncoderFallback) GetEncoderFormat(encoder string) string {
 	encoderLower := strings.ToLower(encoder)
+
+	// SVT software encoders use an svt[-_]codec naming scheme
+	// (libsvtav1, svt_av1, svt-av1, svt-hevc).
+	if strings.Contains(encoderLower, "svt") {
+		switch {
+		case strings.Contains(encoderLower, "av1"):
+			return "av1"
+		case strings.Contains(encoderLower, "hevc"):
+			return "hevc"
+		}
+	}
 
 	// Check for known format patterns
 	switch {
@@ -389,6 +401,8 @@ func (f *EncoderFallback) GetEncoderFormat(encoder string) string {
 		return "hevc"
 	case strings.Contains(encoderLower, "vp9"):
 		return "vp9"
+	case strings.Contains(encoderLower, "vpx"):
+		return "vp8"
 	case strings.Contains(encoderLower, "av1"):
 		return "av1"
 	case strings.Contains(encoderLower, "vp8"):
@@ -399,6 +413,20 @@ func (f *EncoderFallback) GetEncoderFormat(encoder string) string {
 		return "mpeg4"
 	case strings.Contains(encoderLower, "mjpeg"):
 		return "mjpeg"
+	case strings.Contains(encoderLower, "opus"):
+		return "opus"
+	case strings.Contains(encoderLower, "mp3") || strings.Contains(encoderLower, "lame"):
+		return "mp3"
+	case strings.Contains(encoderLower, "aac"):
+		return "aac"
+	case strings.Contains(encoderLower, "vorbis"):
+		return "vorbis"
+	case strings.Contains(encoderLower, "flac"):
+		return "flac"
+	case strings.Contains(encoderLower, "wav"):
+		return "wav"
+	case strings.Contains(encoderLower, "pcm") || strings.Contains(encoderLower, "s16le") || strings.Contains(encoderLower, "s24le") || strings.Contains(encoderLower, "s32le"):
+		return "pcm"
 	}
 
 	return ""
@@ -421,37 +449,56 @@ func (f *EncoderFallback) GetAvailableSoftwareEncoders(format string) []string {
 //
 // Cross-format transitions are refused: when the chained encoder belongs to a
 // different codec family than the current one, the lookup returns empty instead
-// of silently downgrading the requested output format (TSI-2671).
-// Returns empty string if no alternative is configured or the configured
-// alternative would change the codec family.
+// of silently downgrading the requested output format (TSI-2671). Encoders whose
+// family cannot be determined are also refused with a warning rather than
+// silently chained (TSI-2685).
+// Returns empty string if no alternative is configured, the configured
+// alternative would change the codec family, or either encoder is unknown.
 func (f *EncoderFallback) GetAlternativeSoftwareEncoder(encoder string) string {
 	next, ok := f.softwareFallbackChain[encoder]
 	if !ok || next == encoder {
 		return ""
 	}
-	if f.IsCrossFormatFallback(encoder, next) {
-		log.Printf("Refusing cross-format fallback: %s (%s) -> %s (%s)",
-			encoder, f.GetEncoderFormat(encoder), next, f.GetEncoderFormat(next))
+
+	fromFmt := f.GetEncoderFormat(encoder)
+	toFmt := f.GetEncoderFormat(next)
+	if fromFmt == "" || toFmt == "" {
+		// An encoder whose codec family cannot be determined must not be
+		// silently chained: a cross-family transition could otherwise slip
+		// through the format guard (TSI-2685). Log which side is unknown and
+		// refuse the transition.
+		log.Printf("Refusing fallback %q -> %q: unknown encoder format (from=%q, to=%q)",
+			encoder, next, fromFmt, toFmt)
+		return ""
+	}
+	if fromFmt != toFmt {
+		log.Printf("Refusing cross-format fallback: %q (%q) -> %q (%q)",
+			encoder, fromFmt, next, toFmt)
 		return ""
 	}
 	return next
 }
 
 // IsCrossFormatFallback reports whether 'to' belongs to a different codec
-// family than 'from' (e.g. libsvtav1 (av1) -> libx264 (h264)). Unknown encoder
-// formats are treated as compatible so a fallback is never blocked when the
-// family cannot be determined.
+// family than 'from' (e.g. libsvtav1 (av1) -> libx264 (h264)). When either
+// encoder's family cannot be determined, the transition is treated as
+// cross-format so an unknown encoder is never silently chained across an
+// undetermined family boundary (TSI-2685).
 func (f *EncoderFallback) IsCrossFormatFallback(from, to string) bool {
 	fromFmt := f.GetEncoderFormat(from)
 	toFmt := f.GetEncoderFormat(to)
 	if fromFmt == "" || toFmt == "" {
-		return false
+		return true
 	}
 	return fromFmt != toFmt
 }
 
 // AddSoftwareFallbackChain adds a fallback chain entry: when 'from' is unavailable,
 // try 'to' as the next alternative.
+//
+// Entries whose format cannot be determined, or that transition across codec
+// families, are rejected at read time by GetAlternativeSoftwareEncoder with a
+// warning log (TSI-2685).
 func (f *EncoderFallback) AddSoftwareFallbackChain(from, to string) {
 	if f.softwareFallbackChain == nil {
 		f.softwareFallbackChain = make(map[string]string)

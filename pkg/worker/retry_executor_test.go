@@ -294,7 +294,23 @@ func TestEncoderFallback_GetEncoderFormat(t *testing.T) {
 		{"libx264", "libx264", "h264"},
 		{"libx265", "libx265", "hevc"},
 		{"vp9_vaapi", "vp9_vaapi", "vp9"},
+		{"libvpx-vp9", "libvpx-vp9", "vp9"},
+		{"libvpx", "libvpx", "vp8"},
 		{"av1_nvenc", "av1_nvenc", "av1"},
+		{"libsvtav1", "libsvtav1", "av1"},
+		{"svt_av1", "svt_av1", "av1"},
+		{"svt-av1", "svt-av1", "av1"},
+		{"svt-hevc", "svt-hevc", "hevc"},
+		{"libopus", "libopus", "opus"},
+		{"opus", "opus", "opus"},
+		{"libmp3lame", "libmp3lame", "mp3"},
+		{"mp3", "mp3", "mp3"},
+		{"fdk-aac", "fdk-aac", "aac"},
+		{"aac", "aac", "aac"},
+		{"libvorbis", "libvorbis", "vorbis"},
+		{"flac", "flac", "flac"},
+		{"pcm_s16le", "pcm_s16le", "pcm"},
+		{"wav", "wav", "wav"},
 	}
 
 	for _, tt := range tests {
