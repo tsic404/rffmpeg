@@ -141,6 +141,9 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 		if len(inputFiles) == 0 {
 			// This might be an input file without -i (some ffmpeg versions allow this)
 			inputFiles = append(inputFiles, arg)
+			// Rewrite the implicit input into the same -i <INPUT_FILE> form the
+			// worker substitutes, so omitting -i still yields a real input stream.
+			allArgs = append(allArgs, "-i", "<INPUT_FILE>")
 		} else if outputFile == "" && i == outputCandidateIdx {
 			outputFile = arg
 		}

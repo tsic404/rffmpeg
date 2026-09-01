@@ -204,6 +204,33 @@ func TestParseAllArgsPreserved(t *testing.T) {
 	}
 }
 
+func TestParseImplicitInputAllArgs(t *testing.T) {
+	p := NewParser()
+	result, err := p.Parse([]string{"-c:v", "libx264", "input.mp4", "out.mp4"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if len(result.InputFiles) != 1 || result.InputFiles[0] != "input.mp4" {
+		t.Errorf("InputFiles = %v, want [input.mp4]", result.InputFiles)
+	}
+	if result.OutputFile != "out.mp4" {
+		t.Errorf("OutputFile = %q, want out.mp4", result.OutputFile)
+	}
+
+	// The implicit input must be rewritten to the -i <INPUT_FILE> placeholder
+	// form so the worker can substitute the real path (TSI-2749).
+	want := []string{"-c:v", "libx264", "-i", "<INPUT_FILE>"}
+	if len(result.AllArgs) != len(want) {
+		t.Fatalf("AllArgs = %v, want %v", result.AllArgs, want)
+	}
+	for i := range want {
+		if result.AllArgs[i] != want[i] {
+			t.Errorf("AllArgs[%d] = %q, want %q", i, result.AllArgs[i], want[i])
+		}
+	}
+}
+
 func TestIsFfmpegCommand(t *testing.T) {
 	tests := []struct {
 		args []string
