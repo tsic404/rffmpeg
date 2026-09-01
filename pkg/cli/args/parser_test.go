@@ -231,6 +231,43 @@ func TestParseImplicitInputAllArgs(t *testing.T) {
 	}
 }
 
+func TestParseStreamingDashExcludedFromAllArgs(t *testing.T) {
+	p := NewParser()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "format then stdout", args: []string{"-i", "input.mp4", "-f", "mp4", "-"}},
+		{name: "explicit -o stdout", args: []string{"-i", "input.mp4", "-o", "-"}},
+		{name: "bare stdout", args: []string{"-i", "input.mp4", "-"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := p.Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+
+			if !result.StreamingOutput {
+				t.Errorf("StreamingOutput = false, want true for output '-'")
+			}
+			if result.OutputFile != "-" {
+				t.Errorf("OutputFile = %q, want '-'", result.OutputFile)
+			}
+
+			// The output token "-" must not leak into AllArgs: the worker
+			// resolves and appends the output path exactly once. A leaked "-"
+			// would produce "- -" in the exec args (TSI-2683).
+			for _, arg := range result.AllArgs {
+				if arg == "-" {
+					t.Errorf("AllArgs must not contain the output dash '-': %v", result.AllArgs)
+				}
+			}
+		})
+	}
+}
+
 func TestIsFfmpegCommand(t *testing.T) {
 	tests := []struct {
 		args []string
