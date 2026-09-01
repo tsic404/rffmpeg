@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -1490,9 +1491,22 @@ func (w *Worker) validateDirectOutputPath(path string) *directPathViolation {
 	}
 	resolved, err := resolveOutputRealPath(path)
 	if err != nil {
-		return &directPathViolation{
-			msg:     fmt.Sprintf("output path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s: %v", path, err),
-			details: err.Error(),
+		switch {
+		case errors.Is(err, errOutputParentNotExist):
+			return &directPathViolation{
+				msg:     fmt.Sprintf("output path parent directory does not exist: %s", filepath.Dir(path)),
+				details: "parent directory does not exist",
+			}
+		case errors.Is(err, errOutputBrokenSymlink):
+			return &directPathViolation{
+				msg:     fmt.Sprintf("output path is a broken symbolic link: %s", path),
+				details: "output path is a broken symlink",
+			}
+		default:
+			return &directPathViolation{
+				msg:     fmt.Sprintf("output path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s: %v", path, err),
+				details: err.Error(),
+			}
 		}
 	}
 	if !w.pathAllowed(resolved) {
@@ -1504,18 +1518,41 @@ func (w *Worker) validateDirectOutputPath(path string) *directPathViolation {
 	return nil
 }
 
+// errOutputBrokenSymlink and errOutputParentNotExist distinguish the two
+// NotExist outcomes of resolveOutputRealPath so validateDirectOutputPath can
+// report the actual cause instead of lumping both under "parent missing".
+var (
+	errOutputBrokenSymlink  = errors.New("output path is a broken symbolic link")
+	errOutputParentNotExist = errors.New("output path parent directory does not exist")
+)
+
 // resolveOutputRealPath returns the symlink-free real path for an output path.
 // An existing final component (file, symlink, etc.) is resolved in full; a
 // not-yet-existing file has its parent directory resolved and the base name
 // re-joined, so a symlinked parent is checked against the real target.
+//
+// The two NotExist outcomes are distinguished with sentinel errors so the
+// caller can report the actual cause: errOutputBrokenSymlink means path itself
+// exists but is a symlink whose target is missing; errOutputParentNotExist
+// means path's parent directory does not exist.
 func resolveOutputRealPath(path string) (string, error) {
 	if _, err := os.Lstat(path); err == nil {
-		return filepath.EvalSymlinks(path)
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "", errOutputBrokenSymlink
+			}
+			return "", err
+		}
+		return resolved, nil
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
 	realParent, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errOutputParentNotExist
+		}
 		return "", err
 	}
 	return filepath.Join(realParent, filepath.Base(path)), nil

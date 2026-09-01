@@ -227,6 +227,52 @@ func TestValidateDirectOutputPathRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestValidateDirectOutputPathParentDirDoesNotExist(t *testing.T) {
+	base := t.TempDir()
+	allowed := filepath.Join(base, "allowed")
+	if err := os.MkdirAll(allowed, 0755); err != nil {
+		t.Fatalf("mkdir allowed: %v", err)
+	}
+	output := filepath.Join(allowed, "missing", "out.mp4")
+
+	w := &Worker{allowedPrefixes: []string{allowed}}
+	v := w.validateDirectOutputPath(output)
+	if v == nil {
+		t.Fatal("validateDirectOutputPath allowed a path whose parent does not exist, want violation")
+	}
+	if v.details != "parent directory does not exist" {
+		t.Errorf("details = %q, want %q", v.details, "parent directory does not exist")
+	}
+	wantParent := filepath.Join(allowed, "missing")
+	if !strings.Contains(v.msg, wantParent) {
+		t.Errorf("msg = %q, want mention of parent directory %q", v.msg, wantParent)
+	}
+}
+
+func TestValidateDirectOutputPathRejectsBrokenSymlink(t *testing.T) {
+	base := t.TempDir()
+	allowed := filepath.Join(base, "allowed")
+	if err := os.MkdirAll(allowed, 0755); err != nil {
+		t.Fatalf("mkdir allowed: %v", err)
+	}
+	output := filepath.Join(allowed, "broken.mp4")
+	if err := os.Symlink(filepath.Join(allowed, "missing-target.mp4"), output); err != nil {
+		t.Fatalf("symlink broken: %v", err)
+	}
+
+	w := &Worker{allowedPrefixes: []string{allowed}}
+	v := w.validateDirectOutputPath(output)
+	if v == nil {
+		t.Fatal("validateDirectOutputPath allowed a broken-symlink output, want violation")
+	}
+	if v.details != "output path is a broken symlink" {
+		t.Errorf("details = %q, want %q", v.details, "output path is a broken symlink")
+	}
+	if !strings.Contains(v.msg, output) {
+		t.Errorf("msg = %q, want mention of output path %q", v.msg, output)
+	}
+}
+
 func TestValidateDirectInputPathRejectsRelative(t *testing.T) {
 	w := &Worker{allowedPrefixes: []string{"relative/prefix"}}
 	v := w.validateDirectInputPath("relative/prefix/file.mp4")
@@ -519,7 +565,7 @@ func TestProcessProbeJob_DirectInputInfixURLRejected(t *testing.T) {
 // output side: an absolute shared-FS output path containing "://" mid-string
 // must be validated as a local path (and fail closed) instead of being passed
 // straight through to ffmpeg as a remote URL. The error must mention the
-// output path to prove it was rejected locally, not executed by ffmpeg.
+// output's parent directory to prove it was rejected locally, not executed by ffmpeg.
 func TestProcessJob_DirectOutputInfixURLRejected(t *testing.T) {
 	base := t.TempDir()
 	allowed := filepath.Join(base, "allowed")
@@ -594,8 +640,8 @@ func TestProcessJob_DirectOutputInfixURLRejected(t *testing.T) {
 	if update.FailureType != string(protocol.FailureInputUnreachable) {
 		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInputUnreachable))
 	}
-	if !strings.Contains(update.Error, outputPath) {
-		t.Errorf("Error = %q, want mention of output path %q", update.Error, outputPath)
+	if !strings.Contains(update.Error, filepath.Dir(outputPath)) {
+		t.Errorf("Error = %q, want mention of output parent directory %q", update.Error, filepath.Dir(outputPath))
 	}
 }
 
