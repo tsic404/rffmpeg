@@ -49,7 +49,15 @@ func NewStdoutBatcher(jobID string, client *Client, cfg StdoutBatcherConfig) *St
 		cancel:     cancel,
 	}
 
+	// Arm the flush timer while holding b.mu. time.AfterFunc schedules the
+	// callback before this assignment completes, so the assignment itself is
+	// not covered by the AfterFunc call's happens-before edge. Writing
+	// flushTimer under b.mu (the same lock timedFlush holds when it calls
+	// Reset) publishes it to the callback goroutine and removes the
+	// -race-detected write/read race on the field.
+	b.mu.Lock()
 	b.flushTimer = time.AfterFunc(cfg.BatchDelay, b.timedFlush)
+	b.mu.Unlock()
 
 	return b
 }
@@ -138,7 +146,12 @@ func (b *StdoutBatcher) Flush() {
 // It waits for all pending goroutines to complete before returning
 // to ensure all stdout chunks are sent before subsequent status updates.
 func (b *StdoutBatcher) Close() {
+	// Stop the timer under b.mu: the timer callback (timedFlush) also touches
+	// flushTimer under b.mu when it re-arms via Reset, so an unsynchronized
+	// Stop here races with that Reset (-race DATA RACE on the timer).
+	b.mu.Lock()
 	b.flushTimer.Stop()
+	b.mu.Unlock()
 	b.cancel()
 	b.Flush()
 	// Wait for all pending goroutines to complete
