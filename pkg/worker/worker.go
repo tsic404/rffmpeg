@@ -488,15 +488,26 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	log.Printf("Processing job %s (auto_hw=%v, streaming_output=%v)", job.ID, job.AutoHW, job.StreamingOutput)
 
-	// Apply per-job timeout override if specified
+	// The per-job timeout is a dedicated ffmpeg execution budget, not a
+	// wall-clock bound on the pre-execution pipeline. Download, duration
+	// probe, and encoder classification must NOT be charged against it: a
+	// short --timeout has to reach the ffmpeg execution path and be reported
+	// as TIMEOUT when ffmpeg itself exceeds the budget (TSI-2684). jobCtx
+	// therefore stays the cancellable worker context for pre-execution work;
+	// the timeout overlay is created fresh at the execution boundary below.
+	//
+	// Pre-execution phases keep their own, independent bounds rather than a
+	// shared per-job deadline: download is capped by the data-plane client
+	// timeout, duration probe and pixel-format check by the ffprobe executor
+	// timeout, and classification/rewrite are in-memory with no blocking I/O.
+	// The server scheduler's job_timeout and the CLI's client-side wait remain
+	// the overall safety net, so a stuck pre-execution phase still terminates.
 	jobCtx := ctx
-	var jobCancel context.CancelFunc
+	var execTimeout time.Duration
 	if job.Timeout != nil && !job.Timeout.IsZero() {
-		timeoutDur := time.Until(*job.Timeout)
-		if timeoutDur > 0 {
-			jobCtx, jobCancel = context.WithTimeout(ctx, timeoutDur)
-			defer jobCancel()
-			log.Printf("Job %s: using per-job timeout %v", job.ID, timeoutDur)
+		if d := time.Until(*job.Timeout); d > 0 {
+			execTimeout = d
+			log.Printf("Job %s: using per-job timeout %v", job.ID, d)
 		}
 	}
 
@@ -864,6 +875,16 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	log.Printf("Executing ffmpeg with args: %v", args)
 
+	// Reserve the per-job timeout budget for ffmpeg itself: the overlay is
+	// created here, not at job start, so the pre-execution pipeline above
+	// (download, probe, classification) can never consume it (TSI-2684).
+	execCtx := jobCtx
+	var execCancel context.CancelFunc
+	if execTimeout > 0 {
+		execCtx, execCancel = context.WithTimeout(jobCtx, execTimeout)
+		defer execCancel()
+	}
+
 	// Execute with appropriate handlers
 	var result ExecResult
 	var stdoutHandler StdoutHandler
@@ -874,10 +895,10 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		defer stdoutBatcher.Close()
 
 		stdoutHandler = stdoutBatcher.StdoutHandler()
-		result = w.executor.ExecuteWithHandlers(jobCtx, args, stdoutHandler, progressRouter.Handler())
+		result = w.executor.ExecuteWithHandlers(execCtx, args, stdoutHandler, progressRouter.Handler())
 	} else {
 		// Normal mode: stdout goes to file
-		result = w.executor.ExecuteWithStderrHandler(jobCtx, args, progressRouter.Handler())
+		result = w.executor.ExecuteWithStderrHandler(execCtx, args, progressRouter.Handler())
 	}
 
 	// Check for context cancellation
@@ -893,15 +914,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	// Check for timeout
 	if result.IsTimeout {
-		log.Printf("Job %s timed out", job.ID)
-		errMsg := ""
-		if result.Error != nil {
-			errMsg = result.Error.Error()
-		}
-		failureType, details := ClassifyFailure(result.ExitCode, result.Stderr, errMsg, true, false)
-		if err := w.client.UpdateJobWithFailure(job.ID, protocol.JobStatusTimeout, result.ExitCode, errMsg, false, string(failureType), details); err != nil {
-			logTerminalReportError(job.ID, "report timeout", err)
-		}
+		w.reportJobTimeout(job.ID, result)
 		jobFailed = true
 		return
 	}
@@ -957,7 +970,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 		// Check if this is a retryable error that warrants multi-stage retry
 		interceptor := NewErrorInterceptor()
-		intercepted := interceptor.Intercept(jobCtx, result)
+		intercepted := interceptor.Intercept(execCtx, result)
 
 		if intercepted.FFmpegError != nil && intercepted.FFmpegError.IsRetryable() {
 			// Skip retry for output_empty errors on network outputs.
@@ -976,7 +989,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			progressRouter.Handler()(notification + "\n")
 
 			// Use RetryExecutor for multi-stage retry:
-			retryResult := w.retryExecutor.ExecuteWithRetry(jobCtx, args, outputPath, networkOutput, stdoutHandler, progressRouter.Handler())
+			retryResult := w.retryExecutor.ExecuteWithRetry(execCtx, args, outputPath, networkOutput, stdoutHandler, progressRouter.Handler())
 
 			if retryResult.Success {
 				// Retry succeeded — use the final result
@@ -998,6 +1011,16 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 						retryResult.OriginalEncoder, retryResult.FinalEncoder))
 				}
 				goto uploadOutput
+			}
+			// Retry attempts share the same execCtx budget as the initial run:
+			// a timeout landing inside ExecuteWithRetry surfaces on the final
+			// ExecResult's IsTimeout flag, not the initial result. Report it as
+			// TIMEOUT — the exhausted branch below would otherwise misclassify
+			// it as FFMPEG_ERROR (TSI-2684).
+			if retryResult.FinalResult.IsTimeout {
+				w.reportJobTimeout(job.ID, retryResult.FinalResult)
+				jobFailed = true
+				return
 			}
 			// All retries exhausted — report failure with audit trail
 			log.Printf("Job %s: All retry attempts exhausted (stages: %s)", job.ID, retryResult.FinalStage)
@@ -1099,6 +1122,23 @@ func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached
 	failureType, failureDetails := ClassifyFailure(exitCode, errMsg, errMsg, false, false)
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, failureDetails, cached, string(failureType), failureDetails); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
+	}
+}
+
+// reportJobTimeout reports a timed-out job with the TIMEOUT classification
+// (TSI-2684). Shared by the initial-execution path and the retry-exhausted
+// path so a timeout landing inside ExecuteWithRetry is classified identically
+// to one on the first attempt — otherwise the exhausted branch's isTimeout=false
+// would misreport it as FFMPEG_ERROR.
+func (w *Worker) reportJobTimeout(jobID string, result ExecResult) {
+	log.Printf("Job %s timed out", jobID)
+	errMsg := ""
+	if result.Error != nil {
+		errMsg = result.Error.Error()
+	}
+	failureType, details := ClassifyFailure(result.ExitCode, result.Stderr, errMsg, true, false)
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusTimeout, result.ExitCode, errMsg, false, string(failureType), details); err != nil {
+		logTerminalReportError(jobID, "report timeout", err)
 	}
 }
 
