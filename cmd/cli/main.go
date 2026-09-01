@@ -376,6 +376,16 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		return ExitError
 	}
 
+	// Streaming (stdout) output cannot be seeked by the server-side ffmpeg,
+	// and the worker only auto-fixes mp4/mov via fragmented movflags
+	// (TSI-2409). Fail fast here with guidance for any muxer that cannot
+	// write to a pipe, instead of surfacing ffmpeg's opaque
+	// "Error initializing the muxer for pipe:: Invalid argument" (TSI-2696).
+	if msg := args.StreamingOutputError(result); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+		return ExitError
+	}
+
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "rffmpeg %s - Remote FFmpeg Client\n", version)
 		fmt.Fprintf(os.Stderr, "Server: %s\n", cfg.ServerURL)
