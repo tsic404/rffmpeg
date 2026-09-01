@@ -412,6 +412,30 @@ func TestGetJobRetryCount(t *testing.T) {
 	if count != 2 {
 		t.Errorf("Expected retry count 2, got %d", count)
 	}
+
+	// A timeout-driven requeue is a separate budget: it must NOT increment the
+	// worker-failure migration count (TSI-2744). Otherwise a job rescheduled by
+	// the scheduler's MaxTimeoutRetries budget would burn MaxRetryCount.
+	_, err = db.CreateMigrationEvent("worker-2", "worker-2", "job_timeout", 2, []string{jobID}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create job_timeout migration event: %v", err)
+	}
+
+	count, err = db.GetJobRetryCount(jobID)
+	if err != nil {
+		t.Fatalf("Failed to get job retry count after job_timeout event: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("Expected worker-failure retry count to stay 2 after job_timeout event, got %d", count)
+	}
+
+	timeoutCount, err := db.GetJobTimeoutRetryCount(jobID)
+	if err != nil {
+		t.Fatalf("Failed to get job timeout retry count: %v", err)
+	}
+	if timeoutCount != 1 {
+		t.Errorf("Expected timeout retry count 1 after job_timeout event, got %d", timeoutCount)
+	}
 }
 
 func TestCreateMigrationEventEmptyWorkerName(t *testing.T) {

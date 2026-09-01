@@ -346,7 +346,7 @@ func TestStringWithNilTLS(t *testing.T) {
 	if str == "" {
 		t.Error("String representation should not be empty")
 	}
-	expected := "ServerConfig{port=8080, dataDir=./data, tls=disabled, auth=disabled, workerHeartbeatTimeout=0s, workerOfflineThreshold=0s, workerHealthCheckInterval=0s, jobTimeout=0s, scheduleInterval=0s, timeoutCheckInterval=0s, maxJobsPerWorker=0, rateLimitEnabled=false, maxConcurrentJobsPerClient=0}"
+	expected := "ServerConfig{port=8080, dataDir=./data, tls=disabled, auth=disabled, workerHeartbeatTimeout=0s, workerOfflineThreshold=0s, workerHealthCheckInterval=0s, jobTimeout=0s, scheduleInterval=0s, timeoutCheckInterval=0s, maxJobsPerWorker=0, maxTimeoutRetries=0, maxRetryCount=0, rateLimitEnabled=false, maxConcurrentJobsPerClient=0}"
 	if str != expected {
 		t.Errorf("Unexpected string representation: %s", str)
 	}
@@ -494,5 +494,86 @@ func TestRedisEnv(t *testing.T) {
 	}
 	if cfg.RedisDB != 1 {
 		t.Errorf("RedisDB should be 1, got %d", cfg.RedisDB)
+	}
+}
+
+func TestRetryBudgetDefaults(t *testing.T) {
+	cfg := DefaultServerConfig()
+
+	if cfg.MaxTimeoutRetries != 2 {
+		t.Errorf("MaxTimeoutRetries default should be 2, got %d", cfg.MaxTimeoutRetries)
+	}
+	if cfg.MaxRetryCount != 3 {
+		t.Errorf("MaxRetryCount default should be 3, got %d", cfg.MaxRetryCount)
+	}
+}
+
+func TestRetryBudgetFromEnv(t *testing.T) {
+	os.Setenv("MAX_TIMEOUT_RETRIES", "5")
+	os.Setenv("MAX_RETRY_COUNT", "7")
+	defer func() {
+		os.Unsetenv("MAX_TIMEOUT_RETRIES")
+		os.Unsetenv("MAX_RETRY_COUNT")
+	}()
+
+	cfg := LoadFromEnv()
+
+	if cfg.MaxTimeoutRetries != 5 {
+		t.Errorf("MaxTimeoutRetries should be 5, got %d", cfg.MaxTimeoutRetries)
+	}
+	if cfg.MaxRetryCount != 7 {
+		t.Errorf("MaxRetryCount should be 7, got %d", cfg.MaxRetryCount)
+	}
+}
+
+func TestRetryBudgetFromEnvAllowsZero(t *testing.T) {
+	os.Setenv("MAX_TIMEOUT_RETRIES", "0")
+	os.Setenv("MAX_RETRY_COUNT", "0")
+	defer func() {
+		os.Unsetenv("MAX_TIMEOUT_RETRIES")
+		os.Unsetenv("MAX_RETRY_COUNT")
+	}()
+
+	cfg := LoadFromEnv()
+
+	if cfg.MaxTimeoutRetries != 0 {
+		t.Errorf("MaxTimeoutRetries should be 0 (disable retries), got %d", cfg.MaxTimeoutRetries)
+	}
+	if cfg.MaxRetryCount != 0 {
+		t.Errorf("MaxRetryCount should be 0 (disable migration), got %d", cfg.MaxRetryCount)
+	}
+}
+
+func TestRetryBudgetMerge(t *testing.T) {
+	intPtr := func(n int) *int { return &n }
+
+	// nil (flag unset) must keep the defaults.
+	cfg := DefaultServerConfig()
+	cfg.Merge(&Flags{})
+	if cfg.MaxTimeoutRetries != 2 {
+		t.Errorf("MaxTimeoutRetries should keep default 2 when flag unset, got %d", cfg.MaxTimeoutRetries)
+	}
+	if cfg.MaxRetryCount != 3 {
+		t.Errorf("MaxRetryCount should keep default 3 when flag unset, got %d", cfg.MaxRetryCount)
+	}
+
+	// Explicit 0 is expressible and overrides the default.
+	cfg = DefaultServerConfig()
+	cfg.Merge(&Flags{MaxTimeoutRetries: intPtr(0), MaxRetryCount: intPtr(0)})
+	if cfg.MaxTimeoutRetries != 0 {
+		t.Errorf("MaxTimeoutRetries should be 0 when flag set to 0, got %d", cfg.MaxTimeoutRetries)
+	}
+	if cfg.MaxRetryCount != 0 {
+		t.Errorf("MaxRetryCount should be 0 when flag set to 0, got %d", cfg.MaxRetryCount)
+	}
+
+	// Positive values pass through.
+	cfg = DefaultServerConfig()
+	cfg.Merge(&Flags{MaxTimeoutRetries: intPtr(9), MaxRetryCount: intPtr(11)})
+	if cfg.MaxTimeoutRetries != 9 {
+		t.Errorf("MaxTimeoutRetries should be 9, got %d", cfg.MaxTimeoutRetries)
+	}
+	if cfg.MaxRetryCount != 11 {
+		t.Errorf("MaxRetryCount should be 11, got %d", cfg.MaxRetryCount)
 	}
 }

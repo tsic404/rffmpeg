@@ -27,6 +27,9 @@ type ServerConfig struct {
 	WorkerHeartbeatTimeout    time.Duration `json:"worker_heartbeat_timeout" yaml:"worker_heartbeat_timeout"`
 	WorkerOfflineThreshold    time.Duration `json:"worker_offline_threshold" yaml:"worker_offline_threshold"`
 	WorkerHealthCheckInterval time.Duration `json:"worker_health_check_interval" yaml:"worker_health_check_interval"`
+	// MaxRetryCount bounds how many times the health monitor may migrate a
+	// job from a failed worker before failing it. 0 disables migration.
+	MaxRetryCount int `json:"max_retry_count" yaml:"max_retry_count"`
 
 	// WebSocket settings
 	AllowedOrigins []string `json:"allowed_origins" yaml:"allowed_origins"`
@@ -40,6 +43,9 @@ type ServerConfig struct {
 	// schedulable worker (all offline/evicted) as NO_WORKER_AVAILABLE.
 	// 0 disables the check.
 	NoWorkerJobTimeout time.Duration `json:"no_worker_job_timeout" yaml:"no_worker_job_timeout"`
+	// MaxTimeoutRetries bounds how many times the scheduler may requeue a
+	// timed-out job before failing it as TIMEOUT. 0 fails on first timeout.
+	MaxTimeoutRetries int `json:"max_timeout_retries" yaml:"max_timeout_retries"`
 
 	// Rate limit settings (per-client)
 	RateLimitEnabled           bool `json:"rate_limit_enabled" yaml:"rate_limit_enabled"`
@@ -56,19 +62,24 @@ type ServerConfig struct {
 
 // Flags holds command-line flag values for merging into ServerConfig
 type Flags struct {
-	Port                       string
-	DataDir                    string
-	Version                    string
-	Config                     string
-	AuthToken                  string
-	WorkerHeartbeatTimeout     string
-	WorkerOfflineThreshold     string
-	WorkerHealthCheckInterval  string
-	JobTimeout                 string
-	ScheduleInterval           string
-	TimeoutCheckInterval       string
-	MaxJobsPerWorker           int
-	NoWorkerJobTimeout         string
+	Port                      string
+	DataDir                   string
+	Version                   string
+	Config                    string
+	AuthToken                 string
+	WorkerHeartbeatTimeout    string
+	WorkerOfflineThreshold    string
+	WorkerHealthCheckInterval string
+	JobTimeout                string
+	ScheduleInterval          string
+	TimeoutCheckInterval      string
+	MaxJobsPerWorker          int
+	NoWorkerJobTimeout        string
+	// Retry budgets use pointers: nil means "flag not set", so 0 stays an
+	// expressible value (disable retries/migration) unlike MaxJobsPerWorker,
+	// where 0 already means unset.
+	MaxTimeoutRetries          *int
+	MaxRetryCount              *int
 	TLSEnabled                 bool
 	TLSCertFile                string
 	TLSKeyFile                 string
@@ -96,6 +107,8 @@ func DefaultServerConfig() *ServerConfig {
 		TimeoutCheckInterval:       30 * time.Second, // Check for timeouts every 30 seconds
 		MaxJobsPerWorker:           1,                // One job at a time per worker by default
 		NoWorkerJobTimeout:         2 * time.Minute,  // Fail jobs pending >2m with no schedulable worker
+		MaxTimeoutRetries:          2,                // Requeue a timed-out job at most twice before failing
+		MaxRetryCount:              3,                // Migrate a job at most 3 times before failing
 		RateLimitEnabled:           true,             // Enable per-client rate limiting by default
 		MaxConcurrentJobsPerClient: 10,               // Max 10 concurrent jobs per client
 		TLS:                        tlspkg.DefaultConfig(),
@@ -199,6 +212,18 @@ func LoadFromEnv() *ServerConfig {
 			config.MaxJobsPerWorker = n
 		}
 	}
+	// Retry budgets — 0 is a valid value (disables the respective retry),
+	// so these are parsed as non-negative ints, not >0 like the count above.
+	if v := os.Getenv("MAX_TIMEOUT_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			config.MaxTimeoutRetries = n
+		}
+	}
+	if v := os.Getenv("MAX_RETRY_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			config.MaxRetryCount = n
+		}
+	}
 
 	// Rate limit environment variables — symmetric boolean (TSI-2365)
 	if v := os.Getenv("RATE_LIMIT_ENABLED"); v != "" {
@@ -290,6 +315,14 @@ func (c *ServerConfig) Merge(flags *Flags) {
 	}
 	if flags.MaxJobsPerWorker > 0 {
 		c.MaxJobsPerWorker = flags.MaxJobsPerWorker
+	}
+
+	// Retry budgets — nil means "flag not set", so 0 stays expressible.
+	if flags.MaxTimeoutRetries != nil {
+		c.MaxTimeoutRetries = *flags.MaxTimeoutRetries
+	}
+	if flags.MaxRetryCount != nil {
+		c.MaxRetryCount = *flags.MaxRetryCount
 	}
 
 	// Rate limit flags
@@ -428,7 +461,7 @@ func (c *ServerConfig) String() string {
 	if c.AuthToken != "" {
 		authStatus = "enabled"
 	}
-	return fmt.Sprintf("ServerConfig{port=%s, dataDir=%s, tls=%s, auth=%s, workerHeartbeatTimeout=%s, workerOfflineThreshold=%s, workerHealthCheckInterval=%s, jobTimeout=%s, scheduleInterval=%s, timeoutCheckInterval=%s, maxJobsPerWorker=%d, rateLimitEnabled=%v, maxConcurrentJobsPerClient=%d}",
+	return fmt.Sprintf("ServerConfig{port=%s, dataDir=%s, tls=%s, auth=%s, workerHeartbeatTimeout=%s, workerOfflineThreshold=%s, workerHealthCheckInterval=%s, jobTimeout=%s, scheduleInterval=%s, timeoutCheckInterval=%s, maxJobsPerWorker=%d, maxTimeoutRetries=%d, maxRetryCount=%d, rateLimitEnabled=%v, maxConcurrentJobsPerClient=%d}",
 		c.Port, c.DataDir, tlsStatus, authStatus, c.WorkerHeartbeatTimeout, c.WorkerOfflineThreshold, c.WorkerHealthCheckInterval,
-		c.JobTimeout, c.ScheduleInterval, c.TimeoutCheckInterval, c.MaxJobsPerWorker, c.RateLimitEnabled, c.MaxConcurrentJobsPerClient)
+		c.JobTimeout, c.ScheduleInterval, c.TimeoutCheckInterval, c.MaxJobsPerWorker, c.MaxTimeoutRetries, c.MaxRetryCount, c.RateLimitEnabled, c.MaxConcurrentJobsPerClient)
 }

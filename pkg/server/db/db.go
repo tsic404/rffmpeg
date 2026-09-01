@@ -2529,8 +2529,11 @@ func (d *Database) MarkOfflineWorkersWithMigration(heartbeatTimeout time.Duratio
 	return workerIDs, nil
 }
 
-// GetJobRetryCount returns the number of times a job has been migrated/retried.
-// This is calculated by counting migration events that include this job ID.
+// GetJobRetryCount returns the number of times a job has been migrated due to
+// worker failure (heartbeat timeout / worker offline / server restart). It
+// excludes timeout-driven requeues: those are a separate budget consumed by
+// GetJobTimeoutRetryCount, and a hung ffmpeg rescheduled by the scheduler
+// must not burn the worker-failure migration budget.
 func (d *Database) GetJobRetryCount(jobID string) (int, error) {
 	// Count migration events where this job ID appears in the job_ids JSON array.
 	// Use json_each to properly expand the JSON array and check for exact matches,
@@ -2538,10 +2541,11 @@ func (d *Database) GetJobRetryCount(jobID string) (int, error) {
 	var count int
 	err := d.db.QueryRow(`
 		SELECT COUNT(*) FROM migration_events
-		WHERE id IN (
+		WHERE reason != 'job_timeout'
+		  AND id IN (
 			SELECT me.id FROM migration_events me, json_each(me.job_ids)
 			WHERE json_each.value = ?
-		)
+		  )
 	`, jobID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get job retry count: %w", err)

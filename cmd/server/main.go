@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -110,27 +111,31 @@ func main() {
 	h.StartWSHub()
 	log.Printf("WebSocket hub started")
 
-	// Start worker health monitor
-	workerMonitor := workerhealth.New(database, workerhealth.Config{
-		HeartbeatTimeout:    cfg.WorkerHeartbeatTimeout,
-		OfflineThreshold:    cfg.WorkerOfflineThreshold,
-		HealthCheckInterval: cfg.WorkerHealthCheckInterval,
-		MaxRetryCount:       3,
-	})
+	// Start worker health monitor. DefaultConfig() carries the MaxRetryCount
+	// migration budget; only the durations are overridden from ServerConfig.
+	workerHealthConfig := workerhealth.DefaultConfig()
+	workerHealthConfig.HeartbeatTimeout = cfg.WorkerHeartbeatTimeout
+	workerHealthConfig.OfflineThreshold = cfg.WorkerOfflineThreshold
+	workerHealthConfig.HealthCheckInterval = cfg.WorkerHealthCheckInterval
+	workerHealthConfig.MaxRetryCount = cfg.MaxRetryCount
+	workerMonitor := workerhealth.New(database, workerHealthConfig)
 	workerMonitor.SetStateTable(stateTable)
 	workerMonitor.Start()
-	log.Printf("Worker health monitor started (heartbeat timeout: %s, offline threshold: %s, check interval: %s)",
-		cfg.WorkerHeartbeatTimeout, cfg.WorkerOfflineThreshold, cfg.WorkerHealthCheckInterval)
+	log.Printf("Worker health monitor started (heartbeat timeout: %s, offline threshold: %s, check interval: %s, max retry count: %d)",
+		cfg.WorkerHeartbeatTimeout, cfg.WorkerOfflineThreshold, cfg.WorkerHealthCheckInterval, cfg.MaxRetryCount)
 
-	// Start job scheduler
-	jobScheduler := scheduler.New(database, scheduler.Config{
-		JobTimeout:           cfg.JobTimeout,
-		ScheduleInterval:     cfg.ScheduleInterval,
-		TimeoutCheckInterval: cfg.TimeoutCheckInterval,
-		MaxJobsPerWorker:     cfg.MaxJobsPerWorker,
-		NoWorkerJobTimeout:   cfg.NoWorkerJobTimeout,
-		HeartbeatFreshness:   cfg.WorkerHeartbeatTimeout,
-	})
+	// Start job scheduler. DefaultConfig() carries MaxTimeoutRetries=2; the
+	// literal Config{} previously dropped it to 0 and failed jobs on the
+	// first timeout (TSI-2744). Override only the fields ServerConfig owns.
+	schedulerConfig := scheduler.DefaultConfig()
+	schedulerConfig.JobTimeout = cfg.JobTimeout
+	schedulerConfig.ScheduleInterval = cfg.ScheduleInterval
+	schedulerConfig.TimeoutCheckInterval = cfg.TimeoutCheckInterval
+	schedulerConfig.MaxJobsPerWorker = cfg.MaxJobsPerWorker
+	schedulerConfig.NoWorkerJobTimeout = cfg.NoWorkerJobTimeout
+	schedulerConfig.HeartbeatFreshness = cfg.WorkerHeartbeatTimeout
+	schedulerConfig.MaxTimeoutRetries = cfg.MaxTimeoutRetries
+	jobScheduler := scheduler.New(database, schedulerConfig)
 
 	// Connect the scheduler to the monitor so job migration triggers rescheduling
 	workerMonitor.SetScheduler(jobScheduler)
@@ -146,8 +151,8 @@ func main() {
 	h.SetStarvationConfig(cfg.NoWorkerJobTimeout, cfg.TimeoutCheckInterval)
 
 	jobScheduler.Start()
-	log.Printf("Job scheduler started (job timeout: %s, schedule interval: %s, timeout check interval: %s, max jobs per worker: %d, no-worker job timeout: %s)",
-		cfg.JobTimeout, cfg.ScheduleInterval, cfg.TimeoutCheckInterval, cfg.MaxJobsPerWorker, cfg.NoWorkerJobTimeout)
+	log.Printf("Job scheduler started (job timeout: %s, schedule interval: %s, timeout check interval: %s, max jobs per worker: %d, no-worker job timeout: %s, max timeout retries: %d)",
+		schedulerConfig.JobTimeout, schedulerConfig.ScheduleInterval, schedulerConfig.TimeoutCheckInterval, schedulerConfig.MaxJobsPerWorker, schedulerConfig.NoWorkerJobTimeout, schedulerConfig.MaxTimeoutRetries)
 
 	// Initialize rate limiter runtime config
 	rateLimitCfg := &ratelimit.RuntimeConfig{
@@ -369,6 +374,24 @@ func parseFlags() *config.Flags {
 	flag.StringVar(&flags.JobTimeout, "job-timeout", "", "Timeout for running jobs before rescheduling (default: 30m)")
 	flag.StringVar(&flags.ScheduleInterval, "schedule-interval", "", "Interval for job scheduling (default: 5s)")
 	flag.StringVar(&flags.TimeoutCheckInterval, "timeout-check-interval", "", "Interval for checking job timeouts (default: 30s)")
+	// Retry budgets — flag.Func keeps 0 expressible (disable retries); the
+	// zero value would otherwise read as "unset". nil pointer = flag unset.
+	flag.Func("max-timeout-retries", "Maximum times a timed-out job is requeued before failing; 0 disables retries (default: 2)", func(s string) error {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid max-timeout-retries %q: must be a non-negative integer", s)
+		}
+		flags.MaxTimeoutRetries = &n
+		return nil
+	})
+	flag.Func("max-retry-count", "Maximum times a job is migrated after worker failure before failing; 0 disables migration (default: 3)", func(s string) error {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid max-retry-count %q: must be a non-negative integer", s)
+		}
+		flags.MaxRetryCount = &n
+		return nil
+	})
 	flag.StringVar(&flags.NoWorkerJobTimeout, "no-worker-job-timeout", "", "Fail pending jobs waiting longer than this with no schedulable worker; 0 disables (default: 2m)")
 
 	// TLS flags

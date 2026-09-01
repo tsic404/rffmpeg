@@ -129,6 +129,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
   "schedule_interval": "5s",
   "timeout_check_interval": "30s",
   "max_jobs_per_worker": 1,
+  "max_timeout_retries": 2,
+  "max_retry_count": 3,
   "auth_token": "",
   "allowed_origins": ["http://localhost:3000"],
   "tls": {
@@ -158,6 +160,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 | `TIMEOUT_CHECK_INTERVAL` | 超时检查间隔 | `30s` |
 | `MAX_JOBS_PER_WORKER` | 每个 Worker 最大并发任务数 | `1` |
 | `NO_WORKER_JOB_TIMEOUT` | 无可调度 Worker 时 pending 任务的最长等待时间，超时判失败；`0` 禁用 | `2m` |
+| `MAX_TIMEOUT_RETRIES` | 任务超时后重新调度的最大次数，超限判失败；`0` 禁用重试（首次超时即失败） | `2` |
+| `MAX_RETRY_COUNT` | Worker 故障后任务迁移的最大次数，超限判失败；`0` 禁用迁移 | `3` |
 | `ALLOWED_ORIGINS` | WebSocket 允许的源（逗号分隔） | - |
 | `TLS_ENABLED` | 启用 TLS | `false` |
 | `TLS_CERT_FILE` | TLS 证书文件路径 | - |
@@ -179,6 +183,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
   --schedule-interval string           Interval for job scheduling (default: 5s)
   --timeout-check-interval string      Interval for checking job timeouts (default: 30s)
   --no-worker-job-timeout string       Fail pending jobs waiting longer than this with no schedulable worker; 0 disables (default: 2m)
+  --max-timeout-retries int           Maximum times a timed-out job is requeued before failing; 0 disables retries (default: 2)
+  --max-retry-count int               Maximum times a job is migrated after worker failure before failing; 0 disables migration (default: 3)
   --tls                                Enable TLS (HTTPS)
   --tls-cert string                    Path to TLS certificate file
   --tls-key string                     Path to TLS private key file

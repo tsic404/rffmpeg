@@ -397,8 +397,8 @@ func (s *Scheduler) checkTimeouts() {
 			log.Printf("Scheduler: Job %s failed after %d timeout retries", job.ID, retries)
 		} else {
 			// Reset job for rescheduling and record the requeue so the retry
-			// budget is observable on the next pass (GetJobRetryCount reads
-			// migration events).
+			// budget is observable on the next pass (GetJobTimeoutRetryCount
+			// reads the job_timeout migration events).
 			if err := s.db.RescheduleJob(job.ID); err != nil {
 				log.Printf("Scheduler: Failed to reschedule job %s: %v", job.ID, err)
 				continue
