@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -44,11 +45,18 @@ const (
 )
 
 // Overridable keepalive timings for regression tests; production values
-// mirror the exported consts above.
+// mirror the exported consts above. Stored atomically: tests shrink them
+// while a keepalive pinger goroutine from a prior Listen may still be
+// running and reading them (TSI-2804).
 var (
-	wsReadTimeout  = WSReadTimeout
-	wsPingInterval = WSPingInterval
+	wsReadTimeout  atomic.Int64 // nanoseconds
+	wsPingInterval atomic.Int64 // nanoseconds
 )
+
+func init() {
+	wsReadTimeout.Store(int64(WSReadTimeout))
+	wsPingInterval.Store(int64(WSPingInterval))
+}
 
 // WSClient handles WebSocket connections for real-time log streaming
 type WSClient struct {
@@ -224,7 +232,7 @@ func (c *WSClient) connect(ctx context.Context) error {
 	// healthy connection, and broadcasts sent during the forced reconnect
 	// window are lost — surfacing as a spurious seq gap (TSI-2414).
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		conn.SetReadDeadline(time.Now().Add(time.Duration(wsReadTimeout.Load())))
 		return nil
 	})
 
@@ -338,7 +346,7 @@ func (c *WSClient) Listen(ctx context.Context) error {
 	// and by conn.Close() (called by Close() and on ping failure), so it
 	// never outlives the session meaningfully.
 	go func() {
-		ticker := time.NewTicker(wsPingInterval)
+		ticker := time.NewTicker(time.Duration(wsPingInterval.Load()))
 		defer ticker.Stop()
 		for {
 			select {
@@ -355,7 +363,6 @@ func (c *WSClient) Listen(ctx context.Context) error {
 			if conn == nil {
 				continue
 			}
-			conn.SetWriteDeadline(time.Now().Add(WSWriteTimeout))
 			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(WSWriteTimeout)); err != nil {
 				// A failed keepalive write means the connection is dead:
 				// close it so the blocked ReadMessage wakes up and the
@@ -385,7 +392,7 @@ func (c *WSClient) Listen(ctx context.Context) error {
 		}
 
 		// Set read deadline
-		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		conn.SetReadDeadline(time.Now().Add(time.Duration(wsReadTimeout.Load())))
 
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {

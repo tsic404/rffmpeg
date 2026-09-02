@@ -28,16 +28,16 @@ import (
 // and the session survives several multiples of the old deadline without a
 // single disconnect/reconnect — so no gap can be manufactured.
 func TestWSClient_KeepalivePreventsIdleReap(t *testing.T) {
-	oldTimeout := wsReadTimeout
-	oldPing := wsPingInterval
-	wsReadTimeout = 300 * time.Millisecond
-	wsPingInterval = 150 * time.Millisecond
+	oldTimeout := time.Duration(wsReadTimeout.Load())
+	oldPing := time.Duration(wsPingInterval.Load())
+	wsReadTimeout.Store(int64(300 * time.Millisecond))
+	wsPingInterval.Store(int64(150 * time.Millisecond))
 	defer func() {
-		wsReadTimeout = oldTimeout
-		wsPingInterval = oldPing
+		wsReadTimeout.Store(int64(oldTimeout))
+		wsPingInterval.Store(int64(oldPing))
 	}()
-	if wsPingInterval >= wsReadTimeout {
-		t.Fatalf("test precondition: ping interval (%v) must be below the read timeout (%v) so pings, not luck, keep the connection alive", wsPingInterval, wsReadTimeout)
+	if time.Duration(wsPingInterval.Load()) >= time.Duration(wsReadTimeout.Load()) {
+		t.Fatalf("test precondition: ping interval (%v) must be below the read timeout (%v) so pings, not luck, keep the connection alive", time.Duration(wsPingInterval.Load()), time.Duration(wsReadTimeout.Load()))
 	}
 
 	var pongs atomic.Int64
@@ -77,7 +77,7 @@ func TestWSClient_KeepalivePreventsIdleReap(t *testing.T) {
 
 	// Hold the idle connection for 4x the (shrunken) read deadline. Without
 	// keepalive Listen returns a read-deadline error well before this.
-	hold := 4 * wsReadTimeout
+	hold := 4 * time.Duration(wsReadTimeout.Load())
 	select {
 	case err := <-listenDone:
 		t.Fatalf("connection died during quiet period after %v: %v", hold, err)
