@@ -155,23 +155,25 @@ func TestClassifyFailure(t *testing.T) {
 }
 
 func TestFailureType_Retryable(t *testing.T) {
-	if protocol.FailureTimeout.Retryable() != true {
-		t.Error("TIMEOUT should be retryable")
+	cases := []struct {
+		failureType protocol.FailureType
+		want        bool
+	}{
+		// Transient failures that a retry can overcome.
+		{protocol.FailureTimeout, true},
+		{protocol.FailureWorkerCrash, true},
+		// Deterministic failures — retrying without a change cannot help.
+		{protocol.FailureInputUnreachable, false},
+		{protocol.FailureEncoderUnsupported, false},
+		{protocol.FailureDiskFull, false},
+		{protocol.FailureFFmpegError, false},
+		{protocol.FailureNoWorkerAvailable, false},
+		{protocol.FailureInfra, false},
 	}
-	if protocol.FailureWorkerCrash.Retryable() != true {
-		t.Error("WORKER_CRASH should be retryable")
-	}
-	if protocol.FailureInputUnreachable.Retryable() != false {
-		t.Error("INPUT_UNREACHABLE should not be retryable")
-	}
-	if protocol.FailureEncoderUnsupported.Retryable() != false {
-		t.Error("ENCODER_UNSUPPORTED should not be retryable")
-	}
-	if protocol.FailureDiskFull.Retryable() != false {
-		t.Error("DISK_FULL should not be retryable")
-	}
-	if protocol.FailureFFmpegError.Retryable() != false {
-		t.Error("FFMPEG_ERROR should not be retryable")
+	for _, tc := range cases {
+		if got := tc.failureType.Retryable(); got != tc.want {
+			t.Errorf("%s.Retryable() = %v, want %v", tc.failureType, got, tc.want)
+		}
 	}
 }
 
@@ -301,7 +303,7 @@ func TestFailureTypeIsValid(t *testing.T) {
 		protocol.FailureInputUnreachable, protocol.FailureEncoderUnsupported,
 		protocol.FailureDiskFull, protocol.FailureTimeout,
 		protocol.FailureWorkerCrash, protocol.FailureFFmpegError,
-		protocol.FailureNoWorkerAvailable,
+		protocol.FailureNoWorkerAvailable, protocol.FailureInfra,
 	}
 	for _, f := range valid {
 		if !f.IsValid() {

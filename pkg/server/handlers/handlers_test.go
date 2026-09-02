@@ -634,6 +634,106 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	}
 }
 
+// TestUpdateJobFailureTypeAllEnumsAccepted locks the TSI-2802 gap: every one
+// of the eight documented FailureType values must be accepted by the server
+// (not just TIMEOUT / INPUT_UNREACHABLE) and persisted onto the job, and each
+// must report the retryable flag it is defined with. A failed→failed update
+// is a legal retry-after-failure transition, so one job can exercise all
+// eight values in sequence.
+func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorker(t, router, []string{"libx264"})
+
+	fileContent := []byte("test content")
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.mp4")
+	part.Write(fileContent)
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("upload failed: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var uploadResp protocol.UploadResponse
+	if err := json.NewDecoder(w.Body).Decode(&uploadResp); err != nil {
+		t.Fatalf("Failed to decode upload response: %v", err)
+	}
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("job submit failed: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var jobResp protocol.JobSubmitResponse
+	if err := json.NewDecoder(w.Body).Decode(&jobResp); err != nil {
+		t.Fatalf("Failed to decode job response: %v", err)
+	}
+
+	allTypes := []protocol.FailureType{
+		protocol.FailureInputUnreachable,
+		protocol.FailureEncoderUnsupported,
+		protocol.FailureDiskFull,
+		protocol.FailureTimeout,
+		protocol.FailureWorkerCrash,
+		protocol.FailureFFmpegError,
+		protocol.FailureNoWorkerAvailable,
+		protocol.FailureInfra,
+	}
+
+	for _, ft := range allTypes {
+		if !ft.IsValid() {
+			t.Fatalf("%s must be a valid enum value", ft)
+		}
+
+		update := protocol.JobUpdateRequest{
+			Status:         protocol.JobStatusFailed,
+			ExitCode:       1,
+			Error:          "ffmpeg blew up",
+			FailureType:    string(ft),
+			FailureDetails: "injected for enum coverage",
+		}
+		updateBody, _ := json.Marshal(update)
+		r := httptest.NewRequest("PATCH", "/api/v1/jobs/"+jobResp.JobID, bytes.NewReader(updateBody))
+		r.Header.Set("Authorization", "Bearer test-token")
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PATCH failure_type %s: expected 200, got %d (body: %s)",
+				ft, rec.Code, rec.Body.String())
+		}
+
+		gr := httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+		gr.Header.Set("Authorization", "Bearer test-token")
+		grec := httptest.NewRecorder()
+		router.ServeHTTP(grec, gr)
+		var statusResp protocol.JobStatusResponse
+		json.NewDecoder(grec.Body).Decode(&statusResp)
+		if statusResp.Job.FailureType != string(ft) {
+			t.Errorf("failure_type %s not persisted, got %q", ft, statusResp.Job.FailureType)
+		}
+		// Retryable marking is verified per-enum in TestFailureType_Retryable;
+		// here we only assert the value round-trips and persists.
+	}
+}
+
 func TestCancelJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
