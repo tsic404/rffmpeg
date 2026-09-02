@@ -222,10 +222,21 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 	var translatedParams map[string]string
 	var paramsToFilter map[string]string    // Original params that should be filtered from args
 	var sameNameConverted map[string]string // Same-name params whose values were converted
-	if scenarioInfo.RequiresTranslation && e.translator != nil {
+
+	// When the user specified no encoder (auto-HW selection), the source for
+	// translation is empty. User-supplied params like "-preset ultrafast" are
+	// x264-style naming, so they must be translated from the codec's software
+	// baseline (libx264 for H.264, etc.) to the chosen hardware encoder —
+	// otherwise an incompatible value (e.g. ultrafast on h264_qsv) reaches
+	// ffmpeg verbatim and fails with "Invalid argument" (TSI-2781).
+	translationSource := req.SpecifiedEncoder
+	if translationSource == "" {
+		translationSource = SoftwareEncoderForCodec(targetEncoder.CodecFormat())
+	}
+	if scenarioInfo.RequiresTranslation && e.translator != nil && translationSource != "" {
 		translationResult, err := e.translator.Translate(
 			ctx,
-			req.SpecifiedEncoder,
+			translationSource,
 			targetEncoder,
 			req.EncoderParams,
 		)

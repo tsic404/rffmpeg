@@ -542,3 +542,111 @@ func TestRewriteAdapter_NonEncoderParamsPreserved(t *testing.T) {
 		})
 	}
 }
+
+// TestRewriteAdapter_AutoHWPresetCompatibility covers TSI-2781 scenario 5a:
+// when the worker's preferred encoder is a hardware encoder that only supports
+// a subset of x264 preset names (h264_qsv rejects "ultrafast"), an
+// auto-selected hardware upgrade must translate the preset to a supported
+// value instead of passing the incompatible name through verbatim.
+func TestRewriteAdapter_AutoHWPresetCompatibility(t *testing.T) {
+	adapter := NewRewriteAdapter()
+
+	tests := []struct {
+		name         string
+		caps         *protocol.WorkerCapabilities
+		args         []string
+		expectPair   []string
+		expectAbsent []string
+	}{
+		{
+			name: "auto-selected qsv translates ultrafast to veryfast",
+			caps: &protocol.WorkerCapabilities{
+				VideoEncoders: []protocol.EncoderInfo{
+					{Name: "h264_qsv", Type: "video", IsHW: true},
+					{Name: "libx264", Type: "video", IsHW: false},
+				},
+				GPUDevices: []protocol.GPUDeviceInfo{
+					{Type: "qsv", Vendor: "Intel", Accessible: true},
+				},
+			},
+			args:         []string{"-i", "input.mp4", "-preset", "ultrafast", "output.mp4"},
+			expectPair:   []string{"-preset", "veryfast"},
+			expectAbsent: []string{"ultrafast"},
+		},
+		{
+			name: "auto-selected nvenc translates ultrafast to p1",
+			caps: &protocol.WorkerCapabilities{
+				VideoEncoders: []protocol.EncoderInfo{
+					{Name: "h264_nvenc", Type: "video", IsHW: true},
+					{Name: "libx264", Type: "video", IsHW: false},
+				},
+				GPUDevices: []protocol.GPUDeviceInfo{
+					{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+				},
+			},
+			args:         []string{"-i", "input.mp4", "-preset", "ultrafast", "output.mp4"},
+			expectPair:   []string{"-preset", "p1"},
+			expectAbsent: []string{"ultrafast"},
+		},
+		{
+			name: "auto-selected amf translates ultrafast to speed quality",
+			caps: &protocol.WorkerCapabilities{
+				VideoEncoders: []protocol.EncoderInfo{
+					{Name: "h264_amf", Type: "video", IsHW: true},
+					{Name: "libx264", Type: "video", IsHW: false},
+				},
+				GPUDevices: []protocol.GPUDeviceInfo{
+					{Type: "amf", Vendor: "AMD", Accessible: true},
+				},
+			},
+			args:         []string{"-i", "input.mp4", "-preset", "ultrafast", "output.mp4"},
+			expectPair:   []string{"-quality", "speed"},
+			expectAbsent: []string{"ultrafast"},
+		},
+		{
+			name: "auto-selected qsv keeps supported preset unchanged",
+			caps: &protocol.WorkerCapabilities{
+				VideoEncoders: []protocol.EncoderInfo{
+					{Name: "h264_qsv", Type: "video", IsHW: true},
+					{Name: "libx264", Type: "video", IsHW: false},
+				},
+				GPUDevices: []protocol.GPUDeviceInfo{
+					{Type: "qsv", Vendor: "Intel", Accessible: true},
+				},
+			},
+			args:         []string{"-i", "input.mp4", "-preset", "slower", "output.mp4"},
+			expectPair:   []string{"-preset", "slower"},
+			expectAbsent: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter.SetHardwareCapabilities(tt.caps)
+			rewritten, _, err := adapter.RewriteArgs(context.Background(), tt.args, true)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			flag, value := tt.expectPair[0], tt.expectPair[1]
+			found := false
+			for i := 0; i+1 < len(rewritten); i++ {
+				if rewritten[i] == flag && rewritten[i+1] == value {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected %s %s in rewritten args, got %v", flag, value, rewritten)
+			}
+
+			for _, absent := range tt.expectAbsent {
+				for _, arg := range rewritten {
+					if arg == absent {
+						t.Errorf("expected %q to be absent from rewritten args, got %v", absent, rewritten)
+					}
+				}
+			}
+		})
+	}
+}
