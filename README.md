@@ -105,6 +105,14 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 ./bin/rffmpeg --max-retries 5 -i input.mp4 -c:v libx264 output.mp4
 ```
 
+**任务超时（`--timeout`）**：`--timeout` 为每个转码任务设置执行上限（Go duration 格式，如 `30s`/`5m`/`2h`），提交时转为绝对截止时间随作业下发；Worker 在 ffmpeg 执行阶段用完该预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过 `--timeout`，例如：
+
+```bash
+./bin/rffmpeg --timeout 5s -i test-large.mp4 -c:v libx264 -preset veryslow output.mp4
+```
+
+`-preset veryslow` 使软件编码耗时远超 5s，作业才会被 Worker 终止并返回 `timeout`。
+
 **连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。重试次数达到上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / 配置文件 `"max_retries"`，默认 14 次、约 5 分钟）后 CLI 以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。三个通道均支持 `0`：显式设为 `0` 表示**不重试、首次失败即退出**，不会被静默回落为默认值。
 
 流式输出到 stdout（`-f <fmt> -`、`-o -` 或 `-`）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）或 `-o <本地路径>`。
