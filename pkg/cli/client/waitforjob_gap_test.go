@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // gapLogServer serves the WS log endpoint once with a sequenced hole (seq 1

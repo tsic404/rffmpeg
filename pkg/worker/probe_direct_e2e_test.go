@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
 // writeTestWAV writes a minimal 44-byte-header, 1-channel 16-bit PCM WAV file

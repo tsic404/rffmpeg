@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
 )
 
 func newTestScheduler(t *testing.T) (*Scheduler, func()) {

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
-	"github.com/tsix404/rffmpeg/pkg/encoder/rewrite"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder/rewrite"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 func TestRewriteAdapter_RewriteArgs(t *testing.T) {

@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/tsix404/rffmpeg/pkg/server/db"
-	"github.com/tsix404/rffmpeg/pkg/server/handlers"
-	"github.com/tsix404/rffmpeg/pkg/server/storage"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/handlers"
+	"github.com/tsic404/rffmpeg/pkg/server/storage"
 )
 
 // TestSubmitJob_RejectsUnauthenticated verifies handler-level auth enforcement

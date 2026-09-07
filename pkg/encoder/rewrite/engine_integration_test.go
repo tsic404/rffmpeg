@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
 
 // TestEndToEnd_AllScenarios tests all 6 rewrite scenarios end-to-end.

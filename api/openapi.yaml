@@ -5,7 +5,7 @@ info:
   version: 1.0.0
   contact:
     name: rffmpeg
-    url: https://github.com/tsix404/rffmpeg
+    url: https://github.com/tsic404/rffmpeg
 
 servers:
   - url: /api/v1

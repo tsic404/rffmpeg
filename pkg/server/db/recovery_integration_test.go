@@ -3,7 +3,7 @@ package db_test
 import (
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // TestServerRestartRecovery_FullFlow simulates server restart and verifies:

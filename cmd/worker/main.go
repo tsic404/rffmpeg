@@ -9,10 +9,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/worker"
-	"github.com/tsix404/rffmpeg/pkg/worker/capabilities"
-	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/worker"
+	"github.com/tsic404/rffmpeg/pkg/worker/capabilities"
+	"github.com/tsic404/rffmpeg/pkg/worker/workerconfig"
 )
 
 const (

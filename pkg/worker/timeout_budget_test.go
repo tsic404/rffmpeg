@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
 // writeMarkerSleepFFmpeg creates an executable that records its PID, touches a

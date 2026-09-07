@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/server/auth"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/auth"
 )
 
 // RuntimeConfig holds rate limit configuration that can be updated at runtime.

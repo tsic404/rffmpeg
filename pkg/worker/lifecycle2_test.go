@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
 // TestExecuteWithRetry_StaleOutputFromFailedAttemptDoesNotFoolNextAttempt

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/server/migration"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
 // TestMultiWorkerFailover_FullFlow tests the complete worker failover scenario:

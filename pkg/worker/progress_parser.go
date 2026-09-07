@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
+	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
 )
 
 // ProgressFrame represents a parsed progress update from ffmpeg stderr.

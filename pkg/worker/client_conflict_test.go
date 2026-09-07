@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // TestUpdateJobWithFailure_Conflict verifies that a 409 response from the

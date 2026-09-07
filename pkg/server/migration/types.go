@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
 )
 
 // Reason represents why a job migration occurred.

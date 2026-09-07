@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/server/handlers"
-	"github.com/tsix404/rffmpeg/pkg/server/migration"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/handlers"
+	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
 func TestListMigrationEvents(t *testing.T) {

@@ -3,7 +3,7 @@ package rewrite
 import (
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
 
 func TestFFmpegParser_ParseArgs(t *testing.T) {

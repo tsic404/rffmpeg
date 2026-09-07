@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/cli/args"
-	"github.com/tsix404/rffmpeg/pkg/cli/client"
-	"github.com/tsix404/rffmpeg/pkg/cli/config"
-	"github.com/tsix404/rffmpeg/pkg/pathutil"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/cli/args"
+	"github.com/tsic404/rffmpeg/pkg/cli/client"
+	"github.com/tsic404/rffmpeg/pkg/cli/config"
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 const (

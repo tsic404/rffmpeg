@@ -6,7 +6,7 @@ package rewrite
 import (
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
 
 // ScenarioType represents one of the 6 rewrite scenarios.

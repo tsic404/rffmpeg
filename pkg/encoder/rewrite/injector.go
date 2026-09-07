@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
 
 // HardwareInjectorImpl implements the HardwareInjector interface.

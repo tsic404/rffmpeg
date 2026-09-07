@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // formatETA renders a remaining-seconds estimate as H:MM:SS (or M:SS under

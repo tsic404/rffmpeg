@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
 func TestEncoderInfo_JSON(t *testing.T) {

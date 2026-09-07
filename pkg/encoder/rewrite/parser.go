@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
 
 // FFmpegParser parses FFmpeg command-line arguments to extract encoder information.

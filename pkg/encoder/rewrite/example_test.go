@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
 
 // Example demonstrates a complete workflow of the scenario classifier.

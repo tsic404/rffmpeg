@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // contextKey is the type for context keys used by this package

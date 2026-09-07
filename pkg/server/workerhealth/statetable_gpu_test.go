@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // TestWorkerStateTable_StaleGPUPreserved verifies that heartbeats without a

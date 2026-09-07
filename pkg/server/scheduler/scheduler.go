@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/server/db"
-	"github.com/tsix404/rffmpeg/pkg/server/migration"
-	"github.com/tsix404/rffmpeg/pkg/server/ratelimit"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/migration"
+	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
 type Config struct {

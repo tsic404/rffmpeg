@@ -15,16 +15,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/tsix404/rffmpeg/pkg/config"
-	"github.com/tsix404/rffmpeg/pkg/server/auth"
-	"github.com/tsix404/rffmpeg/pkg/server/db"
-	"github.com/tsix404/rffmpeg/pkg/server/handlers"
-	"github.com/tsix404/rffmpeg/pkg/server/ratelimit"
-	"github.com/tsix404/rffmpeg/pkg/server/scheduler"
-	"github.com/tsix404/rffmpeg/pkg/server/storage"
-	"github.com/tsix404/rffmpeg/pkg/server/websocket"
-	"github.com/tsix404/rffmpeg/pkg/server/workerhealth"
-	tlspkg "github.com/tsix404/rffmpeg/pkg/tls"
+	"github.com/tsic404/rffmpeg/pkg/config"
+	"github.com/tsic404/rffmpeg/pkg/server/auth"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/handlers"
+	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
+	"github.com/tsic404/rffmpeg/pkg/server/scheduler"
+	"github.com/tsic404/rffmpeg/pkg/server/storage"
+	"github.com/tsic404/rffmpeg/pkg/server/websocket"
+	"github.com/tsic404/rffmpeg/pkg/server/workerhealth"
+	tlspkg "github.com/tsic404/rffmpeg/pkg/tls"
 )
 
 func main() {

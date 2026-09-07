@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"sync"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"os"
 	"path/filepath"
 	"strings"

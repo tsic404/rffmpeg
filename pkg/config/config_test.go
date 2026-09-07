@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	tlspkg "github.com/tsix404/rffmpeg/pkg/tls"
+	tlspkg "github.com/tsic404/rffmpeg/pkg/tls"
 )
 
 func TestDefaultServerConfig(t *testing.T) {

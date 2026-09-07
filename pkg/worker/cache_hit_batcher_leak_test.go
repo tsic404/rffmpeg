@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // TestCacheHitMkdirAllFailureDoesNotLeakBatcher is the TSI-2415 review-fix

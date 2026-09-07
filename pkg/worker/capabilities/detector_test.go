@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
 // mockFFmpegProber is a mock FFmpegProber for testing

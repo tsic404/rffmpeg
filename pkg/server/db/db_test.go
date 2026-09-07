@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
 )
 
 func setupDBTest(t *testing.T) (*db.Database, func()) {

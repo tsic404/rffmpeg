@@ -9,10 +9,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
-	"github.com/tsix404/rffmpeg/pkg/encoder/rewrite"
-	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder/rewrite"
+	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // RewriteAdapter integrates the encoder rewrite engine with the Worker executor.

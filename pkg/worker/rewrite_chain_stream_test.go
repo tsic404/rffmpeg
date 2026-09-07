@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/audit"
+	"github.com/tsic404/rffmpeg/pkg/audit"
 )
 
 // TestFormatRewriteChainLine verifies the streamed audit-chain line uses the

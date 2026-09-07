@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/tsix404/rffmpeg/pkg/pathutil"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // maxInputBaseName caps the length of filenames derived from remote URLs so a
