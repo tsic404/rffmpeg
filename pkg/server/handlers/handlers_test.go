@@ -1962,7 +1962,9 @@ func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 	}
 }
 
-// TestSubmitJobNoWorkerWithEncoder tests that job submission fails fast when no worker has the requested encoder (TSI-1428)
+// TestSubmitJobNoWorkerWithEncoder verifies a job requesting an encoder no
+// worker supports is persisted and failed as ENCODER_UNSUPPORTED rather than
+// rejected with a 503 that leaves no DB row (TSI-2846; formerly TSI-1428).
 func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2000,23 +2002,164 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	// Should return 503 Service Unavailable
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("Expected status 503, got %d: %s", w.Code, w.Body.String())
+	// TSI-2846: the job is persisted and failed as ENCODER_UNSUPPORTED (200),
+	// not rejected with a 503 that leaves no DB row.
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
 	}
 
+	var jobResp protocol.JobSubmitResponse
+	if err := json.NewDecoder(w.Body).Decode(&jobResp); err != nil {
+		t.Fatalf("Failed to decode job submit response: %v", err)
+	}
+	if jobResp.JobID == "" {
+		t.Fatal("Expected non-empty job ID")
+	}
+
+	// The job must be failed with failure_type ENCODER_UNSUPPORTED.
+	req = httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Failed to get job: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var statusResp protocol.JobStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&statusResp); err != nil {
+		t.Fatalf("Failed to decode job status response: %v", err)
+	}
+	if statusResp.Job.Status != protocol.JobStatusFailed {
+		t.Errorf("Expected job status 'failed', got '%s'", statusResp.Job.Status)
+	}
+	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnsupported) {
+		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnsupported, statusResp.Job.FailureType)
+	}
+	if !strings.Contains(statusResp.Job.Error, "libx265") {
+		t.Errorf("Expected error message to mention 'libx265', got: %s", statusResp.Job.Error)
+	}
+}
+
+// TestSubmitJobUnknownEncoderPersistedAsUnsupported locks the TSI-2846 issue
+// example: an encoder no worker has ever registered (e.g. a typo) is persisted
+// and failed as ENCODER_UNSUPPORTED, not rejected with a 503 leaving no row.
+func TestSubmitJobUnknownEncoderPersistedAsUnsupported(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorker(t, router, []string{"libx264"})
+	fileID := uploadTestFile(t, router)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-c:v", "nonexistent_codec", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var jobResp protocol.JobSubmitResponse
+	if err := json.NewDecoder(w.Body).Decode(&jobResp); err != nil {
+		t.Fatalf("Failed to decode job submit response: %v", err)
+	}
+	if jobResp.JobID == "" {
+		t.Fatal("Expected non-empty job ID")
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	var statusResp protocol.JobStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&statusResp); err != nil {
+		t.Fatalf("Failed to decode job status response: %v", err)
+	}
+	if statusResp.Job.Status != protocol.JobStatusFailed {
+		t.Errorf("Expected status 'failed', got '%s'", statusResp.Job.Status)
+	}
+	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnsupported) {
+		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnsupported, statusResp.Job.FailureType)
+	}
+}
+
+// TestSubmitJobEncoderCheckDBErrorFailsClosed locks the TSI-2846 review fix: a
+// DB error during the encoder-capability check must fail closed (503
+// worker_unavailable), not be treated as "no worker has the encoder" and
+// persisted as a terminal ENCODER_UNSUPPORTED.
+func TestSubmitJobEncoderCheckDBErrorFailsClosed(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorker(t, router, []string{"libx264"})
+	// Corrupt the worker's encoders JSON so the json_each() encoder-capability
+	// query fails while iterating rows, while the plain schedulable-worker
+	// query still succeeds.
+	if _, err := h.GetDB().GetDB().Exec(`UPDATE workers SET encoders = 'not-json' WHERE id = 'test-worker-1'`); err != nil {
+		t.Fatalf("Failed to corrupt worker encoders: %v", err)
+	}
+
+	fileID := uploadTestFile(t, router)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-c:v", "hevc_nvenc", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 (fail-closed) on encoder-query DB error, got %d: %s", w.Code, w.Body.String())
+	}
 	var errResp protocol.ErrorResponse
 	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
 		t.Fatalf("Failed to decode error response: %v", err)
 	}
-
 	if errResp.Code != protocol.ErrCodeWorkerUnavailable {
-		t.Errorf("Expected error code 'worker_unavailable', got '%s'", errResp.Code)
+		t.Errorf("Expected 'worker_unavailable', got '%s'", errResp.Code)
+	}
+}
+
+// TestSubmitJobCreateFailedJobErrorReturns500 locks the TSI-2846 review fix:
+// when the atomic failed-job INSERT fails (transient DB fault), submission must
+// return 500 — never 200 claiming the job was recorded as ENCODER_UNSUPPORTED.
+func TestSubmitJobCreateFailedJobErrorReturns500(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorker(t, router, []string{"libx264"})
+	fileID := uploadTestFile(t, router)
+
+	// Drop the jobs table so the failed-job INSERT fails while the earlier
+	// workers-table reads still succeed, isolating the create-failure path.
+	if _, err := h.GetDB().GetDB().Exec(`DROP TABLE jobs`); err != nil {
+		t.Fatalf("Failed to drop jobs table: %v", err)
 	}
 
-	// Message should mention the encoder
-	if !bytes.Contains([]byte(errResp.Message), []byte("libx265")) {
-		t.Errorf("Expected error message to mention 'libx265', got: %s", errResp.Message)
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-c:v", "hevc_nvenc", "-preset", "fast"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("Expected 500 on failed-job INSERT error, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -2160,7 +2303,8 @@ func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 	}
 }
 
-// TSI-1500: Test that handler rejects job when no compatible encoder is available
+// TSI-1500/TSI-2846: a job requesting an encoder in a codec family no worker
+// supports is persisted and failed as ENCODER_UNSUPPORTED, not rejected 503.
 func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2204,14 +2348,38 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	// Should fail (503) because no hevc encoder is available (different codec family)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("Expected status %d, got %d. Body: %s", http.StatusServiceUnavailable, w.Code, w.Body.String())
+	// TSI-2846: persisted and failed as ENCODER_UNSUPPORTED (200), not 503.
+	if w.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d. Body: %s", w.Code, w.Body.String())
 	}
 
-	// Check error message mentions encoder
-	if !bytes.Contains(w.Body.Bytes(), []byte("encoder")) {
-		t.Errorf("Expected error message to mention encoder, got: %s", w.Body.String())
+	var jobResp protocol.JobSubmitResponse
+	if err := json.NewDecoder(w.Body).Decode(&jobResp); err != nil {
+		t.Fatalf("Failed to decode job submit response: %v", err)
+	}
+	if jobResp.JobID == "" {
+		t.Fatal("Expected non-empty job ID")
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Failed to get job: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var statusResp protocol.JobStatusResponse
+	if err := json.NewDecoder(w.Body).Decode(&statusResp); err != nil {
+		t.Fatalf("Failed to decode job status response: %v", err)
+	}
+	if statusResp.Job.Status != protocol.JobStatusFailed {
+		t.Errorf("Expected job status 'failed', got '%s'", statusResp.Job.Status)
+	}
+	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnsupported) {
+		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnsupported, statusResp.Job.FailureType)
+	}
+	if !strings.Contains(statusResp.Job.Error, "hevc_nvenc") {
+		t.Errorf("Expected error message to mention 'hevc_nvenc', got: %s", statusResp.Job.Error)
 	}
 }
 
