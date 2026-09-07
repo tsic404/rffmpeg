@@ -607,10 +607,10 @@ func TestCreateOrUpdateWorker(t *testing.T) {
 	}
 }
 
-// TSI-2366: after a server restart, offline worker records left over by
-// previous runs must be removable so crash loops don't accumulate stale
-// duplicates of re-registering workers.
-func TestRemoveStaleOfflineWorkers(t *testing.T) {
+// TSI-2844: startup cleanup is lazy — it removes only workers whose last
+// heartbeat is stale (older than the threshold), preserving fresh-heartbeat
+// workers that survived a restart.
+func TestRemoveStaleWorkers(t *testing.T) {
 	database, cleanup := setupDBTest(t)
 	defer cleanup()
 
@@ -619,11 +619,11 @@ func TestRemoveStaleOfflineWorkers(t *testing.T) {
 		FFmpegVersion: "5.1.2",
 	}
 
-	offline1, err := database.CreateWorker("stale-1", "stale-worker-1", caps)
+	stale1, err := database.CreateWorker("stale-1", "stale-worker-1", caps)
 	if err != nil {
 		t.Fatalf("Failed to create stale worker 1: %v", err)
 	}
-	offline2, err := database.CreateWorker("stale-2", "stale-worker-2", caps)
+	stale2, err := database.CreateWorker("stale-2", "stale-worker-2", caps)
 	if err != nil {
 		t.Fatalf("Failed to create stale worker 2: %v", err)
 	}
@@ -632,36 +632,37 @@ func TestRemoveStaleOfflineWorkers(t *testing.T) {
 		t.Fatalf("Failed to create live worker: %v", err)
 	}
 
-	// Mark only the two stale workers offline (threshold 0 would sweep the
-	// live worker too since its heartbeat is also "old" in a fresh DB).
-	for _, id := range []string{offline1.ID, offline2.ID} {
-		if err := database.UpdateWorkerStatus(id, protocol.WorkerStatusOffline); err != nil {
-			t.Fatalf("Failed to mark %s offline: %v", id, err)
+	// Backdate the two stale workers' heartbeats past the threshold; the
+	// live worker's heartbeat is fresh.
+	backdated := time.Now().Add(-10 * time.Minute)
+	for _, id := range []string{stale1.ID, stale2.ID} {
+		if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, backdated, id); err != nil {
+			t.Fatalf("Failed to backdate %s heartbeat: %v", id, err)
 		}
 	}
 
-	removed, err := database.RemoveStaleOfflineWorkers()
+	removed, err := database.RemoveStaleWorkers(2 * time.Minute)
 	if err != nil {
-		t.Fatalf("Failed to remove stale offline workers: %v", err)
+		t.Fatalf("Failed to remove stale workers: %v", err)
 	}
 	if removed != 2 {
 		t.Errorf("Expected 2 stale workers removed, got %d", removed)
 	}
 
-	if _, err := database.GetWorker(offline1.ID); err != protocol.ErrWorkerNotFound {
+	if _, err := database.GetWorker(stale1.ID); err != protocol.ErrWorkerNotFound {
 		t.Errorf("Expected stale worker 1 to be gone, got %v", err)
 	}
-	if _, err := database.GetWorker(offline2.ID); err != protocol.ErrWorkerNotFound {
+	if _, err := database.GetWorker(stale2.ID); err != protocol.ErrWorkerNotFound {
 		t.Errorf("Expected stale worker 2 to be gone, got %v", err)
 	}
 
-	// Live (non-offline) workers are untouched.
+	// Fresh-heartbeat workers are untouched.
 	if _, err := database.GetWorker(live.ID); err != nil {
 		t.Errorf("Expected live worker to survive cleanup, got %v", err)
 	}
 
 	// Idempotent: a second sweep removes nothing.
-	removed, err = database.RemoveStaleOfflineWorkers()
+	removed, err = database.RemoveStaleWorkers(2 * time.Minute)
 	if err != nil {
 		t.Fatalf("Second sweep failed: %v", err)
 	}
@@ -672,7 +673,9 @@ func TestRemoveStaleOfflineWorkers(t *testing.T) {
 
 // TSI-2366 end-to-end residue scenario: register two workers, restart the
 // server (RecoverState marks everything offline), then only one worker comes
-// back. The leftover record of the absent worker must be gone after recovery.
+// back. The absent worker's record — whose heartbeat has gone stale — must be
+// gone after the lazy cleanup (TSI-2844); the returning worker's fresh row
+// survives.
 func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 	database, cleanup := setupDBTest(t)
 	defer cleanup()
@@ -686,7 +689,8 @@ func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to register returning worker: %v", err)
 	}
-	if _, err := database.CreateOrUpdateWorker("worker-gone", "gone-worker", caps, 90*time.Second); err != nil {
+	gone, err := database.CreateOrUpdateWorker("worker-gone", "gone-worker", caps, 90*time.Second)
+	if err != nil {
 		t.Fatalf("Failed to register departing worker: %v", err)
 	}
 
@@ -695,12 +699,18 @@ func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 		t.Fatalf("RecoverState failed: %v", err)
 	}
 
-	// The returning worker re-registers and is recreated as idle; the absent
-	// worker's offline row is swept as residue in the same recovery pass.
+	// The returning worker re-registers and is recreated as idle with a fresh
+	// heartbeat; the absent worker's heartbeat is backdated so the lazy
+	// cleanup treats it as stale residue.
 	if _, err := database.CreateOrUpdateWorker(returning.ID, "returning-worker", caps, 90*time.Second); err != nil {
 		t.Fatalf("Failed to re-register returning worker: %v", err)
 	}
-	removed, err := database.RemoveStaleOfflineWorkers()
+	backdated := time.Now().Add(-10 * time.Minute)
+	if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, backdated, gone.ID); err != nil {
+		t.Fatalf("Failed to backdate departing worker heartbeat: %v", err)
+	}
+
+	removed, err := database.RemoveStaleWorkers(135 * time.Second)
 	if err != nil {
 		t.Fatalf("Failed to remove stale workers: %v", err)
 	}
