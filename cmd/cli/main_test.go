@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/cli/client"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/cli/client"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // captureStdout runs f and returns captured stdout as a string.

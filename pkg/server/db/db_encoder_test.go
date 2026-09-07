@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 func setupEncoderDBTest(t *testing.T) (*Database, func()) {

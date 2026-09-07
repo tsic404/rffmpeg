@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // WorkerStateTable maintains an in-memory map of worker states

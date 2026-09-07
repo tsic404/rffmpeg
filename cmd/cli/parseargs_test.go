@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 func TestParseArgs_SingleDashOptions(t *testing.T) {

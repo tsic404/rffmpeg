@@ -1,4 +1,4 @@
-module github.com/tsix404/rffmpeg
+module github.com/tsic404/rffmpeg
 
 go 1.23
 

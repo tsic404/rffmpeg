@@ -15,16 +15,16 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/tsix404/rffmpeg/pkg/pathutil"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/server/auth"
-	"github.com/tsix404/rffmpeg/pkg/server/db"
-	"github.com/tsix404/rffmpeg/pkg/server/migration"
-	"github.com/tsix404/rffmpeg/pkg/server/ratelimit"
-	"github.com/tsix404/rffmpeg/pkg/server/scheduler"
-	"github.com/tsix404/rffmpeg/pkg/server/storage"
-	"github.com/tsix404/rffmpeg/pkg/server/websocket"
-	"github.com/tsix404/rffmpeg/pkg/server/workerhealth"
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/auth"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/migration"
+	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
+	"github.com/tsic404/rffmpeg/pkg/server/scheduler"
+	"github.com/tsic404/rffmpeg/pkg/server/storage"
+	"github.com/tsic404/rffmpeg/pkg/server/websocket"
+	"github.com/tsic404/rffmpeg/pkg/server/workerhealth"
 )
 
 // Handler holds dependencies for HTTP handlers

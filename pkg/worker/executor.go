@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
+	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
 )
 
 // StderrHandler is a callback function for processing stderr output

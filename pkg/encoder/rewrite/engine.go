@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tsix404/rffmpeg/pkg/encoder"
-	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
 )
 
 // EngineCoordinator implements the RewriteEngine interface.

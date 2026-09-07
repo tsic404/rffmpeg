@@ -3,7 +3,7 @@ package rewrite
 import (
 	"context"
 
-	"github.com/tsix404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
 
 // ScenarioClassifier defines the interface for classifying rewrite scenarios.

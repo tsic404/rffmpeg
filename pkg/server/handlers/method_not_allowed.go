@@ -6,7 +6,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // NormalizeMethodNotAllowed converts chi's default empty-body 405 response into

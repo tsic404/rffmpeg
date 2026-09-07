@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
+	"github.com/tsic404/rffmpeg/pkg/worker/workerconfig"
 )
 
 // CacheConfig holds configuration for the worker cache.

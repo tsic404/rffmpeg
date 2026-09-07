@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tsix404/rffmpeg/pkg/ffmpegopts"
+	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
 )
 
 var (

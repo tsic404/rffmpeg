@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // ProgressRouter intercepts stderr lines, parses progress information,

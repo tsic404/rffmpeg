@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // TestExecutor_CancelReturnsWithGrandchildHoldingPipe verifies acceptance
@@ -571,7 +571,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/worker"
+	"github.com/tsic404/rffmpeg/pkg/worker"
 )
 
 func main() {

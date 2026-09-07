@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // TestProcessProbeJobDirectPathFailuresReportWithoutFlush locks the TSI-2665

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/pathutil"
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 )
 
 func TestBuildArgs(t *testing.T) {

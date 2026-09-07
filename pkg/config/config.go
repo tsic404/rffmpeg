@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	tlspkg "github.com/tsix404/rffmpeg/pkg/tls"
+	tlspkg "github.com/tsic404/rffmpeg/pkg/tls"
 )
 
 // ServerConfig holds the complete server configuration

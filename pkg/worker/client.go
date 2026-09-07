@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/pathutil"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
 // apiSuffix is the canonical API path appended to a normalized root URL.

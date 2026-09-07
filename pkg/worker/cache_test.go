@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tsix404/rffmpeg/pkg/worker/workerconfig"
+	"github.com/tsic404/rffmpeg/pkg/worker/workerconfig"
 )
 
 func TestGenerateCacheKey_Deterministic(t *testing.T) {

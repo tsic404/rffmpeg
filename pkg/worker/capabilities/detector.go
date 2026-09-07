@@ -6,8 +6,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/worker/gpu"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
 // Detector detects worker capabilities including FFmpeg encoders/decoders and GPU devices.

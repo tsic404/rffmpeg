@@ -14,14 +14,14 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/tsix404/rffmpeg/pkg/protocol"
-	"github.com/tsix404/rffmpeg/pkg/server/auth"
-	"github.com/tsix404/rffmpeg/pkg/server/db"
-	"github.com/tsix404/rffmpeg/pkg/server/handlers"
-	"github.com/tsix404/rffmpeg/pkg/server/ratelimit"
-	"github.com/tsix404/rffmpeg/pkg/server/scheduler"
-	"github.com/tsix404/rffmpeg/pkg/server/storage"
-	"github.com/tsix404/rffmpeg/pkg/server/workerhealth"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/auth"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/handlers"
+	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
+	"github.com/tsic404/rffmpeg/pkg/server/scheduler"
+	"github.com/tsic404/rffmpeg/pkg/server/storage"
+	"github.com/tsic404/rffmpeg/pkg/server/workerhealth"
 )
 
 // setupTestWithRateLimit creates a test environment with rate limit middleware applied.

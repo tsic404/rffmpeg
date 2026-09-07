@@ -47,7 +47,7 @@ rffmpeg 提供了一个与原生 FFmpeg 命令行兼容的客户端工具，用�
 
 ```bash
 # 克隆仓库
-git clone https://github.com/tsip404/rffmpeg.git
+git clone https://github.com/tsic404/rffmpeg.git
 cd rffmpeg
 
 # 编译所有组件

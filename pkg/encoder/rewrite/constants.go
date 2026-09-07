@@ -1,6 +1,6 @@
 package rewrite
 
-import "github.com/tsix404/rffmpeg/pkg/encoder"
+import "github.com/tsic404/rffmpeg/pkg/encoder"
 
 // Encoder priority constants define the default hardware encoder preference order.
 // Higher values indicate higher priority: NVENC > QSV > VAAPI > AMF > VideoToolbox > software.
