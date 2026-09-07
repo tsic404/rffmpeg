@@ -359,6 +359,40 @@ func (d *Database) CreateJobWithStreaming(inputFiles, args, outputFilename strin
 	return d.GetJob(id)
 }
 
+// CreateFailedJob persists a job that is terminal at submission — no worker
+// can serve it (e.g. ENCODER_UNSUPPORTED). A single INSERT writes the job
+// directly in the failed state, so a deterministic submit-time rejection is
+// recorded atomically: there is no pending→failed window in which a crash
+// would leave the job pending and later failed by the starvation sweep as
+// NO_WORKER_AVAILABLE with a classification that contradicts the response
+// (TSI-2846).
+func (d *Database) CreateFailedJob(inputFiles, args, outputFilename string, autoHW bool, streamingOutput bool, timeout *time.Time, directPaths, failureType, errMsg string) (*Job, error) {
+	id := uuid.New().String()
+	now := time.Now()
+
+	var timeoutVal interface{}
+	if timeout != nil {
+		timeoutVal = *timeout
+	}
+
+	const exitCode = -1
+	_, err := d.db.Exec(`
+		INSERT INTO jobs (id, status, input_files, args, output_filename, streaming_output, output_files, exit_code, error, failure_type, auto_hw, timeout, direct_paths, created_at, updated_at, finished_at)
+		VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, protocol.JobStatusFailed, inputFiles, args, outputFilename, streamingOutput, exitCode, errMsg, failureType, autoHW, timeoutVal, directPaths, now, now, now)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create failed job: %w", err)
+	}
+
+	// A terminal-state write must notify in-process DB waiters (TSI-2562),
+	// matching every other terminal writer (UpdateJob, CancelJob, FailJob,
+	// starvation sweep).
+	d.notifyTerminal(id)
+
+	return d.GetJob(id)
+}
+
 // GetJob retrieves a job by ID
 func (d *Database) GetJob(id string) (*Job, error) {
 	job := &Job{}

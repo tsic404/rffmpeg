@@ -406,6 +406,29 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
+
+	// Marshal input files and direct paths to JSON up front: the
+	// ENCODER_UNSUPPORTED rejection path below also persists the job, so these
+	// must be available before the encoder-capability check (TSI-2846).
+	inputFilesJSON, err := json.Marshal(req.InputFiles)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to marshal input files", err,
+		))
+		return
+	}
+	directPathsJSON := "[]"
+	if len(req.DirectPath) > 0 {
+		dp, err := json.Marshal(req.DirectPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+				protocol.ErrCodeInternalError, "Failed to marshal direct path", err,
+			))
+			return
+		}
+		directPathsJSON = string(dp)
+	}
+
 	requestedEncoder := scheduler.ExtractEncoderFromArgs(string(argsJSON))
 
 	// Check for available workers with the requested encoder capability
@@ -442,12 +465,44 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !hasCompatibleWorker {
-			// No workers with compatible encoder in the same codec family
-			writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
-				protocol.ErrCodeWorkerUnavailable,
-				fmt.Sprintf("No worker available with encoder: %s (or compatible encoders)", requestedEncoder),
-				nil,
-			))
+			if !h.failAsEncoderUnsupported(requestedEncoder, compatibleEncoders) {
+				// No live worker has the encoder (or a compatible one), but the
+				// cluster either has no schedulable worker at all, or a worker
+				// has the encoder but is merely stale — keep the fail-fast 503
+				// (worker_unavailable) rather than misclassifying it as
+				// ENCODER_UNSUPPORTED (TSI-2419).
+				writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
+					protocol.ErrCodeWorkerUnavailable,
+					fmt.Sprintf("No worker available with encoder: %s (or compatible encoders)", requestedEncoder),
+					nil,
+				))
+				return
+			}
+
+			// TSI-2846: workers exist but none has the requested encoder or a
+			// compatible one. Persist the job directly in the failed state
+			// (atomic single INSERT, symmetric with INPUT_UNREACHABLE /
+			// NO_WORKER_AVAILABLE) so the classification is recorded and
+			// observable instead of vanishing with no DB row.
+			errMsg := fmt.Sprintf("No worker available with encoder: %s (or compatible encoders)", requestedEncoder)
+			job, createErr := h.db.CreateFailedJob(string(inputFilesJSON), string(argsJSON), req.OutputFilename, req.AutoHW, req.StreamingOutput, req.Timeout, directPathsJSON, string(protocol.FailureEncoderUnsupported), errMsg)
+			if createErr != nil {
+				// The rate-limit middleware auto-rolls-back the submit increment
+				// on non-2xx, so no explicit decrement is needed on this path.
+				writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+					protocol.ErrCodeInternalError, "Failed to create job", createErr,
+				))
+				return
+			}
+			// The job is terminal at creation; release the submit-time
+			// rate-limit increment (the middleware only rolls back non-2xx).
+			if clientID := auth.GetClientID(r); clientID != "" {
+				h.rateLimiter.Decrement(clientID)
+			}
+			writeJSON(w, http.StatusOK, protocol.JobSubmitResponse{
+				JobID:   job.ID,
+				Message: errMsg,
+			})
 			return
 		}
 	}
@@ -477,28 +532,6 @@ jobCreate:
 		return
 	}
 
-	// Convert input files and args to JSON for storage
-	inputFilesJSON, err := json.Marshal(req.InputFiles)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-			protocol.ErrCodeInternalError, "Failed to marshal input files", err,
-		))
-		return
-	}
-
-	// Marshal direct paths to JSON for storage
-	directPathsJSON := "[]"
-	if len(req.DirectPath) > 0 {
-		dp, err := json.Marshal(req.DirectPath)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-				protocol.ErrCodeInternalError, "Failed to marshal direct path", err,
-			))
-			return
-		}
-		directPathsJSON = string(dp)
-	}
-
 	job, err := h.db.CreateJobWithStreaming(string(inputFilesJSON), string(argsJSON), req.OutputFilename, req.AutoHW, req.StreamingOutput, req.Timeout, directPathsJSON)
 	if err != nil {
 		// Note: the rate limit middleware's rateLimitResponseWriter will
@@ -524,6 +557,60 @@ jobCreate:
 		JobID:   job.ID,
 		Message: "Job submitted successfully",
 	})
+}
+
+// failAsEncoderUnsupported reports whether a submission whose requested encoder
+// has no live worker should be persisted as ENCODER_UNSUPPORTED rather than
+// rejected as worker_unavailable. True only when at least one schedulable
+// worker exists (a stale heartbeat still counts — TSI-2419) but none of them
+// has the requested encoder or a compatible one. A workerless cluster is
+// NO_WORKER_AVAILABLE, not an unsupported encoder (TSI-2846).
+func (h *Handler) failAsEncoderUnsupported(requestedEncoder string, compatibleEncoders []string) bool {
+	// At least one schedulable worker must exist for a missing encoder to mean
+	// "unsupported" rather than "no worker available".
+	all, err := h.db.GetSchedulableWorkers()
+	if err != nil {
+		log.Printf("SubmitJob: Failed to list schedulable workers: %v", err)
+		return false
+	}
+	if len(all) == 0 {
+		return false
+	}
+
+	// Does any schedulable worker (stale or not) already have the requested
+	// encoder or a compatible one? If so, the live-match failure is a liveness
+	// problem, not an encoder-capability gap. A query error here is fail-closed:
+	// returning true on error would convert a transient DB fault into evidence
+	// of "encoder unsupported" and persist a terminal misclassification.
+	has := func(enc string) (bool, error) {
+		workers, err := h.db.GetSchedulableWorkersByEncoder(enc)
+		if err != nil {
+			return false, fmt.Errorf("check encoder %s: %w", enc, err)
+		}
+		return len(workers) > 0, nil
+	}
+	present, err := has(requestedEncoder)
+	if err != nil {
+		log.Printf("SubmitJob: %v", err)
+		return false
+	}
+	if present {
+		return false
+	}
+	for _, enc := range compatibleEncoders {
+		if enc == requestedEncoder {
+			continue
+		}
+		present, err := has(enc)
+		if err != nil {
+			log.Printf("SubmitJob: %v", err)
+			return false
+		}
+		if present {
+			return false
+		}
+	}
+	return true
 }
 
 // GetJob handles job status query
