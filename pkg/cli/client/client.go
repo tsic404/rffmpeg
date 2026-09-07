@@ -38,14 +38,16 @@ func formatETA(seconds int) string {
 }
 
 // renderProgressLine formats a WS progress payload as the CLI stderr
-// progress line: "Progress: X%" plus an ETA segment when the worker
-// reported one. Shared by every WebSocket wait/stream entry point.
+// progress line: "Progress: X% | ETA: <formatted or n/a>". The ETA segment is
+// always present so monitoring scripts can parse a stable shape even on short
+// tasks where the worker never produced an ETA (TSI-2845). Shared by every
+// WebSocket wait/stream entry point.
 func renderProgressLine(p protocol.WSProgressPayload) string {
-	line := fmt.Sprintf("Progress: %.1f%%", p.Percent)
+	eta := "n/a"
 	if p.EtaSeconds > 0 {
-		line += fmt.Sprintf(" | ETA: %s", formatETA(p.EtaSeconds))
+		eta = formatETA(p.EtaSeconds)
 	}
-	return line
+	return fmt.Sprintf("Progress: %.1f%% | ETA: %s", p.Percent, eta)
 }
 
 const (
