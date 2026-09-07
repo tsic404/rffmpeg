@@ -27,6 +27,12 @@ import (
 	tlspkg "github.com/tsic404/rffmpeg/pkg/tls"
 )
 
+// staleWorkerFactor scales the heartbeat timeout into the startup cleanup
+// cutoff: a worker whose last heartbeat is older than staleWorkerFactor × the
+// heartbeat timeout is dead residue and is removed lazily at startup
+// (TSI-2844). Fresh-heartbeat workers survive the restart and re-register.
+const staleWorkerFactor = 1.5
+
 func main() {
 	// Parse command-line flags
 	flags := parseFlags()
@@ -70,18 +76,21 @@ func main() {
 		log.Fatalf("Failed to recover database state: %v", err)
 	}
 
-	// Remove worker records left offline by previous runs (TSI-2366). After a
-	// restart no worker is serving, so any offline row is residue; live
-	// workers re-register and come back as idle. This keeps crash loops from
-	// accumulating stale duplicate records that the health monitor would only
-	// clean up after the offline threshold — if it ever runs at all.
-	staleWorkersRemoved, err := database.RemoveStaleOfflineWorkers()
+	// Lazily remove worker records whose heartbeat is stale — older than
+	// 1.5× the heartbeat timeout (TSI-2844). After a restart no worker is
+	// serving, so a row that has gone that long without a heartbeat is dead
+	// residue; a fresh-heartbeat worker is a live process that survived the
+	// restart and re-registers to come back idle. Deleting only genuinely
+	// stale rows keeps /api/v1/workers stable across restarts instead of
+	// transiently dropping every worker to zero.
+	staleWorkerCutoff := time.Duration(float64(cfg.WorkerHeartbeatTimeout) * staleWorkerFactor)
+	staleWorkersRemoved, err := database.RemoveStaleWorkers(staleWorkerCutoff)
 	if err != nil {
-		log.Printf("Warning: failed to remove stale offline workers: %v", err)
+		log.Printf("Warning: failed to remove stale workers: %v", err)
 	}
 
 	if jobsReset > 0 || workersMarkedOffline > 0 || staleWorkersRemoved > 0 {
-		log.Printf("State recovery: reset %d job(s) to pending, marked %d worker(s) offline, removed %d stale offline worker record(s)",
+		log.Printf("State recovery: reset %d job(s) to pending, marked %d worker(s) offline, removed %d stale worker record(s)",
 			jobsReset, workersMarkedOffline, staleWorkersRemoved)
 	}
 

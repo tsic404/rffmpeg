@@ -1492,10 +1492,10 @@ func (d *Database) scanWorkers(rows *sql.Rows) ([]*Worker, error) {
 	return workers, nil
 }
 
-// RecoverState performs recovery operations after server restart
-// It resets jobs that were in running/queued state back to pending,
-// removes offline worker records left over by previous runs (TSI-2366),
-// and marks all workers as offline.
+// RecoverState performs recovery operations after server restart: it resets
+// jobs that were in running/queued state back to pending and marks all workers
+// as offline. Stale-worker cleanup is a separate pass (RemoveStaleWorkers)
+// invoked from cmd/server/main.go after recovery.
 func (d *Database) RecoverState() (jobsReset int64, workersMarkedOffline int64, err error) {
 	tx, err := d.db.Begin()
 	if err != nil {
@@ -1540,20 +1540,26 @@ func (d *Database) RecoverState() (jobsReset int64, workersMarkedOffline int64, 
 	return jobsReset, workersMarkedOffline, nil
 }
 
-// RemoveStaleOfflineWorkers deletes every worker record currently marked
-// offline. Called during startup recovery (RecoverState): after a server
-// restart no worker can still be serving, so any offline row is residue from
-// a previous run. Without this, records accumulate when the server crashes or
-// shuts down before the health monitor's offline-threshold sweep ever runs,
-// leaving stale duplicate entries for re-registering workers (TSI-2366).
-// Live workers are unaffected: they re-register and are recreated with idle
-// status by CreateOrUpdateWorker.
-func (d *Database) RemoveStaleOfflineWorkers() (int64, error) {
-	result, err := d.db.Exec(`
-		DELETE FROM workers WHERE status = ?
-	`, protocol.WorkerStatusOffline)
+// RemoveStaleWorkers deletes worker records whose last heartbeat predates
+// now - staleThreshold. Called from cmd/server/main.go during startup
+// recovery, after RecoverState has marked every worker offline: a worker that
+// has not heartbeated within the threshold is dead, so its row is
+// stale residue from a previous run. Without this, records accumulate when the
+// server crashes or shuts down before the health monitor's offline-threshold
+// sweep (10m default) ever runs, leaving stale entries that /api/v1/workers
+// would keep returning as offline nodes (TSI-2366, TSI-2844).
+//
+// Fresh-heartbeat workers — a live process that survived a server restart —
+// are preserved: they re-register and are recreated as idle by
+// CreateOrUpdateWorker. Deleting only genuinely stale rows (last_heartbeat
+// older than 1.5× the heartbeat timeout, per TSI-2844) is what makes this
+// cleanup lazy versus the previous delete-everything-offline sweep, which
+// dropped the worker list to zero on every restart.
+func (d *Database) RemoveStaleWorkers(staleThreshold time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-staleThreshold)
+	result, err := d.db.Exec(`DELETE FROM workers WHERE last_heartbeat < ?`, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("failed to remove stale offline workers: %w", err)
+		return 0, fmt.Errorf("failed to remove stale workers: %w", err)
 	}
 	return result.RowsAffected()
 }
