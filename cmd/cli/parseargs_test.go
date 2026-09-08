@@ -198,6 +198,7 @@ func TestParseArgs_ProbeSubcommand(t *testing.T) {
 	tests := []struct {
 		name           string
 		args           []string
+		wantErr        bool
 		wantIsProbe    bool
 		wantProbeInput string
 		wantFfmpegArgs []string
@@ -272,11 +273,50 @@ func TestParseArgs_ProbeSubcommand(t *testing.T) {
 			wantQuiet:      true,
 		},
 		{
-			name:           "probe with -i flag but no value",
-			args:           []string{"probe", "-i"},
+			name:    "probe with -i flag but no value",
+			args:    []string{"probe", "-i"},
+			wantErr: true,
+		},
+		{
+			name:    "probe rejects duplicate -i flag",
+			args:    []string{"probe", "-i", "a.mp4", "-i", "b.mp4"},
+			wantErr: true,
+		},
+		{
+			name:    "probe rejects flag-like value after -i",
+			args:    []string{"probe", "-i", "-show_streams", "video.mp4"},
+			wantErr: true,
+		},
+		{
+			name:           "probe with -show_streams and -of json",
+			args:           []string{"probe", "video.mp4", "-show_streams", "-of", "json"},
 			wantIsProbe:    true,
-			wantProbeInput: "",
+			wantProbeInput: "video.mp4",
 			wantFfmpegArgs: []string{},
+		},
+		{
+			name:           "probe with -i and trailing ffprobe flags",
+			args:           []string{"probe", "-i", "video.mp4", "-show_format", "-print_format", "json"},
+			wantIsProbe:    true,
+			wantProbeInput: "video.mp4",
+			wantFfmpegArgs: []string{},
+		},
+		{
+			name:           "probe with ffprobe flags before -i",
+			args:           []string{"probe", "-show_streams", "-of", "json", "-i", "video.mp4"},
+			wantIsProbe:    true,
+			wantProbeInput: "video.mp4",
+			wantFfmpegArgs: []string{},
+		},
+		{
+			name:    "probe rejects non-json output format",
+			args:    []string{"probe", "video.mp4", "-of", "xml"},
+			wantErr: true,
+		},
+		{
+			name:    "probe rejects unknown option",
+			args:    []string{"probe", "video.mp4", "-show_entries", "stream=codec_name"},
+			wantErr: true,
 		},
 		{
 			name:           "probe as filename (not subcommand, after -i)",
@@ -298,6 +338,12 @@ func TestParseArgs_ProbeSubcommand(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts, err := parseArgs(tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseArgs(%v) expected error, got opts=%+v", tt.args, opts)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
 			}
