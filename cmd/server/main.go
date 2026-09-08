@@ -230,6 +230,7 @@ func main() {
 			r.Use(ratelimit.JobSubmitMiddleware(h.GetRateLimiter(), rateLimitCfg))
 			r.Post("/jobs", h.SubmitJob)
 		})
+		r.Get("/jobs", h.ListJobs)
 		r.Get("/jobs/{jobId}", h.GetJob)
 		r.Delete("/jobs/{jobId}", h.CancelJob)
 		r.Patch("/jobs/{jobId}", h.UpdateJob)

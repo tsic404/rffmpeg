@@ -56,6 +56,7 @@ func setupTest(t *testing.T) (*handlers.Handler, *chi.Mux, func()) {
 	r := chi.NewRouter()
 	r.Post("/api/v1/upload", h.Upload)
 	r.Post("/api/v1/jobs", h.SubmitJob)
+	r.Get("/api/v1/jobs", h.ListJobs)
 	r.Get("/api/v1/jobs/{jobId}", h.GetJob)
 	r.Delete("/api/v1/jobs/{jobId}", h.CancelJob)
 	r.Patch("/api/v1/jobs/{jobId}", h.UpdateJob)
@@ -229,6 +230,99 @@ func TestUploadAndSubmitJob(t *testing.T) {
 
 	if statusResp.Job.Status != protocol.JobStatusPending {
 		t.Errorf("Expected status 'pending', got '%s'", statusResp.Job.Status)
+	}
+}
+
+// TestListJobs guards the GET /api/v1/jobs list endpoint: it must answer 200
+// (not 405) with the submitted jobs, newest first.
+func TestListJobs(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	// Empty cluster: the endpoint exists and returns an empty list, not 405.
+	req := httptest.NewRequest("GET", "/api/v1/jobs", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/jobs (empty) = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var emptyResp protocol.JobListResponse
+	if err := json.NewDecoder(w.Body).Decode(&emptyResp); err != nil {
+		t.Fatalf("Failed to decode empty list response: %v", err)
+	}
+	if len(emptyResp.Jobs) != 0 {
+		t.Errorf("empty list has %d jobs, want 0", len(emptyResp.Jobs))
+	}
+
+	// Register a worker so jobs can be submitted (TSI-1428).
+	registerTestWorker(t, router, []string{"libx264"})
+
+	// Submit three jobs with a remote URL input to skip the file-existence check.
+	submit := func() string {
+		jobReq := protocol.JobSubmitRequest{
+			InputFiles: []string{"http://example.com/in.mp4"},
+			Args:       []string{"-c:v", "libx264"},
+		}
+		jobBody, _ := json.Marshal(jobReq)
+		r := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+		r.Header.Set("Authorization", "Bearer test-token")
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Job submit failed with status %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp protocol.JobSubmitResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("Failed to decode job response: %v", err)
+		}
+		return resp.JobID
+	}
+	ids := []string{submit(), submit(), submit()}
+
+	list := func(query string) []protocol.JobInfo {
+		r := httptest.NewRequest("GET", "/api/v1/jobs"+query, nil)
+		r.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/jobs%s = %d, want 200: %s", query, rec.Code, rec.Body.String())
+		}
+		var resp protocol.JobListResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("Failed to decode list response: %v", err)
+		}
+		return resp.Jobs
+	}
+
+	// Default page returns all three submitted jobs.
+	all := list("")
+	if len(all) != 3 {
+		t.Fatalf("default list has %d jobs, want 3", len(all))
+	}
+	got := make(map[string]bool, len(all))
+	for _, j := range all {
+		got[j.ID] = true
+	}
+	for _, id := range ids {
+		if !got[id] {
+			t.Errorf("default list missing job %q", id)
+		}
+	}
+
+	// limit caps the page size and offset skips rows (parsePagination HTTP path).
+	if page := list("?limit=2"); len(page) != 2 {
+		t.Errorf("limit=2 returned %d jobs, want 2", len(page))
+	}
+	if page := list("?limit=1"); len(page) != 1 {
+		t.Errorf("limit=1 returned %d jobs, want 1", len(page))
+	}
+	if page := list("?limit=2&offset=2"); len(page) != 1 {
+		t.Errorf("limit=2&offset=2 returned %d jobs, want 1", len(page))
+	}
+	if page := list("?limit=10&offset=1"); len(page) != 2 {
+		t.Errorf("limit=10&offset=1 returned %d jobs, want 2", len(page))
 	}
 }
 

@@ -73,6 +73,11 @@ type JobStatusResponse struct {
 	Job JobInfo `json:"job"`
 }
 
+// JobListResponse is the response for listing jobs (GET /api/v1/jobs).
+type JobListResponse struct {
+	Jobs []JobInfo `json:"jobs"`
+}
+
 type JobCancelResponse struct {
 	Message string `json:"message"`
 }
