@@ -105,13 +105,15 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 ./bin/rffmpeg --max-retries 5 -i input.mp4 -c:v libx264 output.mp4
 ```
 
-**任务超时（`--timeout`）**：`--timeout` 为每个转码任务设置执行上限（Go duration 格式，如 `30s`/`5m`/`2h`），提交时转为绝对截止时间随作业下发；Worker 在 ffmpeg 执行阶段用完该预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过 `--timeout`，例如：
+**任务超时（`--timeout`）**：`--timeout` 为每个转码任务的 **ffmpeg 执行预算**（Go duration 格式，如 `30s`/`5m`/`2h`），只约束 ffmpeg 进程本身的运行时长——上传、调度、输入下载、时长探测等执行前阶段不占用该预算。Worker 在 ffmpeg 执行起点开始计时，用完预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过 `--timeout`，例如：
 
 ```bash
 ./bin/rffmpeg --timeout 5s -i test-large.mp4 -c:v libx264 -preset veryslow output.mp4
 ```
 
 `-preset veryslow` 使软件编码耗时远超 5s，作业才会被 Worker 终止并返回 `timeout`。
+
+> **兼容性说明（破坏性变更）**：本版本的 `--timeout` 语义与线上格式均有变更——job 的 `timeout` 字段由 RFC3339 绝对截止时间改为整数纳秒的执行预算。server、worker、CLI 三个二进制**必须同步升级**，不支持滚动混合部署：旧版 worker/CLI 读取新版 server 下发的整数字段（或新版 server 读取旧版 CLI 上报的 RFC3339 字符串）会在 JSON 解码处直接失败。
 
 **连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。重试次数达到上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / 配置文件 `"max_retries"`，默认 14 次、约 5 分钟）后 CLI 以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。三个通道均支持 `0`：显式设为 `0` 表示**不重试、首次失败即退出**，不会被静默回落为默认值。
 

@@ -520,11 +520,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// the overall safety net, so a stuck pre-execution phase still terminates.
 	jobCtx := ctx
 	var execTimeout time.Duration
-	if job.Timeout != nil && !job.Timeout.IsZero() {
-		if d := time.Until(*job.Timeout); d > 0 {
-			execTimeout = d
-			log.Printf("Job %s: using per-job timeout %v", job.ID, d)
-		}
+	if job.Timeout != nil && *job.Timeout > 0 {
+		execTimeout = *job.Timeout
+		log.Printf("Job %s: using per-job timeout %v", job.ID, execTimeout)
 	}
 
 	// Check for direct paths (shared FS mode)
@@ -662,13 +660,10 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	}
 	defer w.cleanupJobDir(jobDir)
 
-	// Update job status to running
-	if err := w.client.UpdateJob(job.ID, protocol.JobStatusRunning, 0, "", false); err != nil {
-		log.Printf("Failed to update job status to running: %v", err)
-		jobFailed = true
-		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to update job status to running: %v", err))
-		return
-	}
+	// Note: the job stays queued through the pre-execution pipeline below
+	// (download, probe, classification). The running/started_at transition is
+	// reported at the ffmpeg execution boundary so the server's started_at
+	// matches where the --timeout budget actually begins (TSI-2886).
 
 	// Download input files (skip in direct mode)
 	inputPaths := make([]string, 0, len(job.InputFiles))
@@ -890,6 +885,17 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	}
 
 	log.Printf("Executing ffmpeg with args: %v", args)
+
+	// Mark the job running here, at the ffmpeg execution boundary, so the
+	// server's started_at matches where the --timeout budget actually begins.
+	// The pre-execution pipeline above keeps the job queued: a slow download
+	// or probe must not consume the client's --timeout wait window (TSI-2886).
+	if err := w.client.UpdateJob(job.ID, protocol.JobStatusRunning, 0, "", false); err != nil {
+		log.Printf("Failed to update job status to running: %v", err)
+		jobFailed = true
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to update job status to running: %v", err))
+		return
+	}
 
 	// Reserve the per-job timeout budget for ffmpeg itself: the overlay is
 	// created here, not at job start, so the pre-execution pipeline above

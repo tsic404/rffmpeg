@@ -134,7 +134,7 @@ func TestProcessJob_ShortTimeoutReachesFFmpegAndClassifiesTimeout(t *testing.T) 
 
 	// Short per-job timeout: must be reserved for ffmpeg execution, not spent
 	// on the 1s duration probe (TSI-2684).
-	timeout := time.Now().Add(300 * time.Millisecond)
+	timeout := 300 * time.Millisecond
 	job := protocol.JobInfo{
 		ID:             "test-job-short-timeout",
 		DirectPaths:    []string{src},
@@ -265,7 +265,7 @@ func TestProcessJob_RetryTimeoutClassifiedAsTimeout(t *testing.T) {
 
 	// Short budget: long enough for the initial retryable failure, short enough
 	// that the sleeping retry attempt is killed by the deadline.
-	timeout := time.Now().Add(500 * time.Millisecond)
+	timeout := 500 * time.Millisecond
 	job := protocol.JobInfo{
 		ID:             "test-job-retry-timeout",
 		DirectPaths:    []string{src},
@@ -394,7 +394,7 @@ func TestProcessJob_RetryBackoffBudgetExhaustionClassifiedAsTimeout(t *testing.T
 
 	// Short budget: the initial + first retry attempts fail immediately, then
 	// the budget expires during the 1s backoff interval.
-	timeout := time.Now().Add(150 * time.Millisecond)
+	timeout := 150 * time.Millisecond
 	job := protocol.JobInfo{
 		ID:             "test-job-retry-backoff-timeout",
 		DirectPaths:    []string{src},

@@ -678,6 +678,117 @@ func TestMigrationAddsCachedColumn(t *testing.T) {
 	}
 }
 
+// TestMigrationConvertsLegacyTimeoutDeadline pins the TSI-2886 timeout column
+// migration: a legacy absolute-deadline timeout (RFC3339 text) on an in-flight
+// job is converted to its remaining nanosecond budget; expired and terminal
+// rows are dropped; a NULL timeout stays NULL.
+func TestMigrationConvertsLegacyTimeoutDeadline(t *testing.T) {
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "legacy-timeout.db")
+
+	legacy, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE jobs (
+			id TEXT PRIMARY KEY,
+			status TEXT NOT NULL,
+			input_files TEXT NOT NULL,
+			args TEXT NOT NULL,
+			output_filename TEXT DEFAULT '',
+			streaming_output INTEGER DEFAULT 0,
+			output_files TEXT DEFAULT '[]',
+			worker_id TEXT,
+			exit_code INTEGER,
+			error TEXT,
+			failure_type TEXT DEFAULT '',
+			failure_details TEXT DEFAULT '',
+			retryable INTEGER DEFAULT 0,
+			auto_hw INTEGER DEFAULT 0,
+			cached INTEGER DEFAULT 0,
+			timeout DATETIME,
+			direct_paths TEXT DEFAULT '[]',
+			progress_percent REAL DEFAULT 0,
+			eta_seconds INTEGER DEFAULT 0,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			started_at DATETIME,
+			finished_at DATETIME
+		);
+	`); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+
+	now := time.Now()
+	insert := `INSERT INTO jobs (id, status, input_files, args, timeout, created_at, updated_at)
+	           VALUES (?, ?, '[]', '[]', ?, ?, ?)`
+	rows := []struct {
+		id, status string
+		timeout    interface{}
+	}{
+		{"job-future", "pending", now.Add(5 * time.Minute).Format(time.RFC3339Nano)},
+		{"job-running", "running", now.Add(5 * time.Minute).Format(time.RFC3339Nano)},
+		{"job-past", "pending", now.Add(-5 * time.Minute).Format(time.RFC3339Nano)},
+		{"job-completed", "completed", now.Add(5 * time.Minute).Format(time.RFC3339Nano)},
+		{"job-null", "pending", nil},
+	}
+	for _, r := range rows {
+		if _, err := legacy.Exec(insert, r.id, r.status, r.timeout, now, now); err != nil {
+			t.Fatalf("insert legacy job %s: %v", r.id, err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	d, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("open db through migration path: %v", err)
+	}
+	defer d.Close()
+
+	future, err := d.GetJob("job-future")
+	if err != nil || future == nil {
+		t.Fatalf("GetJob(job-future): err=%v job=%v", err, future)
+	}
+	if !future.Timeout.Valid || future.Timeout.Int64 <= 0 || future.Timeout.Int64 > int64(5*time.Minute) {
+		t.Errorf("job-future timeout = %+v, want positive remaining ns <= 5m", future.Timeout)
+	}
+
+	running, err := d.GetJob("job-running")
+	if err != nil || running == nil {
+		t.Fatalf("GetJob(job-running): err=%v job=%v", err, running)
+	}
+	if !running.Timeout.Valid || running.Timeout.Int64 <= 0 || running.Timeout.Int64 > int64(5*time.Minute) {
+		t.Errorf("job-running timeout = %+v, want positive remaining ns <= 5m", running.Timeout)
+	}
+
+	past, err := d.GetJob("job-past")
+	if err != nil || past == nil {
+		t.Fatalf("GetJob(job-past): err=%v job=%v", err, past)
+	}
+	if past.Timeout.Valid {
+		t.Errorf("job-past timeout = %+v, want cleared (expired)", past.Timeout)
+	}
+
+	done, err := d.GetJob("job-completed")
+	if err != nil || done == nil {
+		t.Fatalf("GetJob(job-completed): err=%v job=%v", err, done)
+	}
+	if done.Timeout.Valid {
+		t.Errorf("job-completed timeout = %+v, want cleared (terminal)", done.Timeout)
+	}
+
+	nullJob, err := d.GetJob("job-null")
+	if err != nil || nullJob == nil {
+		t.Fatalf("GetJob(job-null): err=%v job=%v", err, nullJob)
+	}
+	if nullJob.Timeout.Valid {
+		t.Errorf("job-null timeout = %+v, want cleared (was NULL)", nullJob.Timeout)
+	}
+}
+
 // TestCachedFlagPersistedOnTerminalUpdate guards the TSI-2519 DB contract:
 // a terminal completion recorded with the cached flag returns Cached=true
 // from GetJob; a non-cached completion stays false; non-terminal updates do

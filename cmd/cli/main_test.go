@@ -1295,25 +1295,42 @@ func mustAbs(t *testing.T, p string) string {
 func TestClientWaitDeadline(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	// timeout-only: deadline is now+timeout+clientVerdictGrace.
+	// pending timeout-only: deadline is now+timeout+clientVerdictGrace.
 	timeout := time.Hour
-	got, has := clientWaitDeadline(now, timeout, nil)
+	got, has := clientWaitDeadline(now, timeout, protocol.JobStatusPending, nil, nil)
 	if !has {
-		t.Fatal("clientWaitDeadline(timeout-only) has = false, want true")
+		t.Fatal("clientWaitDeadline(pending timeout-only) has = false, want true")
 	}
 	want := now.Add(timeout + clientVerdictGrace)
 	if !got.Equal(want) {
-		t.Errorf("clientWaitDeadline(timeout-only) = %v, want %v", got, want)
+		t.Errorf("clientWaitDeadline(pending timeout-only) = %v, want %v", got, want)
+	}
+
+	// running started-at anchor: the budget runs from started_at, not submit
+	// time (TSI-2886), so the give-up line shifts by the pre-exec latency.
+	startedAt := now.Add(8 * time.Second)
+	got, has = clientWaitDeadline(now, timeout, protocol.JobStatusRunning, &startedAt, nil)
+	if !has {
+		t.Fatal("clientWaitDeadline(started) has = false, want true")
+	}
+	if want := startedAt.Add(timeout + clientVerdictGrace); !got.Equal(want) {
+		t.Errorf("clientWaitDeadline(started) = %v, want %v", got, want)
+	}
+
+	// queued: --timeout is the ffmpeg budget, not the pre-exec budget, so a
+	// claimed job in download/probe must not be given a --timeout bound.
+	if _, has := clientWaitDeadline(now, timeout, protocol.JobStatusQueued, nil, nil); has {
+		t.Error("clientWaitDeadline(queued) has = true, want false (no --timeout bound)")
 	}
 
 	// no bounds: has must be false.
-	if _, has := clientWaitDeadline(now, 0, nil); has {
+	if _, has := clientWaitDeadline(now, 0, protocol.JobStatusPending, nil, nil); has {
 		t.Error("clientWaitDeadline(no bounds) has = true, want false")
 	}
 
 	// noWorkerDeadline-only: deadline is verdict + clientVerdictGrace.
 	verdict := now.Add(2 * time.Minute)
-	got, has = clientWaitDeadline(now, 0, &verdict)
+	got, has = clientWaitDeadline(now, 0, protocol.JobStatusPending, nil, &verdict)
 	if !has {
 		t.Fatal("clientWaitDeadline(verdict-only) has = false, want true")
 	}
@@ -1322,21 +1339,21 @@ func TestClientWaitDeadline(t *testing.T) {
 	}
 
 	// timeout later than verdict: deadline follows timeout.
-	got, _ = clientWaitDeadline(now, 3*time.Minute, &verdict)
+	got, _ = clientWaitDeadline(now, 3*time.Minute, protocol.JobStatusPending, nil, &verdict)
 	if !got.Equal(now.Add(3*time.Minute + clientVerdictGrace)) {
 		t.Errorf("clientWaitDeadline(timeout later) = %v, want timeout-bound", got)
 	}
 
 	// verdict later than timeout: deadline follows verdict.
 	laterVerdict := now.Add(10 * time.Minute)
-	got, _ = clientWaitDeadline(now, 2*time.Minute, &laterVerdict)
+	got, _ = clientWaitDeadline(now, 2*time.Minute, protocol.JobStatusPending, nil, &laterVerdict)
 	if !got.Equal(laterVerdict.Add(clientVerdictGrace)) {
 		t.Errorf("clientWaitDeadline(verdict later) = %v, want verdict-bound", got)
 	}
 
 	// Overflow input must not produce a deadline in the past.
 	maxDur := time.Duration(1<<63 - 1)
-	got, has = clientWaitDeadline(now, maxDur, nil)
+	got, has = clientWaitDeadline(now, maxDur, protocol.JobStatusPending, nil, nil)
 	if !has {
 		t.Fatal("clientWaitDeadline(overflow) has = false, want true")
 	}
@@ -1428,12 +1445,13 @@ func (s *scriptedJobClient) CancelJob(jobID string) error {
 }
 
 // TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert pins the TSI-2571 core
-// behavior at loop level: the client submits while the job is queued (no
-// NoWorkerDeadline), its --timeout wait fires, and the re-read after the
-// deadline observes the job reverted to pending with a fresh verdict (worker
-// died in between). The loop must extend the wait once — the second wait's
-// bound is the fresh verdict plus grace, not the exhausted fallback bound —
-// and then terminate by returning the terminal job, without cancelling it.
+// behavior at loop level: the client submits while the job is pending with no
+// NoWorkerDeadline (waiting behind a busy worker), its --timeout wait fires,
+// and the re-read after the deadline observes the job now carries a fresh
+// verdict (the busy worker died). The loop must extend the wait once — the
+// second wait's bound is the fresh verdict plus grace, not the exhausted
+// fallback bound — and then terminate by returning the terminal job, without
+// cancelling it.
 func TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert(t *testing.T) {
 	now := time.Now()
 	verdict := now.Add(10 * time.Second)
@@ -1443,7 +1461,7 @@ func TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert(t *testing.T) {
 	fake := &scriptedJobClient{
 		jobID: jobID,
 		seq: []protocol.JobInfo{
-			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusPending},
 			{ID: jobID, Status: protocol.JobStatusPending, NoWorkerDeadline: &verdict},
 			{ID: jobID, Status: protocol.JobStatusPending, NoWorkerDeadline: &verdict},
 			{ID: jobID, Status: protocol.JobStatusFailed, FailureType: string(protocol.FailureNoWorkerAvailable), Error: "no worker available"},
@@ -1541,6 +1559,126 @@ func TestWaitForJobLoop_DoesNotExtendTwice(t *testing.T) {
 	}
 	if strings.Contains(stderr, "NO_WORKER_AVAILABLE") {
 		t.Errorf("stderr = %q, must not claim a server NO_WORKER_AVAILABLE verdict is still possible", stderr)
+	}
+}
+
+// TestWaitForJobLoop_ExtendsOnceAfterJobStarts is the TSI-2886 regression: the
+// client's first wait is anchored to submit time (started_at nil), but once the
+// job starts running the worker's ffmpeg budget only begins at started_at. The
+// loop must re-anchor to started_at+timeout and wait for the worker's TIMEOUT
+// verdict instead of cancelling the running job early.
+func TestWaitForJobLoop_ExtendsOnceAfterJobStarts(t *testing.T) {
+	now := time.Now()
+	startedAt := now.Add(2 * time.Second)
+	timeout := 50 * time.Millisecond
+	jobID := "job-started"
+
+	fake := &scriptedJobClient{
+		jobID: jobID,
+		seq: []protocol.JobInfo{
+			{ID: jobID, Status: protocol.JobStatusPending},
+			{ID: jobID, Status: protocol.JobStatusRunning, StartedAt: &startedAt},
+			{ID: jobID, Status: protocol.JobStatusRunning, StartedAt: &startedAt},
+			{ID: jobID, Status: protocol.JobStatusTimeout, Error: "job exceeded its time limit"},
+		},
+	}
+
+	var job *protocol.JobInfo
+	var code int
+	stderr := captureStderr(func() {
+		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+	})
+
+	if code != ExitSuccess {
+		t.Fatalf("waitForJobLoop code = %d, want ExitSuccess (worker TIMEOUT verdict observed)", code)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty on terminal-verdict path", stderr)
+	}
+	if job == nil || job.Status != protocol.JobStatusTimeout {
+		t.Fatalf("returned job = %+v, want timeout verdict job", job)
+	}
+	if fake.cancelCalls != 0 {
+		t.Errorf("CancelJob calls = %d, want 0 (loop must extend, not cancel)", fake.cancelCalls)
+	}
+	if len(fake.waitDeadlines) != 2 {
+		t.Fatalf("wait deadlines recorded = %d, want 2", len(fake.waitDeadlines))
+	}
+	if !fake.waitDeadlines[1].After(fake.waitDeadlines[0]) {
+		t.Errorf("second wait deadline %v not after first %v: wait was not re-anchored to started_at", fake.waitDeadlines[1], fake.waitDeadlines[0])
+	}
+}
+
+// TestWaitForJobLoop_QueuedJobNotCancelledByTimeout is the TSI-2886 regression
+// for the download/probe phase: a queued job is already claimed by a worker and
+// spends --timeout on its pre-exec pipeline, which the worker bounds
+// independently (30m dataClient download + ffprobe executor). The client must not cancel a
+// queued job on the --timeout bound — it waits for the worker's terminal
+// verdict instead.
+func TestWaitForJobLoop_QueuedJobNotCancelledByTimeout(t *testing.T) {
+	timeout := 50 * time.Millisecond
+	jobID := "job-queued"
+
+	fake := &scriptedJobClient{
+		jobID: jobID,
+		seq: []protocol.JobInfo{
+			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusTimeout, Error: "job exceeded its time limit"},
+		},
+	}
+
+	var job *protocol.JobInfo
+	var code int
+	stderr := captureStderr(func() {
+		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+	})
+
+	if code != ExitSuccess {
+		t.Fatalf("waitForJobLoop code = %d, want ExitSuccess (worker TIMEOUT verdict observed)", code)
+	}
+	if job == nil || job.Status != protocol.JobStatusTimeout {
+		t.Fatalf("returned job = %+v, want timeout verdict job", job)
+	}
+	if fake.cancelCalls != 0 {
+		t.Errorf("CancelJob calls = %d, want 0 (queued job must not be cancelled on --timeout)", fake.cancelCalls)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty on terminal-verdict path", stderr)
+	}
+}
+
+// TestWaitForJobLoop_PendingToQueuedNotCancelled covers the claim transition:
+// a pending job whose --timeout wait fires, but which has since been claimed by
+// a worker (queued), must not be cancelled as "did not start" — the client
+// re-anchors to the no-deadline queued wait and awaits the verdict.
+func TestWaitForJobLoop_PendingToQueuedNotCancelled(t *testing.T) {
+	timeout := 50 * time.Millisecond
+	jobID := "job-pending-to-queued"
+
+	fake := &scriptedJobClient{
+		jobID: jobID,
+		seq: []protocol.JobInfo{
+			{ID: jobID, Status: protocol.JobStatusPending},
+			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusQueued},
+			{ID: jobID, Status: protocol.JobStatusTimeout, Error: "job exceeded its time limit"},
+		},
+	}
+
+	var job *protocol.JobInfo
+	var code int
+	job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+
+	if code != ExitSuccess {
+		t.Fatalf("waitForJobLoop code = %d, want ExitSuccess (worker TIMEOUT verdict observed)", code)
+	}
+	if job == nil || job.Status != protocol.JobStatusTimeout {
+		t.Fatalf("returned job = %+v, want timeout verdict job", job)
+	}
+	if fake.cancelCalls != 0 {
+		t.Errorf("CancelJob calls = %d, want 0 (claimed job must not be cancelled as 'did not start')", fake.cancelCalls)
 	}
 }
 

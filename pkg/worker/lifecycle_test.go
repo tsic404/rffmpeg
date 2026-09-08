@@ -235,7 +235,13 @@ func TestStopRejectsNewJobsAndWaitsForInFlight(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"jobs":[]}`))
 		case r.URL.Path == "/api/v1/jobs/long-job":
-			jobStarted <- struct{}{}
+			// Signal "started" at most once: the first job request (running)
+			// marks the job as handed out; later stderr/terminal requests must
+			// not re-signal, so drop the send when the buffer is already full.
+			select {
+			case jobStarted <- struct{}{}:
+			default:
+			}
 			<-blockJob // hold the job's final status update until released
 			_, _ = w.Write([]byte(`{}`))
 		default:
@@ -358,7 +364,10 @@ func TestHeartbeatFlowsWhileJobBlocked(t *testing.T) {
 				_, _ = w.Write([]byte(`{"jobs":[]}`))
 			}
 		case r.URL.Path == "/api/v1/jobs/block-job":
-			jobStarted <- struct{}{}
+			select {
+			case jobStarted <- struct{}{}:
+			default:
+			}
 			<-blockJob // hold the job's final status update until released
 			_, _ = w.Write([]byte(`{}`))
 		default:

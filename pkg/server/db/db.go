@@ -25,14 +25,14 @@ type Job struct {
 	WorkerID        sql.NullString
 	ExitCode        sql.NullInt32
 	Error           sql.NullString
-	FailureType     string       // Classified failure type (TSI-757)
-	FailureDetails  string       // Human-readable failure detail
-	AutoHW          bool         // Enable automatic hardware encoder upgrade
-	Cached          bool         // Result was served from the worker cache (TSI-2519)
-	Timeout         sql.NullTime // Per-job timeout deadline (TSI-764)
-	DirectPaths     string       // JSON array of direct output paths for pass-through mode (TSI-807)
-	ProgressPercent float64      // Current progress percentage (0-100)
-	EtaSeconds      int          // Estimated seconds remaining (0 if unknown)
+	FailureType     string        // Classified failure type (TSI-757)
+	FailureDetails  string        // Human-readable failure detail
+	AutoHW          bool          // Enable automatic hardware encoder upgrade
+	Cached          bool          // Result was served from the worker cache (TSI-2519)
+	Timeout         sql.NullInt64 // Per-job ffmpeg execution budget in nanoseconds (nil = worker default)
+	DirectPaths     string        // JSON array of direct output paths for pass-through mode (TSI-807)
+	ProgressPercent float64       // Current progress percentage (0-100)
+	EtaSeconds      int           // Estimated seconds remaining (0 if unknown)
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	StartedAt       sql.NullTime
@@ -179,7 +179,7 @@ func (d *Database) initTables() error {
 			retryable INTEGER DEFAULT 0,
 			auto_hw INTEGER DEFAULT 0,
 			cached INTEGER DEFAULT 0,
-			timeout DATETIME,
+			timeout INTEGER,
 			direct_paths TEXT DEFAULT '[]',
 			progress_percent REAL DEFAULT 0,
 			eta_seconds INTEGER DEFAULT 0,
@@ -307,7 +307,7 @@ func (d *Database) initTables() error {
 		`ALTER TABLE jobs ADD COLUMN failure_type TEXT DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN failure_details TEXT DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN retryable INTEGER DEFAULT 0`,
-		`ALTER TABLE jobs ADD COLUMN timeout DATETIME`,
+		`ALTER TABLE jobs ADD COLUMN timeout INTEGER`,
 		`ALTER TABLE workers ADD COLUMN evicted INTEGER DEFAULT 0`,
 		`ALTER TABLE workers ADD COLUMN evicted_at DATETIME`,
 		`ALTER TABLE jobs ADD COLUMN direct_paths TEXT DEFAULT '[]'`,
@@ -329,7 +329,58 @@ func (d *Database) initTables() error {
 		}
 	}
 
+	// TSI-2886: jobs.timeout must hold a nanosecond duration (INTEGER). Fresh
+	// databases already create it INTEGER, but legacy databases declared it
+	// DATETIME — which makes the sqlite driver read INTEGER values back as
+	// time.Time (treating them as Unix seconds) and corrupt a nanosecond
+	// budget. Re-declare the column on legacy databases (see
+	// migrateTimeoutColumnType); fresh databases skip this entirely.
+	var timeoutDecl string
+	if err := d.db.QueryRow(`SELECT type FROM pragma_table_info('jobs') WHERE name = 'timeout'`).Scan(&timeoutDecl); err != nil {
+		return fmt.Errorf("inspect jobs.timeout column: %w", err)
+	}
+	if !strings.EqualFold(timeoutDecl, "INTEGER") {
+		if err := d.migrateTimeoutColumnType(); err != nil {
+			return err
+		}
+	}
+
 	return err
+}
+
+// migrateTimeoutColumnType re-declares jobs.timeout from DATETIME to INTEGER
+// (TSI-2886). It runs inside a transaction so a crash cannot leave the column
+// half-renamed. In-flight jobs carrying a future RFC3339 absolute deadline keep
+// their remaining budget in nanoseconds; expired and terminal deadlines are
+// dropped (their job is done or would fail anyway).
+func (d *Database) migrateTimeoutColumnType() error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin timeout column migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	steps := []struct {
+		stmt string
+		args []interface{}
+	}{
+		{`ALTER TABLE jobs RENAME COLUMN timeout TO timeout_legacy`, nil},
+		{`ALTER TABLE jobs ADD COLUMN timeout INTEGER`, nil},
+		{
+			`UPDATE jobs SET timeout = CAST((julianday(timeout_legacy) - julianday('now')) * 86400000000000 AS INTEGER)
+			 WHERE typeof(timeout_legacy) = 'text'
+			   AND status IN (?, ?, ?)
+			   AND (julianday(timeout_legacy) - julianday('now')) > 0`,
+			[]interface{}{protocol.JobStatusPending, protocol.JobStatusQueued, protocol.JobStatusRunning},
+		},
+		{`ALTER TABLE jobs DROP COLUMN timeout_legacy`, nil},
+	}
+	for _, s := range steps {
+		if _, err := tx.Exec(s.stmt, s.args...); err != nil {
+			return fmt.Errorf("timeout column migration: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // CreateJob creates a new job record
@@ -338,13 +389,13 @@ func (d *Database) CreateJob(inputFiles, args, outputFilename string, autoHW boo
 }
 
 // CreateJobWithStreaming creates a new job record with streaming output option and optional direct paths
-func (d *Database) CreateJobWithStreaming(inputFiles, args, outputFilename string, autoHW bool, streamingOutput bool, timeout *time.Time, directPaths string) (*Job, error) {
+func (d *Database) CreateJobWithStreaming(inputFiles, args, outputFilename string, autoHW bool, streamingOutput bool, timeout *time.Duration, directPaths string) (*Job, error) {
 	id := uuid.New().String()
 	now := time.Now()
 
 	var timeoutVal interface{}
 	if timeout != nil {
-		timeoutVal = *timeout
+		timeoutVal = int64(*timeout)
 	}
 
 	_, err := d.db.Exec(`
@@ -366,13 +417,13 @@ func (d *Database) CreateJobWithStreaming(inputFiles, args, outputFilename strin
 // would leave the job pending and later failed by the starvation sweep as
 // NO_WORKER_AVAILABLE with a classification that contradicts the response
 // (TSI-2846).
-func (d *Database) CreateFailedJob(inputFiles, args, outputFilename string, autoHW bool, streamingOutput bool, timeout *time.Time, directPaths, failureType, errMsg string) (*Job, error) {
+func (d *Database) CreateFailedJob(inputFiles, args, outputFilename string, autoHW bool, streamingOutput bool, timeout *time.Duration, directPaths, failureType, errMsg string) (*Job, error) {
 	id := uuid.New().String()
 	now := time.Now()
 
 	var timeoutVal interface{}
 	if timeout != nil {
-		timeoutVal = *timeout
+		timeoutVal = int64(*timeout)
 	}
 
 	const exitCode = -1
