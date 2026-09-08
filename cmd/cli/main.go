@@ -335,10 +335,12 @@ func run() int {
 
 	ffmpegArgs := opts.FmpegArgs
 
-	// If no ffmpeg args and not in probe mode, show help instead of connecting to server
+	// If no ffmpeg args and not in probe mode, print usage and exit non-zero.
+	// ffmpeg exits 1 when invoked with no arguments, and rffmpeg must match
+	// so callers can detect a missing command (TSI-2907).
 	if !opts.IsProbe && len(ffmpegArgs) == 0 {
 		printUsage()
-		return ExitSuccess
+		return ExitError
 	}
 
 	// Load configuration

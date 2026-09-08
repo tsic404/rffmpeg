@@ -61,6 +61,23 @@ func captureStderr(f func()) string {
 	return buf.String()
 }
 
+// TestRun_NoArgsReturnsError pins the TSI-2907 fix: invoking rffmpeg with no
+// arguments must exit non-zero (ffmpeg exits 1) instead of printing usage and
+// reporting success.
+func TestRun_NoArgsReturnsError(t *testing.T) {
+	orig := os.Args
+	defer func() { os.Args = orig }()
+	os.Args = []string{"rffmpeg"}
+
+	code := ExitSuccess
+	captureStderr(func() {
+		code = run()
+	})
+	if code != ExitError {
+		t.Errorf("run() with no args = %d, want %d", code, ExitError)
+	}
+}
+
 func TestEncoderCapabilityFlags(t *testing.T) {
 	tests := []struct {
 		name     string
