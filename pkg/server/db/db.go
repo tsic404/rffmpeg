@@ -247,6 +247,9 @@ func (d *Database) initTables() error {
 
 		CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 		CREATE INDEX IF NOT EXISTS idx_jobs_worker_id ON jobs(worker_id);
+		-- Backs the GET /api/v1/jobs list ordering (created_at DESC, id DESC)
+		-- so paginated listings scan an index instead of a full table sort.
+		CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs(created_at DESC, id DESC);
 		CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 		CREATE INDEX IF NOT EXISTS idx_upload_sessions_status ON upload_sessions(status);
 		CREATE INDEX IF NOT EXISTS idx_upload_sessions_expires_at ON upload_sessions(expires_at);
@@ -1609,6 +1612,25 @@ func (d *Database) GetJobsByStatus(status protocol.JobStatus, limit int) ([]*Job
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get jobs by status: %w", err)
+	}
+	defer rows.Close()
+
+	return d.scanJobs(rows)
+}
+
+// ListJobs retrieves all jobs with pagination, newest first. Used by the
+// GET /api/v1/jobs list endpoint.
+func (d *Database) ListJobs(limit int, offset int) ([]*Job, error) {
+	rows, err := d.db.Query(`
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
+		       created_at, updated_at, started_at, finished_at
+		FROM jobs
+		ORDER BY created_at DESC, id DESC
+		LIMIT ? OFFSET ?
+	`, limit, offset)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list jobs: %w", err)
 	}
 	defer rows.Close()
 

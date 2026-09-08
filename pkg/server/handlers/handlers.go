@@ -631,8 +631,36 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobInfo := h.dbJobToJobInfo(job)
+	var noLiveWorker bool
+	if job.Status == protocol.JobStatusPending {
+		noLiveWorker = h.hasNoLiveSchedulableWorker()
+	}
+	jobInfo := h.dbJobToJobInfo(job, noLiveWorker)
 	writeJSON(w, http.StatusOK, protocol.JobStatusResponse{Job: jobInfo})
+}
+
+// ListJobs handles listing all jobs with pagination.
+// GET /api/v1/jobs
+// Query params: limit (default 50, capped at 500), offset (default 0).
+// Results are ordered newest-first (created_at DESC).
+func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	limit, offset := parsePagination(r, 50, 500)
+
+	jobs, err := h.db.ListJobs(limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to list jobs", err,
+		))
+		return
+	}
+
+	noLiveWorker := h.hasNoLiveSchedulableWorker()
+	jobInfos := make([]protocol.JobInfo, len(jobs))
+	for i, job := range jobs {
+		jobInfos[i] = h.dbJobToJobInfo(job, noLiveWorker)
+	}
+
+	writeJSON(w, http.StatusOK, protocol.JobListResponse{Jobs: jobInfos})
 }
 
 // CancelJob handles job cancellation
@@ -1165,9 +1193,11 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pulled jobs are queued (assigned), never pending, so no NoWorkerDeadline
+	// applies and no live-worker lookup is needed.
 	jobInfos := make([]protocol.JobInfo, len(jobs))
 	for i, job := range jobs {
-		jobInfos[i] = h.dbJobToJobInfo(job)
+		jobInfos[i] = h.dbJobToJobInfo(job, false)
 	}
 
 	writeJSON(w, http.StatusOK, protocol.WorkerJobPullResponse{
@@ -1634,8 +1664,25 @@ func isHWEncoder(name string) bool {
 	return false
 }
 
+// hasNoLiveSchedulableWorker reports whether the cluster currently has no live
+// schedulable worker, so pending jobs can carry a NoWorkerDeadline. It returns
+// false (deadline suppressed) when the starvation sweep is disabled
+// (noWorkerJobTimeout <= 0) or the lookup fails — the sweep would also skip the
+// tick on a failed lookup, so the job keeps waiting and no verdict is imminent.
+func (h *Handler) hasNoLiveSchedulableWorker() bool {
+	if h.noWorkerJobTimeout <= 0 {
+		return false
+	}
+	liveWorkers, err := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
+	if err != nil {
+		log.Printf("failed to check live schedulable workers: %v", err)
+		return false
+	}
+	return len(liveWorkers) == 0
+}
+
 // dbJobToJobInfo converts database Job to protocol JobInfo
-func (h *Handler) dbJobToJobInfo(job *db.Job) protocol.JobInfo {
+func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool) protocol.JobInfo {
 	var inputFiles, args, outputFiles, directPaths []string
 	if err := json.Unmarshal([]byte(job.InputFiles), &inputFiles); err != nil {
 		log.Printf("Failed to unmarshal input files for job %s: %v", job.ID, err)
@@ -1692,19 +1739,11 @@ func (h *Handler) dbJobToJobInfo(job *db.Job) protocol.JobInfo {
 	// has a worker_id and can never receive NO_WORKER_AVAILABLE; a pending
 	// job behind a busy-but-live worker is never swept (the sweep's
 	// live-worker guard short-circuits, TSI-2204), so neither carries a
-	// deadline. A non-positive heartbeatTimeout disables the liveness
-	// filter, mirroring the sweep's HeartbeatFreshness semantics.
-	if job.Status == protocol.JobStatusPending && h.noWorkerJobTimeout > 0 {
-		liveWorkers, err := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
-		if err != nil {
-			// A failed lookup must not poison the response: skip the
-			// deadline (the sweep would also fail its lookup and skip the
-			// tick, so the job keeps waiting and no verdict is imminent).
-			log.Printf("dbJobToJobInfo: failed to check live schedulable workers for job %s: %v", job.ID, err)
-		} else if len(liveWorkers) == 0 {
-			d := job.CreatedAt.Add(h.noWorkerJobTimeout + h.timeoutCheckInterval)
-			info.NoWorkerDeadline = &d
-		}
+	// deadline. noLiveWorker is computed once per request by the caller so a
+	// page of pending jobs does not re-run the same live-worker query N times.
+	if job.Status == protocol.JobStatusPending && h.noWorkerJobTimeout > 0 && noLiveWorker {
+		d := job.CreatedAt.Add(h.noWorkerJobTimeout + h.timeoutCheckInterval)
+		info.NoWorkerDeadline = &d
 	}
 
 	return info

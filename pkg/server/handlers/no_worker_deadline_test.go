@@ -79,7 +79,7 @@ func TestDBJobToJobInfo_NoWorkerDeadline(t *testing.T) {
 		job.Status = protocol.JobStatusPending
 		job.WorkerID = sql.NullString{} // unassigned
 
-		info := h.dbJobToJobInfo(&job)
+		info := h.dbJobToJobInfo(&job, h.hasNoLiveSchedulableWorker())
 		if info.NoWorkerDeadline == nil {
 			t.Fatal("pending unassigned job with no live worker: NoWorkerDeadline = nil, want non-nil")
 		}
@@ -97,7 +97,7 @@ func TestDBJobToJobInfo_NoWorkerDeadline(t *testing.T) {
 		job.Status = protocol.JobStatusPending
 		job.WorkerID = sql.NullString{} // unassigned
 
-		info := h.dbJobToJobInfo(&job)
+		info := h.dbJobToJobInfo(&job, h.hasNoLiveSchedulableWorker())
 		if info.NoWorkerDeadline != nil {
 			t.Errorf("pending job behind live worker: NoWorkerDeadline = %v, want nil", info.NoWorkerDeadline)
 		}
@@ -113,7 +113,7 @@ func TestDBJobToJobInfo_NoWorkerDeadline(t *testing.T) {
 		job.Status = protocol.JobStatusPending
 		job.WorkerID = sql.NullString{}
 
-		info := h.dbJobToJobInfo(&job)
+		info := h.dbJobToJobInfo(&job, h.hasNoLiveSchedulableWorker())
 		if info.NoWorkerDeadline == nil {
 			t.Fatal("pending job with stale worker: NoWorkerDeadline = nil, want non-nil")
 		}
@@ -132,7 +132,7 @@ func TestDBJobToJobInfo_NoWorkerDeadline(t *testing.T) {
 		job.Status = protocol.JobStatusPending
 		job.WorkerID = sql.NullString{}
 
-		info := h.dbJobToJobInfo(&job)
+		info := h.dbJobToJobInfo(&job, h.hasNoLiveSchedulableWorker())
 		if info.NoWorkerDeadline != nil {
 			t.Errorf("pending job with freshness disabled: NoWorkerDeadline = %v, want nil", info.NoWorkerDeadline)
 		}
@@ -146,7 +146,7 @@ func TestDBJobToJobInfo_NoWorkerDeadline(t *testing.T) {
 		job.Status = protocol.JobStatusQueued
 		job.WorkerID = sql.NullString{String: "worker-1", Valid: true}
 
-		info := h.dbJobToJobInfo(&job)
+		info := h.dbJobToJobInfo(&job, h.hasNoLiveSchedulableWorker())
 		if info.NoWorkerDeadline != nil {
 			t.Errorf("queued job: NoWorkerDeadline = %v, want nil", info.NoWorkerDeadline)
 		}
@@ -165,7 +165,7 @@ func TestDBJobToJobInfo_NoWorkerDeadline(t *testing.T) {
 		job.Status = protocol.JobStatusPending
 		job.WorkerID = sql.NullString{}
 
-		info := disabled.dbJobToJobInfo(&job)
+		info := disabled.dbJobToJobInfo(&job, disabled.hasNoLiveSchedulableWorker())
 		if info.NoWorkerDeadline != nil {
 			t.Errorf("noWorkerJobTimeout=0: NoWorkerDeadline = %v, want nil", info.NoWorkerDeadline)
 		}

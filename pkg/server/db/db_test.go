@@ -1134,6 +1134,73 @@ func TestGetJobsByStatus(t *testing.T) {
 	}
 }
 
+func TestListJobs(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	inputFiles := `["file1.mp4"]`
+	args := `["-c:v", "libx264"]`
+	outputFilename := "output.mp4"
+
+	job1, err := database.CreateJob(inputFiles, args, outputFilename, false)
+	if err != nil {
+		t.Fatalf("Failed to create job1: %v", err)
+	}
+	job2, err := database.CreateJob(inputFiles, args, outputFilename, false)
+	if err != nil {
+		t.Fatalf("Failed to create job2: %v", err)
+	}
+	job3, err := database.CreateJob(inputFiles, args, outputFilename, false)
+	if err != nil {
+		t.Fatalf("Failed to create job3: %v", err)
+	}
+
+	// Backdate job1/job2 so the newest-first ordering is deterministic.
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, time.Now().Add(-2*time.Second), job1.ID); err != nil {
+		t.Fatalf("Failed to backdate job1: %v", err)
+	}
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, time.Now().Add(-1*time.Second), job2.ID); err != nil {
+		t.Fatalf("Failed to backdate job2: %v", err)
+	}
+
+	// Full list is newest-first.
+	jobs, err := database.ListJobs(10, 0)
+	if err != nil {
+		t.Fatalf("Failed to list jobs: %v", err)
+	}
+	if len(jobs) != 3 {
+		t.Fatalf("ListJobs returned %d jobs, want 3", len(jobs))
+	}
+	if jobs[0].ID != job3.ID || jobs[1].ID != job2.ID || jobs[2].ID != job1.ID {
+		t.Errorf("ListJobs order = [%s %s %s], want newest-first [%s %s %s]",
+			jobs[0].ID, jobs[1].ID, jobs[2].ID, job3.ID, job2.ID, job1.ID)
+	}
+
+	// limit=2 returns the two newest.
+	page, err := database.ListJobs(2, 0)
+	if err != nil {
+		t.Fatalf("Failed to list jobs page: %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("limit=2 returned %d jobs, want 2", len(page))
+	}
+	if page[0].ID != job3.ID || page[1].ID != job2.ID {
+		t.Errorf("limit=2 page = [%s %s], want [%s %s]", page[0].ID, page[1].ID, job3.ID, job2.ID)
+	}
+
+	// offset=2 returns the oldest.
+	rest, err := database.ListJobs(10, 2)
+	if err != nil {
+		t.Fatalf("Failed to list jobs offset: %v", err)
+	}
+	if len(rest) != 1 {
+		t.Fatalf("offset=2 returned %d jobs, want 1", len(rest))
+	}
+	if rest[0].ID != job1.ID {
+		t.Errorf("offset=2 job = %s, want %s", rest[0].ID, job1.ID)
+	}
+}
+
 func TestGetAllWorkers(t *testing.T) {
 	database, cleanup := setupDBTest(t)
 	defer cleanup()

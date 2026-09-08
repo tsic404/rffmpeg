@@ -553,6 +553,22 @@ Response:
   "message": "Job submitted"
 }
 
+# 列出任务（分页，按创建时间倒序）
+GET /api/v1/jobs?limit=50&offset=0
+
+Response:
+{
+  "jobs": [
+    {
+      "id": "uuid",
+      "status": "completed",
+      "input_files": ["file_id"],
+      "args": [...],
+      "created_at": "2024-01-01T00:00:00Z"
+    }
+  ]
+}
+
 # 查询任务状态
 GET /api/v1/jobs/{jobId}
 
@@ -572,6 +588,8 @@ Response:
     "finished_at": "2024-01-01T00:00:12Z"
 }
 ```
+
+> **访问模型**：`GET /api/v1/jobs`（列表）与 `GET /api/v1/jobs/{jobId}`（单查）采用同一单令牌访问模型——持有有效令牌的调用方可读取全部 job 的完整元数据（`input_files`、`args`、`output_filename`、`direct_paths` 等）。这是有意设计：本服务假定令牌持有者即为可信客户端；若需要按客户端隔离 job 可见性，请在接入层（如反向代理 / 独立令牌池）实现，而非依赖服务端字段裁剪。
 
 ### 缓存命中可观察性
 
