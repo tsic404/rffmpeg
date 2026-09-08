@@ -214,22 +214,46 @@ func parseArgs(argList []string) (*Options, error) {
 		opts.IsProbe = true
 		positionalArgs = positionalArgs[1:]
 
-		// Everything after "probe" goes to FmpegArgs; first arg is the probe input.
-		// Support both "probe <file>" and "probe -i <file>" syntax.
-		opts.FmpegArgs = positionalArgs
-		if len(opts.FmpegArgs) > 0 {
-			if opts.FmpegArgs[0] == "-i" {
-				// Skip the -i flag and use next arg as probe input
-				if len(opts.FmpegArgs) >= 2 {
-					opts.ProbeInput = opts.FmpegArgs[1]
-					opts.FmpegArgs = opts.FmpegArgs[2:]
-				} else {
-					// "-i" without a value — skip it, ProbeInput remains empty
-					opts.FmpegArgs = opts.FmpegArgs[1:]
+		// The probe subcommand accepts ffprobe-compatible flags. The server's
+		// probe endpoint always returns JSON containing both format and stream
+		// info, so -show_format, -show_streams and -of/-print_format json are
+		// accepted and already satisfied; any other output format is rejected
+		// up front because the server cannot honor it.
+		for i := 0; i < len(positionalArgs); i++ {
+			arg := positionalArgs[i]
+			switch arg {
+			case "-i":
+				if opts.ProbeInput != "" {
+					return nil, fmt.Errorf("duplicate -i flag: input already set to %q", opts.ProbeInput)
 				}
-			} else {
-				opts.ProbeInput = opts.FmpegArgs[0]
-				opts.FmpegArgs = opts.FmpegArgs[1:]
+				if i+1 >= len(positionalArgs) {
+					return nil, fmt.Errorf("flag -i requires a value")
+				}
+				val := positionalArgs[i+1]
+				if strings.HasPrefix(val, "-") {
+					return nil, fmt.Errorf("flag -i requires a value")
+				}
+				opts.ProbeInput = val
+				i++
+			case "-show_format", "-show_streams":
+				// Already included in the probe response; nothing to forward.
+			case "-of", "-print_format":
+				if i+1 >= len(positionalArgs) {
+					return nil, fmt.Errorf("flag %s requires a value", arg)
+				}
+				if val := positionalArgs[i+1]; val != "json" {
+					return nil, fmt.Errorf("probe only supports json output format, got %q for %s", val, arg)
+				}
+				i++
+			default:
+				if strings.HasPrefix(arg, "-") {
+					return nil, fmt.Errorf("unknown probe option: %s", arg)
+				}
+				if opts.ProbeInput == "" {
+					opts.ProbeInput = arg
+				} else {
+					return nil, fmt.Errorf("unexpected probe argument: %s (input already set to %q)", arg, opts.ProbeInput)
+				}
 			}
 		}
 	} else {
@@ -1585,7 +1609,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `rffmpeg - Remote FFmpeg Client
 Usage:
   rffmpeg [rffmpeg_options] [ffmpeg_options]        Run ffmpeg transcoding
-  rffmpeg probe <file|URL> [--server URL] [--token TOKEN] [-q]   Probe media file or URL
+  rffmpeg probe <file|URL> [-i <file|URL>] [-show_streams] [-show_format] [-of json] [--server URL] [--token TOKEN] [-q]   Probe media file or URL
   rffmpeg -encoders                                  List available encoders (ffmpeg-compatible format)
   rffmpeg -decoders                                  List available decoders (ffmpeg-compatible format)
   rffmpeg -codecs                                    List available codecs (encoders + decoders, ffmpeg-compatible format)
@@ -1631,6 +1655,9 @@ ffmpeg options:
 Examples:
   # Probe a media file
   rffmpeg probe video.mp4
+
+  # Probe with ffprobe-style flags (-i / -show_streams / -of json)
+  rffmpeg probe -i video.mp4 -show_streams -of json
 
   # List available encoders
   rffmpeg -encoders
