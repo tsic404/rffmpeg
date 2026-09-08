@@ -19,6 +19,10 @@ type StdoutBatcher struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup // Track pending goroutines
+	// sendErr records the first SendStdoutChunk failure so FlushAndWait can
+	// surface it: a terminal status must not be reported when a stdout chunk
+	// failed to reach the server (TSI-2905). Guarded by mu.
+	sendErr error
 }
 
 // StdoutBatcherConfig holds configuration for the batcher
@@ -126,8 +130,14 @@ func (b *StdoutBatcher) flushLocked() {
 	go func(chunk []byte) {
 		defer b.wg.Done()
 		if err := b.client.SendStdoutChunk(b.jobID, chunk); err != nil {
-			// Log error but don't block
-			// Error is logged in the caller
+			// Record the first failure (under mu) so FlushAndWait can report
+			// it; the terminal status report carries the log line instead of
+			// the error being swallowed here (TSI-2905).
+			b.mu.Lock()
+			if b.sendErr == nil {
+				b.sendErr = err
+			}
+			b.mu.Unlock()
 		}
 	}(combined)
 
@@ -140,6 +150,27 @@ func (b *StdoutBatcher) Flush() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.flushLocked()
+}
+
+// FlushAndWait flushes any pending chunks and blocks until all in-flight
+// stdout sends complete. Unlike Close it neither stops the flush timer nor
+// cancels the context, so callers may keep appending afterward. It exists so
+// a terminal job status can be reported after the tail stdout has actually
+// reached the server, where the batcher timer may not have fired yet
+// (TSI-2905; mirrors StderrBatcher.FlushAndWait, TSI-2581).
+//
+// It returns the first SendStdoutChunk failure, if any: a terminal status must
+// not be reported when a stdout chunk failed to reach the server, or the CLI
+// would observe a truncated stream with rc=0 (TSI-2905).
+func (b *StdoutBatcher) FlushAndWait() error {
+	b.mu.Lock()
+	b.flushLocked()
+	b.mu.Unlock()
+	b.wg.Wait()
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sendErr
 }
 
 // Close stops the batcher and flushes any remaining chunks.

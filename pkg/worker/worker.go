@@ -910,10 +910,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Execute with appropriate handlers
 	var result ExecResult
 	var stdoutHandler StdoutHandler
+	var stdoutBatcher *StdoutBatcher
 	if job.StreamingOutput {
 		// Streaming output mode: stdout goes to WebSocket. The batcher handler
 		// is also passed to ExecuteWithRetry so retried attempts keep streaming.
-		stdoutBatcher := NewStdoutBatcher(job.ID, w.client, DefaultStdoutBatcherConfig())
+		stdoutBatcher = NewStdoutBatcher(job.ID, w.client, DefaultStdoutBatcherConfig())
 		defer stdoutBatcher.Close()
 
 		stdoutHandler = stdoutBatcher.StdoutHandler()
@@ -1103,6 +1104,22 @@ uploadOutput:
 			// Non-fatal — job still succeeded
 		} else {
 			log.Printf("Job %s: cached output (key=%s)", job.ID, cacheKey[:16])
+		}
+	}
+
+	// Flush and wait for all streamed stdout chunks to reach the server before
+	// reporting completion. The stdout batcher's timer may not have fired for
+	// the tail chunks yet; reporting "completed" first lets the CLI observe the
+	// terminal status and close its WebSocket before the bytes arrive, dropping
+	// the whole stream for short jobs. A send failure must abort the completion
+	// instead — the CLI would otherwise see a truncated stream with rc=0
+	// (TSI-2905). Mirrors StderrBatcher's FlushAndWait on the failure paths.
+	if stdoutBatcher != nil {
+		if err := stdoutBatcher.FlushAndWait(); err != nil {
+			log.Printf("Job %s: failed to stream stdout to server: %v", job.ID, err)
+			jobFailed = true
+			w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to stream stdout to server: %v", err))
+			return
 		}
 	}
 

@@ -127,10 +127,12 @@ func TestWaitForJobWithStreamingOutput_GapStillFails(t *testing.T) {
 }
 
 // TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling is the
-// review regression test: when the WS closes gracefully (NORMAL_CLOSURE)
-// with no gap and no ctx deadline, WaitForJobWithStreamingOutput must fall
-// back to polling and return the completed job — never (nil, nil), which
-// makes main.go panic dereferencing job.Status.
+// review regression test: when the WS closes gracefully (NORMAL_CLOSURE),
+// WaitForJobWithStreamingOutput falls back to polling and returns a non-nil
+// job — never (nil, nil), which makes main.go panic dereferencing job.Status.
+// The fallback must also apply the integrity checks: the streamed output
+// carried a sequenced hole, so the gap must surface as an error instead of a
+// clean rc=0 (TSI-2905).
 func TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling(t *testing.T) {
 	srv := gapLogServer(t, 400*time.Millisecond, false) // graceful close, then job completes
 	defer srv.Close()
@@ -140,14 +142,11 @@ func TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling(t *testin
 	defer cancel()
 
 	job, err := cli.WaitForJobWithStreamingOutput(ctx, "job-1", true)
-	if err != nil {
-		t.Fatalf("graceful WS close must fall back to polling, got error: %v", err)
-	}
 	if job == nil {
-		t.Fatal("job must not be nil — caller dereferences job.Status")
+		t.Fatal("graceful WS close fallback must return a non-nil job — caller dereferences job.Status")
 	}
-	if job.Status != protocol.JobStatusCompleted {
-		t.Errorf("expected status completed, got %s", job.Status)
+	if err == nil || !strings.Contains(err.Error(), "gap") {
+		t.Fatalf("graceful WS close with a sequenced gap must surface it, got err=%v", err)
 	}
 }
 
@@ -212,5 +211,46 @@ func TestWaitForJobWithLogs_CtxDoneRaceWithPollDone(t *testing.T) {
 	}
 	if job.Status != protocol.JobStatusCompleted {
 		t.Fatalf("expected status completed, got %s", job.Status)
+	}
+}
+
+// TestWaitForJobWithStreamingOutput_ZeroBytesFails is the TSI-2905 regression
+// test: a completed streaming job that delivered zero stdout bytes must return
+// an error (surfacing a non-zero exit), never rc=0 with an empty redirect
+// target. The worker produced output that never reached the client.
+func TestWaitForJobWithStreamingOutput_ZeroBytesFails(t *testing.T) {
+	const jobID = "job-empty-stream"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/jobs/"+jobID+"/log", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		// No stdout/stderr messages are ever written: the job completes
+		// without delivering a single byte to the client.
+		<-r.Context().Done()
+		conn.Close()
+	})
+	mux.HandleFunc("/api/v1/jobs/"+jobID, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.JobStatusResponse{
+			Job: protocol.JobInfo{
+				ID:     jobID,
+				Status: protocol.JobStatusCompleted,
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cli := New(srv.URL, "")
+	// Generous budget: the wait costs the 2s poll interval plus the 1s
+	// StreamingDrainTimeout before the integrity check can run.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	job, err := cli.WaitForJobWithStreamingOutput(ctx, jobID, true)
+	if err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("expected zero-byte error from streaming-output wait, got job=%v err=%v", job, err)
 	}
 }

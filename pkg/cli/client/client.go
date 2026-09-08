@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
@@ -70,6 +72,13 @@ const (
 	// retry time before the CLI gives up with a distinct "job submitted"
 	// exit code (TSI-2697).
 	DefaultMaxRetries = 14
+
+	// StreamingDrainTimeout bounds how long the streaming wait will block for
+	// the WebSocket to deliver its terminal event after the HTTP poll reports
+	// completion. The terminal event is sequenced after every stdout frame, so
+	// once it arrives the stream is fully delivered; the timeout is a safety
+	// bound for a stalled connection, never a normal-path cost (TSI-2905).
+	StreamingDrainTimeout = 1 * time.Second
 )
 
 // Overridable poll interval for regression tests; production value mirrors
@@ -597,11 +606,34 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 // WaitForJobWithStreamingOutput waits for job completion with streaming output to stdout.
 // This is used when the output file is "-" to stream transcoded data directly to stdout.
 func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	// stdoutBytes counts bytes actually written to stdout (partial writes and
+	// failures excluded); stdoutErr records the first write failure. A completed
+	// streaming job that delivered zero bytes — or whose stdout write failed —
+	// must surface as a failure, never a silent rc=0 (TSI-2905).
+	var stdoutBytes atomic.Int64
+	var stdoutMu sync.Mutex
+	var stdoutErr error
+
+	// terminalSeen is closed once the WebSocket delivers the terminal event
+	// (complete or a terminal status), which the hub sequences after every
+	// stdout frame on the same channel — so it also means "stdout fully
+	// delivered".
+	var terminalOnce sync.Once
+	terminalSeen := make(chan struct{})
+	markTerminal := func() { terminalOnce.Do(func() { close(terminalSeen) }) }
+
 	// Start WebSocket connection for real-time stdout streaming
 	wsClient := NewWSClient(c.serverURL, jobID, c.token,
 		WithOnStdout(func(chunk []byte) {
-			// Write raw decoded stdout chunks directly to stdout
-			os.Stdout.Write(chunk)
+			n, err := os.Stdout.Write(chunk)
+			stdoutBytes.Add(int64(n))
+			if err != nil {
+				stdoutMu.Lock()
+				if stdoutErr == nil {
+					stdoutErr = err
+				}
+				stdoutMu.Unlock()
+			}
 		}),
 		WithOnStderr(func(chunk string) {
 			// Write stderr to stderr (progress info, etc.)
@@ -617,6 +649,9 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 				}
 				fmt.Fprintln(os.Stderr)
 			}
+			if protocol.IsTerminalStatus(status) {
+				markTerminal()
+			}
 		}),
 		WithOnProgress(func(p protocol.WSProgressPayload) {
 			if quiet {
@@ -624,9 +659,44 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 			}
 			fmt.Fprintln(os.Stderr, renderProgressLine(p))
 		}),
+		WithOnComplete(func(exitCode int) { markTerminal() }),
 		WithWSMaxRetries(c.maxRetries),
 	)
 	defer wsClient.Close()
+
+	// integrityErr reports whether the streamed result is trustworthy: a
+	// sequence gap, a stdout write failure, or a completed job with zero
+	// delivered bytes. Shared by the connected path and every polling fallback
+	// so no completion path can bypass it (TSI-2905).
+	integrityErr := func(job *protocol.JobInfo) error {
+		if wsClient.HasGap() {
+			return fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+		}
+		stdoutMu.Lock()
+		we := stdoutErr
+		stdoutMu.Unlock()
+		if we != nil {
+			return fmt.Errorf("streaming output write failed: %w", we)
+		}
+		if job != nil && job.Status == protocol.JobStatusCompleted && stdoutBytes.Load() == 0 {
+			return fmt.Errorf("streaming output empty: job completed but no output bytes were received")
+		}
+		return nil
+	}
+
+	// fallbackToPolling waits via HTTP polling (no WS streaming) and applies
+	// the same integrity checks, so a WebSocket failure can never surface as a
+	// clean rc=0 for a job whose streamed output never reached stdout.
+	fallbackToPolling := func() (*protocol.JobInfo, error) {
+		job, err := c.WaitForJob(ctx, jobID, !quiet)
+		if err != nil {
+			return job, err
+		}
+		if e := integrityErr(job); e != nil {
+			return job, e
+		}
+		return job, nil
+	}
 
 	// Connect to WebSocket
 	if err := wsClient.ConnectWithReconnect(ctx); err != nil {
@@ -638,7 +708,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		}
 		// If WebSocket fails, fall back to HTTP polling (without streaming output)
 		fmt.Fprintf(os.Stderr, "Warning: WebSocket connection failed, falling back to HTTP polling: %v\n", err)
-		return c.WaitForJob(ctx, jobID, !quiet)
+		return fallbackToPolling()
 	}
 
 	// Start listening in a goroutine
@@ -684,6 +754,11 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	select {
 	case job := <-pollDone:
 		finalJob = job
+		// Drain: the HTTP poll may observe the terminal DB status a moment
+		// before the WebSocket has read the final sequenced stdout frames. Wait
+		// (bounded) for the terminal WS event so integrityErr runs against the
+		// fully-delivered stream instead of a transient 0-byte state.
+		drainStreamingOutput(ctx, terminalSeen, listenDone)
 	case err := <-pollErr:
 		// TSI-2452-style race guard (see WaitForJobWithLogs): a terminal
 		// status reached at the same moment the backup poll budget expired
@@ -700,40 +775,51 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 			if errors.Is(err, ErrRetriesExhausted) {
 				return nil, &RetriesExhaustedError{JobID: jobID, Cause: err}
 			}
-			// WebSocket failed, fall back to polling
-			return c.WaitForJob(ctx, jobID, !quiet)
+			// WebSocket failed, fall back to polling (integrity checked).
+			return fallbackToPolling()
 		}
-		// WebSocket closed normally; poll until terminal status is reached.
-		// A single GetJob call may return a non-terminal status if the
-		// WebSocket closes before the server DB is updated.
-		return c.WaitForJob(ctx, jobID, !quiet)
+		// WebSocket closed normally; poll until terminal status is reached,
+		// then apply the same integrity checks. A single GetJob call may return
+		// a non-terminal status if the WebSocket closes before the server DB is
+		// updated.
+		return fallbackToPolling()
 	case <-ctx.Done():
 		// Race guard (TSI-2452): the client-side timeout fired, but the
 		// job may have reached a terminal status on the server between
 		// the last poll and ctx.Done() (e.g. a cache hit). The poll
 		// goroutine may still be mid-GetJob, so pollDone is not yet
 		// written. Do a final GetJob with a fresh context — if the job
-		// is already done, fall through to the gap check below and
-		// return it; otherwise report the timeout/gap error.
+		// is already done, fall through to the integrity check below and
+		// return it; otherwise report the timeout/integrity error.
 		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
 			finalJob = job
 		} else {
-			// Gap check before the ctx error: if stdout bytes with holes
-			// were already written, the consumer must hear about it.
-			if wsClient.HasGap() {
-				return nil, fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+			if e := integrityErr(nil); e != nil {
+				return nil, e
 			}
 			return nil, ctx.Err()
 		}
 	}
 
-	// Gap detection: if messages were lost across a reconnect, the bytes
-	// already written to stdout have holes. Report failure rather than let
-	// a silently corrupted output pass as success.
-	if wsClient.HasGap() {
-		return finalJob, fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
+	if e := integrityErr(finalJob); e != nil {
+		return finalJob, e
 	}
 	return finalJob, nil
+}
+
+// drainStreamingOutput waits (bounded) for the WebSocket to deliver its
+// terminal event, which is sequenced after every stdout frame on the same
+// channel. It lets the streaming wait confirm the full stream was read before
+// running the integrity checks (TSI-2905).
+func drainStreamingOutput(ctx context.Context, terminalSeen <-chan struct{}, listenDone <-chan error) {
+	timer := time.NewTimer(StreamingDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-terminalSeen:
+	case <-listenDone:
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 }
 
 // DownloadOutput downloads an output file

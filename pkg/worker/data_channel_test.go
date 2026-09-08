@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestClient_DownloadInput_HTTPRemote verifies that the Worker client can download
@@ -260,6 +261,84 @@ func TestClient_StdoutBatcher(t *testing.T) {
 
 	if len(receivedMsgs) == 0 {
 		t.Error("Expected at least one stdout message to be sent")
+	}
+}
+
+// TestStdoutBatcher_FlushAndWait is the TSI-2905 regression test for the
+// stdout side of the flush-before-terminal-status contract. With a batch
+// delay far longer than the test, only FlushAndWait (not the timer) can
+// trigger a flush; it must drain the buffered chunks and block until the
+// combined send has reached the server, so a terminal status reported
+// afterward can never overtake the streamed bytes.
+func TestStdoutBatcher_FlushAndWait(t *testing.T) {
+	var mu sync.Mutex
+	var received []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			received = append(received, string(body))
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-worker", "")
+	cfg := StdoutBatcherConfig{BatchSize: 100, BatchDelay: time.Hour}
+	b := NewStdoutBatcher("test-job", client, cfg)
+	defer b.Close()
+
+	handler := b.StdoutHandler()
+	handler([]byte{0x00, 0x01, 0x02, 0x03})
+	handler([]byte{0x04, 0x05, 0x06, 0x07})
+
+	b.FlushAndWait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) == 0 {
+		t.Fatal("FlushAndWait must have sent the buffered chunks")
+	}
+	var update protocol.JobUpdateRequest
+	if err := json.Unmarshal([]byte(received[0]), &update); err != nil {
+		t.Fatalf("unmarshal update: %v", err)
+	}
+	if update.StdoutChunk == "" {
+		t.Fatal("StdoutChunk must be populated")
+	}
+	raw, err := protocol.StdoutChunkBase64(update.StdoutChunk)
+	if err != nil {
+		t.Fatalf("decode stdout chunk: %v", err)
+	}
+	if len(raw) != 8 {
+		t.Errorf("decoded stdout bytes = %d, want 8", len(raw))
+	}
+}
+
+// TestStdoutBatcher_FlushAndWaitReturnsSendError is the TSI-2905 regression
+// test for the error half of the flush contract: a failed SendStdoutChunk must
+// not be swallowed. FlushAndWait must return it so processJob can report the
+// job failed instead of completed with a truncated stream.
+func TestStdoutBatcher_FlushAndWaitReturnsSendError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-worker", "")
+	cfg := StdoutBatcherConfig{BatchSize: 100, BatchDelay: time.Hour}
+	b := NewStdoutBatcher("test-job", client, cfg)
+	defer b.Close()
+
+	b.StdoutHandler()([]byte{0x01, 0x02, 0x03})
+
+	if err := b.FlushAndWait(); err == nil {
+		t.Fatal("FlushAndWait must surface the SendStdoutChunk failure")
 	}
 }
 
