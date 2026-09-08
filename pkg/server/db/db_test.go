@@ -169,11 +169,22 @@ func TestMarkOfflineWorkers(t *testing.T) {
 		t.Fatalf("Failed to create worker2: %v", err)
 	}
 
-	// Simulate worker1 heartbeat being stale by waiting and sending heartbeat from worker2
-	time.Sleep(100 * time.Millisecond)
-	err = database.UpdateWorkerHeartbeat(worker2.ID, protocol.WorkerStatusIdle)
-	if err != nil {
-		t.Fatalf("Failed to update worker2 heartbeat: %v", err)
+	// Deterministically age worker1's heartbeat and keep worker2's fresh via a
+	// direct UPDATE. The original wall-clock sleep left only a ~50ms margin
+	// between worker2's heartbeat refresh and MarkOfflineWorkers, which flaked
+	// under CI load by marking both workers offline.
+	now := time.Now()
+	if _, err := database.GetDB().Exec(
+		`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		now.Add(-time.Hour), worker1.ID,
+	); err != nil {
+		t.Fatalf("Failed to age worker1 heartbeat: %v", err)
+	}
+	if _, err := database.GetDB().Exec(
+		`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		now.Add(time.Hour), worker2.ID,
+	); err != nil {
+		t.Fatalf("Failed to refresh worker2 heartbeat: %v", err)
 	}
 
 	// Mark workers offline with a short timeout (50ms)

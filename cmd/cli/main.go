@@ -698,10 +698,14 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 	var job *protocol.JobInfo
 	for {
 		var noWorkerDeadline *time.Time
+		var startedAt *time.Time
+		var status protocol.JobStatus
 		if submitted, getErr := cli.GetJob(jobID); getErr == nil {
 			noWorkerDeadline = submitted.NoWorkerDeadline
+			startedAt = submitted.StartedAt
+			status = submitted.Status
 		}
-		waitDeadline, hasDeadline := clientWaitDeadline(time.Now(), timeout, noWorkerDeadline)
+		waitDeadline, hasDeadline := clientWaitDeadline(time.Now(), timeout, status, startedAt, noWorkerDeadline)
 		waitCtx := context.Background()
 		var cancelWait context.CancelFunc
 		if hasDeadline {
@@ -759,6 +763,12 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 		if finalErr == nil && extendWaitForNoWorkerDeadline(waitDeadline, finalJob.NoWorkerDeadline) {
 			continue
 		}
+		if finalErr == nil && extendWaitForStartedAt(waitDeadline, finalJob.StartedAt, timeout) {
+			continue
+		}
+		if finalErr == nil && extendWaitForQueued(finalJob.Status) {
+			continue
+		}
 
 		// The job is genuinely not done. Cancel it server-side so it
 		// doesn't linger, and report a clear client-side timeout — distinct
@@ -783,22 +793,39 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 }
 
 // clientWaitDeadline computes the client-side give-up time. timeout is the
-// per-job execution deadline; noWorkerDeadline is the server's
-// NO_WORKER_AVAILABLE verdict time for a pending job. The client waits
-// until the later bound (plus clientVerdictGrace) so it never cancels before
-// the server can emit its verdict. Returns false when neither bound exists.
+// per-job ffmpeg execution budget; status is the job's current status;
+// startedAt is the server's started_at (the budget's anchor); noWorkerDeadline
+// is the server's NO_WORKER_AVAILABLE verdict time for a pending job. The
+// client waits until the later bound (plus clientVerdictGrace) so it never
+// cancels before the server can emit its verdict. Returns false when neither
+// bound exists.
+//
+// --timeout is a worker-side execution budget, not a wall-clock bound
+// (TSI-2886). It bounds the client's wait only for pending jobs (anchored to
+// now — the "did not start within --timeout" give-up) and running jobs
+// (anchored to started_at so pre-exec latency is not charged and the worker's
+// TIMEOUT verdict stays observable).
+//
+// A queued job is already claimed by a worker and spends its pre-exec phase
+// (download, duration probe) in the queued state; that phase is bounded by the
+// worker's own timeouts (30m dataClient download + ffprobe executor), not by
+// --timeout, so the client must not cancel it before ffmpeg starts.
 //
 // The old code computed timeout+clientVerdictGrace as a duration sum, which
 // overflowed negative for a --timeout near math.MaxInt64 and made
-// context.WithTimeout expire immediately. The two bounds are now added to
-// wall-clock times separately; a duration near MaxInt64 (~292 years) plus a
-// 5s grace cannot wrap a time.Time anchored at the present (year ~2318), so
-// no clamping is needed.
-func clientWaitDeadline(now time.Time, timeout time.Duration, noWorkerDeadline *time.Time) (time.Time, bool) {
+// context.WithTimeout expire immediately. The bounds are added to wall-clock
+// times separately; a duration near MaxInt64 (~292 years) plus a 5s grace
+// cannot wrap a time.Time anchored at the present (year ~2318), so no
+// clamping is needed.
+func clientWaitDeadline(now time.Time, timeout time.Duration, status protocol.JobStatus, startedAt, noWorkerDeadline *time.Time) (time.Time, bool) {
 	var deadline time.Time
 	has := false
-	if timeout > 0 {
-		deadline = now.Add(timeout)
+	if timeout > 0 && status != protocol.JobStatusQueued {
+		anchor := now
+		if startedAt != nil {
+			anchor = *startedAt
+		}
+		deadline = anchor.Add(timeout)
 		has = true
 	}
 	if noWorkerDeadline != nil {
@@ -822,6 +849,29 @@ func clientWaitDeadline(now time.Time, timeout time.Duration, noWorkerDeadline *
 // once attached, so this can extend the wait at most once.
 func extendWaitForNoWorkerDeadline(exhaustedDeadline time.Time, noWorkerDeadline *time.Time) bool {
 	return noWorkerDeadline != nil && noWorkerDeadline.After(exhaustedDeadline)
+}
+
+// extendWaitForStartedAt reports whether the client should extend its wait
+// after the client-side deadline fired because the job just started running:
+// the first wait was anchored to submit time (started_at was nil), but the
+// worker's ffmpeg budget only begins at started_at, so the TIMEOUT verdict is
+// still ahead of the exhausted bound. The re-anchored bound (started_at +
+// timeout + grace) is fixed — started_at never advances — so this can extend
+// the wait at most once (TSI-2886).
+func extendWaitForStartedAt(exhaustedDeadline time.Time, startedAt *time.Time, timeout time.Duration) bool {
+	if startedAt == nil || timeout <= 0 {
+		return false
+	}
+	return startedAt.Add(timeout).Add(clientVerdictGrace).After(exhaustedDeadline)
+}
+
+// extendWaitForQueued reports whether the client should extend its wait after
+// the client-side deadline fired because the job was just claimed by a worker
+// (pending → queued). A queued job spends --timeout on its pre-exec phase
+// (download/probe), which the worker bounds independently, so the client must
+// not cancel it as if it had never started (TSI-2886).
+func extendWaitForQueued(status protocol.JobStatus) bool {
+	return status == protocol.JobStatusQueued
 }
 
 // reportTerminalJob prints the outcome for a terminal job status and returns

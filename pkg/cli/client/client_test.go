@@ -1153,6 +1153,39 @@ func TestSharedFSSubmitJobWithoutDirectPath(t *testing.T) {
 	}
 }
 
+// TestSubmitJobTimeoutSentAsDuration is the TSI-2886 regression test: the CLI
+// must send --timeout as a duration budget (integer nanoseconds), not as an
+// absolute submit-time deadline. Encoding a deadline here re-introduces the
+// ~2x discrepancy where scheduling/download latency eats the ffmpeg budget.
+func TestSubmitJobTimeoutSentAsDuration(t *testing.T) {
+	var captured map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"job_id":"job-timeout-wire","message":"ok"}`))
+	}))
+	defer srv.Close()
+
+	c := client.New(srv.URL, "")
+	if _, err := c.SubmitJobWithOptions([]string{"f1"}, nil, []string{"-i", "in.mp4"}, "out.mp4", false, false, 5*time.Second); err != nil {
+		t.Fatalf("SubmitJobWithOptions failed: %v", err)
+	}
+
+	raw, ok := captured["timeout"]
+	if !ok {
+		t.Fatal("request body missing timeout field")
+	}
+	var ns int64
+	if err := json.Unmarshal(raw, &ns); err != nil {
+		t.Fatalf("timeout = %s, want integer nanoseconds (duration), got non-integer", raw)
+	}
+	if ns != int64(5*time.Second) {
+		t.Errorf("timeout = %d ns, want %d ns", ns, int64(5*time.Second))
+	}
+}
+
 // TestSharedFSSubmitJobWithEmptyDirectPath tests DirectPath as empty slice
 func TestSharedFSSubmitJobWithEmptyDirectPath(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)

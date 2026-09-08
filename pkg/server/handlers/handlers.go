@@ -1322,8 +1322,8 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		directPathsJSON = string(dp)
 	}
 
-	// Set a 60s timeout for the probe job
-	timeout := time.Now().Add(60 * time.Second)
+	// Set a 60s ffmpeg execution budget for the probe job.
+	timeout := 60 * time.Second
 	job, err := h.db.CreateJobWithStreaming(string(inputFilesJSON), string(argsJSON), "probe_result.json", false, false, &timeout, directPathsJSON)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
@@ -1732,7 +1732,8 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool) protocol.JobInf
 		info.FinishedAt = &job.FinishedAt.Time
 	}
 	if job.Timeout.Valid {
-		info.Timeout = &job.Timeout.Time
+		d := time.Duration(job.Timeout.Int64)
+		info.Timeout = &d
 	}
 	// Match checkNoWorkerStarvation's exact filter: pending AND unassigned
 	// AND the cluster has no live schedulable worker. A queued job already

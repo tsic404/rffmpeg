@@ -321,10 +321,12 @@ func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, 
 		StreamingOutput: streamingOutput,
 	}
 
-	// Convert timeout duration to absolute timestamp
+	// The per-job timeout is an ffmpeg execution budget (a duration), not an
+	// absolute wall-clock deadline. The worker anchors it at the ffmpeg
+	// execution boundary, so upload/scheduling/probe time is never charged
+	// against it (TSI-2684, TSI-2886).
 	if timeout > 0 {
-		deadline := time.Now().Add(timeout)
-		req.Timeout = &deadline
+		req.Timeout = &timeout
 	}
 
 	body, err := json.Marshal(req)

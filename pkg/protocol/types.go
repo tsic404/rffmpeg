@@ -19,14 +19,14 @@ type UploadResponse struct {
 }
 
 type JobSubmitRequest struct {
-	InputFiles      []string   `json:"input_files"`
-	DirectPath      []string   `json:"direct_path,omitempty"` // Absolute paths when shared FS is enabled
-	Args            []string   `json:"args"`
-	OutputFilename  string     `json:"output_filename,omitempty"`
-	StreamingOutput bool       `json:"streaming_output,omitempty"` // Output to stdout via WebSocket
-	Priority        int        `json:"priority,omitempty"`
-	Timeout         *time.Time `json:"timeout,omitempty"`
-	AutoHW          bool       `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
+	InputFiles      []string       `json:"input_files"`
+	DirectPath      []string       `json:"direct_path,omitempty"` // Absolute paths when shared FS is enabled
+	Args            []string       `json:"args"`
+	OutputFilename  string         `json:"output_filename,omitempty"`
+	StreamingOutput bool           `json:"streaming_output,omitempty"` // Output to stdout via WebSocket
+	Priority        int            `json:"priority,omitempty"`
+	Timeout         *time.Duration `json:"timeout,omitempty"` // Per-job ffmpeg execution budget (nil = worker default)
+	AutoHW          bool           `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
 }
 
 type JobSubmitResponse struct {
@@ -35,21 +35,21 @@ type JobSubmitResponse struct {
 }
 
 type JobInfo struct {
-	ID              string     `json:"id"`
-	Status          JobStatus  `json:"status"`
-	InputFiles      []string   `json:"input_files"`
-	Args            []string   `json:"args"`
-	OutputFilename  string     `json:"output_filename,omitempty"`
-	StreamingOutput bool       `json:"streaming_output,omitempty"` // Output to stdout via WebSocket
-	OutputFiles     []string   `json:"output_files,omitempty"`
-	WorkerID        string     `json:"worker_id,omitempty"`
-	ExitCode        int        `json:"exit_code,omitempty"`
-	Error           string     `json:"error,omitempty"`
-	AutoHW          bool       `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
-	Cached          bool       `json:"cached,omitempty"`  // Whether the result was served from the worker cache
-	FailureType     string     `json:"failure_type,omitempty"`
-	FailureDetails  string     `json:"failure_details,omitempty"`
-	Timeout         *time.Time `json:"timeout,omitempty"` // Per-job timeout (nil = use default)
+	ID              string         `json:"id"`
+	Status          JobStatus      `json:"status"`
+	InputFiles      []string       `json:"input_files"`
+	Args            []string       `json:"args"`
+	OutputFilename  string         `json:"output_filename,omitempty"`
+	StreamingOutput bool           `json:"streaming_output,omitempty"` // Output to stdout via WebSocket
+	OutputFiles     []string       `json:"output_files,omitempty"`
+	WorkerID        string         `json:"worker_id,omitempty"`
+	ExitCode        int            `json:"exit_code,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	AutoHW          bool           `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
+	Cached          bool           `json:"cached,omitempty"`  // Whether the result was served from the worker cache
+	FailureType     string         `json:"failure_type,omitempty"`
+	FailureDetails  string         `json:"failure_details,omitempty"`
+	Timeout         *time.Duration `json:"timeout,omitempty"` // Per-job ffmpeg execution budget (nil = worker default)
 	// NoWorkerDeadline is the server-computed wall-clock time at which a
 	// still-pending job will be failed as NO_WORKER_AVAILABLE by the
 	// starvation sweep (created_at + no_worker_job_timeout +
