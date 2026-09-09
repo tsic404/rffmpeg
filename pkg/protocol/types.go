@@ -43,6 +43,8 @@ type JobInfo struct {
 	StreamingOutput bool           `json:"streaming_output,omitempty"` // Output to stdout via WebSocket
 	OutputFiles     []string       `json:"output_files,omitempty"`
 	WorkerID        string         `json:"worker_id,omitempty"`
+	AssignedWorker  string         `json:"assigned_worker,omitempty"` // Worker ID of the executor, survives terminal state
+	WorkerName      string         `json:"worker_name,omitempty"`     // Human-readable name of the assigned worker
 	ExitCode        int            `json:"exit_code,omitempty"`
 	Error           string         `json:"error,omitempty"`
 	AutoHW          bool           `json:"auto_hw,omitempty"` // Enable automatic hardware encoder upgrade
