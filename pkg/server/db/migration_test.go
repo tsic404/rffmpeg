@@ -93,6 +93,154 @@ func TestGetMigrationEventNotFound(t *testing.T) {
 	}
 }
 
+func redistributionByJob(t *testing.T, rs []JobRedistribution, jobID string) JobRedistribution {
+	t.Helper()
+	for _, r := range rs {
+		if r.JobID == jobID {
+			return r
+		}
+	}
+	t.Fatalf("no redistribution record for job %s", jobID)
+	return JobRedistribution{}
+}
+
+func TestRecordMigrationTarget(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	event, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create migration event: %v", err)
+	}
+	if err := db.CreateJobRedistributions(event.ID, []string{"job-1"}); err != nil {
+		t.Fatalf("CreateJobRedistributions: %v", err)
+	}
+
+	if err := db.RecordMigrationTarget("job-1", "worker-2", "gpu-worker-2"); err != nil {
+		t.Fatalf("RecordMigrationTarget: %v", err)
+	}
+
+	rs, err := db.GetJobRedistributionsByEvent(event.ID)
+	if err != nil {
+		t.Fatalf("GetJobRedistributionsByEvent: %v", err)
+	}
+	if len(rs) != 1 {
+		t.Fatalf("redistributions = %d, want 1", len(rs))
+	}
+	got := rs[0]
+	if !got.TargetWorkerID.Valid || got.TargetWorkerID.String != "worker-2" {
+		t.Errorf("target_worker_id = %v, want worker-2", got.TargetWorkerID)
+	}
+	if !got.TargetWorkerName.Valid || got.TargetWorkerName.String != "gpu-worker-2" {
+		t.Errorf("target_worker_name = %v, want gpu-worker-2", got.TargetWorkerName)
+	}
+}
+
+func TestRecordMigrationTargetMultiJobFanout(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// One worker goes offline carrying three jobs; the jobs fan out to
+	// different workers on reassignment. Each job must record its own target.
+	event, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1", "job-2", "job-3"}, 3)
+	if err != nil {
+		t.Fatalf("Failed to create migration event: %v", err)
+	}
+	if err := db.CreateJobRedistributions(event.ID, []string{"job-1", "job-2", "job-3"}); err != nil {
+		t.Fatalf("CreateJobRedistributions: %v", err)
+	}
+
+	if err := db.RecordMigrationTarget("job-1", "worker-A", "gpu-worker-A"); err != nil {
+		t.Fatalf("RecordMigrationTarget(job-1): %v", err)
+	}
+	if err := db.RecordMigrationTarget("job-2", "worker-B", "gpu-worker-B"); err != nil {
+		t.Fatalf("RecordMigrationTarget(job-2): %v", err)
+	}
+	if err := db.RecordMigrationTarget("job-3", "worker-C", "gpu-worker-C"); err != nil {
+		t.Fatalf("RecordMigrationTarget(job-3): %v", err)
+	}
+
+	rs, err := db.GetJobRedistributionsByEvent(event.ID)
+	if err != nil {
+		t.Fatalf("GetJobRedistributionsByEvent: %v", err)
+	}
+	if len(rs) != 3 {
+		t.Fatalf("redistributions = %d, want 3", len(rs))
+	}
+
+	want := map[string]string{"job-1": "worker-A", "job-2": "worker-B", "job-3": "worker-C"}
+	for jobID, target := range want {
+		r := redistributionByJob(t, rs, jobID)
+		if !r.TargetWorkerID.Valid || r.TargetWorkerID.String != target {
+			t.Errorf("job %s target_worker_id = %v, want %s", jobID, r.TargetWorkerID, target)
+		}
+	}
+}
+
+func TestRecordMigrationTargetMultiHop(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// First hop: worker-1 -> worker-2.
+	first, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create first event: %v", err)
+	}
+	if err := db.CreateJobRedistributions(first.ID, []string{"job-1"}); err != nil {
+		t.Fatalf("CreateJobRedistributions (first): %v", err)
+	}
+	if err := db.RecordMigrationTarget("job-1", "worker-2", "gpu-worker-2"); err != nil {
+		t.Fatalf("RecordMigrationTarget (first): %v", err)
+	}
+
+	// Second hop: worker-2 -> worker-3.
+	second, err := db.CreateMigrationEvent("worker-2", "gpu-worker-2", "heartbeat_timeout", 1, []string{"job-1"}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create second event: %v", err)
+	}
+	if err := db.CreateJobRedistributions(second.ID, []string{"job-1"}); err != nil {
+		t.Fatalf("CreateJobRedistributions (second): %v", err)
+	}
+	if err := db.RecordMigrationTarget("job-1", "worker-3", "gpu-worker-3"); err != nil {
+		t.Fatalf("RecordMigrationTarget (second): %v", err)
+	}
+
+	firstRS, err := db.GetJobRedistributionsByEvent(first.ID)
+	if err != nil {
+		t.Fatalf("GetJobRedistributionsByEvent (first): %v", err)
+	}
+	if !firstRS[0].TargetWorkerID.Valid || firstRS[0].TargetWorkerID.String != "worker-2" {
+		t.Errorf("first hop target = %v, want worker-2", firstRS[0].TargetWorkerID)
+	}
+
+	secondRS, err := db.GetJobRedistributionsByEvent(second.ID)
+	if err != nil {
+		t.Fatalf("GetJobRedistributionsByEvent (second): %v", err)
+	}
+	if !secondRS[0].TargetWorkerID.Valid || secondRS[0].TargetWorkerID.String != "worker-3" {
+		t.Errorf("second hop target = %v, want worker-3", secondRS[0].TargetWorkerID)
+	}
+}
+
+func TestRecordMigrationTargetNoOpForFreshJob(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// A job that was never migrated has no placeholder: the write-back must
+	// be a silent no-op, not an error or a spurious row.
+	if err := db.RecordMigrationTarget("fresh-job", "worker-1", "gpu-worker-1"); err != nil {
+		t.Fatalf("RecordMigrationTarget on fresh job: %v", err)
+	}
+
+	events, err := db.GetMigrationEvents(10, 0)
+	if err != nil {
+		t.Fatalf("GetMigrationEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Errorf("Expected 0 migration events for fresh job, got %d", len(events))
+	}
+}
+
 func TestGetMigrationEvents(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
