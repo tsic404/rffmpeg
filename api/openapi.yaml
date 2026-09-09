@@ -472,6 +472,13 @@ paths:
       summary: List workers
       description: List all registered workers with capabilities and health metrics
       operationId: listWorkers
+      parameters:
+        - name: active_only
+          in: query
+          required: false
+          description: When true, return only non-offline workers (default includes offline rows retained within the offline threshold).
+          schema:
+            type: boolean
       responses:
         '200':
           description: Workers registered on the server
@@ -479,7 +486,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/WorkersListResponse'
-
   /workers/{workerId}:
     get:
       tags: [workers]

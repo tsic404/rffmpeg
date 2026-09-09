@@ -727,6 +727,7 @@ worker 列表响应都只使用它。`video_encoders` 是**可选的请求侧增
 
 **并发同名 worker 不受影响**：心跳新鲜的多个同名 worker（各自持有不同 `worker_id`）在注册时互相保留，不会被清理——只有 offline 或心跳过期的同名行才会被删除。
 
+```
 # 心跳（含 GPU 利用率与显存指标，由 nvidia-smi 采样）
 POST /api/v1/workers/heartbeat
 {
@@ -750,8 +751,10 @@ POST /api/v1/workers/heartbeat
   而不是"利用率 0%"；服务端会保留上一次有效采样。合法的 0% 读数始终会上报。
 
 ```
+
 # Worker 列表（含实时健康指标）
 GET /api/v1/workers
+GET /api/v1/workers?active_only=true
 {
   "workers": [
     {
@@ -773,6 +776,8 @@ GET /api/v1/workers
 # 拉取任务
 GET /api/v1/workers/{workerId}/jobs
 ```
+
+默认返回全部记录（含 `--worker-offline-threshold` 窗口内尚未回收的 offline 行）；加 `?active_only=true` 只返回非 offline 的记录。
 
 ### 迁移与淘汰审计事件
 

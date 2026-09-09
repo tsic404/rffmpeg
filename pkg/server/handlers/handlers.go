@@ -1762,9 +1762,25 @@ func (h *Handler) GetJobLogWS(w http.ResponseWriter, r *http.Request) {
 	websocket.HandleJobLogWithValidation(h.wsHub, h.db, w, r)
 }
 
-// ListWorkers handles listing all workers with their capabilities
+// ListWorkers handles listing all workers with their capabilities.
+// GET /api/v1/workers
+// Query param active_only=true returns only non-offline workers. The default
+// list includes offline rows that are still retained within the
+// --worker-offline-threshold window after a worker dies (TSI-2919).
 func (h *Handler) ListWorkers(w http.ResponseWriter, r *http.Request) {
-	workers, err := h.db.GetAllWorkers()
+	// active_only is declared boolean in the OpenAPI spec, so parse it as one;
+	// any non-boolean value falls back to false (the default list).
+	activeOnly, _ := strconv.ParseBool(r.URL.Query().Get("active_only"))
+
+	var (
+		workers []*db.Worker
+		err     error
+	)
+	if activeOnly {
+		workers, err = h.db.GetActiveWorkers()
+	} else {
+		workers, err = h.db.GetAllWorkers()
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to get workers", err,

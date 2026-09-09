@@ -11,6 +11,7 @@ import (
 	"hash"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1565,12 +1566,22 @@ func (c *Client) uploadChunkWithRetry(file *os.File, uploadID string, chunkIndex
 	return lastErr
 }
 
-// isRetryableError determines if an error is worth retrying
+// isRetryableError determines if an error is worth retrying.
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Network errors, timeouts, and 5xx errors are retryable
+	// Network timeouts are retryable. Detect them via the net.Error interface
+	// rather than substring matching: http.Client.Timeout surfaces as
+	// "context deadline exceeded (Client.Timeout exceeded ...)" — its
+	// capitalized "Client.Timeout" evades a lowercase "timeout" check, so the
+	// chunk retry path silently never retried the most common client timeout
+	// (TSI-2919 CI flake).
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// Network errors, transient failures, and 5xx statuses are retryable.
 	errStr := err.Error()
 	return strings.Contains(errStr, "timeout") ||
 		strings.Contains(errStr, "connection reset") ||
