@@ -1626,6 +1626,65 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 	_ = h // handler kept for state table wiring via setupTest
 }
 
+// TestListWorkersActiveOnlyFilter (TSI-2919) verifies GET /api/v1/workers
+// returns every registered worker by default, and that ?active_only=true
+// excludes offline rows retained within the --worker-offline-threshold window.
+func TestListWorkersActiveOnlyFilter(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorkerWithID(t, router, "worker-active", "active-node", []string{"libx264"})
+	registerTestWorkerWithID(t, router, "worker-offline", "offline-node", []string{"libx264"})
+
+	if err := h.GetDB().UpdateWorkerStatus("worker-offline", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+
+	list := func(query string) []struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	} {
+		req := httptest.NewRequest("GET", "/api/v1/workers"+query, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("List workers%s failed with status %d: %s", query, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Workers []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"workers"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("Failed to decode list workers response: %v", err)
+		}
+		return resp.Workers
+	}
+
+	cases := []struct {
+		query string
+		want  int
+	}{
+		{"", 2},                     // default: include offline rows
+		{"?active_only=true", 1},    // boolean true
+		{"?active_only=1", 1},       // ParseBool accepts 1
+		{"?active_only=false", 2},   // boolean false
+		{"?active_only=garbage", 2}, // non-boolean -> false
+	}
+	for _, tc := range cases {
+		if got := list(tc.query); len(got) != tc.want {
+			t.Errorf("List workers%s returned %d workers, want %d", tc.query, len(got), tc.want)
+		}
+	}
+
+	active := list("?active_only=true")
+	if len(active) == 1 && (active[0].ID != "worker-active" || active[0].Status != string(protocol.WorkerStatusIdle)) {
+		t.Errorf("Expected only worker-active (idle), got %+v", active[0])
+	}
+}
+
 // TestWorkerHealthStatusTracksJobLifecycle (TSI-2347) verifies health.status
 // reflects a running job as "busy" without requiring a busy heartbeat: the
 // scheduler and the job-pull path keep the DB status current, and health must
