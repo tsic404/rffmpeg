@@ -366,8 +366,8 @@ func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, 
 				var rlResp protocol.RateLimitResponse
 				if json.Unmarshal(bodyBytes, &rlResp) == nil {
 					return "", fmt.Errorf(
-						"rate limit exceeded: %d/%d concurrent jobs.\n        %s\n        Retry after %d seconds, or wait for existing jobs to complete.",
-						rlResp.Current, rlResp.Limit, rlResp.Message, rlResp.RetryIn,
+						"rate limit exceeded: %d/%d concurrent jobs. Retry after %d seconds",
+						rlResp.Current, rlResp.Limit, rlResp.RetryIn,
 					)
 				}
 				// Fallback: show raw body

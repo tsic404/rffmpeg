@@ -1253,6 +1253,35 @@ func TestSubmitJobBackwardsCompat(t *testing.T) {
 	}
 }
 
+// TestSubmitJobRateLimitMessage is the TSI-2938 regression test: the rate-limit
+// 429 error must render the exact single-line stderr promised by the QA skill
+// scenario 6d — "rate limit exceeded: 10/10 concurrent jobs. Retry after 5
+// seconds" — rather than burying the Retry hint in a verbose multi-line body.
+func TestSubmitJobRateLimitMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(protocol.RateLimitResponse{
+			Code:    protocol.ErrCodeRateLimitExceeded,
+			Message: "Too many concurrent jobs. Please wait for existing jobs to complete before submitting new ones.",
+			Current: 10,
+			Limit:   10,
+			RetryIn: 5,
+		})
+	}))
+	defer srv.Close()
+
+	c := client.New(srv.URL, "")
+	_, err := c.SubmitJob([]string{"in.mp4"}, []string{"-c:v", "libx264"}, "out.mp4", false)
+	if err == nil {
+		t.Fatal("expected rate-limit error, got nil")
+	}
+	const want = "rate limit exceeded: 10/10 concurrent jobs. Retry after 5 seconds"
+	if got := err.Error(); got != want {
+		t.Errorf("rate-limit error = %q, want %q", got, want)
+	}
+}
+
 // TestWaitForJob_ContextCancellation verifies that WaitForJob returns
 // context.DeadlineExceeded promptly when the job never reaches a terminal
 // status (e.g. a worker killed within the heartbeat window leaves the job
