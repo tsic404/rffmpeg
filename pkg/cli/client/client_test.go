@@ -1091,6 +1091,7 @@ func TestSharedFSSubmitJobWithDirectPath(t *testing.T) {
 	allArgs := []string{"-c:v", "libx264", "-c:a", "copy", "/tmp/output.mp4"}
 
 	jobID, err := c.SubmitJobWithOptions(
+		context.Background(),
 		fileIDs,
 		directPaths,
 		allArgs,
@@ -1137,6 +1138,7 @@ func TestSharedFSSubmitJobWithoutDirectPath(t *testing.T) {
 	allArgs := []string{"-c:v", "libx264", "-c:a", "copy", "/tmp/output.mp4"}
 
 	jobID, err := c.SubmitJobWithOptions(
+		context.Background(),
 		fileIDs,
 		nil, // No DirectPath
 		allArgs,
@@ -1169,7 +1171,7 @@ func TestSubmitJobTimeoutSentAsDuration(t *testing.T) {
 	defer srv.Close()
 
 	c := client.New(srv.URL, "")
-	if _, err := c.SubmitJobWithOptions([]string{"f1"}, nil, []string{"-i", "in.mp4"}, "out.mp4", false, false, 5*time.Second); err != nil {
+	if _, err := c.SubmitJobWithOptions(context.Background(), []string{"f1"}, nil, []string{"-i", "in.mp4"}, "out.mp4", false, false, 5*time.Second); err != nil {
 		t.Fatalf("SubmitJobWithOptions failed: %v", err)
 	}
 
@@ -1207,6 +1209,7 @@ func TestSharedFSSubmitJobWithEmptyDirectPath(t *testing.T) {
 	allArgs := []string{"-c:v", "libx264", "output.mp4"}
 
 	jobID, err := c.SubmitJobWithOptions(
+		context.Background(),
 		fileIDs,
 		[]string{}, // Empty DirectPath
 		allArgs,

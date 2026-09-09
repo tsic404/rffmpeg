@@ -760,6 +760,37 @@ func TestParseArgs_MaxRetries(t *testing.T) {
 	}
 }
 
+// TestParseArgs_Retry verifies --retry is a boolean opt-in (default false)
+// that does not consume the next argument.
+func TestParseArgs_Retry(t *testing.T) {
+	opts, err := parseArgs([]string{"--retry", "-i", "in.mp4", "out.mp4"})
+	if err != nil {
+		t.Fatalf("parseArgs(--retry) unexpected error: %v", err)
+	}
+	if !opts.Retry {
+		t.Errorf("Retry = false, want true when --retry present")
+	}
+	if want := []string{"-i", "in.mp4", "out.mp4"}; len(opts.FmpegArgs) != len(want) {
+		t.Fatalf("FmpegArgs = %v, want %v", opts.FmpegArgs, want)
+	}
+
+	opts, err = parseArgs([]string{"-retry", "-i", "in.mp4", "out.mp4"})
+	if err != nil {
+		t.Fatalf("parseArgs(-retry) unexpected error: %v", err)
+	}
+	if !opts.Retry {
+		t.Errorf("Retry = false, want true when -retry present")
+	}
+
+	opts, err = parseArgs([]string{"-i", "in.mp4", "out.mp4"})
+	if err != nil {
+		t.Fatalf("parseArgs(default) unexpected error: %v", err)
+	}
+	if opts.Retry {
+		t.Errorf("Retry = true, want false by default")
+	}
+}
+
 // TestParseArgs_DashDashSeparator verifies that everything after "--" is
 // passed through to ffmpeg verbatim.
 func TestParseArgs_DashDashSeparator(t *testing.T) {

@@ -74,6 +74,16 @@ const (
 	// exit code (TSI-2697).
 	DefaultMaxRetries = 14
 
+	// DefaultSubmitRetries bounds the CLI's rate-limit (HTTP 429) resubmission
+	// loop when --retry is enabled. Backoff starts at the server's retry_in
+	// hint (or 1s) and doubles per attempt, capped at submitRetryMaxDelay
+	// (TSI-2939).
+	DefaultSubmitRetries = 5
+
+	// submitRetryMaxDelay caps a single backoff wait so --retry never parks
+	// the CLI for an unbounded time on a stuck server.
+	submitRetryMaxDelay = 60 * time.Second
+
 	// StreamingDrainTimeout bounds how long the streaming wait will block for
 	// the WebSocket to deliver its terminal event after the HTTP poll reports
 	// completion. The terminal event is sequenced after every stdout frame, so
@@ -87,12 +97,34 @@ const (
 // timing-sensitive code paths (e.g. the TSI-2452 race guard) without 2s waits.
 var pollInterval = PollInterval
 
+// Overridable sleep for rate-limit resubmission backoff; production value
+// waits d or until ctx is done (whichever comes first). Internal tests stub
+// it so the 429 retry loop runs instantly instead of waiting out real
+// exponential backoff (TSI-2939).
+var submitRetrySleep = sleepWithContext
+
+// sleepWithContext waits d, or returns ctx.Err() if ctx is cancelled first.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		d = time.Second
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // Client is the HTTP client for rffmpeg server
 type Client struct {
-	serverURL  string
-	token      string
-	http       *http.Client
-	maxRetries int
+	serverURL     string
+	token         string
+	http          *http.Client
+	maxRetries    int
+	submitRetries int
 }
 
 // ClientOption configures a Client.
@@ -105,6 +137,18 @@ func WithMaxRetries(n int) ClientOption {
 	return func(c *Client) {
 		if n >= 0 {
 			c.maxRetries = n
+		}
+	}
+}
+
+// WithSubmitRetries sets the retry budget for rate-limit (HTTP 429) job
+// submission. 0 (the default) means "no retries" — a rate-limited submission
+// fails immediately. A positive n retries the submission up to n times with
+// exponential backoff honoring the server's retry_in hint (TSI-2939).
+func WithSubmitRetries(n int) ClientOption {
+	return func(c *Client) {
+		if n >= 0 {
+			c.submitRetries = n
 		}
 	}
 }
@@ -131,6 +175,34 @@ func (e *RetriesExhaustedError) Error() string {
 
 func (e *RetriesExhaustedError) Unwrap() error {
 	return e.Cause
+}
+
+// RateLimitError reports an HTTP 429 rate-limit rejection from job
+// submission. It carries the server's suggested backoff so a caller with a
+// retry budget can honor it instead of re-submitting immediately (TSI-2939).
+// Error() renders the single-line message promised by the CLI (TSI-2938).
+type RateLimitError struct {
+	Current int
+	Limit   int
+	RetryIn int // suggested backoff in seconds; 0 when the server gave none
+	// decoded reports whether the body parsed as a structured
+	// RateLimitResponse (vs. an undecodable or empty body).
+	decoded bool
+	// rawBody holds an undecodable response body (diagnostic only).
+	rawBody string
+}
+
+func (e *RateLimitError) Error() string {
+	if e.decoded {
+		return fmt.Sprintf(
+			"rate limit exceeded: %d/%d concurrent jobs. Retry after %d seconds",
+			e.Current, e.Limit, e.RetryIn,
+		)
+	}
+	if e.rawBody != "" {
+		return fmt.Sprintf("rate limit exceeded (HTTP 429): %s", e.rawBody)
+	}
+	return "rate limit exceeded (HTTP 429)"
 }
 
 // normalizeServerURL strips a trailing /api/v1 (with or without trailing
@@ -314,14 +386,46 @@ func escapeMultipartQuotes(s string) string {
 	return s
 }
 
-// SubmitJob submits a transcoding job
+// SubmitJob submits a transcoding job.
 func (c *Client) SubmitJob(inputFiles []string, args []string, outputFilename string, autoHW bool) (string, error) {
-	return c.SubmitJobWithOptions(inputFiles, nil, args, outputFilename, autoHW, false, 0)
+	return c.SubmitJobWithOptions(context.Background(), inputFiles, nil, args, outputFilename, autoHW, false, 0)
 }
 
 // SubmitJobWithOptions submits a transcoding job with additional options.
 // timeout is the job timeout duration (0 means use server default).
-func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, args []string, outputFilename string, autoHW bool, streamingOutput bool, timeout time.Duration) (string, error) {
+//
+// When the client is configured with a submit-retry budget (WithSubmitRetries),
+// a rate-limit rejection (HTTP 429) is retried with exponential backoff that
+// starts at the server's retry_in hint and doubles per attempt, capped at
+// submitRetryMaxDelay. Any other failure — network, auth, validation — fails
+// immediately, and once the budget is spent the last rate-limit error is
+// returned (TSI-2939).
+//
+// The backoff wait is interruptible: if ctx is cancelled it stops waiting and
+// returns ctx.Err(), so callers can abort a rate-limited submission from a
+// signal handler instead of blocking for the full backoff (TSI-2939).
+func (c *Client) SubmitJobWithOptions(ctx context.Context, inputFiles []string, directPath []string, args []string, outputFilename string, autoHW bool, streamingOutput bool, timeout time.Duration) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= c.submitRetries; attempt++ {
+		jobID, err := c.submitJobOnce(ctx, inputFiles, directPath, args, outputFilename, autoHW, streamingOutput, timeout)
+		if err == nil {
+			return jobID, nil
+		}
+		lastErr = err
+
+		var rl *RateLimitError
+		if !errors.As(err, &rl) || attempt == c.submitRetries {
+			break
+		}
+		if sleepErr := submitRetrySleep(ctx, rateLimitBackoff(rl.RetryIn, attempt)); sleepErr != nil {
+			return "", sleepErr
+		}
+	}
+	return "", lastErr
+}
+
+// submitJobOnce performs a single job-submission attempt with no retry logic.
+func (c *Client) submitJobOnce(ctx context.Context, inputFiles []string, directPath []string, args []string, outputFilename string, autoHW bool, streamingOutput bool, timeout time.Duration) (string, error) {
 	req := protocol.JobSubmitRequest{
 		InputFiles:      inputFiles,
 		DirectPath:      directPath,
@@ -344,7 +448,7 @@ func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, 
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.serverURL+JobsEndpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+JobsEndpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -359,21 +463,10 @@ func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, 
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		// Handle rate limit (429) with detailed info
+		// Rate limit (429): surface a typed error so a caller with a retry
+		// budget can honor the server's backoff hint (TSI-2939).
 		if resp.StatusCode == http.StatusTooManyRequests {
-			bodyBytes, readErr := io.ReadAll(resp.Body)
-			if readErr == nil {
-				var rlResp protocol.RateLimitResponse
-				if json.Unmarshal(bodyBytes, &rlResp) == nil {
-					return "", fmt.Errorf(
-						"rate limit exceeded: %d/%d concurrent jobs. Retry after %d seconds",
-						rlResp.Current, rlResp.Limit, rlResp.RetryIn,
-					)
-				}
-				// Fallback: show raw body
-				return "", fmt.Errorf("rate limit exceeded (HTTP 429): %s", string(bodyBytes))
-			}
-			return "", fmt.Errorf("rate limit exceeded (HTTP 429)")
+			return "", decodeRateLimitError(resp.Body)
 		}
 		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return "", fmt.Errorf("job submission failed [%s]: %s", errResp.Code, errResp.Message)
@@ -387,6 +480,52 @@ func (c *Client) SubmitJobWithOptions(inputFiles []string, directPath []string, 
 	}
 
 	return jobResp.JobID, nil
+}
+
+// decodeRateLimitError converts an HTTP 429 response body into a
+// *RateLimitError, preserving the pre-existing error text for undecodable or
+// empty bodies.
+func decodeRateLimitError(body io.Reader) error {
+	bodyBytes, readErr := io.ReadAll(body)
+	if readErr == nil {
+		var rlResp protocol.RateLimitResponse
+		if json.Unmarshal(bodyBytes, &rlResp) == nil {
+			return &RateLimitError{
+				Current: rlResp.Current,
+				Limit:   rlResp.Limit,
+				RetryIn: rlResp.RetryIn,
+				decoded: true,
+			}
+		}
+		// Fallback: preserve the raw body in the diagnostic.
+		return &RateLimitError{rawBody: string(bodyBytes)}
+	}
+	return &RateLimitError{}
+}
+
+// rateLimitBackoff computes the wait before the attempt-th retry (0-based),
+// starting from the server's retry_in hint (or 1s when absent) and doubling
+// per attempt, capped at submitRetryMaxDelay.
+func rateLimitBackoff(retryIn, attempt int) time.Duration {
+	// retryIn is a server-controlled int with no upper bound. Clamp it before
+	// the time.Duration conversion: a huge value would overflow int64 and can
+	// wrap to a small positive number that skips both the <=0 guard below and
+	// the submitRetryMaxDelay cap (TSI-2939).
+	if retryIn > int(submitRetryMaxDelay/time.Second) {
+		retryIn = int(submitRetryMaxDelay / time.Second)
+	}
+	base := time.Duration(retryIn) * time.Second
+	if base <= 0 {
+		base = time.Second
+	}
+	delay := base
+	for i := 0; i < attempt && delay < submitRetryMaxDelay; i++ {
+		delay *= 2
+	}
+	if delay > submitRetryMaxDelay {
+		delay = submitRetryMaxDelay
+	}
+	return delay
 }
 
 // GetJob gets job status

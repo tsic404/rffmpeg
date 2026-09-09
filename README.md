@@ -103,6 +103,9 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 
 # 调整连接中断后的重试次数（默认 14 次，约 5 分钟；也可用环境变量 RFFMPEG_MAX_RETRIES）
 ./bin/rffmpeg --max-retries 5 -i input.mp4 -c:v libx264 output.mp4
+
+# 提交被限流（429）时自动退避重投（指数退避，默认关闭）
+./bin/rffmpeg --retry -i input.mp4 -c:v libx264 output.mp4
 ```
 
 **任务超时（`--timeout`）**：`--timeout` 为每个转码任务的 **ffmpeg 执行预算**（Go duration 格式，如 `30s`/`5m`/`2h`），只约束 ffmpeg 进程本身的运行时长——上传、调度、输入下载、时长探测等执行前阶段不占用该预算。Worker 在 ffmpeg 执行起点开始计时，用完预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过 `--timeout`，例如：
@@ -116,6 +119,8 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 > **兼容性说明（破坏性变更）**：本版本的 `--timeout` 语义与线上格式均有变更——job 的 `timeout` 字段由 RFC3339 绝对截止时间改为整数纳秒的执行预算。server、worker、CLI 三个二进制**必须同步升级**，不支持滚动混合部署：旧版 worker/CLI 读取新版 server 下发的整数字段（或新版 server 读取旧版 CLI 上报的 RFC3339 字符串）会在 JSON 解码处直接失败。
 
 **连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。重试次数达到上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / 配置文件 `"max_retries"`，默认 14 次、约 5 分钟）后 CLI 以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。三个通道均支持 `0`：显式设为 `0` 表示**不重试、首次失败即退出**，不会被静默回落为默认值。
+
+**限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。
 
 流式输出到 stdout（`-f <fmt> -`、`-o -` 或 `-`）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）或 `-o <本地路径>`。
 
