@@ -444,6 +444,30 @@ func FilterProgressLine(line string) bool {
 	return strings.Contains(line, "time=")
 }
 
+// ffmpegStatsLineRe matches ffmpeg's -stats progress updates written to stderr:
+// video ("frame= ... fps= ... time= ..."), audio-only ("size= ..."), and the
+// final lines ("frame= ... Lsize= ..." / "Lsize= ..."). The size/Lsize value is
+// "N/A" for non-file outputs (-f null -, pipes, rtmp, …), so it accepts either
+// a digit or N/A. These lines are rewritten in place with \r by ffmpeg and are
+// already surfaced to the CLI as structured progress pushes by ProgressRouter,
+// so forwarding the raw line interleaves frame/fps noise with the [rffmpeg]
+// log channel (TSI-2928).
+var ffmpegStatsLineRe = regexp.MustCompile(`^\s*(?:frame=\s*\d|(?:size|Lsize)=\s*(?:\d|N/A)).*time=\d`)
+
+// ffmpegSummaryLineRe matches ffmpeg's terminal -stats summary line emitted
+// once per job at exit: "video:...kB audio:...kB ... muxing overhead: ...%"
+// (audio-only jobs omit the video: column; ffmpeg 7 prefixes the line with
+// "[out#N/fmt @ 0x...]"). It carries no progress information and is raw
+// ffmpeg output, so it must not reach the CLI log stream either.
+var ffmpegSummaryLineRe = regexp.MustCompile(`^\s*(?:\[out#\d+[^\]]*\]\s+)?(?:video|audio):.*muxing overhead:`)
+
+// isFFmpegStatsLine reports whether line is ffmpeg -stats output — an
+// incremental progress update or the terminal summary — that must not be
+// forwarded verbatim to the CLI log stream.
+func isFFmpegStatsLine(line string) bool {
+	return ffmpegStatsLineRe.MatchString(line) || ffmpegSummaryLineRe.MatchString(line)
+}
+
 // ETAVerificationResult holds the outcome of an ETA precision check at a single checkpoint.
 type ETAVerificationResult struct {
 	ProgressPercent float64 // percent complete at this checkpoint
