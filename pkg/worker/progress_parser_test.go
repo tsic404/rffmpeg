@@ -102,6 +102,107 @@ func TestFilterProgressLine(t *testing.T) {
 	}
 }
 
+func TestIsFFmpegStatsLine(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{
+			name: "video stats",
+			line: "frame=  100 fps= 30 q=28.0 size=    1024kB time=00:00:03.33 bitrate=2518.0kbits/s speed=1x",
+			want: true,
+		},
+		{
+			name: "video final Lsize",
+			line: "frame=  100 fps=30 q=-1.0 Lsize=  500kB time=00:00:03.33 bitrate=2045.0kbits/s speed=2.05x",
+			want: true,
+		},
+		{
+			name: "audio stats",
+			line: "size=    1024kB time=00:00:03.33 bitrate=2518.0kbits/s speed=1x",
+			want: true,
+		},
+		{
+			name: "audio final Lsize",
+			line: "Lsize=    500kB time=00:00:03.33 bitrate=2045.0kbits/s speed=2.05x",
+			want: true,
+		},
+		{
+			name: "zero frame",
+			line: "frame=    0 fps=0.0 q=0.0 size=       0kB time=00:00:00.00 bitrate=N/A speed=0.00x",
+			want: true,
+		},
+		{
+			name: "audio stats size N/A",
+			line: "size=     N/A time=00:00:03.33 bitrate=N/A speed=1x",
+			want: true,
+		},
+		{
+			name: "audio final Lsize N/A",
+			line: "Lsize=     N/A time=00:00:03.33 bitrate=N/A speed=1x",
+			want: true,
+		},
+		{
+			name: "null output size N/A",
+			line: "size=N/A time=00:00:00.20 bitrate=N/A speed= 284x",
+			want: true,
+		},
+		{
+			name: "muxing overhead summary",
+			line: "video:2KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 35.5%",
+			want: true,
+		},
+		{
+			name: "muxing overhead summary ffmpeg7 prefix",
+			line: "[out#0/mpegts @ 0x55d1a2b3c4d0] video:2KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 35.5%",
+			want: true,
+		},
+		{
+			name: "audio only muxing overhead",
+			line: "audio:1000kB subtitle:0kB other streams:0kB global headers:0kB muxing overhead: 0.00%",
+			want: true,
+		},
+		{
+			name: "rffmpeg notification",
+			line: "[rffmpeg] Cache hit: deadbeef",
+			want: false,
+		},
+		{
+			name: "rffmpeg rewrite",
+			line: "[rffmpeg] upgraded libx264 → h264_nvenc",
+			want: false,
+		},
+		{
+			name: "retry notice",
+			line: "[RETRY] Stage 1 succeeded with encoder h264_nvenc",
+			want: false,
+		},
+		{
+			name: "ffmpeg stream header",
+			line: "  Stream #0:0: Video: h264 (libx264)",
+			want: false,
+		},
+		{
+			name: "ffmpeg error",
+			line: "Error while opening encoder for output stream #0:0",
+			want: false,
+		},
+		{
+			name: "plain log",
+			line: "Just a regular log message",
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isFFmpegStatsLine(tt.line); got != tt.want {
+				t.Errorf("isFFmpegStatsLine(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProgressParser_ShouldPush(t *testing.T) {
 	p := NewProgressParser()
 	// First call should return true
@@ -757,5 +858,51 @@ func TestProgressRouter_SendFinal(t *testing.T) {
 	}
 	if gotEta != 0 {
 		t.Errorf("SendFinal eta = %d, want 0", gotEta)
+	}
+}
+
+// TestProgressRouterHandlerFiltersStatsLines verifies the Worker→CLI stream
+// drops ffmpeg -stats frame/fps lines while forwarding everything else — the
+// structured progress pushes replace them, so the CLI log channel stays free
+// of raw frame= ... fps= ... noise interleaved with [rffmpeg] lines (TSI-2928).
+func TestProgressRouterHandlerFiltersStatsLines(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var forwarded []string
+	client := NewClient(srv.URL, "worker-1", "")
+	router := NewProgressRouter(client, "job-1", func(line string) {
+		mu.Lock()
+		forwarded = append(forwarded, line)
+		mu.Unlock()
+	})
+
+	h := router.Handler()
+	h("Input #0, mov,mp4:\n")
+	h("[rffmpeg] Cache hit: deadbeef\n")
+	h("frame=  100 fps= 30 q=28.0 size=    1024kB time=00:00:03.33 bitrate=2518.0kbits/s speed=1x\n")
+	h("frame=  200 fps= 30 q=28.0 size=    2048kB time=00:00:06.66 bitrate=2518.0kbits/s speed=1x\n")
+	h("size=    1024kB time=00:00:06.66 bitrate=2518.0kbits/s speed=1x\n")
+	h("size=N/A time=00:00:06.66 bitrate=N/A speed= 284x\n")
+	h("video:2KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 35.5%\n")
+	h("[rffmpeg] fallback to software encoder libx264\n")
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{
+		"Input #0, mov,mp4:\n",
+		"[rffmpeg] Cache hit: deadbeef\n",
+		"[rffmpeg] fallback to software encoder libx264\n",
+	}
+	if len(forwarded) != len(want) {
+		t.Fatalf("forwarded %d lines, want %d: %q", len(forwarded), len(want), forwarded)
+	}
+	for i := range want {
+		if forwarded[i] != want[i] {
+			t.Errorf("forwarded[%d] = %q, want %q", i, forwarded[i], want[i])
+		}
 	}
 }
