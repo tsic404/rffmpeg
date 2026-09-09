@@ -21,6 +21,14 @@ func isBooleanFlag(arg string) bool {
 	return ffmpegopts.IsBoolean(arg)
 }
 
+// isKnownOption reports whether arg names a known FFmpeg option (boolean or
+// value-taking), using the generated arity table in pkg/ffmpegopts. It
+// disambiguates a real "-i"-prefixed option such as "-itsoffset" from a
+// concatenated "-i<input>" input path (TSI-2907).
+func isKnownOption(arg string) bool {
+	return ffmpegopts.IsKnown(arg)
+}
+
 // ParseResult contains parsed ffmpeg arguments
 type ParseResult struct {
 	InputFiles      []string
@@ -54,24 +62,9 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	var outputFile string
 	var allArgs []string
 
-	// Find the last argument that looks like an output file
-	// Output file is typically the last non-option argument or specified with -o
-	outputCandidateIdx := -1
-
-	for i := len(args) - 1; i >= 0; i-- {
-		arg := args[i]
-		// Skip option values (previous arg starts with -) but NOT for boolean flags
-		if i > 0 && strings.HasPrefix(args[i-1], "-") && !strings.HasPrefix(args[i-1], "-i") && !isBooleanFlag(args[i-1]) {
-			continue
-		}
-		// Skip options themselves (but "-" is stdout, not an option)
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			continue
-		}
-		// This is a candidate for output file
-		outputCandidateIdx = i
-		break
-	}
+	// Find the last argument that looks like an output file (typically the
+	// last non-option argument, or an explicit -o value).
+	outputCandidateIdx := findOutputCandidate(args)
 
 	// Parse arguments
 	i := 0
@@ -91,8 +84,10 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 			continue
 		}
 
-		// Handle concatenated -i option: -iinputfile
-		if strings.HasPrefix(arg, "-i") && len(arg) > 2 {
+		// Handle concatenated -i option: -iinputfile. A known "-i"-prefixed
+		// option such as "-itsoffset" is NOT an inline input; it falls through
+		// to the generic option handling below (TSI-2907).
+		if strings.HasPrefix(arg, "-i") && len(arg) > 2 && !isKnownOption(arg) {
 			inputFile := arg[2:]
 			inputFiles = append(inputFiles, inputFile)
 			// Add -i <INPUT_FILE> to allArgs - Worker will replace <INPUT_FILE> with actual path
@@ -118,22 +113,26 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 			i++
 			continue
 		}
-
-		// Handle other options with values
-		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "-i") {
-			// Option that takes a value
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				optionValue := args[i+1]
-				// Check if next arg could be a value for this option
-				if i+1 != outputCandidateIdx {
-					allArgs = append(allArgs, arg, optionValue)
-					i += 2
-					continue
-				}
+		// Handle other options
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			// Boolean flag: takes no value; leave the following argument
+			// (often the output file) untouched.
+			if isBooleanFlag(arg) {
+				allArgs = append(allArgs, arg)
+				i++
+				continue
 			}
-			// Option without value (flag)
-			allArgs = append(allArgs, arg)
-			i++
+			// Value-taking option: consume the next token unconditionally,
+			// matching ffmpeg — a value may itself begin with "-" (e.g.
+			// "-map -1", "-ss -10", "-itsoffset -5"). Only a missing next
+			// token is a hard error, so "-c:v" with no codec reports the
+			// real problem instead of a misleading
+			// "no input/output file specified" (TSI-2907).
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("option %s requires a value", arg)
+			}
+			allArgs = append(allArgs, arg, args[i+1])
+			i += 2
 			continue
 		}
 
@@ -167,6 +166,36 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	result.AllArgs = allArgs
 
 	return result, nil
+}
+
+// findOutputCandidate returns the index of the last positional argument,
+// which ffmpeg treats as the output file. It scans left-to-right so a
+// value-taking option consumes its next token even when that value begins
+// with "-" (e.g. "-map -1"); a right-to-left scan mistakes "-1" for an
+// option and skips the real output file (TSI-2907).
+func findOutputCandidate(args []string) int {
+	candidate := -1
+	for i := 0; i < len(args); {
+		arg := args[i]
+		switch {
+		case arg == "-i" || arg == "--input":
+			i += 2 // input flag and its value
+		case strings.HasPrefix(arg, "-i") && len(arg) > 2 && !isKnownOption(arg):
+			i++ // -iinput inline form
+		case arg == "-o":
+			i += 2 // explicit output flag and its value
+		case strings.HasPrefix(arg, "-") && arg != "-":
+			if isBooleanFlag(arg) {
+				i++
+			} else {
+				i += 2 // value-taking option and its value
+			}
+		default:
+			candidate = i // positional argument
+			i++
+		}
+	}
+	return candidate
 }
 
 // StripFileScheme removes the "file://" prefix from a URI and returns the raw path.

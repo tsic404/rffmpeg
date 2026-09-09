@@ -173,6 +173,88 @@ func TestParseBasicInput(t *testing.T) {
 	}
 }
 
+// TestParseMissingValue pins the TSI-2907 fix: a value-taking option that
+// finds no value must report "requires a value" instead of a misleading
+// "no input/output file specified".
+func TestParseMissingValue(t *testing.T) {
+	p := NewParser()
+	cases := [][]string{
+		{"-c:v"},
+		{"-i", "input.mp4", "-c:v"},
+	}
+	for _, args := range cases {
+		_, err := p.Parse(args)
+		if err == nil {
+			t.Errorf("Parse(%v): expected error, got nil", args)
+			continue
+		}
+		if !strings.Contains(err.Error(), "requires a value") {
+			t.Errorf("Parse(%v): error = %q, want a 'requires a value' error", args, err)
+		}
+	}
+}
+
+// TestParseNegativeOptionValue pins the TSI-2907 fix: a value-taking option
+// whose value begins with "-" (e.g. "-map -1") must consume that value and
+// preserve it, rather than misreading it as a missing value or another option.
+func TestParseNegativeOptionValue(t *testing.T) {
+	p := NewParser()
+	cases := [][]string{
+		{"-i", "input.mp4", "-map", "-1", "output.mp4"},
+		{"-i", "input.mp4", "-ss", "-10", "output.mp4"},
+		{"-i", "input.mp4", "-itsoffset", "-5", "output.mp4"},
+	}
+	for _, args := range cases {
+		result, err := p.Parse(args)
+		if err != nil {
+			t.Errorf("Parse(%v): error = %v, want success", args, err)
+			continue
+		}
+		if result.OutputFile != "output.mp4" {
+			t.Errorf("Parse(%v): OutputFile = %q, want %q", args, result.OutputFile, "output.mp4")
+		}
+		opt, val := args[2], args[3]
+		found := false
+		for i, a := range result.AllArgs {
+			if a == opt && i+1 < len(result.AllArgs) && result.AllArgs[i+1] == val {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Parse(%v): AllArgs = %v, want %s %s preserved", args, result.AllArgs, opt, val)
+		}
+	}
+}
+
+// TestParseIPrefixedDemuxerOption pins the TSI-2907 fix for demuxer
+// AVOptions absent from `ffmpeg -h long`: "-input_format" starts with "-i"
+// and must parse as a value-taking option (hand-written in valueFlags), not
+// as a concatenated "-i<input>" input path that would silently drop "mjpeg".
+func TestParseIPrefixedDemuxerOption(t *testing.T) {
+	p := NewParser()
+	result, err := p.Parse([]string{"-f", "v4l2", "-input_format", "mjpeg", "-i", "/dev/video0", "out.mp4"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if result.OutputFile != "out.mp4" {
+		t.Errorf("OutputFile = %q, want %q", result.OutputFile, "out.mp4")
+	}
+	if len(result.InputFiles) != 1 || result.InputFiles[0] != "/dev/video0" {
+		t.Errorf("InputFiles = %v, want [%q]", result.InputFiles, "/dev/video0")
+	}
+	found := false
+	for i, a := range result.AllArgs {
+		if a == "-input_format" && i+1 < len(result.AllArgs) && result.AllArgs[i+1] == "mjpeg" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("AllArgs = %v, want -input_format mjpeg preserved", result.AllArgs)
+	}
+}
+
 func TestParseAllArgsPreserved(t *testing.T) {
 	args := []string{"-i", "input.mp4", "-c:v", "libx264", "-preset", "fast", "output.mp4"}
 	p := NewParser()
