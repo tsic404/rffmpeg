@@ -666,7 +666,7 @@ Content-Type: application/json
 }
 ```
 
-如果请求的编码器没有任何 Worker 支持（含同 codec family 的兼容编码器），服务端会落库该任务并标记 `failure_type=ENCODER_UNSUPPORTED`，返回 200 与 `job_id`；CLI 随后通过状态轮询观察到 `failed`（与 `INPUT_UNREACHABLE` / `NO_WORKER_AVAILABLE` 对称，TSI-2846）：
+如果请求的编码器没有任何 Worker 支持（含同 codec family 的兼容编码器），服务端会落库该任务并标记 `failure_type=ENCODER_UNAVAILABLE`，返回 200 与 `job_id`；CLI 随后通过状态轮询观察到 `failed`（与 `INPUT_UNREACHABLE` / `NO_WORKER_AVAILABLE` 对称，TSI-2846）：
 
 ```json
 HTTP/1.1 200 OK
@@ -678,7 +678,7 @@ Content-Type: application/json
 }
 ```
 
-查询该任务时 `status=failed`、`failure_type=ENCODER_UNSUPPORTED`、`error` 含编码器名。
+查询该任务时 `status=failed`、`failure_type=ENCODER_UNAVAILABLE`、`error` 含编码器名。
 
 集群内完全没有任何 Worker、或 Worker 持有该编码器但心跳已过期时，仍走上面的 503 `worker_unavailable` 快速失败（不落库，TSI-2419）。
 

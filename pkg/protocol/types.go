@@ -308,6 +308,7 @@ type FailureType string
 const (
 	FailureInputUnreachable   FailureType = "INPUT_UNREACHABLE"
 	FailureEncoderUnsupported FailureType = "ENCODER_UNSUPPORTED"
+	FailureEncoderUnavailable FailureType = "ENCODER_UNAVAILABLE"
 	FailureDiskFull           FailureType = "DISK_FULL"
 	FailureTimeout            FailureType = "TIMEOUT"
 	FailureWorkerCrash        FailureType = "WORKER_CRASH"
@@ -318,8 +319,8 @@ const (
 
 func (f FailureType) IsValid() bool {
 	switch f {
-	case FailureInputUnreachable, FailureEncoderUnsupported, FailureDiskFull,
-		FailureTimeout, FailureWorkerCrash, FailureFFmpegError,
+	case FailureInputUnreachable, FailureEncoderUnsupported, FailureEncoderUnavailable,
+		FailureDiskFull, FailureTimeout, FailureWorkerCrash, FailureFFmpegError,
 		FailureNoWorkerAvailable, FailureInfra:
 		return true
 	default:
