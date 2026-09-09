@@ -1832,8 +1832,16 @@ func (h *Handler) ListMigrationEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	targets, err := h.redistributionTargets(events)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to list migration targets", err,
+		))
+		return
+	}
+
 	writeJSON(w, http.StatusOK, MigrationEventsResponse{
-		Events: migrationEventsToInfo(events),
+		Events: migrationEventsToInfo(events, targets),
 	})
 }
 
@@ -1856,19 +1864,47 @@ func (h *Handler) GetMigrationEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, MigrationEventResponse{Event: migration.FromDBEvent(event)})
+	redistributions, err := h.db.GetJobRedistributionsByEvent(eventID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to get migration targets", err,
+		))
+		return
+	}
+
+	info := migration.FromDBEvent(event)
+	info.Targets = migration.RedistributionsByEvent(redistributions)[eventID]
+	writeJSON(w, http.StatusOK, MigrationEventResponse{Event: info})
+}
+
+// redistributionTargets fetches the per-job redistribution targets for the
+// given events in one batched query, grouped by event ID.
+func (h *Handler) redistributionTargets(events []*db.MigrationEvent) (map[string][]migration.JobRedistributionTarget, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(events))
+	for i, e := range events {
+		ids[i] = e.ID
+	}
+	redistributions, err := h.db.GetJobRedistributionsByEvents(ids)
+	if err != nil {
+		return nil, err
+	}
+	return migration.RedistributionsByEvent(redistributions), nil
 }
 
 // migrationEventsToInfo converts db.MigrationEvent records into the public
-// migration.EventInfo slice, reusing migration.FromDBEvent so handlers and
-// workerhealth.Monitor share one conversion path.
-func migrationEventsToInfo(events []*db.MigrationEvent) []migration.EventInfo {
+// migration.EventInfo slice, attaching the per-job redistribution targets.
+func migrationEventsToInfo(events []*db.MigrationEvent, targets map[string][]migration.JobRedistributionTarget) []migration.EventInfo {
 	if events == nil {
 		return []migration.EventInfo{}
 	}
 	result := make([]migration.EventInfo, len(events))
 	for i, event := range events {
-		result[i] = migration.FromDBEvent(event)
+		info := migration.FromDBEvent(event)
+		info.Targets = targets[event.ID]
+		result[i] = info
 	}
 	return result
 }

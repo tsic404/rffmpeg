@@ -137,6 +137,56 @@ func TestGetMigrationEvent(t *testing.T) {
 	}
 }
 
+func TestGetMigrationEventTargets(t *testing.T) {
+	h, r, cleanup := setupTest(t)
+	defer cleanup()
+
+	r.Get("/api/v1/migrations/{eventId}", h.GetMigrationEvent)
+
+	event, err := h.GetDB().CreateMigrationEvent("worker-1", "w1", "heartbeat_timeout", 0, []string{"job-1", "job-2"}, 2)
+	if err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if err := h.GetDB().CreateJobRedistributions(event.ID, []string{"job-1", "job-2"}); err != nil {
+		t.Fatalf("seed redistributions: %v", err)
+	}
+	if err := h.GetDB().RecordMigrationTarget("job-1", "worker-A", "gpu-A"); err != nil {
+		t.Fatalf("record target job-1: %v", err)
+	}
+	if err := h.GetDB().RecordMigrationTarget("job-2", "worker-B", "gpu-B"); err != nil {
+		t.Fatalf("record target job-2: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/migrations/"+event.ID, nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Event migration.EventInfo `json:"event"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Event.Targets) != 2 {
+		t.Fatalf("targets = %d, want 2", len(resp.Event.Targets))
+	}
+
+	want := map[string]string{"job-1": "worker-A", "job-2": "worker-B"}
+	seen := map[string]string{}
+	for _, tgt := range resp.Event.Targets {
+		seen[tgt.JobID] = tgt.TargetWorkerID
+	}
+	for jobID, target := range want {
+		if seen[jobID] != target {
+			t.Errorf("job %s target_worker_id = %q, want %q", jobID, seen[jobID], target)
+		}
+	}
+}
+
 func TestMigrationNotFoundConsistentJSON(t *testing.T) {
 	h, r, cleanup := setupTest(t)
 	defer cleanup()

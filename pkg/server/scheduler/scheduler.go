@@ -273,6 +273,14 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 		return false
 	}
 
+	// TSI-2929: write back the migration target so a migrated job's chain
+	// (source → target) is resolvable from migration_events alone. Best-effort
+	// audit write: assignment already succeeded, so a failure is logged, not
+	// surfaced.
+	if err := s.db.RecordMigrationTarget(job.ID, bestWorker.ID, bestWorker.Name); err != nil {
+		log.Printf("Scheduler: Failed to record migration target for job %s: %v", job.ID, err)
+	}
+
 	if requestedEncoder != "" {
 		if usedFallbackEncoder != "" {
 			log.Printf("Scheduler: Assigned job %s (fallback: %s -> %s) to worker %s", job.ID, requestedEncoder, usedFallbackEncoder, bestWorker.ID)

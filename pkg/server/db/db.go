@@ -280,6 +280,25 @@ func (d *Database) initTables() error {
 		CREATE INDEX IF NOT EXISTS idx_migration_events_timestamp ON migration_events(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_migration_events_worker_id ON migration_events(worker_id);
 
+		-- TSI-2929: per-job redistribution targets. A migration event records
+		-- the source worker and the full migrated job_ids list, but those jobs
+		-- are then reassigned independently and can fan out to different
+		-- workers — so the target is a per-job fact, not a per-event one. Rows
+		-- are inserted as unresolved placeholders (target_worker_id NULL) when
+		-- a job is migrated, and filled by the scheduler/pull path on
+		-- reassignment. The job_id index keeps the fill path a point lookup
+		-- instead of a full-table json_each scan.
+		CREATE TABLE IF NOT EXISTS job_redistributions (
+			id TEXT PRIMARY KEY,
+			migration_event_id TEXT NOT NULL,
+			job_id TEXT NOT NULL,
+			target_worker_id TEXT,
+			target_worker_name TEXT,
+			created_at DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_job_redistributions_job_id ON job_redistributions(job_id);
+		CREATE INDEX IF NOT EXISTS idx_job_redistributions_migration_event_id ON job_redistributions(migration_event_id);
+
 		CREATE TABLE IF NOT EXISTS worker_eviction_events (
 			id TEXT PRIMARY KEY,
 			timestamp DATETIME NOT NULL,
@@ -1231,6 +1250,16 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// TSI-2929: write back the migration target for any claimed job that was
+	// previously migrated, so the chain is resolvable from migration_events
+	// alone. Best-effort audit write after commit: assignment is authoritative,
+	// and a failure here must not fail the pull.
+	for _, job := range claimedJobs {
+		if err := d.RecordMigrationTarget(job.ID, workerID, workerName); err != nil {
+			log.Printf("Failed to record migration target for job %s: %v", job.ID, err)
+		}
 	}
 
 	// Combine queued jobs (already assigned) with newly claimed jobs
@@ -2577,6 +2606,117 @@ func (d *Database) GetMigrationEventsByWorker(workerID string, limit int) ([]*Mi
 	}
 
 	return events, nil
+}
+
+// JobRedistribution represents a per-job redistribution record: which worker a
+// migrated job was reassigned to. Unlike a migration event (source worker +
+// full job_ids list), the target is a per-job fact because the jobs of a single
+// migration can fan out to different workers.
+type JobRedistribution struct {
+	ID               string
+	MigrationEventID string
+	JobID            string
+	TargetWorkerID   sql.NullString
+	TargetWorkerName sql.NullString
+	CreatedAt        time.Time
+}
+
+// CreateJobRedistributions inserts an unresolved placeholder row per migrated
+// job, linking it to the migration event that migrated it. The target is filled
+// later by RecordMigrationTarget when the scheduler/pull path reassigns the
+// job. This is a cold path (one call per worker-offline migration).
+func (d *Database) CreateJobRedistributions(migrationEventID string, jobIDs []string) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	for _, jobID := range jobIDs {
+		id := uuid.New().String()
+		if _, err := tx.Exec(`
+			INSERT INTO job_redistributions (id, migration_event_id, job_id, target_worker_id, target_worker_name, created_at)
+			VALUES (?, ?, ?, NULL, NULL, ?)
+		`, id, migrationEventID, jobID, now); err != nil {
+			return fmt.Errorf("failed to create job redistribution for job %s: %w", jobID, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// RecordMigrationTarget fills the unresolved redistribution placeholder for a
+// migrated job with the worker it was reassigned to. The lookup is an indexed
+// point query on job_id, so a fresh job (no placeholder) matches zero rows and
+// the UPDATE is a cheap no-op rather than a full-table json_each scan.
+// targetWorkerName may be empty (worker registered without a name).
+func (d *Database) RecordMigrationTarget(jobID, targetWorkerID, targetWorkerName string) error {
+	var targetWorkerNameVal interface{}
+	if targetWorkerName != "" {
+		targetWorkerNameVal = targetWorkerName
+	}
+
+	_, err := d.db.Exec(`
+		UPDATE job_redistributions
+		SET target_worker_id = ?, target_worker_name = ?
+		WHERE id = (
+			SELECT id FROM job_redistributions
+			WHERE job_id = ? AND target_worker_id IS NULL
+			ORDER BY created_at DESC, id DESC
+			LIMIT 1
+		)
+	`, targetWorkerID, targetWorkerNameVal, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to record migration target for job %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// GetJobRedistributionsByEvent lists the per-job redistribution records for a
+// migration event, used to reconstruct the target side of a migration chain.
+func (d *Database) GetJobRedistributionsByEvent(migrationEventID string) ([]JobRedistribution, error) {
+	return d.GetJobRedistributionsByEvents([]string{migrationEventID})
+}
+
+// GetJobRedistributionsByEvents returns the per-job redistribution records for
+// the given migration events in a single query, so the migration events list
+// endpoint can attach targets without an N+1 per-event read.
+func (d *Database) GetJobRedistributionsByEvents(migrationEventIDs []string) ([]JobRedistribution, error) {
+	if len(migrationEventIDs) == 0 {
+		return nil, nil
+	}
+
+	placeholders := make([]string, len(migrationEventIDs))
+	args := make([]interface{}, len(migrationEventIDs))
+	for i, id := range migrationEventIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	rows, err := d.db.Query(fmt.Sprintf(`
+		SELECT id, migration_event_id, job_id, target_worker_id, target_worker_name, created_at
+		FROM job_redistributions
+		WHERE migration_event_id IN (%s)
+		ORDER BY created_at ASC, id ASC
+	`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job redistributions: %w", err)
+	}
+	defer rows.Close()
+
+	var redistributions []JobRedistribution
+	for rows.Next() {
+		r := JobRedistribution{}
+		if err := rows.Scan(&r.ID, &r.MigrationEventID, &r.JobID, &r.TargetWorkerID, &r.TargetWorkerName, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan job redistribution: %w", err)
+		}
+		redistributions = append(redistributions, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating job redistributions: %w", err)
+	}
+	return redistributions, nil
 }
 
 // GetRunningJobsByWorker retrieves all running/queued jobs for a specific worker.

@@ -46,14 +46,15 @@ type Event struct {
 
 // EventInfo represents the public-facing migration event information.
 type EventInfo struct {
-	ID           string    `json:"id"`
-	Timestamp    time.Time `json:"timestamp"`
-	WorkerID     string    `json:"worker_id"`
-	WorkerName   string    `json:"worker_name,omitempty"`
-	Reason       Reason    `json:"reason"`
-	RetryCount   int       `json:"retry_count"`
-	JobIDs       []string  `json:"job_ids"`
-	JobsMigrated int       `json:"jobs_migrated"`
+	ID           string                    `json:"id"`
+	Timestamp    time.Time                 `json:"timestamp"`
+	WorkerID     string                    `json:"worker_id"`
+	WorkerName   string                    `json:"worker_name,omitempty"`
+	Reason       Reason                    `json:"reason"`
+	RetryCount   int                       `json:"retry_count"`
+	JobIDs       []string                  `json:"job_ids"`
+	JobsMigrated int                       `json:"jobs_migrated"`
+	Targets      []JobRedistributionTarget `json:"targets,omitempty"`
 }
 
 // FromDBEvent converts a db.MigrationEvent into the public EventInfo.
@@ -80,6 +81,35 @@ func FromDBEvent(event *db.MigrationEvent) EventInfo {
 		JobIDs:       jobIDs,
 		JobsMigrated: event.JobsMigrated,
 	}
+}
+
+// JobRedistributionTarget is the per-job target side of a migration: which
+// worker a single migrated job was reassigned to. A migration event's jobs can
+// fan out to different workers, so the target is a per-job fact (TSI-2929).
+type JobRedistributionTarget struct {
+	JobID            string `json:"job_id"`
+	TargetWorkerID   string `json:"target_worker_id,omitempty"`
+	TargetWorkerName string `json:"target_worker_name,omitempty"`
+}
+
+// RedistributionsByEvent groups per-job redistribution records by their
+// migration event ID, converting DB rows into the public target shape. Events
+// with no redistribution record are absent from the map — callers treat that
+// as "no reassignment recorded yet". A record with an unresolved target
+// (target_worker_id NULL) carries an empty TargetWorkerID/Name.
+func RedistributionsByEvent(rs []db.JobRedistribution) map[string][]JobRedistributionTarget {
+	grouped := make(map[string][]JobRedistributionTarget)
+	for _, r := range rs {
+		t := JobRedistributionTarget{JobID: r.JobID}
+		if r.TargetWorkerID.Valid {
+			t.TargetWorkerID = r.TargetWorkerID.String
+		}
+		if r.TargetWorkerName.Valid {
+			t.TargetWorkerName = r.TargetWorkerName.String
+		}
+		grouped[r.MigrationEventID] = append(grouped[r.MigrationEventID], t)
+	}
+	return grouped
 }
 
 // Config holds configuration for the migration manager.

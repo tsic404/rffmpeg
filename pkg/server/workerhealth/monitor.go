@@ -246,7 +246,8 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 		workerName = worker.Name
 	}
 
-	// Process each job individually: fail if previous retries >= MaxRetryCount, otherwise migrate
+	// Phase 1: classify jobs (read-only) into migrated vs failed, tracking the
+	// max retry count for the audit event. No job is made schedulable here.
 	var migratedJobIDs []string
 	var failedJobIDs []string
 	retryCount := 0
@@ -263,28 +264,19 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 		}
 
 		if count >= m.config.MaxRetryCount {
-			// Max retries exceeded: mark job as failed
-			errMsg := "max retry count exceeded after repeated worker failures"
-			if err := m.db.FailJob(job.ID, errMsg, string(protocol.FailureWorkerCrash)); err != nil {
-				log.Printf("Failed to mark job %s as failed: %v", job.ID, err)
-				continue
-			}
 			failedJobIDs = append(failedJobIDs, job.ID)
-			log.Printf("Job %s exceeded max retry count (%d/%d), marked as failed",
-				job.ID, count, m.config.MaxRetryCount)
 		} else {
-			// Reset job to pending for migration
-			if err := m.db.ResetJobToPending(job.ID); err != nil {
-				log.Printf("Failed to reset job %s to pending: %v", job.ID, err)
-				continue
-			}
 			migratedJobIDs = append(migratedJobIDs, job.ID)
 		}
 	}
 
-	// Record migration event for migrated jobs (not failed ones)
+	// Phase 2: record the migration event and the per-job redistribution
+	// placeholders BEFORE any job becomes schedulable. ResetJobToPending (phase
+	// 3) is what makes a job claimable, and a job claimed in the window between
+	// reset and placeholder insert would never have its target written back —
+	// a permanent loss of that hop's target (TSI-2929 review).
 	if len(migratedJobIDs) > 0 {
-		_, err = m.db.CreateMigrationEvent(
+		event, err := m.db.CreateMigrationEvent(
 			workerID,
 			workerName,
 			string(migration.ReasonHeartbeatTimeout),
@@ -294,8 +286,28 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 		)
 		if err != nil {
 			log.Printf("Failed to create migration event for worker %s: %v", workerID, err)
+		} else if err := m.db.CreateJobRedistributions(event.ID, migratedJobIDs); err != nil {
+			// The migration event is authoritative; a redistribution placeholder
+			// failure only degrades target observability.
+			log.Printf("Failed to create job redistributions for worker %s: %v", workerID, err)
 		}
+	}
 
+	// Phase 3: apply the decisions. ResetJobToPending is conditional on the job
+	// still being active, so a job that raced to a terminal state is left alone.
+	for _, jobID := range migratedJobIDs {
+		if err := m.db.ResetJobToPending(jobID); err != nil {
+			log.Printf("Failed to reset job %s to pending: %v", jobID, err)
+		}
+	}
+	for _, jobID := range failedJobIDs {
+		errMsg := "max retry count exceeded after repeated worker failures"
+		if err := m.db.FailJob(jobID, errMsg, string(protocol.FailureWorkerCrash)); err != nil {
+			log.Printf("Failed to mark job %s as failed: %v", jobID, err)
+		}
+	}
+
+	if len(migratedJobIDs) > 0 {
 		log.Printf("Migrated %d job(s) from offline worker %s (retry count: %d)",
 			len(migratedJobIDs), workerID, retryCount)
 	}
