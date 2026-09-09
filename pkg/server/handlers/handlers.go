@@ -1719,6 +1719,12 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool) protocol.JobInf
 	if job.WorkerID.Valid {
 		info.WorkerID = job.WorkerID.String
 	}
+	if job.AssignedWorker.Valid {
+		info.AssignedWorker = job.AssignedWorker.String
+	}
+	if job.WorkerName.Valid {
+		info.WorkerName = job.WorkerName.String
+	}
 	if job.ExitCode.Valid {
 		info.ExitCode = int(job.ExitCode.Int32)
 	}

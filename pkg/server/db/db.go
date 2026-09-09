@@ -23,6 +23,8 @@ type Job struct {
 	StreamingOutput bool   // Output to stdout via WebSocket
 	OutputFiles     string // JSON array stored as string
 	WorkerID        sql.NullString
+	AssignedWorker  sql.NullString // Worker ID of the last/current executor (survives terminal state)
+	WorkerName      sql.NullString // Human-readable name of the assigned worker
 	ExitCode        sql.NullInt32
 	Error           sql.NullString
 	FailureType     string        // Classified failure type (TSI-757)
@@ -172,6 +174,8 @@ func (d *Database) initTables() error {
 			streaming_output INTEGER DEFAULT 0,
 			output_files TEXT DEFAULT '[]',
 			worker_id TEXT,
+			assigned_worker TEXT,
+			worker_name TEXT,
 			exit_code INTEGER,
 			error TEXT,
 			failure_type TEXT DEFAULT '',
@@ -315,6 +319,8 @@ func (d *Database) initTables() error {
 		`ALTER TABLE workers ADD COLUMN evicted_at DATETIME`,
 		`ALTER TABLE jobs ADD COLUMN direct_paths TEXT DEFAULT '[]'`,
 		`ALTER TABLE jobs ADD COLUMN cached INTEGER DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN assigned_worker TEXT`,
+		`ALTER TABLE jobs ADD COLUMN worker_name TEXT`,
 		`ALTER TABLE workers ADD COLUMN video_encoders TEXT DEFAULT '[]'`,
 		`ALTER TABLE workers ADD COLUMN video_decoders TEXT DEFAULT '[]'`,
 		`ALTER TABLE workers ADD COLUMN hwaccels TEXT DEFAULT ''`,
@@ -453,13 +459,13 @@ func (d *Database) GetJob(id string) (*Job, error) {
 	err := d.db.QueryRow(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error,
 	       failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-	       created_at, updated_at, started_at, finished_at
+	       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs WHERE id = ?
 	`, id).Scan(
 		&job.ID, &job.Status, &job.InputFiles, &job.Args, &job.OutputFilename, &job.StreamingOutput, &job.OutputFiles,
 		&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW, &job.Cached,
 		&job.Timeout, &job.DirectPaths, &job.ProgressPercent, &job.EtaSeconds,
-		&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt,
+		&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt, &job.AssignedWorker, &job.WorkerName,
 	)
 
 	if err == sql.ErrNoRows {
@@ -535,7 +541,9 @@ func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStat
 			                failure_type = COALESCE(?, failure_type),
 			                failure_details = COALESCE(?, failure_details),
 			                started_at = COALESCE(started_at, ?), finished_at = ?,
-			                cached = ?
+			                cached = ?,
+			                assigned_worker = COALESCE(assigned_worker, worker_id),
+			                worker_name = COALESCE(worker_name, (SELECT name FROM workers WHERE id = jobs.worker_id))
 			WHERE id = ?
 			  AND NOT EXISTS (
 			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?)
@@ -616,10 +624,12 @@ func (d *Database) updateJobTerminalStatusWithOwner(jobID, workerID string, stat
 		                error = ?,
 		                failure_type = COALESCE(?, failure_type),
 		                failure_details = COALESCE(?, failure_details),
-		                finished_at = ?, cached = ?
+		                finished_at = ?, cached = ?,
+		                assigned_worker = COALESCE(assigned_worker, ?),
+		                worker_name = COALESCE(worker_name, (SELECT name FROM workers WHERE id = ?))
 		WHERE id = ? AND worker_id = ? AND status IN (?, ?)
 	`, status, now, exitCode, errMsg, failureType, failureDetails, finishedAt, cached,
-		jobID, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
+		workerID, workerID, jobID, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
 	if err != nil {
 		return fmt.Errorf("failed to update job terminal status: %w", err)
 	}
@@ -661,9 +671,9 @@ func (d *Database) UpdateJobProgress(id string, progress float64, etaSeconds int
 func (d *Database) AssignJobToWorker(jobID, workerID string) error {
 	now := time.Now()
 	result, err := d.db.Exec(`
-		UPDATE jobs SET worker_id = ?, status = ?, updated_at = ?
+		UPDATE jobs SET worker_id = ?, assigned_worker = ?, worker_name = (SELECT name FROM workers WHERE id = ?), status = ?, updated_at = ?
 		WHERE id = ? AND status = ? AND worker_id IS NULL
-	`, workerID, protocol.JobStatusQueued, now, jobID, protocol.JobStatusPending)
+	`, workerID, workerID, workerID, protocol.JobStatusQueued, now, jobID, protocol.JobStatusPending)
 	if err != nil {
 		return fmt.Errorf("failed to assign job to worker: %w", err)
 	}
@@ -729,7 +739,7 @@ func (d *Database) UpdateJobOutput(id string, outputFiles string) error {
 func (d *Database) GetPendingJobs(limit int) ([]*Job, error) {
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs WHERE status = ?
 		ORDER BY created_at ASC LIMIT ?
 	`, protocol.JobStatusPending, limit)
@@ -794,7 +804,7 @@ func (d *Database) scanJobs(rows *sql.Rows) ([]*Job, error) {
 			&job.ID, &job.Status, &job.InputFiles, &job.Args, &job.OutputFilename, &job.StreamingOutput, &job.OutputFiles,
 			&job.WorkerID, &job.ExitCode, &job.Error, &job.FailureType, &job.FailureDetails, &job.AutoHW, &job.Cached,
 			&job.Timeout, &job.DirectPaths, &job.ProgressPercent, &job.EtaSeconds,
-			&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt,
+			&job.CreatedAt, &job.UpdatedAt, &job.StartedAt, &job.FinishedAt, &job.AssignedWorker, &job.WorkerName,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan job: %w", err)
@@ -1079,7 +1089,7 @@ func (d *Database) GetJobsForWorker(workerID string, limit int) ([]*Job, error) 
 	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
 		ORDER BY created_at ASC LIMIT ?
 	`, workerID, protocol.JobStatusPending, protocol.JobStatusQueued, limit)
@@ -1122,7 +1132,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 	// Get pending jobs (status = pending AND worker_id IS NULL)
 	rows, err := tx.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs WHERE status = ? AND worker_id IS NULL
 		ORDER BY created_at ASC LIMIT ?
 	`, protocol.JobStatusPending, remainingSlots)
@@ -1136,6 +1146,15 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 		return nil, err
 	}
 
+	// Fetch the worker name once so the claimed Job objects carry the same
+	// attribution the UPDATE persists via subquery — the pull response is built
+	// from these in-memory objects, and a re-read would otherwise return null
+	// attribution for freshly claimed jobs (TSI-2920 review).
+	workerName := ""
+	if w, err := d.GetWorker(workerID); err == nil {
+		workerName = w.Name
+	}
+
 	now := time.Now()
 	claimedJobs := make([]*Job, 0, len(newJobs))
 	for _, job := range newJobs {
@@ -1146,9 +1165,9 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 		// guarded UPDATE that matches 0 rows means the other worker won the
 		// race — skip the job instead of double-dispatching it.
 		result, err := tx.Exec(`
-			UPDATE jobs SET worker_id = ?, status = ?, updated_at = ?
+			UPDATE jobs SET worker_id = ?, assigned_worker = ?, worker_name = (SELECT name FROM workers WHERE id = ?), status = ?, updated_at = ?
 			WHERE id = ? AND status = ? AND worker_id IS NULL
-		`, workerID, protocol.JobStatusQueued, now, job.ID, protocol.JobStatusPending)
+		`, workerID, workerID, workerID, protocol.JobStatusQueued, now, job.ID, protocol.JobStatusPending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to assign job %s: %w", job.ID, err)
 		}
@@ -1160,6 +1179,8 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 			continue // lost the race to another worker's pull
 		}
 		job.WorkerID = sql.NullString{String: workerID, Valid: true}
+		job.AssignedWorker = sql.NullString{String: workerID, Valid: true}
+		job.WorkerName = sql.NullString{String: workerName, Valid: workerName != ""}
 		job.Status = protocol.JobStatusQueued
 		claimedJobs = append(claimedJobs, job)
 	}
@@ -1386,7 +1407,7 @@ func (d *Database) GetTimedOutJobs(timeout time.Duration) ([]*Job, error) {
 	cutoff := time.Now().Add(-timeout)
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs WHERE status = ? AND started_at IS NOT NULL AND started_at < ?
 	`, protocol.JobStatusRunning, cutoff)
 	if err != nil {
@@ -1656,7 +1677,7 @@ func (d *Database) RemoveStaleWorkers(staleThreshold time.Duration) (int64, erro
 func (d *Database) GetJobsByStatus(status protocol.JobStatus, limit int) ([]*Job, error) {
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs WHERE status = ?
 		ORDER BY created_at ASC LIMIT ?
 	`, status, limit)
@@ -1674,7 +1695,7 @@ func (d *Database) GetJobsByStatus(status protocol.JobStatus, limit int) ([]*Job
 func (d *Database) ListJobs(limit int, offset int) ([]*Job, error) {
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs
 		ORDER BY created_at DESC, id DESC
 		LIMIT ? OFFSET ?
@@ -2534,7 +2555,7 @@ func (d *Database) GetRunningJobsByWorker(workerID string) ([]*Job, error) {
 	workerID = NormalizeWorkerID(workerID)
 	rows, err := d.db.Query(`
 		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
 		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
 		ORDER BY created_at ASC
 	`, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
