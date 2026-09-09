@@ -165,6 +165,7 @@ func TestFailureType_Retryable(t *testing.T) {
 		// Deterministic failures — retrying without a change cannot help.
 		{protocol.FailureInputUnreachable, false},
 		{protocol.FailureEncoderUnsupported, false},
+		{protocol.FailureEncoderUnavailable, false},
 		{protocol.FailureDiskFull, false},
 		{protocol.FailureFFmpegError, false},
 		{protocol.FailureNoWorkerAvailable, false},
@@ -301,9 +302,10 @@ func TestClassifyFailureInfraTextNotInputUnreachable(t *testing.T) {
 func TestFailureTypeIsValid(t *testing.T) {
 	valid := []protocol.FailureType{
 		protocol.FailureInputUnreachable, protocol.FailureEncoderUnsupported,
-		protocol.FailureDiskFull, protocol.FailureTimeout,
-		protocol.FailureWorkerCrash, protocol.FailureFFmpegError,
-		protocol.FailureNoWorkerAvailable, protocol.FailureInfra,
+		protocol.FailureEncoderUnavailable, protocol.FailureDiskFull,
+		protocol.FailureTimeout, protocol.FailureWorkerCrash,
+		protocol.FailureFFmpegError, protocol.FailureNoWorkerAvailable,
+		protocol.FailureInfra,
 	}
 	for _, f := range valid {
 		if !f.IsValid() {

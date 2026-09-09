@@ -789,6 +789,64 @@ func TestMigrationConvertsLegacyTimeoutDeadline(t *testing.T) {
 	}
 }
 
+// TestMigrationRelabelsEncoderUnsupportedNoWorker locks the TSI-2930 data
+// correction: historical submit-time rejections persisted as
+// ENCODER_UNSUPPORTED with a NULL worker_id (before ENCODER_UNAVAILABLE
+// existed) are re-labeled ENCODER_UNAVAILABLE, while runtime
+// ENCODER_UNSUPPORTED rows — which always carry a worker_id — are untouched.
+func TestMigrationRelabelsEncoderUnsupportedNoWorker(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	if _, err := db.db.Exec(`
+		INSERT INTO jobs (id, status, input_files, args, failure_type, worker_id, created_at, updated_at)
+		VALUES ('legacy-reject', ?, '[]', '[]', ?, NULL, ?, ?)
+	`, protocol.JobStatusFailed, string(protocol.FailureEncoderUnsupported), now, now); err != nil {
+		t.Fatalf("seed legacy reject: %v", err)
+	}
+	if _, err := db.db.Exec(`
+		INSERT INTO jobs (id, status, input_files, args, failure_type, worker_id, created_at, updated_at)
+		VALUES ('legacy-runtime', ?, '[]', '[]', ?, 'worker-1', ?, ?)
+	`, protocol.JobStatusFailed, string(protocol.FailureEncoderUnsupported), now, now); err != nil {
+		t.Fatalf("seed legacy runtime: %v", err)
+	}
+
+	if err := db.migrateEncoderUnavailableClassification(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	reject, err := db.GetJob("legacy-reject")
+	if err != nil {
+		t.Fatalf("get legacy-reject: %v", err)
+	}
+	if reject.FailureType != string(protocol.FailureEncoderUnavailable) {
+		t.Errorf("legacy-reject failure_type = %q, want %q",
+			reject.FailureType, protocol.FailureEncoderUnavailable)
+	}
+
+	runtime, err := db.GetJob("legacy-runtime")
+	if err != nil {
+		t.Fatalf("get legacy-runtime: %v", err)
+	}
+	if runtime.FailureType != string(protocol.FailureEncoderUnsupported) {
+		t.Errorf("legacy-runtime failure_type = %q, want %q (runtime failure must be preserved)",
+			runtime.FailureType, protocol.FailureEncoderUnsupported)
+	}
+
+	// Idempotent: a second run must not change anything.
+	if err := db.migrateEncoderUnavailableClassification(); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	again, err := db.GetJob("legacy-reject")
+	if err != nil {
+		t.Fatalf("get legacy-reject (2nd): %v", err)
+	}
+	if again.FailureType != string(protocol.FailureEncoderUnavailable) {
+		t.Errorf("second run changed legacy-reject failure_type to %q", again.FailureType)
+	}
+}
+
 // TestCachedFlagPersistedOnTerminalUpdate guards the TSI-2519 DB contract:
 // a terminal completion recorded with the cached flag returns Cached=true
 // from GetJob; a non-cached completion stays false; non-terminal updates do

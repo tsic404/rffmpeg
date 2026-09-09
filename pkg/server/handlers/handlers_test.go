@@ -729,7 +729,7 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 }
 
 // TestUpdateJobFailureTypeAllEnumsAccepted locks the TSI-2802 gap: every one
-// of the eight documented FailureType values must be accepted by the server
+// of the nine documented FailureType values must be accepted by the server
 // (not just TIMEOUT / INPUT_UNREACHABLE) and persisted onto the job, and each
 // must report the retryable flag it is defined with. A failed→failed update
 // is a legal retry-after-failure transition, so one job can exercise all
@@ -783,6 +783,7 @@ func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 	allTypes := []protocol.FailureType{
 		protocol.FailureInputUnreachable,
 		protocol.FailureEncoderUnsupported,
+		protocol.FailureEncoderUnavailable,
 		protocol.FailureDiskFull,
 		protocol.FailureTimeout,
 		protocol.FailureWorkerCrash,
@@ -2116,7 +2117,7 @@ func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 }
 
 // TestSubmitJobNoWorkerWithEncoder verifies a job requesting an encoder no
-// worker supports is persisted and failed as ENCODER_UNSUPPORTED rather than
+// worker supports is persisted and failed as ENCODER_UNAVAILABLE rather than
 // rejected with a 503 that leaves no DB row (TSI-2846; formerly TSI-1428).
 func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	_, router, cleanup := setupTest(t)
@@ -2155,7 +2156,7 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	// TSI-2846: the job is persisted and failed as ENCODER_UNSUPPORTED (200),
+	// TSI-2846: the job is persisted and failed as ENCODER_UNAVAILABLE (200),
 	// not rejected with a 503 that leaves no DB row.
 	if w.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
@@ -2169,7 +2170,7 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 		t.Fatal("Expected non-empty job ID")
 	}
 
-	// The job must be failed with failure_type ENCODER_UNSUPPORTED.
+	// The job must be failed with failure_type ENCODER_UNAVAILABLE.
 	req = httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
@@ -2184,18 +2185,24 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	if statusResp.Job.Status != protocol.JobStatusFailed {
 		t.Errorf("Expected job status 'failed', got '%s'", statusResp.Job.Status)
 	}
-	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnsupported) {
-		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnsupported, statusResp.Job.FailureType)
+	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnavailable) {
+		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnavailable, statusResp.Job.FailureType)
+	}
+	// TSI-2930: the pre-scheduling rejection never assigned a worker, so no
+	// attribution is written — this distinguishes it from runtime failures.
+	if statusResp.Job.AssignedWorker != "" || statusResp.Job.WorkerName != "" {
+		t.Errorf("submit-time rejection must not write attribution, got assigned_worker=%q worker_name=%q",
+			statusResp.Job.AssignedWorker, statusResp.Job.WorkerName)
 	}
 	if !strings.Contains(statusResp.Job.Error, "libx265") {
 		t.Errorf("Expected error message to mention 'libx265', got: %s", statusResp.Job.Error)
 	}
 }
 
-// TestSubmitJobUnknownEncoderPersistedAsUnsupported locks the TSI-2846 issue
+// TestSubmitJobUnknownEncoderPersistedAsUnavailable locks the TSI-2846 issue
 // example: an encoder no worker has ever registered (e.g. a typo) is persisted
-// and failed as ENCODER_UNSUPPORTED, not rejected with a 503 leaving no row.
-func TestSubmitJobUnknownEncoderPersistedAsUnsupported(t *testing.T) {
+// and failed as ENCODER_UNAVAILABLE, not rejected with a 503 leaving no row.
+func TestSubmitJobUnknownEncoderPersistedAsUnavailable(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
@@ -2236,15 +2243,15 @@ func TestSubmitJobUnknownEncoderPersistedAsUnsupported(t *testing.T) {
 	if statusResp.Job.Status != protocol.JobStatusFailed {
 		t.Errorf("Expected status 'failed', got '%s'", statusResp.Job.Status)
 	}
-	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnsupported) {
-		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnsupported, statusResp.Job.FailureType)
+	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnavailable) {
+		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnavailable, statusResp.Job.FailureType)
 	}
 }
 
 // TestSubmitJobEncoderCheckDBErrorFailsClosed locks the TSI-2846 review fix: a
 // DB error during the encoder-capability check must fail closed (503
 // worker_unavailable), not be treated as "no worker has the encoder" and
-// persisted as a terminal ENCODER_UNSUPPORTED.
+// persisted as a terminal ENCODER_UNAVAILABLE.
 func TestSubmitJobEncoderCheckDBErrorFailsClosed(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2285,7 +2292,7 @@ func TestSubmitJobEncoderCheckDBErrorFailsClosed(t *testing.T) {
 
 // TestSubmitJobCreateFailedJobErrorReturns500 locks the TSI-2846 review fix:
 // when the atomic failed-job INSERT fails (transient DB fault), submission must
-// return 500 — never 200 claiming the job was recorded as ENCODER_UNSUPPORTED.
+// return 500 — never 200 claiming the job was recorded as ENCODER_UNAVAILABLE.
 func TestSubmitJobCreateFailedJobErrorReturns500(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2457,7 +2464,7 @@ func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 }
 
 // TSI-1500/TSI-2846: a job requesting an encoder in a codec family no worker
-// supports is persisted and failed as ENCODER_UNSUPPORTED, not rejected 503.
+// supports is persisted and failed as ENCODER_UNAVAILABLE, not rejected 503.
 func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2501,7 +2508,7 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	// TSI-2846: persisted and failed as ENCODER_UNSUPPORTED (200), not 503.
+	// TSI-2846: persisted and failed as ENCODER_UNAVAILABLE (200), not 503.
 	if w.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d. Body: %s", w.Code, w.Body.String())
 	}
@@ -2528,8 +2535,8 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	if statusResp.Job.Status != protocol.JobStatusFailed {
 		t.Errorf("Expected job status 'failed', got '%s'", statusResp.Job.Status)
 	}
-	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnsupported) {
-		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnsupported, statusResp.Job.FailureType)
+	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnavailable) {
+		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnavailable, statusResp.Job.FailureType)
 	}
 	if !strings.Contains(statusResp.Job.Error, "hevc_nvenc") {
 		t.Errorf("Expected error message to mention 'hevc_nvenc', got: %s", statusResp.Job.Error)

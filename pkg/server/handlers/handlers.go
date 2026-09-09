@@ -408,7 +408,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Marshal input files and direct paths to JSON up front: the
-	// ENCODER_UNSUPPORTED rejection path below also persists the job, so these
+	// ENCODER_UNAVAILABLE rejection path below also persists the job, so these
 	// must be available before the encoder-capability check (TSI-2846).
 	inputFilesJSON, err := json.Marshal(req.InputFiles)
 	if err != nil {
@@ -465,12 +465,12 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !hasCompatibleWorker {
-			if !h.failAsEncoderUnsupported(requestedEncoder, compatibleEncoders) {
+			if !h.failAsEncoderUnavailable(requestedEncoder, compatibleEncoders) {
 				// No live worker has the encoder (or a compatible one), but the
 				// cluster either has no schedulable worker at all, or a worker
 				// has the encoder but is merely stale — keep the fail-fast 503
 				// (worker_unavailable) rather than misclassifying it as
-				// ENCODER_UNSUPPORTED (TSI-2419).
+				// ENCODER_UNAVAILABLE (TSI-2419).
 				writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
 					protocol.ErrCodeWorkerUnavailable,
 					fmt.Sprintf("No worker available with encoder: %s (or compatible encoders)", requestedEncoder),
@@ -485,7 +485,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 			// NO_WORKER_AVAILABLE) so the classification is recorded and
 			// observable instead of vanishing with no DB row.
 			errMsg := fmt.Sprintf("No worker available with encoder: %s (or compatible encoders)", requestedEncoder)
-			job, createErr := h.db.CreateFailedJob(string(inputFilesJSON), string(argsJSON), req.OutputFilename, req.AutoHW, req.StreamingOutput, req.Timeout, directPathsJSON, string(protocol.FailureEncoderUnsupported), errMsg)
+			job, createErr := h.db.CreateFailedJob(string(inputFilesJSON), string(argsJSON), req.OutputFilename, req.AutoHW, req.StreamingOutput, req.Timeout, directPathsJSON, string(protocol.FailureEncoderUnavailable), errMsg)
 			if createErr != nil {
 				// The rate-limit middleware auto-rolls-back the submit increment
 				// on non-2xx, so no explicit decrement is needed on this path.
@@ -559,15 +559,15 @@ jobCreate:
 	})
 }
 
-// failAsEncoderUnsupported reports whether a submission whose requested encoder
-// has no live worker should be persisted as ENCODER_UNSUPPORTED rather than
+// failAsEncoderUnavailable reports whether a submission whose requested encoder
+// has no live worker should be persisted as ENCODER_UNAVAILABLE rather than
 // rejected as worker_unavailable. True only when at least one schedulable
 // worker exists (a stale heartbeat still counts — TSI-2419) but none of them
 // has the requested encoder or a compatible one. A workerless cluster is
-// NO_WORKER_AVAILABLE, not an unsupported encoder (TSI-2846).
-func (h *Handler) failAsEncoderUnsupported(requestedEncoder string, compatibleEncoders []string) bool {
+// NO_WORKER_AVAILABLE, not an unavailable encoder (TSI-2846).
+func (h *Handler) failAsEncoderUnavailable(requestedEncoder string, compatibleEncoders []string) bool {
 	// At least one schedulable worker must exist for a missing encoder to mean
-	// "unsupported" rather than "no worker available".
+	// "unavailable" rather than "no worker available".
 	all, err := h.db.GetSchedulableWorkers()
 	if err != nil {
 		log.Printf("SubmitJob: Failed to list schedulable workers: %v", err)
@@ -581,7 +581,7 @@ func (h *Handler) failAsEncoderUnsupported(requestedEncoder string, compatibleEn
 	// encoder or a compatible one? If so, the live-match failure is a liveness
 	// problem, not an encoder-capability gap. A query error here is fail-closed:
 	// returning true on error would convert a transient DB fault into evidence
-	// of "encoder unsupported" and persist a terminal misclassification.
+	// of "encoder unavailable" and persist a terminal misclassification.
 	has := func(enc string) (bool, error) {
 		workers, err := h.db.GetSchedulableWorkersByEncoder(enc)
 		if err != nil {

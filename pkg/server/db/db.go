@@ -338,6 +338,12 @@ func (d *Database) initTables() error {
 		}
 	}
 
+	// TSI-2930: re-label historical submit-time encoder rejections before the
+	// ENCODER_UNAVAILABLE value existed (see migrateEncoderUnavailableClassification).
+	if err := d.migrateEncoderUnavailableClassification(); err != nil {
+		return err
+	}
+
 	// TSI-2886: jobs.timeout must hold a nanosecond duration (INTEGER). Fresh
 	// databases already create it INTEGER, but legacy databases declared it
 	// DATETIME — which makes the sqlite driver read INTEGER values back as
@@ -392,6 +398,29 @@ func (d *Database) migrateTimeoutColumnType() error {
 	return tx.Commit()
 }
 
+// migrateEncoderUnavailableClassification re-labels historical submit-time
+// encoder rejections (TSI-2930). Before ENCODER_UNAVAILABLE existed, the
+// submit-time "no worker has this encoder" fast-fail persisted rows as
+// ENCODER_UNSUPPORTED with worker_id NULL — the job was rejected before
+// assignment, so no worker was ever recorded. Once ENCODER_UNAVAILABLE landed,
+// ENCODER_UNSUPPORTED became reserved for the worker's runtime classification
+// (a job that actually ran), which always carries a worker_id. Without this
+// relabel, those legacy NULL-worker rows would be indistinguishable from a
+// general no-attribution row under the new taxonomy.
+//
+// The WHERE predicate is bounded and idempotent: it touches exactly the legacy
+// submit-time rejections (ENCODER_UNSUPPORTED + no worker_id) and nothing else,
+// so it is safe to run on every open with no schema-version bookkeeping.
+func (d *Database) migrateEncoderUnavailableClassification() error {
+	if _, err := d.db.Exec(`
+		UPDATE jobs SET failure_type = ?
+		WHERE failure_type = ? AND worker_id IS NULL
+	`, string(protocol.FailureEncoderUnavailable), string(protocol.FailureEncoderUnsupported)); err != nil {
+		return fmt.Errorf("migrate ENCODER_UNAVAILABLE classification: %w", err)
+	}
+	return nil
+}
+
 // CreateJob creates a new job record
 func (d *Database) CreateJob(inputFiles, args, outputFilename string, autoHW bool) (*Job, error) {
 	return d.CreateJobWithStreaming(inputFiles, args, outputFilename, autoHW, false, nil, "")
@@ -420,7 +449,7 @@ func (d *Database) CreateJobWithStreaming(inputFiles, args, outputFilename strin
 }
 
 // CreateFailedJob persists a job that is terminal at submission — no worker
-// can serve it (e.g. ENCODER_UNSUPPORTED). A single INSERT writes the job
+// can serve it (e.g. ENCODER_UNAVAILABLE). A single INSERT writes the job
 // directly in the failed state, so a deterministic submit-time rejection is
 // recorded atomically: there is no pending→failed window in which a crash
 // would leave the job pending and later failed by the starvation sweep as
