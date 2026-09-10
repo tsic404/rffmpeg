@@ -420,6 +420,15 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		fmt.Fprintln(os.Stderr, msg)
 		return ExitError
 	}
+	// An output filename whose extension ffmpeg cannot map to a muxer (e.g.
+	// "out.out") may fail on the worker with "Unable to choose an output
+	// format". Surface guidance up front, but only warn: the extension table
+	// is generated from a specific ffmpeg build while the muxer decision is
+	// made by the remote worker, so the two can drift and the worker stays the
+	// authority.
+	if msg := args.OutputExtensionWarning(result); msg != "" {
+		fmt.Fprintln(os.Stderr, msg)
+	}
 
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "rffmpeg %s - Remote FFmpeg Client\n", version)
