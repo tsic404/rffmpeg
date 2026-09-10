@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +78,92 @@ func TestRun_NoArgsReturnsError(t *testing.T) {
 	if code != ExitError {
 		t.Errorf("run() with no args = %d, want %d", code, ExitError)
 	}
+}
+
+// TestRejectOverwriteIfNeeded pins the TSI-2964 CLI download guard: in the
+// default upload/download mode the CLI is the sole writer of the user's output
+// file, so a pre-existing file must not be silently truncated.
+func TestRejectOverwriteIfNeeded(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "out.mp4")
+	if err := os.WriteFile(outPath, []byte("existing content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		ffmpegArgs []string
+		exists     bool
+		wantCode   int
+		wantMsg    string
+	}{
+		{"no flag + existing rejects", []string{"-i", "in.mp4", "out.mp4"}, true, ExitError, "Not overwriting"},
+		{"-n + existing rejects", []string{"-n", "-i", "in.mp4", "out.mp4"}, true, ExitError, "already exists. Exiting."},
+		{"-y + existing allows", []string{"-y", "-i", "in.mp4", "out.mp4"}, true, ExitSuccess, ""},
+		{"no flag + absent allows", []string{"-i", "in.mp4", "out.mp4"}, false, ExitSuccess, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := outPath
+			if !tt.exists {
+				p = filepath.Join(dir, "absent.mp4")
+			}
+			stderr := captureStderr(func() {
+				if code := rejectOverwriteIfNeeded(p, tt.ffmpegArgs); code != tt.wantCode {
+					t.Errorf("rejectOverwriteIfNeeded() = %d, want %d", code, tt.wantCode)
+				}
+			})
+			if tt.wantMsg != "" && !strings.Contains(stderr, tt.wantMsg) {
+				t.Errorf("stderr = %q, want substring %q", stderr, tt.wantMsg)
+			}
+		})
+	}
+}
+
+// TestDefaultModeDownloadOverwriteGuard verifies the end-to-end default-mode
+// path: an existing output with no -y is refused (file preserved), while -y
+// downloads and overwrites it — the original TSI-2964 scenario.
+func TestDefaultModeDownloadOverwriteGuard(t *testing.T) {
+	const payload = "transcoded-output-data"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+	c := client.New(srv.URL, "")
+
+	t.Run("no -y preserves existing file", func(t *testing.T) {
+		dir := t.TempDir()
+		outPath := filepath.Join(dir, "out.mp4")
+		if err := os.WriteFile(outPath, []byte("existing content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if code := rejectOverwriteIfNeeded(outPath, []string{"-i", "in.mp4", "out.mp4"}); code != ExitError {
+			t.Fatalf("expected rejection, got code %d", code)
+		}
+		b, _ := os.ReadFile(outPath)
+		if string(b) != "existing content" {
+			t.Errorf("existing file was modified: %q", string(b))
+		}
+	})
+
+	t.Run("-y downloads and overwrites", func(t *testing.T) {
+		dir := t.TempDir()
+		outPath := filepath.Join(dir, "out.mp4")
+		if err := os.WriteFile(outPath, []byte("existing content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if code := rejectOverwriteIfNeeded(outPath, []string{"-y", "-i", "in.mp4", "out.mp4"}); code != ExitSuccess {
+			t.Fatalf("expected overwrite allowed, got code %d", code)
+		}
+		if err := c.DownloadOutput("file-id", outPath); err != nil {
+			t.Fatalf("DownloadOutput failed: %v", err)
+		}
+		b, _ := os.ReadFile(outPath)
+		if string(b) != payload {
+			t.Errorf("output not overwritten with download payload: %q", string(b))
+		}
+	})
 }
 
 func TestEncoderCapabilityFlags(t *testing.T) {

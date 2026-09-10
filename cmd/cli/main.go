@@ -19,6 +19,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/cli/args"
 	"github.com/tsic404/rffmpeg/pkg/cli/client"
 	"github.com/tsic404/rffmpeg/pkg/cli/config"
+	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
 	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
@@ -704,6 +705,16 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 				outputPath = outputPath[:len(outputPath)-len(ext)] + fmt.Sprintf("_%d", i) + ext
 			}
 
+			// Enforce ffmpeg's overwrite semantics before writing the local
+			// output: in the default upload/download mode the CLI is the sole
+			// writer of the user's output file, so a pre-existing file must not
+			// be silently truncated (TSI-2964). Without -y (or with -n), refuse
+			// with ffmpeg's message and a non-zero exit, mirroring the worker's
+			// shared-FS guard.
+			if code := rejectOverwriteIfNeeded(outputPath, ffmpegArgs); code != ExitSuccess {
+				return code
+			}
+
 			if !quiet {
 				fmt.Fprintf(os.Stderr, "Downloading output to %s...\n", outputPath)
 			}
@@ -727,6 +738,31 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 	// Return success exit code
 	return ExitSuccess
+}
+
+// rejectOverwriteIfNeeded enforces ffmpeg's overwrite semantics on a local
+// output path before the CLI downloads and writes it. In the default
+// upload/download mode the CLI is the only writer of the user's output file, so
+// a pre-existing file must not be silently truncated (TSI-2964): when the target
+// exists and the caller did not pass -y (or passed -n), it refuses with ffmpeg's
+// message and returns a non-zero exit, without touching the file.
+func rejectOverwriteIfNeeded(outputPath string, ffmpegArgs []string) int {
+	switch ffmpegopts.OverwritePolicy(ffmpegArgs) {
+	case ffmpegopts.OverwriteForce:
+		return ExitSuccess
+	case ffmpegopts.OverwriteNever:
+		if _, err := os.Stat(outputPath); err == nil {
+			fmt.Fprintf(os.Stderr, "File '%s' already exists. Exiting.\n", outputPath)
+			return ExitError
+		}
+		return ExitSuccess
+	default: // OverwriteAsk
+		if _, err := os.Stat(outputPath); err == nil {
+			fmt.Fprintf(os.Stderr, "File '%s' already exists. Overwrite? [y/N] Not overwriting - exiting\n", outputPath)
+			return ExitError
+		}
+		return ExitSuccess
+	}
 }
 
 // resolveOutputFilename determines the output filename sent to the server for

@@ -225,9 +225,13 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	return result
 }
 
-// BuildArgs constructs ffmpeg arguments from job parameters and input/output paths
-// It replaces <INPUT_FILE> placeholders in jobArgs with actual input file paths
-// and prepends -y flag to enable output file overwriting (required for retry support).
+// BuildArgs constructs ffmpeg arguments from job parameters and input/output paths.
+// It replaces <INPUT_FILE> placeholders in jobArgs with actual input file paths.
+// User-supplied overwrite semantics (-y / -n) pass through verbatim: the worker
+// never injects an overwrite flag, so a pre-existing output file follows native
+// ffmpeg behavior (reject with "Not overwriting - exiting" unless the caller
+// explicitly opted into -y). Retries remain safe because the RetryExecutor
+// removes any partial output left by a prior attempt before re-running.
 //
 // jobArgs is a trusted passthrough channel: unlike DirectPaths and
 // OutputFilename, it is deliberately NOT subject to the
@@ -237,12 +241,7 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 // semantics. Direct (shared-FS) mode is therefore a trust mode: the caller
 // that submits Args must itself be trusted (TSI-2674).
 func BuildArgs(jobArgs []string, inputPaths []string, outputPath string) []string {
-	args := make([]string, 0, len(jobArgs)+5)
-
-	// Prepend -y flag to enable overwriting output files
-	// This is required for retry support: when a job fails midway and the worker
-	// retries, the output file may already exist from the partial attempt.
-	args = append(args, "-y")
+	args := make([]string, 0, len(jobArgs)+1)
 
 	// Replace <INPUT_FILE> placeholders with actual input paths
 	inputIdx := 0
