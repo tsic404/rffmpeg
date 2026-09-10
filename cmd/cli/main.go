@@ -57,6 +57,7 @@ type Options struct {
 	Timeout       time.Duration
 	MaxRetries    int
 	MaxRetriesSet bool
+	Retry         bool
 	FmpegArgs     []string
 
 	// Info flags
@@ -166,6 +167,8 @@ func parseArgs(argList []string) (*Options, error) {
 			opts.MaxRetries = n
 			opts.MaxRetriesSet = true
 			i++
+		case "--retry", "-retry":
+			opts.Retry = true
 
 		case "-encoders", "--encoders":
 			opts.ShowEncoders = true
@@ -370,8 +373,13 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "Shared filesystem mode enabled: skipping upload/download")
 	}
 
-	// Create client
-	cli := client.New(cfg.ServerURL, cfg.Token, client.WithMaxRetries(maxRetries))
+	// Create client. --retry opts into rate-limit (429) resubmission with
+	// exponential backoff; without it a rate-limited submission fails fast.
+	submitRetries := 0
+	if opts.Retry {
+		submitRetries = client.DefaultSubmitRetries
+	}
+	cli := client.New(cfg.ServerURL, cfg.Token, client.WithMaxRetries(maxRetries), client.WithSubmitRetries(submitRetries))
 
 	// Check server health
 	if err := cli.HealthCheck(); err != nil {
@@ -423,25 +431,42 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 
 	// Setup signal handling for graceful cancellation.
-	// jobID/cancelled are guarded by sigMu: the goroutine reads them while
-	// the main flow writes, so unsynchronized access would be a data race.
-	// First interrupt cancels the running job; a second one exits hard.
+	// jobID/cancelled/submitting are guarded by sigMu: the handler goroutine
+	// reads them while the main flow writes. The mutex is never held across a
+	// network round-trip or a rate-limit backoff sleep, so SIGINT/SIGTERM is
+	// serviced immediately even during --retry backoff (TSI-2939).
+	// The first interrupt cancels ctx — aborting any in-flight submission
+	// (both the rate-limit backoff sleep and the submit HTTP request are
+	// ctx-bound) — and cancels a submitted job. A second interrupt after a
+	// submitted job was already cancelled force-quits the process.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	var (
-		sigMu     sync.Mutex
-		jobID     string
-		cancelled bool
+		sigMu      sync.Mutex
+		jobID      string
+		cancelled  bool
+		submitting bool
 	)
 
 	go func() {
+		var handlerCancelled bool
 		for range sigChan {
+			cancel()
+
 			sigMu.Lock()
 			id := jobID
 			done := cancelled
+			inFlight := submitting
 			if id != "" && !done {
 				cancelled = true
-				sigMu.Unlock()
+			}
+			sigMu.Unlock()
+
+			if id != "" && !done {
+				handlerCancelled = true
 				fmt.Fprintln(os.Stderr, "\nReceived interrupt, cancelling job...")
 				if err := cli.CancelJob(id); err != nil {
 					fmt.Fprintf(os.Stderr, "Failed to cancel job: %v\n", err)
@@ -450,8 +475,22 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 				fmt.Fprintln(os.Stderr, "Job cancellation requested. Press Ctrl+C again to force quit.")
 				continue
 			}
-			sigMu.Unlock()
-			os.Exit(ExitError)
+
+			// No job to cancel here. A submission may still be in flight: the
+			// cancelled ctx aborts its backoff/HTTP request and the main flow
+			// exits, so just loop back for a possible force-quit interrupt.
+			if inFlight {
+				continue
+			}
+
+			// Not in flight. Force-quit when there is no submitted job (upload
+			// phase) or when this handler already issued the graceful cancel on
+			// a prior interrupt. Otherwise the main flow claimed the cancel for
+			// a just-submitted job and is cancelling it — loop back and let it
+			// exit (TSI-2939).
+			if id == "" || handlerCancelled {
+				os.Exit(ExitError)
+			}
 		}
 	}()
 
@@ -576,10 +615,43 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 
 	sigMu.Lock()
-	jobID, err = cli.SubmitJobWithOptions(fileIDs, directPathParam, result.AllArgs, outputFilename, autoHW, result.StreamingOutput, timeout)
+	submitting = true
 	sigMu.Unlock()
+
+	// Submit without holding sigMu: the rate-limit backoff inside is
+	// interruptible via ctx, so the signal handler above stays responsive.
+	submittedID, err := cli.SubmitJobWithOptions(ctx, fileIDs, directPathParam, result.AllArgs, outputFilename, autoHW, result.StreamingOutput, timeout)
+
+	sigMu.Lock()
+	submitting = false
+	if err == nil {
+		jobID = submittedID
+	}
+	interrupted := ctx.Err() != nil
+	// Claim the cancellation atomically with publishing jobID, so the signal
+	// handler (which reads both under the same mutex) never issues a second
+	// CancelJob for the same job (TSI-2939).
+	shouldCancel := false
+	if interrupted && err == nil && !cancelled {
+		cancelled = true
+		shouldCancel = true
+	}
+	sigMu.Unlock()
+
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error submitting job: %v\n", err)
+		if interrupted {
+			fmt.Fprintln(os.Stderr, "Submission cancelled.")
+		} else {
+			fmt.Fprintf(os.Stderr, "Error submitting job: %v\n", err)
+		}
+		return ExitError
+	}
+
+	if shouldCancel {
+		fmt.Fprintln(os.Stderr, "\nReceived interrupt, cancelling job...")
+		if cerr := cli.CancelJob(submittedID); cerr != nil {
+			fmt.Fprintf(os.Stderr, "Failed to cancel job: %v\n", cerr)
+		}
 		return ExitError
 	}
 
@@ -1699,6 +1771,7 @@ rffmpeg options:
   --auto-hw[=true|false]  Enable automatic hardware encoder upgrade (default: false)
   --timeout DURATION      Job execution timeout (e.g., 30s, 5m, 2h)
   --max-retries N         Max WS reconnect attempts / HTTP poll retry budget (default: 14, ~5 min; 0 = no retries)
+  --retry                 Retry job submission on rate-limit (429) with exponential backoff (default: off)
 
 ffmpeg options:
   All standard ffmpeg options are supported and passed through to the server.
