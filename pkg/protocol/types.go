@@ -51,6 +51,7 @@ type JobInfo struct {
 	Cached          bool           `json:"cached,omitempty"`  // Whether the result was served from the worker cache
 	FailureType     string         `json:"failure_type,omitempty"`
 	FailureDetails  string         `json:"failure_details,omitempty"`
+	Retryable       bool           `json:"retryable"`         // Whether the failure type is worth retrying (TSI-2958)
 	Timeout         *time.Duration `json:"timeout,omitempty"` // Per-job ffmpeg execution budget (nil = worker default)
 	// NoWorkerDeadline is the server-computed wall-clock time at which a
 	// still-pending job will be failed as NO_WORKER_AVAILABLE by the

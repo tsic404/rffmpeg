@@ -645,6 +645,9 @@ components:
         failure_details:
           type: string
           description: Human-readable failure details.
+        retryable:
+          type: boolean
+          description: Whether the failure type is worth retrying (TSI-2958).
         cached:
           type: boolean
           description: Whether the result was served from the worker cache (TSI-2519).

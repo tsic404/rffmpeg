@@ -1709,6 +1709,7 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool) protocol.JobInf
 		Cached:          job.Cached,
 		FailureType:     job.FailureType,
 		FailureDetails:  job.FailureDetails,
+		Retryable:       protocol.FailureType(job.FailureType).Retryable(),
 		DirectPaths:     directPaths,
 		ProgressPercent: job.ProgressPercent,
 		EtaSeconds:      job.EtaSeconds,

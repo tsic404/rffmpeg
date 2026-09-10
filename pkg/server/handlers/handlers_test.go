@@ -824,8 +824,10 @@ func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 		if statusResp.Job.FailureType != string(ft) {
 			t.Errorf("failure_type %s not persisted, got %q", ft, statusResp.Job.FailureType)
 		}
-		// Retryable marking is verified per-enum in TestFailureType_Retryable;
-		// here we only assert the value round-trips and persists.
+		if statusResp.Job.Retryable != ft.Retryable() {
+			t.Errorf("failure_type %s: retryable = %v, want %v",
+				ft, statusResp.Job.Retryable, ft.Retryable())
+		}
 	}
 }
 
