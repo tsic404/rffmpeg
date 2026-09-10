@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/tsic404/rffmpeg/pkg/audit"
+	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
 	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
@@ -605,41 +606,57 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				outputPath = filepath.Join(jobDir, outputFilename)
 			}
 
-			if err := copyFile(cachePath, outputPath); err != nil {
-				log.Printf("Job %s: failed to copy cached file: %v", job.ID, err)
-				batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached output copy failed (%v), re-transcoding\n", job.ID, err))
-				// Fall through to normal processing
-			} else if _, err := os.Stat(outputPath); err != nil {
-				// Copy claimed success but the file is not there — degrade to
-				// a cache miss instead of reporting Completed without output.
-				log.Printf("Job %s: cached file missing after copy (%v), falling through to normal processing", job.ID, err)
-				batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached file missing after copy (%v), re-transcoding\n", job.ID, err))
-			} else if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
-				// Upload failure is recoverable by re-transcoding — fall
-				// through to normal processing instead of failing the job.
-				log.Printf("Job %s: failed to upload cached output (%v), falling through to normal processing", job.ID, err)
-				batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached output upload failed (%v), re-transcoding\n", job.ID, err))
-				cached = false
-			} else {
-				// Confirm the cache hit (stats + LRU touch)
-				w.cache.ConfirmHit(cacheKey)
-				log.Printf("Uploaded cached output for job %s", job.ID)
-				cached = true
-				// Emit the cache-hit notice only once the cached output is
-				// successfully delivered, so CLI clients never see it ahead
-				// of a re-transcoding fallback.
-				batcher.Add(fmt.Sprintf("[rffmpeg] Cache hit: %s\n", cacheKey))
-				// Deliver the notice before reporting completion so CLI
-				// clients always see it ahead of the terminal status.
-				batcher.Close()
-
-				// Report success with cached flag
-				if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, 0, "", cached); err != nil {
-					logTerminalReportError(job.ID, "report completed", err)
-				} else {
-					log.Printf("Job %s completed from cache", job.ID)
+			// Overwrite-policy guard (TSI-2964): a cache hit must never
+			// silently truncate a pre-existing output file. When the target
+			// already exists and the caller did not pass -y (or passed -n),
+			// degrade to a cache miss so the normal ffmpeg path applies native
+			// overwrite semantics and rejects with "Not overwriting - exiting".
+			skipCacheCopy := false
+			if ffmpegopts.OverwritePolicy(job.Args) != ffmpegopts.OverwriteForce {
+				if _, err := os.Stat(outputPath); err == nil {
+					skipCacheCopy = true
+					log.Printf("Job %s: output %s exists and overwrite not allowed, degrading cache hit to miss", job.ID, outputPath)
+					batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: output exists and overwrite not allowed, re-transcoding\n", job.ID))
 				}
-				return
+			}
+
+			if !skipCacheCopy {
+				if err := copyFile(cachePath, outputPath); err != nil {
+					log.Printf("Job %s: failed to copy cached file: %v", job.ID, err)
+					batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached output copy failed (%v), re-transcoding\n", job.ID, err))
+					// Fall through to normal processing
+				} else if _, err := os.Stat(outputPath); err != nil {
+					// Copy claimed success but the file is not there — degrade to
+					// a cache miss instead of reporting Completed without output.
+					log.Printf("Job %s: cached file missing after copy (%v), falling through to normal processing", job.ID, err)
+					batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached file missing after copy (%v), re-transcoding\n", job.ID, err))
+				} else if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
+					// Upload failure is recoverable by re-transcoding — fall
+					// through to normal processing instead of failing the job.
+					log.Printf("Job %s: failed to upload cached output (%v), falling through to normal processing", job.ID, err)
+					batcher.Add(fmt.Sprintf("[rffmpeg] Job %s: cached output upload failed (%v), re-transcoding\n", job.ID, err))
+					cached = false
+				} else {
+					// Confirm the cache hit (stats + LRU touch)
+					w.cache.ConfirmHit(cacheKey)
+					log.Printf("Uploaded cached output for job %s", job.ID)
+					cached = true
+					// Emit the cache-hit notice only once the cached output is
+					// successfully delivered, so CLI clients never see it ahead
+					// of a re-transcoding fallback.
+					batcher.Add(fmt.Sprintf("[rffmpeg] Cache hit: %s\n", cacheKey))
+					// Deliver the notice before reporting completion so CLI
+					// clients always see it ahead of the terminal status.
+					batcher.Close()
+
+					// Report success with cached flag
+					if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, 0, "", cached); err != nil {
+						logTerminalReportError(job.ID, "report completed", err)
+					} else {
+						log.Printf("Job %s completed from cache", job.ID)
+					}
+					return
+				}
 			}
 		}
 	} else {

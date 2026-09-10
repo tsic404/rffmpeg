@@ -290,3 +290,36 @@ func IsKnown(flag string) bool {
 	_, ok := valueFlags[name]
 	return ok
 }
+
+// OverwriteMode describes how a pre-existing output file should be treated,
+// mirroring ffmpeg's -y / -n semantics.
+type OverwriteMode int
+
+const (
+	// OverwriteAsk is the default (no -y / -n): refuse to overwrite, matching
+	// ffmpeg's fail-safe "Not overwriting - exiting" behavior.
+	OverwriteAsk OverwriteMode = iota
+	// OverwriteForce corresponds to -y: always overwrite.
+	OverwriteForce
+	// OverwriteNever corresponds to -n: never overwrite ("already exists. Exiting.").
+	OverwriteNever
+)
+
+// OverwritePolicy returns the overwrite mode the given args request. -y and -n
+// are standalone boolean flags, so exact-token matching is sufficient; anything
+// after a "--" separator is an output filename, not an option. -n takes
+// precedence over -y (ffmpeg errors on both; refusing is the safe default).
+func OverwritePolicy(args []string) OverwriteMode {
+	mode := OverwriteAsk
+	for _, arg := range args {
+		switch arg {
+		case "--":
+			return mode
+		case "-y":
+			mode = OverwriteForce
+		case "-n":
+			return OverwriteNever
+		}
+	}
+	return mode
+}

@@ -289,6 +289,11 @@ func TestFFmpegStderrIndicatesCriticalError(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "not overwriting - exiting (output exists, no -y)",
+			stderr: "File 'out.mp4' already exists. Overwrite? [y/N] Not overwriting - exiting\nError opening output file out.mp4.\n",
+			want:   true,
+		},
+		{
 			name:   "error initializing the muxer - unknown container",
 			stderr: "[AVFormatContext @ 0x563fd6c0cd00] Unable to choose an output format for 'output.xyz'; use a standard extension for the filename or specify the format manually.\n[out#0 @ 0x563fd6c0cc00] Error initializing the muxer for output.xyz: Invalid argument\nError opening output file output.xyz.\n",
 			want:   true,

@@ -49,3 +49,26 @@ func TestIsBoolean_Regression(t *testing.T) {
 		}
 	}
 }
+
+func TestOverwritePolicy(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want OverwriteMode
+	}{
+		{name: "explicit -y forces overwrite", args: []string{"-y", "-i", "in.mp4", "out.mp4"}, want: OverwriteForce},
+		{name: "explicit -n never overwrites", args: []string{"-n", "-i", "in.mp4", "out.mp4"}, want: OverwriteNever},
+		{name: "no flag defaults to ask (refuse)", args: []string{"-i", "in.mp4", "-c:v", "libx264", "out.mp4"}, want: OverwriteAsk},
+		{name: "-n wins over -y", args: []string{"-y", "-n", "-i", "in.mp4", "out.mp4"}, want: OverwriteNever},
+		{name: "-y after -- separator ignored", args: []string{"-i", "in.mp4", "--", "-y", "out.mp4"}, want: OverwriteAsk},
+		{name: "-n after -- separator ignored", args: []string{"-i", "in.mp4", "--", "-n", "out.mp4"}, want: OverwriteAsk},
+		{name: "empty args", args: []string{}, want: OverwriteAsk},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := OverwritePolicy(tc.args); got != tc.want {
+				t.Errorf("OverwritePolicy(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
