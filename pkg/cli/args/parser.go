@@ -156,6 +156,16 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	if outputFile == "" {
 		return nil, ErrNoOutputFile
 	}
+	// ffmpeg treats "-" as shorthand for "pipe:1" (stdout) on output. rffmpeg
+	// only recognizes "-" as a streaming job, so normalize "pipe:1" here:
+	// otherwise it is treated as a literal output filename, the worker's
+	// ffmpeg writes the stream to its own stdout (never captured), and the
+	// job yields a 0-byte output the downloader reports as "moov atom not
+	// found" (TSI-3038). The comparison is case-insensitive because ffmpeg
+	// protocol names are matched without regard to case ("PIPE:1" == "pipe:1").
+	if strings.EqualFold(outputFile, "pipe:1") {
+		outputFile = "-"
+	}
 
 	// Detect streaming output mode (output is "-")
 	streamingOutput := outputFile == "-"

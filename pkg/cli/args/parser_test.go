@@ -350,6 +350,85 @@ func TestParseStreamingDashExcludedFromAllArgs(t *testing.T) {
 	}
 }
 
+func TestParsePipe1NormalizedToStreamingOutput(t *testing.T) {
+	p := NewParser()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "positional pipe:1", args: []string{"-i", "input.mp4", "-f", "mp4", "pipe:1"}},
+		{name: "positional PIPE:1", args: []string{"-i", "input.mp4", "-f", "mp4", "PIPE:1"}},
+		{name: "positional Pipe:1", args: []string{"-i", "input.mp4", "-f", "mp4", "Pipe:1"}},
+		{name: "explicit -o pipe:1", args: []string{"-i", "input.mp4", "-f", "mp4", "-o", "pipe:1"}},
+		{name: "bare pipe:1 without -f", args: []string{"-i", "input.mp4", "pipe:1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := p.Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+
+			// pipe:1 (stdout) must be recognized as a streaming job, exactly
+			// as if the caller had written "-" (TSI-3038).
+			if !result.StreamingOutput {
+				t.Errorf("StreamingOutput = false, want true for output 'pipe:1'")
+			}
+			if result.OutputFile != "-" {
+				t.Errorf("OutputFile = %q, want '-'", result.OutputFile)
+			}
+
+			// The normalized token must not leak into AllArgs: the worker
+			// appends the output path exactly once (mirrors TSI-2683).
+			for _, arg := range result.AllArgs {
+				if strings.EqualFold(arg, "pipe:1") || arg == "-" {
+					t.Errorf("AllArgs must not contain the output token %q: %v", arg, result.AllArgs)
+				}
+			}
+		})
+	}
+}
+
+func TestParsePipeStdinNotNormalized(t *testing.T) {
+	p := NewParser()
+	// "pipe:" (no fd, or fd 0) is stdin, NOT stdout: it must not be mistaken
+	// for a streaming output and rewritten to "-".
+	for _, out := range []string{"pipe:", "pipe:0"} {
+		result, err := p.Parse([]string{"-i", "input.mp4", "-f", "mp4", out})
+		if err != nil {
+			t.Fatalf("Parse(%q) error = %v", out, err)
+		}
+		if result.StreamingOutput {
+			t.Errorf("StreamingOutput = true for %q, want false", out)
+		}
+		if result.OutputFile != out {
+			t.Errorf("OutputFile = %q, want %q", result.OutputFile, out)
+		}
+	}
+}
+
+func TestParsePipe1AsInputNotNormalized(t *testing.T) {
+	p := NewParser()
+	// pipe:1 in the INPUT role (via -i) reads from stdin and must be left
+	// untouched: only the OUTPUT path is normalized to "-". The output here is
+	// a real file, so StreamingOutput stays false and InputFiles keeps "pipe:1"
+	// verbatim (TSI-3038).
+	result, err := p.Parse([]string{"-i", "pipe:1", "out.mp4"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if result.StreamingOutput {
+		t.Errorf("StreamingOutput = true, want false for input 'pipe:1' with file output")
+	}
+	if len(result.InputFiles) != 1 || result.InputFiles[0] != "pipe:1" {
+		t.Errorf("InputFiles = %v, want [\"pipe:1\"]", result.InputFiles)
+	}
+	if result.OutputFile != "out.mp4" {
+		t.Errorf("OutputFile = %q, want %q", result.OutputFile, "out.mp4")
+	}
+}
+
 func TestIsFfmpegCommand(t *testing.T) {
 	tests := []struct {
 		args []string
