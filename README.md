@@ -667,7 +667,7 @@ Content-Type: application/json
 
 {
   "code": "worker_unavailable",
-  "message": "No worker available. Please ensure at least one worker is registered and idle."
+  "message": "No worker available. Please ensure at least one worker is registered and online."
 }
 ```
 

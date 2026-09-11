@@ -470,10 +470,12 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 				// cluster either has no schedulable worker at all, or a worker
 				// has the encoder but is merely stale — keep the fail-fast 503
 				// (worker_unavailable) rather than misclassifying it as
-				// ENCODER_UNAVAILABLE (TSI-2419).
+				// ENCODER_UNAVAILABLE (TSI-2419). This is the worker_offline
+				// sub-case: use the user guidance copy, not the
+				// encoder-specific copy reserved for encoder_match_failed.
 				writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
 					protocol.ErrCodeWorkerUnavailable,
-					fmt.Sprintf("No worker available with encoder: %s (or compatible encoders)", requestedEncoder),
+					"No worker available. Please ensure at least one worker is registered and online.",
 					nil,
 				))
 				return
