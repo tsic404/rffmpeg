@@ -1629,6 +1629,60 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 	_ = h // handler kept for state table wiring via setupTest
 }
 
+// TestWorkerHealthThroughputAlwaysPresent verifies the health response always
+// carries throughput_fps, even for an idle worker reporting zero throughput
+// (or no heartbeat yet). omitempty previously dropped the field at 0, leaving
+// an idle worker's health as {status, gpu_metrics_valid, last_seen} and
+// breaking the QA assertion that throughput_fps is present (TSI-2999).
+func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "test-worker-throughput-always",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	var regResp protocol.WorkerRegisterResponse
+	json.NewDecoder(rec.Body).Decode(&regResp)
+
+	// No heartbeat yet: idle worker, zero throughput. throughput_fps must
+	// still be present (as 0) rather than omitted.
+	req = httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"throughput_fps"`) {
+		t.Fatalf("Expected health response to contain throughput_fps, got: %s", body)
+	}
+
+	var getResp struct {
+		Worker struct {
+			Health *WorkerHealth `json:"health"`
+		} `json:"worker"`
+	}
+	if err := json.Unmarshal([]byte(body), &getResp); err != nil {
+		t.Fatalf("Failed to decode get worker response: %v", err)
+	}
+	if getResp.Worker.Health == nil {
+		t.Fatalf("Expected non-null health for idle worker")
+	}
+	if getResp.Worker.Health.ThroughputFPS != 0 {
+		t.Errorf("Expected throughput_fps 0 for idle worker, got %f", getResp.Worker.Health.ThroughputFPS)
+	}
+}
+
 // TestListWorkersActiveOnlyFilter (TSI-2919) verifies GET /api/v1/workers
 // returns every registered worker by default, and that ?active_only=true
 // excludes offline rows retained within the --worker-offline-threshold window.

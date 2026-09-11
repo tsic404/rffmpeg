@@ -916,7 +916,7 @@ components:
           description: >-
             Worker throughput in jobs per second since the last heartbeat.
             The field name is historical; the unit is jobs/second, not frames
-            per second.
+            per second. Always present (0 when no job completed in the window).
         last_seen:
           type: string
           format: date-time
