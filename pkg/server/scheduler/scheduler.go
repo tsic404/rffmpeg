@@ -9,7 +9,6 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
-	"github.com/tsic404/rffmpeg/pkg/server/migration"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
@@ -404,16 +403,19 @@ func (s *Scheduler) checkTimeouts() {
 			}
 			log.Printf("Scheduler: Job %s failed after %d timeout retries", job.ID, retries)
 		} else {
-			// Reset job for rescheduling and record the requeue so the retry
-			// budget is observable on the next pass (GetJobTimeoutRetryCount
-			// reads the job_timeout migration events).
-			if err := s.db.RescheduleJob(job.ID); err != nil {
-				log.Printf("Scheduler: Failed to reschedule job %s: %v", job.ID, err)
+			// Record the migration event + per-job redistribution placeholder
+			// and reschedule the job atomically. If the job already left the
+			// running set nothing is written, and an event/placeholder failure
+			// rolls the whole transaction back — no ghost migration event and
+			// no permanently-NULL placeholder (TSI-3008 review).
+			rescheduled, err := s.db.RecordJobTimeoutMigration(job.WorkerID.String, job.ID, retries)
+			if err != nil {
+				log.Printf("Scheduler: Failed to record timeout migration for job %s: %v", job.ID, err)
 				continue
 			}
-			if _, err := s.db.CreateMigrationEvent(job.WorkerID.String, "",
-				string(migration.ReasonJobTimeout), retries, []string{job.ID}, 1); err != nil {
-				log.Printf("Scheduler: Failed to record timeout retry for job %s: %v", job.ID, err)
+			if !rescheduled {
+				// Job left running between the snapshot and this sweep.
+				continue
 			}
 			log.Printf("Scheduler: Job %s rescheduled (timeout retry %d/%d)", job.ID, retries+1, s.config.MaxTimeoutRetries)
 		}
