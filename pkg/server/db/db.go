@@ -2926,8 +2926,8 @@ func (d *Database) RecordJobTimeoutMigration(workerID, jobID string, retryCount 
 
 	if _, err := tx.Exec(`
 		INSERT INTO migration_events (id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at)
-		VALUES (?, ?, ?, NULL, 'job_timeout', ?, ?, ?, ?)
-	`, eventID, now, workerID, retryCount, string(jobIDsJSON), 1, now); err != nil {
+		VALUES (?, ?, ?, (SELECT name FROM workers WHERE id = ?), 'job_timeout', ?, ?, ?, ?)
+	`, eventID, now, workerID, workerID, retryCount, string(jobIDsJSON), 1, now); err != nil {
 		return false, fmt.Errorf("insert timeout migration event for job %s: %w", jobID, err)
 	}
 

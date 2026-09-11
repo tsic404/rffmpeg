@@ -591,7 +591,16 @@ func TestRecordJobTimeoutMigration(t *testing.T) {
 	defer db.Close()
 
 	// Success: a running job is rescheduled, and the migration event + its
-	// per-job redistribution placeholder are written atomically.
+	// per-job redistribution placeholder are written atomically. The event's
+	// worker_name is resolved from the workers table (TSI-3029), matching the
+	// heartbeat_timeout events written by the health monitor.
+	if _, err := db.CreateWorker("worker-1", "gpu-worker-1", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "6.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	job, err := db.CreateJob(`["f.mkv"]`, `[]`, "o.mkv", false)
 	if err != nil {
 		t.Fatal(err)
@@ -628,6 +637,9 @@ func TestRecordJobTimeoutMigration(t *testing.T) {
 	}
 	if events[0].JobsMigrated != 1 {
 		t.Errorf("jobs_migrated = %d, want 1", events[0].JobsMigrated)
+	}
+	if !events[0].WorkerName.Valid || events[0].WorkerName.String != "gpu-worker-1" {
+		t.Errorf("worker_name = %q (valid=%v), want gpu-worker-1", events[0].WorkerName.String, events[0].WorkerName.Valid)
 	}
 
 	rs, err := db.GetJobRedistributionsByEvent(events[0].ID)
