@@ -2876,6 +2876,74 @@ func (d *Database) GetJobTimeoutRetryCount(jobID string) (int, error) {
 	return count, nil
 }
 
+// RecordJobTimeoutMigration atomically reschedules a timed-out job, records a
+// job_timeout migration event, and inserts its per-job redistribution
+// placeholder in a single transaction. All three succeed together or none do:
+//
+//   - The reschedule is a conditional UPDATE (status = 'running'). If the job
+//     already left the running set (raced a completion report or another
+//     sweep), zero rows match and the transaction rolls back — no ghost
+//     migration event and no permanently-NULL placeholder are left behind.
+//   - The event and its placeholder are written in the same transaction, so a
+//     placeholder insert failure rolls the event back too, instead of leaving
+//     a migration event whose target can never be resolved.
+//
+// workerID is the worker the job ran on when it timed out; the reschedule
+// clears worker_id, so it must be captured by the caller beforehand. Returns
+// rescheduled=false, nil when the job was no longer running (nothing written);
+// rescheduled=true, nil on success.
+func (d *Database) RecordJobTimeoutMigration(workerID, jobID string, retryCount int) (bool, error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin timeout migration: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+
+	// Reschedule is the authoritative gate: if the job left the running set,
+	// nothing else must be written.
+	res, err := tx.Exec(`
+		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?, created_at = ?
+		WHERE id = ? AND status = ?
+	`, protocol.JobStatusPending, now, now, jobID, protocol.JobStatusRunning)
+	if err != nil {
+		return false, fmt.Errorf("reschedule job %s: %w", jobID, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check reschedule rows for job %s: %w", jobID, err)
+	}
+	if rows == 0 {
+		return false, nil
+	}
+
+	eventID := uuid.New().String()
+	jobIDsJSON, err := json.Marshal([]string{jobID})
+	if err != nil {
+		return false, fmt.Errorf("marshal job ids for job %s: %w", jobID, err)
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO migration_events (id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at)
+		VALUES (?, ?, ?, NULL, 'job_timeout', ?, ?, ?, ?)
+	`, eventID, now, workerID, retryCount, string(jobIDsJSON), 1, now); err != nil {
+		return false, fmt.Errorf("insert timeout migration event for job %s: %w", jobID, err)
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO job_redistributions (id, migration_event_id, job_id, target_worker_id, target_worker_name, created_at)
+		VALUES (?, ?, ?, NULL, NULL, ?)
+	`, uuid.New().String(), eventID, jobID, now); err != nil {
+		return false, fmt.Errorf("insert job redistribution for job %s: %w", jobID, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit timeout migration for job %s: %w", jobID, err)
+	}
+	return true, nil
+}
+
 // --- Worker Eviction Methods (TSI-761) ---
 
 // MarkWorkerEvicted marks a worker as evicted (slow node) with the current timestamp.

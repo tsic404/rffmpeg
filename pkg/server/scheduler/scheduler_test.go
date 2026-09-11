@@ -6,6 +6,7 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -1299,6 +1300,88 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 	}
 	if got.FailureType != string(protocol.FailureTimeout) {
 		t.Fatalf("expected failure_type TIMEOUT, got %q", got.FailureType)
+	}
+}
+
+// TestCheckTimeoutsRecordsRedistribution verifies that a timeout-driven
+// requeue (reason=job_timeout) creates a per-job redistribution placeholder, so
+// the migration target is resolvable once the job is reassigned — closing the
+// gap where only the heartbeat-timeout path tracked targets (TSI-3008).
+func TestCheckTimeoutsRecordsRedistribution(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	if _, err := database.CreateWorker("worker-1", "worker-1", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "5.0", MaxConcurrent: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := database.CreateJob(`["f.mkv"]`, `[]`, "o.mkv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Hour), job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(database, DefaultConfig())
+	s.checkTimeouts()
+
+	// Job requeued back to pending.
+	got, _ := database.GetJob(job.ID)
+	if got.Status != protocol.JobStatusPending {
+		t.Fatalf("expected pending after timeout, got %s", got.Status)
+	}
+
+	// A job_timeout migration event must exist for the source worker.
+	events, err := database.GetMigrationEventsByWorker("worker-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 migration event, got %d", len(events))
+	}
+	if events[0].Reason != string(migration.ReasonJobTimeout) {
+		t.Fatalf("reason = %q, want %q", events[0].Reason, migration.ReasonJobTimeout)
+	}
+
+	// The timeout event must carry a per-job redistribution placeholder so the
+	// reassignment write-back (RecordMigrationTarget) can record the target.
+	rs, err := database.GetJobRedistributionsByEvent(events[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs) != 1 {
+		t.Fatalf("redistributions = %d, want 1", len(rs))
+	}
+	if rs[0].JobID != job.ID {
+		t.Errorf("redistribution job_id = %q, want %q", rs[0].JobID, job.ID)
+	}
+	if rs[0].TargetWorkerID.Valid {
+		t.Errorf("placeholder target_worker_id should be NULL before reassignment, got %q", rs[0].TargetWorkerID.String)
+	}
+
+	// Reassign the job: the write-back must fill the placeholder.
+	if err := database.RecordMigrationTarget(job.ID, "worker-2", "gpu-2"); err != nil {
+		t.Fatal(err)
+	}
+	rs, err = database.GetJobRedistributionsByEvent(events[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs) != 1 || !rs[0].TargetWorkerID.Valid || rs[0].TargetWorkerID.String != "worker-2" {
+		t.Fatalf("expected target worker-2 recorded, got %+v", rs)
 	}
 }
 

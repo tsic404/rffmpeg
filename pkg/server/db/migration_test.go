@@ -586,6 +586,94 @@ func TestGetJobRetryCount(t *testing.T) {
 	}
 }
 
+func TestRecordJobTimeoutMigration(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Success: a running job is rescheduled, and the migration event + its
+	// per-job redistribution placeholder are written atomically.
+	job, err := db.CreateJob(`["f.mkv"]`, `[]`, "o.mkv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rescheduled, err := db.RecordJobTimeoutMigration("worker-1", job.ID, 0)
+	if err != nil {
+		t.Fatalf("RecordJobTimeoutMigration: %v", err)
+	}
+	if !rescheduled {
+		t.Fatal("expected rescheduled=true for a running job")
+	}
+
+	got, err := db.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != protocol.JobStatusPending {
+		t.Errorf("status = %s, want pending", got.Status)
+	}
+
+	events, err := db.GetMigrationEventsByWorker("worker-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].Reason != "job_timeout" {
+		t.Errorf("reason = %q, want job_timeout", events[0].Reason)
+	}
+	if events[0].JobsMigrated != 1 {
+		t.Errorf("jobs_migrated = %d, want 1", events[0].JobsMigrated)
+	}
+
+	rs, err := db.GetJobRedistributionsByEvent(events[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rs) != 1 || rs[0].JobID != job.ID {
+		t.Fatalf("placeholder missing or wrong: %+v", rs)
+	}
+
+	// Failure path: a job that already left the running set must write
+	// nothing — no ghost migration event and no placeholder.
+	job2, err := db.CreateJob(`["f2.mkv"]`, `[]`, "o2.mkv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FailJob(job2.ID, "already failed", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rescheduled, err = db.RecordJobTimeoutMigration("worker-1", job2.ID, 0)
+	if err != nil {
+		t.Fatalf("RecordJobTimeoutMigration (terminal): %v", err)
+	}
+	if rescheduled {
+		t.Fatal("expected rescheduled=false for a terminal job")
+	}
+
+	// Still exactly one event (the success case); no ghost row was added, and
+	// the failed job stayed failed (not dragged back to pending).
+	eventsAfter, err := db.GetMigrationEventsByWorker("worker-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eventsAfter) != 1 {
+		t.Errorf("events after terminal attempt = %d, want still 1 (no ghost)", len(eventsAfter))
+	}
+	got2, err := db.GetJob(job2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.Status != protocol.JobStatusFailed {
+		t.Errorf("terminal job status = %s, want still failed", got2.Status)
+	}
+}
+
 func TestCreateMigrationEventEmptyWorkerName(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
