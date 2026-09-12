@@ -20,6 +20,8 @@ tags:
     description: Worker registration and management
   - name: health
     description: Health check endpoints
+  - name: migrations
+    description: Worker migration audit events
 
 paths:
   /upload:
@@ -548,6 +550,63 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+  /migrations:
+    get:
+      tags: [migrations]
+      summary: List migration events
+      description: >-
+        List worker migration audit events, newest first (timestamp DESC, id
+        DESC), with pagination. Each event records a batch of jobs migrated
+        back to pending after a worker failure or timeout.
+      operationId: listMigrationEvents
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of events to return (default 50, max 500)
+          schema:
+            type: integer
+            default: 50
+            maximum: 500
+        - name: offset
+          in: query
+          required: false
+          description: Number of events to skip (default 0)
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of migration events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MigrationEventsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /migrations/{eventId}:
+    get:
+      tags: [migrations]
+      summary: Get migration event
+      description: Retrieve a single worker migration audit event by ID.
+      operationId: getMigrationEvent
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Migration event details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MigrationEventResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
 components:
   schemas:
@@ -1110,6 +1169,63 @@ components:
           items:
             type: integer
         status:
+          type: string
+
+    MigrationEventsResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/MigrationEventInfo'
+
+    MigrationEventResponse:
+      type: object
+      required: [event]
+      properties:
+        event:
+          $ref: '#/components/schemas/MigrationEventInfo'
+
+    MigrationEventInfo:
+      type: object
+      required: [id, timestamp, worker_id, reason, retry_count, job_ids, jobs_migrated]
+      properties:
+        id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
+        worker_id:
+          type: string
+        worker_name:
+          type: string
+        reason:
+          type: string
+          enum: [heartbeat_timeout, worker_offline, server_restart, job_timeout]
+        retry_count:
+          type: integer
+        job_ids:
+          type: array
+          items:
+            type: string
+        jobs_migrated:
+          type: integer
+        targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/MigrationRedistributionTarget'
+
+    MigrationRedistributionTarget:
+      type: object
+      required: [job_id]
+      properties:
+        job_id:
+          type: string
+        target_worker_id:
+          type: string
+        target_worker_name:
           type: string
 
     ErrorResponse:

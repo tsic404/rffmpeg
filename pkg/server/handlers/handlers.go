@@ -1824,6 +1824,7 @@ func (h *Handler) GetWorker(w http.ResponseWriter, r *http.Request) {
 // ListMigrationEvents handles listing worker migration audit events.
 // GET /api/v1/migrations
 // Query params: limit (default 50, capped at 500), offset (default 0).
+// Results are ordered newest-first (timestamp DESC, id DESC).
 func (h *Handler) ListMigrationEvents(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parsePagination(r, 50, 500)
 
