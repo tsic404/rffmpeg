@@ -126,10 +126,11 @@ func (m *Monitor) checkWorkers() {
 	}
 
 	if len(offlineWorkerIDs) > 0 {
-		log.Printf("Marked %d worker(s) as offline due to heartbeat timeout", len(offlineWorkerIDs))
-
-		// Migrate jobs from each offline worker
+		// Migrate jobs from each offline worker. Log per-worker detection detail
+		// (ID, name, heartbeat staleness) so the kill -> offline latency is
+		// directly observable in server logs rather than only a count.
 		for _, workerID := range offlineWorkerIDs {
+			m.logOfflineDetection(workerID)
 			m.migrateJobsFromWorker(workerID)
 		}
 	}
@@ -151,6 +152,22 @@ func (m *Monitor) checkWorkers() {
 
 	// Slow node detection (TSI-760)
 	m.detectSlowWorkers()
+}
+
+// logOfflineDetection logs per-worker offline detection detail. The previous
+// count-only message hid the per-worker heartbeat staleness that determines
+// the kill -> offline latency (~86s observed with a 90s heartbeat timeout and
+// 30s check interval, not a fixed 105s); surfacing ID, name, staleness and the
+// last_heartbeat timestamp makes that window directly measurable in logs.
+func (m *Monitor) logOfflineDetection(workerID string) {
+	worker, err := m.db.GetWorker(workerID)
+	if err != nil {
+		log.Printf("Marked worker %q offline due to heartbeat timeout (failed to read worker info: %v)", workerID, err)
+		return
+	}
+	stale := time.Since(worker.LastHeartbeat)
+	log.Printf("Marked worker %q (%q) offline: heartbeat stale for %s (last_heartbeat=%s, timeout=%s)",
+		workerID, worker.Name, stale.Round(time.Second), worker.LastHeartbeat.Format(time.RFC3339), m.config.HeartbeatTimeout)
 }
 
 // detectSlowWorkers runs slow node detection using the WorkerStateTable.
