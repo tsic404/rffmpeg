@@ -1063,6 +1063,113 @@ func TestUploadOutputAndDownload(t *testing.T) {
 	}
 }
 
+// submitTestJob creates a schedulable job and returns its ID, mirroring the
+// upload+submit flow so UploadJobOutput has a real job record to accept the
+// output upload.
+func submitTestJob(t *testing.T, router *chi.Mux) string {
+	t.Helper()
+	registerTestWorker(t, router, []string{"libx264"})
+
+	fileContent := []byte("test content")
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("file", "test.mp4")
+	part.Write(fileContent)
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/v1/upload", body)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var uploadResp protocol.UploadResponse
+	if err := json.NewDecoder(w.Body).Decode(&uploadResp); err != nil {
+		t.Fatalf("Failed to decode upload response: %v", err)
+	}
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{uploadResp.FileID},
+		Args:       []string{"-c:v", "libx264"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	var jobResp protocol.JobSubmitResponse
+	if err := json.NewDecoder(w.Body).Decode(&jobResp); err != nil {
+		t.Fatalf("Failed to decode job submit response: %v", err)
+	}
+	if jobResp.JobID == "" {
+		t.Fatalf("Job submit returned empty job ID (status %d, body: %s)", w.Code, w.Body.String())
+	}
+	return jobResp.JobID
+}
+
+// uploadOutputPayload streams a multipart file part of the given size through
+// a pipe so the test never buffers the whole body in memory.
+func uploadOutputPayload(t *testing.T, router *chi.Mux, jobID string, size int) *httptest.ResponseRecorder {
+	t.Helper()
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	go func() {
+		part, err := writer.CreateFormFile("file", "output.mp4")
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		chunk := bytes.Repeat([]byte("x"), 1<<20)
+		remaining := size
+		for remaining > 0 {
+			n := len(chunk)
+			if remaining < n {
+				n = remaining
+			}
+			if _, err := part.Write(chunk[:n]); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			remaining -= n
+		}
+		pw.CloseWithError(writer.Close())
+	}()
+
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/output", jobID), pr)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// TestUploadLargeOutput verifies output uploads spanning both sides of the
+// 32MB ParseMultipartForm in-memory threshold succeed: 20MB stays in memory
+// while 50MB spills the file part to a temporary file on disk (TSI-3072).
+func TestUploadLargeOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{"20MB", 20 << 20},
+		{"50MB", 50 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, router, cleanup := setupTest(t)
+			defer cleanup()
+
+			jobID := submitTestJob(t, router)
+			w := uploadOutputPayload(t, router, jobID, tc.size)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("Upload output (%d bytes) failed with status %d: %s", tc.size, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestGetNonExistentJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()

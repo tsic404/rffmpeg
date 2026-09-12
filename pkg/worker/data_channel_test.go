@@ -380,6 +380,37 @@ func TestClient_UploadOutput(t *testing.T) {
 	}
 }
 
+// TestClient_UploadOutputRecordsErrorBody verifies that a non-200 response's
+// body is surfaced in the returned error so upload failures are diagnosable
+// (TSI-3072).
+func TestClient_UploadOutputRecordsErrorBody(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"message":"Failed to parse multipart form"}`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-worker", "")
+
+	tmpFile, err := os.CreateTemp("", "rffmpeg-upload-err-*.mp4")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write([]byte("data")); err != nil {
+		t.Fatalf("Failed to write test data: %v", err)
+	}
+	tmpFile.Close()
+
+	err = client.UploadOutput("test-job-id", tmpFile.Name())
+	if err == nil {
+		t.Fatal("expected error for 400, got nil")
+	}
+	if !strings.Contains(err.Error(), "Failed to parse multipart form") {
+		t.Fatalf("expected error to include response body, got: %v", err)
+	}
+}
+
 // TestClient_RTMPStreamingOutput tests that streaming output mode bypasses
 // file-based output and sends data directly to the server via WebSocket/stdout.
 func TestClient_RTMPStreamingOutput(t *testing.T) {
