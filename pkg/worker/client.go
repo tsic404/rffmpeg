@@ -38,6 +38,22 @@ func IsConflict(err error) bool { return errors.Is(err, ErrJobConflict) }
 // server's own upload limits; remote URLs have no such bound.
 const MaxRemoteInputBytes int64 = 20 * 1024 * 1024 * 1024 // 20GB
 
+// transportError marks a transport-layer failure from dataClient.Do during a
+// remote-URL download: the request never received a response (DNS lookup,
+// connection refused/reset, TLS handshake, timeout). DownloadInput wraps only
+// dataClient.Do errors in this type so callers can distinguish "input URL
+// genuinely unreachable" from size-limit, HTTP-status, and local disk errors
+// via errors.As, without string matching (TSI-3082).
+type transportError struct {
+	err error
+}
+
+func (e *transportError) Error() string {
+	return fmt.Sprintf("failed to download file: %v", e.err)
+}
+
+func (e *transportError) Unwrap() error { return e.err }
+
 // Client is the HTTP client for communicating with the server
 type Client struct {
 	baseURL    string
@@ -214,7 +230,7 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 	}
 	resp, err := c.dataClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download file: %w", err)
+		return &transportError{err: err}
 	}
 	defer resp.Body.Close()
 
