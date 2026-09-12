@@ -702,7 +702,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			}
 			if err := w.client.DownloadInput(fileID, inputPath); err != nil {
 				jobFailed = true
-				w.reportInputDownloadFailure(job.ID, fileID, fmt.Sprintf("Failed to download input file %s: %v", fileID, err))
+				w.reportInputDownloadFailure(job.ID, fileID, err)
 				return
 			}
 			inputPaths = append(inputPaths, inputPath)
@@ -1230,9 +1230,22 @@ func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
 // Classification depends on the input kind: a remote URL that cannot be
 // fetched is INPUT_UNREACHABLE; a server file ID failing over the
 // worker↔server channel is infrastructure → FFMPEG_ERROR.
-func (w *Worker) reportInputDownloadFailure(jobID string, fileID, errMsg string) {
+func (w *Worker) reportInputDownloadFailure(jobID string, fileID string, downloadErr error) {
 	failureType := ClassifyInputDownloadFailure(fileID)
-	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, 1, errMsg, false, string(failureType), errMsg); err != nil {
+	errMsg := fmt.Sprintf("Failed to download input file %s: %v", fileID, downloadErr)
+	// Only a transport-layer failure (dataClient.Do error) means the input URL
+	// is genuinely unreachable. Its raw error ("dial tcp: lookup … : no such
+	// host") is not user-friendly, so surface a clear message naming the input.
+	// Size-limit, HTTP-status, and local disk errors carry their own actionable
+	// messages and must pass through unchanged (TSI-3082).
+	userMsg := errMsg
+	if failureType == protocol.FailureInputUnreachable {
+		var transportErr *transportError
+		if errors.As(downloadErr, &transportErr) {
+			userMsg = fmt.Sprintf("Input file or stream cannot be reached: %s", fileID)
+		}
+	}
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, 1, userMsg, false, string(failureType), errMsg); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
 	}
 }
@@ -1353,7 +1366,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 			inputPath = filepath.Join(jobDir, "input-"+fileID)
 		}
 		if err := w.client.DownloadInput(fileID, inputPath); err != nil {
-			w.reportInputDownloadFailure(job.ID, fileID, fmt.Sprintf("Failed to download input file %s: %v", fileID, err))
+			w.reportInputDownloadFailure(job.ID, fileID, err)
 			return
 		}
 		log.Printf("Downloaded probe input file %s to %s", fileID, inputPath)
