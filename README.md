@@ -122,7 +122,7 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 
 **限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。
 
-流式输出到 stdout（`-f <fmt> -`、`-o -` 或 `-`）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）或 `-o <本地路径>`。
+流式输出到 stdout（`-f <fmt> -`、`-o -`、`-`，或 `pipe:1`——CLI 会将其归一化为 `-`）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）或 `-o <本地路径>`。
 
 ## 配置说明
 
