@@ -419,6 +419,15 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		var env protocol.ErrorResponse
+		if jsonErr := json.Unmarshal(body, &env); jsonErr == nil && env.Message != "" {
+			return fmt.Errorf("upload output failed with status: %d: %s", resp.StatusCode, env.Message)
+		}
+		msg := strings.TrimSpace(string(body))
+		if msg != "" {
+			return fmt.Errorf("upload output failed with status: %d: %s", resp.StatusCode, msg)
+		}
 		return fmt.Errorf("upload output failed with status: %d", resp.StatusCode)
 	}
 

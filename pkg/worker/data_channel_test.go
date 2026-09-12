@@ -380,6 +380,62 @@ func TestClient_UploadOutput(t *testing.T) {
 	}
 }
 
+// TestClient_UploadOutputRecordsErrorBody verifies that a non-200 response's
+// body is surfaced in the returned error so upload failures are diagnosable
+// (TSI-3072). A JSON protocol error envelope is decoded to its Message field;
+// a non-JSON body falls back to the raw text.
+func TestClient_UploadOutputRecordsErrorBody(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantText string
+		notWant  string
+	}{
+		{
+			name:     "json-envelope",
+			body:     `{"code":"invalid_request","message":"Failed to parse multipart form","detail":"multipart: message too large"}`,
+			wantText: "Failed to parse multipart form",
+			notWant:  `"code"`,
+		},
+		{
+			name:     "raw-body-fallback",
+			body:     "plain-text failure",
+			wantText: "plain-text failure",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			client := NewClient(ts.URL, "test-worker", "")
+
+			tmpFile, err := os.CreateTemp("", "rffmpeg-upload-err-*.mp4")
+			if err != nil {
+				t.Fatalf("Failed to create temp file: %v", err)
+			}
+			defer os.Remove(tmpFile.Name())
+			if _, err := tmpFile.Write([]byte("data")); err != nil {
+				t.Fatalf("Failed to write test data: %v", err)
+			}
+			tmpFile.Close()
+
+			err = client.UploadOutput("test-job-id", tmpFile.Name())
+			if err == nil {
+				t.Fatal("expected error for 400, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("expected error to include %q, got: %v", tc.wantText, err)
+			}
+			if tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
+				t.Fatalf("expected error to exclude %q, got: %v", tc.notWant, err)
+			}
+		})
+	}
+}
+
 // TestClient_RTMPStreamingOutput tests that streaming output mode bypasses
 // file-based output and sends data directly to the server via WebSocket/stdout.
 func TestClient_RTMPStreamingOutput(t *testing.T) {
