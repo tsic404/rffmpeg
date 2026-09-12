@@ -931,6 +931,7 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 	// temporary files on disk. The old 256MB let concurrent uploads pin
 	// hundreds of MB of RSS (TSI-2365).
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		log.Printf("UploadJobOutput: failed to parse multipart form for job %s: %v", jobID, err)
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
 		))
@@ -939,6 +940,7 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
+		log.Printf("UploadJobOutput: failed to get file for job %s: %v", jobID, err)
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Missing file in request", err,
 		))
