@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1413,45 +1414,38 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Populate _rffmpeg metadata with worker encoders and worker list
+	// Populate _rffmpeg metadata (TSI-3048): workers[] stays lightweight, the
+	// executing worker's encoder list is emitted once as the shared list, and
+	// only workers whose list differs appear in worker_encoder_overrides — so a
+	// homogeneous cluster emits a single copy while a heterogeneous one keeps
+	// every per-worker capability.
 	var rffmpegMeta *protocol.RffmpegMeta
 	allWorkers, workersErr := h.db.GetAllWorkers()
 
-	// Build worker summaries for the response
-	var workerSummaries []protocol.WorkerSummary
-	if workersErr == nil {
-		for _, w := range allWorkers {
-			var encoders []string
-			if err := json.Unmarshal([]byte(w.Encoders), &encoders); err != nil {
-				encoders = []string{}
-			}
-			workerSummaries = append(workerSummaries, protocol.WorkerSummary{
-				ID:            w.ID,
-				Name:          w.Name,
-				Status:        string(w.Status),
-				GPUModel:      w.GPUModel.String,
-				Encoders:      encoders,
-				FFmpegVersion: w.FFmpegVersion,
-				MaxConcurrent: w.MaxConcurrent,
-			})
-		}
-	}
-
-	// Build encoder suggestion from the worker that executed the probe
+	// The shared baseline is the encoder list of the worker that executed the
+	// probe; it also drives the suggestion.
+	var sharedEncoders []string
 	if finalJob.WorkerID.Valid {
-		encoders, err := h.db.GetWorkerEncoders(finalJob.WorkerID.String)
-		if err == nil && len(encoders) > 0 {
-			suggestion := buildEncoderSuggestion(ffprobeResult.Streams, encoders)
-			rffmpegMeta = &protocol.RffmpegMeta{
-				WorkerEncoders: encoders,
-				Suggestion:     suggestion,
-				Workers:        workerSummaries,
-			}
+		if encoders, err := h.db.GetWorkerEncoders(finalJob.WorkerID.String); err == nil {
+			sharedEncoders = encoders
 		}
 	}
 
-	// If we couldn't build meta from the executing worker but have worker summaries, still return them
-	if rffmpegMeta == nil && len(workerSummaries) > 0 {
+	var workerSummaries []protocol.WorkerSummary
+	var overrides map[string][]string
+	if workersErr == nil {
+		workerSummaries, overrides = buildWorkerSummariesAndOverrides(allWorkers, sharedEncoders)
+	}
+
+	if len(sharedEncoders) > 0 {
+		rffmpegMeta = &protocol.RffmpegMeta{
+			WorkerEncoders:         sharedEncoders,
+			WorkerEncoderOverrides: overrides,
+			Suggestion:             buildEncoderSuggestion(ffprobeResult.Streams, sharedEncoders),
+			Workers:                workerSummaries,
+		}
+	} else if len(workerSummaries) > 0 {
+		// No executing-worker baseline: fall back to summaries only.
 		rffmpegMeta = &protocol.RffmpegMeta{
 			Workers: workerSummaries,
 		}
@@ -1462,6 +1456,32 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		Streams: ffprobeResult.Streams,
 		Rffmpeg: rffmpegMeta,
 	})
+}
+
+// buildWorkerSummariesAndOverrides reduces the worker list to lightweight
+// summaries and returns sparse per-worker encoder overrides relative to the
+// shared (executing-worker) list. Workers whose list matches the shared list
+// are elided, so a homogeneous cluster emits no overrides (TSI-3048).
+func buildWorkerSummariesAndOverrides(allWorkers []*db.Worker, sharedEncoders []string) ([]protocol.WorkerSummary, map[string][]string) {
+	workerSummaries := make([]protocol.WorkerSummary, 0, len(allWorkers))
+	overrides := make(map[string][]string)
+	for _, w := range allWorkers {
+		workerSummaries = append(workerSummaries, protocol.WorkerSummary{
+			ID:            w.ID,
+			Name:          w.Name,
+			Status:        string(w.Status),
+			FFmpegVersion: w.FFmpegVersion,
+			MaxConcurrent: w.MaxConcurrent,
+		})
+		var encoders []string
+		if err := json.Unmarshal([]byte(w.Encoders), &encoders); err != nil {
+			encoders = []string{}
+		}
+		if !slices.Equal(encoders, sharedEncoders) {
+			overrides[w.ID] = encoders
+		}
+	}
+	return workerSummaries, overrides
 }
 
 // waitForProbeTerminal blocks until the probe job reaches a terminal state,

@@ -353,20 +353,28 @@ type ProbeResponse struct {
 }
 
 type RffmpegMeta struct {
-	WorkerEncoders []string           `json:"worker_encoders,omitempty"`
-	Suggestion     *EncoderSuggestion `json:"suggestion,omitempty"`
-	Workers        []WorkerSummary    `json:"workers,omitempty"`
+	// WorkerEncoders is the shared encoder list of the worker that executed the
+	// probe, emitted once. Workers whose list differs appear sparsely in
+	// WorkerEncoderOverrides instead of repeating the full list per worker
+	// (TSI-3048).
+	WorkerEncoders []string `json:"worker_encoders,omitempty"`
+	// WorkerEncoderOverrides maps only workers whose encoder list differs from
+	// the shared WorkerEncoders list. A homogeneous cluster emits no overrides.
+	WorkerEncoderOverrides map[string][]string `json:"worker_encoder_overrides,omitempty"`
+	Suggestion             *EncoderSuggestion  `json:"suggestion,omitempty"`
+	Workers                []WorkerSummary     `json:"workers,omitempty"`
 }
 
-// WorkerSummary is a lightweight worker representation for the probe _rffmpeg response.
+// WorkerSummary is a lightweight worker representation for the probe _rffmpeg
+// response. It carries only identifying/lightweight fields; encoders live in
+// RffmpegMeta.WorkerEncoders (shared) plus WorkerEncoderOverrides (diffs)
+// (TSI-3048).
 type WorkerSummary struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name,omitempty"`
-	Status        string   `json:"status"`
-	GPUModel      string   `json:"gpu_model,omitempty"`
-	Encoders      []string `json:"encoders"`
-	FFmpegVersion string   `json:"ffmpeg_version"`
-	MaxConcurrent int      `json:"max_concurrent"`
+	ID            string `json:"id"`
+	Name          string `json:"name,omitempty"`
+	Status        string `json:"status"`
+	FFmpegVersion string `json:"ffmpeg_version"`
+	MaxConcurrent int    `json:"max_concurrent"`
 }
 
 type EncoderSuggestion struct {

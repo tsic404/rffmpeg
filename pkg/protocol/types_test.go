@@ -212,3 +212,93 @@ func TestNewWorkerCapabilities_Empty(t *testing.T) {
 		t.Errorf("GPUModel should be empty, got %q", caps.GPUModel)
 	}
 }
+
+func TestWorkerSummary_JSONOmitsEncodersAndGPUModel(t *testing.T) {
+	summary := WorkerSummary{
+		ID:            "worker-1",
+		Name:          "gpu-node",
+		Status:        "idle",
+		FFmpegVersion: "5.1",
+		MaxConcurrent: 2,
+	}
+
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("Failed to marshal WorkerSummary: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal WorkerSummary: %v", err)
+	}
+	for _, forbidden := range []string{"encoders", "gpu_model"} {
+		if _, ok := m[forbidden]; ok {
+			t.Errorf("WorkerSummary JSON must not contain %q (workers[] stays lightweight), got %s", forbidden, data)
+		}
+	}
+}
+
+func TestRffmpegMeta_HomogeneousSerializesSharedListOnly(t *testing.T) {
+	meta := RffmpegMeta{
+		WorkerEncoders: []string{"libx264", "h264_nvenc"},
+		Workers: []WorkerSummary{
+			{ID: "worker-1", Status: "idle", FFmpegVersion: "5.1", MaxConcurrent: 2},
+			{ID: "worker-2", Status: "idle", FFmpegVersion: "5.1", MaxConcurrent: 2},
+		},
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Failed to marshal RffmpegMeta: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal RffmpegMeta: %v", err)
+	}
+
+	// The shared list serializes once as a single array.
+	shared, ok := m["worker_encoders"].([]interface{})
+	if !ok || len(shared) != 2 {
+		t.Errorf("worker_encoders = %v, want a single 2-element array (%s)", m["worker_encoders"], data)
+	}
+	// Homogeneous cluster: the sparse overrides map is empty and omitted.
+	if _, ok := m["worker_encoder_overrides"]; ok {
+		t.Errorf("worker_encoder_overrides must be omitted for a homogeneous cluster, got %s", data)
+	}
+}
+
+func TestRffmpegMeta_HeterogeneousSerializesSparseOverrides(t *testing.T) {
+	meta := RffmpegMeta{
+		WorkerEncoders: []string{"libx264", "h264_nvenc"},
+		WorkerEncoderOverrides: map[string][]string{
+			"worker-2": {"libx265"},
+		},
+		Workers: []WorkerSummary{
+			{ID: "worker-1", Status: "idle", FFmpegVersion: "5.1", MaxConcurrent: 2},
+			{ID: "worker-2", Status: "idle", FFmpegVersion: "6.0", MaxConcurrent: 4},
+		},
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Failed to marshal RffmpegMeta: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Failed to unmarshal RffmpegMeta: %v", err)
+	}
+
+	overrides, ok := m["worker_encoder_overrides"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("worker_encoder_overrides must be an object, got %T (%s)", m["worker_encoder_overrides"], data)
+	}
+	// Only the differing worker appears; the shared worker is elided.
+	if _, has := overrides["worker-1"]; has {
+		t.Errorf("worker_encoder_overrides must only contain differing workers, but includes worker-1 (%s)", data)
+	}
+	if got, ok := overrides["worker-2"].([]interface{}); !ok || len(got) != 1 {
+		t.Errorf("worker_encoder_overrides[\"worker-2\"] = %v, want a 1-element list", overrides["worker-2"])
+	}
+}
