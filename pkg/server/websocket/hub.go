@@ -436,7 +436,7 @@ func (c *Client) WritePump() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer func() {
 		ticker.Stop()
-		c.Close()
+		c.closeConn()
 	}()
 
 	for {
@@ -474,7 +474,11 @@ func (c *Client) WritePump() {
 	}
 }
 
-// Close closes the client connection
+// Close closes the client's connection and send channel. It must be called
+// only from the hub's Run loop (unregister/shed paths), after the client has
+// been removed from h.clients: closing c.send while a broadcast could still
+// reach it makes the Run loop panic ("send on closed channel") — the exact
+// silent-server-death crash this invariant prevents (TSI-2388).
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -484,6 +488,20 @@ func (c *Client) Close() {
 	c.closed = true
 	c.conn.Close()
 	close(c.send)
+}
+
+// closeConn closes the underlying connection without touching c.send. The
+// WritePump defer calls it on exit: when the write side fails first (ping
+// write error, write deadline, peer gone), the connection must be torn down
+// to wake the peer, but c.send must stay open until the Run loop's Unregister
+// removes the client — otherwise a broadcast for the still-registered job
+// select-sends on the now-closed channel and panics the Run loop (a second
+// door into the TSI-2388 crash, reachable under client churn rather than
+// buffer shed).
+func (c *Client) closeConn() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conn.Close()
 }
 
 // ClientCount returns the number of clients listening for a specific job

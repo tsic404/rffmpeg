@@ -1,9 +1,11 @@
 package websocket
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,4 +176,149 @@ func waitForTotal(t *testing.T, h *Hub, n int) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for hub to shed down to %d clients; have %d", n, h.TotalClients())
+}
+
+// newHalfOpenClient creates a Hub Client over a real WebSocket connection whose
+// server side never reads or closes until test cleanup. That keeps the
+// connection's read half alive so a CloseWrite() on the client's write half
+// fails WritePump's writes without tearing down the connection — the state in
+// which a client is still registered while its WritePump exits.
+func newHalfOpenClient(t *testing.T, hub *Hub, jobID string) *Client {
+	t.Helper()
+	upgrader := &websocket.Upgrader{}
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		<-done
+		conn.Close()
+	}))
+	t.Cleanup(func() {
+		close(done)
+		srv.Close()
+	})
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial half-open websocket: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return NewClient(conn, jobID, hub)
+}
+
+// TestHub_ClientWritePumpExitDoesNotCloseSend is the regression test for a
+// second door into the TSI-2388 "silent server death" crash. The first door
+// (full client buffer -> shed) was fixed by delete-then-close under h.mu. This
+// door is client churn: WritePump's deferred cleanup used to call Close(),
+// which closed c.send while the client was still in h.clients. A broadcast for
+// that job then select-sent on the closed channel and panicked the Run loop.
+//
+// Unlike the earlier version, this test runs the victim's WritePump for real
+// and drives it out through a genuine write error, so a regression of the
+// WritePump defer from closeConn back to Close fails here.
+func TestHub_ClientWritePumpExitDoesNotCloseSend(t *testing.T) {
+	hub := NewHub()
+	runHub(hub)
+
+	// Observer proves the Run loop stays alive after the victim's exit.
+	upgrader := &websocket.Upgrader{}
+	received := make(chan []byte, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			select {
+			case received <- data:
+			default:
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	oconn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial observer websocket: %v", err)
+	}
+	t.Cleanup(func() { oconn.Close() })
+	observer := NewClient(oconn, "job-observer", hub)
+	go observer.WritePump()
+	go observer.ReadPump()
+	hub.Register(observer)
+
+	// Victim: a real WebSocket connection with its WritePump running for real,
+	// so the defer under test actually executes. The WaitGroup blocks until that
+	// defer has completed. ReadPump is deliberately NOT started: its Unregister
+	// is what removes the client from the hub, and the bug lives exactly in the
+	// window where WritePump has exited but the client is still registered —
+	// starting ReadPump would unregister the victim and close that window,
+	// masking the regression.
+	victim := newHalfOpenClient(t, hub, "job-victim")
+	var wpDone sync.WaitGroup
+	wpDone.Add(1)
+	go func() { defer wpDone.Done(); victim.WritePump() }()
+	hub.Register(victim)
+	waitForTotal(t, hub, 2)
+
+	// Real write error: CloseWrite shuts down the client's write half, so
+	// WritePump's next write fails with EPIPE. The read half stays open (the
+	// peer never closes), so the connection is not torn down underneath the
+	// still-registered client.
+	tcp, ok := victim.conn.UnderlyingConn().(*net.TCPConn)
+	if !ok {
+		t.Fatalf("underlying conn is %T, want *net.TCPConn", victim.conn.UnderlyingConn())
+	}
+	if err := tcp.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+
+	// Deliver a message so WritePump attempts a write on the broken conn and
+	// exits through its defer.
+	if err := hub.BroadcastStderr("job-victim", "chunk"); err != nil {
+		t.Fatalf("broadcast to victim: %v", err)
+	}
+	wpDone.Wait()
+
+	// Deterministic wiring assertion: Close() sets c.closed and closes c.send;
+	// closeConn() leaves both untouched. With no ReadPump to drive an
+	// Unregister, the only possible writer of c.closed here is WritePump's own
+	// defer.
+	victim.mu.Lock()
+	closedByWritePump := victim.closed
+	victim.mu.Unlock()
+	if closedByWritePump {
+		t.Fatal("WritePump exit ran Close() and closed c.send while the client is still registered")
+	}
+
+	// The victim is still registered (no ReadPump ran), so broadcasting to it
+	// must not panic the Run loop: on the fixed code c.send is still open; on
+	// the pre-fix code it is closed and this select-send kills the Run goroutine.
+	for range 5 {
+		if err := hub.BroadcastStderr("job-victim", "after-exit"); err != nil {
+			t.Fatalf("broadcast after WritePump exit: %v", err)
+		}
+	}
+
+	if err := hub.BroadcastStderr("job-observer", "alive"); err != nil {
+		t.Fatalf("broadcast to observer: %v", err)
+	}
+
+	select {
+	case data := <-received:
+		if !strings.Contains(string(data), "alive") {
+			t.Fatalf("observer got unexpected frame: %.80s", string(data))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("observer received nothing after victim WritePump exit — Run loop panicked on closed send channel")
+	}
 }

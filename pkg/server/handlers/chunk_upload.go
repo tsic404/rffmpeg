@@ -17,6 +17,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
 )
 
@@ -58,7 +59,7 @@ func NewChunkUploadHandler(database *db.Database, store *storage.Storage, chunkS
 	}
 
 	// Start cleanup routine
-	go h.cleanupExpiredSessions()
+	go panicguard.Guard("chunk upload session cleaner", h.cleanupExpiredSessions)
 
 	return h
 }
@@ -537,7 +538,7 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 
 	// Clean up chunks asynchronously
 	h.wg.Add(1)
-	go func() {
+	go panicguard.Guard("chunk upload cleanup", func() {
 		defer h.wg.Done()
 		if err := h.storage.DeleteChunkDirectory(uploadID); err != nil {
 			log.Printf("Warning: failed to clean up chunks for upload %s: %v", uploadID, err)
@@ -545,7 +546,7 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 		if err := h.db.DeleteUploadChunks(uploadID); err != nil {
 			log.Printf("Warning: failed to delete chunk records for upload %s: %v", uploadID, err)
 		}
-	}()
+	})
 
 	writeJSON(w, http.StatusOK, protocol.ChunkUploadCompleteResponse{
 		FileID:  fileID,
@@ -590,10 +591,10 @@ func (h *ChunkUploadHandler) CancelChunkUpload(w http.ResponseWriter, r *http.Re
 	}
 
 	// Clean up chunks
-	go func() {
+	go panicguard.Guard("chunk upload cancel cleanup", func() {
 		h.storage.DeleteChunkDirectory(uploadID)
 		h.db.DeleteUploadChunks(uploadID)
-	}()
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Upload session cancelled",
@@ -665,7 +666,9 @@ func (h *ChunkUploadHandler) UploadFileFromReader(filename string, fileSize int6
 	}
 
 	h.db.CompleteUploadSession(session.ID)
-	go h.storage.DeleteChunkDirectory(session.ID)
+	go panicguard.Guard("chunk upload assembly cleanup", func() {
+		h.storage.DeleteChunkDirectory(session.ID)
+	})
 
 	return fileID, nil
 }
