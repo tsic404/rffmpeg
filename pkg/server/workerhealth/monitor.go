@@ -8,6 +8,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
+	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 )
 
 // Config holds the configuration for the worker health monitor
@@ -76,7 +77,7 @@ func (m *Monitor) Start() {
 	m.mu.Lock()
 	m.started = true
 	m.mu.Unlock()
-	go m.run()
+	go panicguard.Guard("worker health monitor loop", m.run)
 }
 
 // Stop stops the health monitor. Idempotent, and safe to call before Start:

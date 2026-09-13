@@ -9,6 +9,7 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
@@ -116,7 +117,7 @@ func (s *Scheduler) Start() {
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
-	go s.run()
+	go panicguard.Guard("job scheduler loop", s.run)
 }
 
 // Stop stops the scheduler and waits for the loop to exit. Idempotent, and

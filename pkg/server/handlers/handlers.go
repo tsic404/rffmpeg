@@ -21,6 +21,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
+	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 	"github.com/tsic404/rffmpeg/pkg/server/scheduler"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
@@ -159,7 +160,7 @@ func (h *Handler) validateAuthToken(w http.ResponseWriter, r *http.Request) (str
 
 // StartWSHub starts the WebSocket hub
 func (h *Handler) StartWSHub() {
-	go h.wsHub.Run()
+	go panicguard.Guard("websocket hub loop", h.wsHub.Run)
 }
 
 // writeJSON writes JSON response

@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 )
 
 // JobStore defines the interface for job validation
@@ -78,8 +79,8 @@ func (h *Handler) HandleJobLog(w http.ResponseWriter, r *http.Request) {
 	h.hub.Register(client)
 
 	// Start read and write pumps in goroutines
-	go client.WritePump()
-	go client.ReadPump()
+	go panicguard.Guard("websocket write pump", client.WritePump)
+	go panicguard.Guard("websocket read pump", client.ReadPump)
 }
 
 // HandleJobLogWithHub handles WebSocket connections using a provided hub
@@ -102,8 +103,8 @@ func HandleJobLogWithHub(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	hub.Register(client)
 
 	// Start read and write pumps in goroutines
-	go client.WritePump()
-	go client.ReadPump()
+	go panicguard.Guard("websocket write pump", client.WritePump)
+	go panicguard.Guard("websocket read pump", client.ReadPump)
 }
 
 // handshakeResponseWriter intercepts gorilla/websocket's built-in 400 Bad
@@ -242,6 +243,6 @@ func HandleJobLogWithValidation(hub *Hub, db JobStore, w http.ResponseWriter, r 
 	hub.Register(client)
 
 	// Start read and write pumps in goroutines
-	go client.WritePump()
-	go client.ReadPump()
+	go panicguard.Guard("websocket write pump", client.WritePump)
+	go panicguard.Guard("websocket read pump", client.ReadPump)
 }

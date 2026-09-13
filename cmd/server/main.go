@@ -4,21 +4,26 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/tsic404/rffmpeg/pkg/config"
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/handlers"
+	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 	"github.com/tsic404/rffmpeg/pkg/server/scheduler"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
@@ -34,6 +39,12 @@ import (
 const staleWorkerFactor = 1.5
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("FATAL: server panicked: %v\n%s", r, debug.Stack())
+			os.Exit(1)
+		}
+	}()
 	// Parse command-line flags
 	flags := parseFlags()
 
@@ -60,6 +71,18 @@ func main() {
 	// hint. MkdirAll keeps --data-dir runnable out of the box.
 	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
 		log.Fatalf("Failed to create data directory %s: %v", cfg.DataDir, err)
+	}
+
+	// Route logging to a file in the data directory in addition to stderr so
+	// that a panic or fatal in any goroutine — whose stack trace the runtime
+	// otherwise writes only to stderr — is captured on disk instead of
+	// vanishing with the process. This is what turns the "silent exit" into a
+	// diagnosable crash (TSI-3100).
+	logFile, err := setupLogFile(cfg.DataDir)
+	if err != nil {
+		log.Printf("Warning: failed to open log file: %v", err)
+	} else {
+		defer logFile.Close()
 	}
 
 	// Initialize database
@@ -333,7 +356,7 @@ func main() {
 	}
 
 	// Start server in goroutine
-	go func() {
+	go panicguard.Guard("http server", func() {
 		if cfg.TLS.Enabled {
 			log.Printf("Starting HTTPS server on %s (version %s, mTLS: %v)", addr, cfg.Version, cfg.TLS.MTLS)
 			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
@@ -345,7 +368,7 @@ func main() {
 				log.Fatalf("Server failed: %v", err)
 			}
 		}
-	}()
+	})
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
@@ -364,6 +387,36 @@ func main() {
 	}
 
 	log.Println("Server stopped")
+}
+
+// setupLogFile redirects the standard logger to write to both stderr and a
+// size/age-bounded log file in the data directory. lumberjack rotates the file
+// at MaxSize and prunes backups beyond MaxBackups/MaxAge, so a long-running
+// server's log cannot grow without bound (TSI-3100 review). Panics recovered
+// by the background-goroutine guards log through this logger, so the crash
+// cause lands on disk even when the deployment only captures stdout. A non-nil
+// error means the file could not be opened and logging falls back to stderr
+// only.
+func setupLogFile(dataDir string) (*lumberjack.Logger, error) {
+	path := filepath.Join(dataDir, "rffmpeg-server.log")
+	// Eager writability check: lumberjack opens lazily on first write, so a
+	// misconfigured data-dir would otherwise fail silently at startup.
+	probe, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	if err := probe.Close(); err != nil {
+		return nil, err
+	}
+	logFile := &lumberjack.Logger{
+		Filename:   path,
+		MaxSize:    100, // megabytes
+		MaxBackups: 3,
+		MaxAge:     28, // days
+		Compress:   false,
+	}
+	log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+	return logFile, nil
 }
 
 // parseFlags parses command-line flags
