@@ -125,12 +125,212 @@ func New(dbPath string) (*Database, error) {
 		db.SetMaxOpenConns(1)
 	}
 
+	// TSI-3122: a restart whose WAL recovery did not land can leave a
+	// pre-existing database with missing tables. initTables' CREATE TABLE IF
+	// NOT EXISTS would silently recreate a missing table as empty — losing
+	// every job/file row — so an existing database is verified before any
+	// schema initialization, and a missing table fails startup instead of
+	// being rebuilt. A fresh database (no user tables) skips this and is
+	// created normally below.
+	existing, err := d.hasUserTables()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to inspect database schema: %w", err)
+	}
+	if existing {
+		if err := d.verifyIntegrity(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("database integrity check failed: %w", err)
+		}
+		if err := d.verifyCoreTables(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("database schema check failed: %w", err)
+		}
+	}
+
 	if err := d.initTables(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize tables: %w", err)
 	}
 
+	// Column/shape verification runs after initTables so the ALTER TABLE
+	// migrations have already upgraded a legacy database to the current
+	// shape. A table that is present but missing a column the server reads
+	// or writes would otherwise pass a name-only check and only fail at
+	// request time with a missing-column 500 (TSI-3122).
+	if err := d.verifyColumns(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("database column check failed: %w", err)
+	}
+
 	return d, nil
+}
+
+// tableSpec describes the minimum schema the server needs for one table: its
+// name, the columns server code reads or writes, and the primary-key column
+// that upserts (ON CONFLICT) depend on. core marks tables that have existed in
+// every released schema since the initial commit: a pre-existing database
+// missing one of them is corrupt (their absence can never be a legitimate
+// upgrade gap), so startup must fail rather than recreate them empty. Non-core
+// tables (ws_job_seq, job_redistributions) were added by later releases and
+// are legitimately absent on an old database, so initTables may create them.
+type tableSpec struct {
+	name    string
+	pk      string
+	core    bool
+	columns []string
+}
+
+var requiredTables = []tableSpec{
+	{name: "jobs", pk: "id", core: true, columns: []string{
+		"id", "status", "input_files", "args", "output_filename",
+		"streaming_output", "output_files", "worker_id", "assigned_worker",
+		"worker_name", "exit_code", "error", "failure_type", "failure_details",
+		"retryable", "auto_hw", "cached", "timeout", "direct_paths",
+		"progress_percent", "eta_seconds", "created_at", "updated_at",
+		"started_at", "finished_at",
+	}},
+	{name: "files", pk: "id", core: true, columns: []string{
+		"id", "filename", "path", "size", "checksum", "created_at",
+	}},
+	{name: "workers", pk: "id", core: true, columns: []string{
+		"id", "name", "status", "gpu_model", "encoders", "decoders",
+		"video_encoders", "video_decoders", "ffmpeg_version", "max_concurrent",
+		"evicted", "evicted_at", "hwaccels", "codecs", "filters", "pix_fmts",
+		"formats", "last_heartbeat", "created_at",
+	}},
+	{name: "upload_sessions", pk: "id", core: true, columns: []string{
+		"id", "filename", "file_size", "chunk_size", "total_chunks",
+		"uploaded_chunks", "file_checksum", "status", "created_at",
+		"updated_at", "expires_at",
+	}},
+	{name: "upload_chunks", pk: "id", core: true, columns: []string{
+		"id", "upload_id", "chunk_index", "chunk_size", "checksum", "path",
+		"created_at",
+	}},
+	{name: "migration_events", pk: "id", core: true, columns: []string{
+		"id", "timestamp", "worker_id", "worker_name", "reason",
+		"retry_count", "job_ids", "jobs_migrated", "created_at",
+	}},
+	{name: "job_redistributions", pk: "id", core: false, columns: []string{
+		"id", "migration_event_id", "job_id", "target_worker_id",
+		"target_worker_name", "created_at",
+	}},
+	{name: "worker_eviction_events", pk: "id", core: true, columns: []string{
+		"id", "timestamp", "worker_id", "event_type", "current_throughput",
+		"cluster_median", "decision_reason", "created_at",
+	}},
+	{name: "ws_job_seq", pk: "job_id", core: false, columns: []string{
+		"job_id", "last_seq", "updated_at",
+	}},
+}
+
+// hasUserTables reports whether the database already contains any user table
+// (anything in sqlite_master that is not a SQLite internal table). A fresh
+// database has none; a pre-existing one has at least one.
+func (d *Database) hasUserTables() (bool, error) {
+	var n int
+	err := d.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("inspect sqlite_master: %w", err)
+	}
+	return n > 0, nil
+}
+
+// verifyIntegrity asserts the SQLite file is structurally sound and that
+// foreign-key enforcement is on. integrity_check detects malformed pages and
+// broken b-tree structure — the corruption a half-landed WAL recovery leaves
+// behind — but not content-level bit flips in row data.
+func (d *Database) verifyIntegrity() error {
+	var result string
+	if err := d.db.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
+		return fmt.Errorf("integrity_check failed: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("integrity_check reported corruption: %s", result)
+	}
+
+	var fk int
+	if err := d.db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+		return fmt.Errorf("foreign_keys check failed: %w", err)
+	}
+	if fk != 1 {
+		return fmt.Errorf("foreign_keys enforcement is off (got %d, want 1)", fk)
+	}
+	return nil
+}
+
+// verifyCoreTables fails if any core table is absent from sqlite_master. It
+// must run before initTables: CREATE TABLE IF NOT EXISTS would otherwise
+// recreate a missing core table as empty, silently discarding the rows that
+// should have been there (TSI-3122). Non-core tables added by later releases
+// are excluded — their absence is a legitimate upgrade gap that initTables
+// fills.
+func (d *Database) verifyCoreTables() error {
+	for _, t := range requiredTables {
+		if !t.core {
+			continue
+		}
+		var name string
+		err := d.db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, t.name,
+		).Scan(&name)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("required table %q is missing (no such table: %s)", t.name, t.name)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to verify table %q: %w", t.name, err)
+		}
+	}
+	return nil
+}
+
+// verifyColumns fails if a required table is missing one of the columns the
+// server depends on, or has lost its primary-key constraint. Table names are
+// hard-coded identifiers, not user input, so they are safe to inline in the
+// PRAGMA (SQLite does not bind identifiers).
+func (d *Database) verifyColumns() error {
+	for _, t := range requiredTables {
+		rows, err := d.db.Query("PRAGMA table_info(" + t.name + ")")
+		if err != nil {
+			return fmt.Errorf("inspect columns of %q: %w", t.name, err)
+		}
+		type colInfo struct{ pk int }
+		cols := make(map[string]colInfo)
+		for rows.Next() {
+			var (
+				cid     int
+				name    string
+				ctype   string
+				notNull int
+				dflt    sql.NullString
+				pk      int
+			)
+			if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan columns of %q: %w", t.name, err)
+			}
+			cols[name] = colInfo{pk: pk}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate columns of %q: %w", t.name, err)
+		}
+
+		for _, c := range t.columns {
+			if _, ok := cols[c]; !ok {
+				return fmt.Errorf("required table %q is missing column %q", t.name, c)
+			}
+		}
+		if t.pk != "" {
+			if c, ok := cols[t.pk]; !ok || c.pk == 0 {
+				return fmt.Errorf("required table %q is missing its primary key on %q", t.name, t.pk)
+			}
+		}
+	}
+	return nil
 }
 
 // Close closes the database connection

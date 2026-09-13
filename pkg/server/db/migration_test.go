@@ -872,42 +872,27 @@ func TestMigrationAddsCachedColumn(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "legacy.db")
 
-	// Build a legacy schema: a jobs table without the cached column.
-	legacy, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	// Build a complete database, then remove cached to simulate the
+	// pre-TSI-2519 jobs schema (no cached column) and reopen through New so
+	// the ALTER migration re-adds it.
+	full, err := New(dbPath)
 	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
+		t.Fatalf("create db: %v", err)
 	}
-	_, err = legacy.Exec(`
-		CREATE TABLE jobs (
-			id TEXT PRIMARY KEY,
-			status TEXT NOT NULL,
-			input_files TEXT NOT NULL,
-			args TEXT NOT NULL,
-			output_filename TEXT DEFAULT '',
-			streaming_output INTEGER DEFAULT 0,
-			output_files TEXT DEFAULT '[]',
-			worker_id TEXT,
-			exit_code INTEGER,
-			error TEXT,
-			failure_type TEXT DEFAULT '',
-			failure_details TEXT DEFAULT '',
-			retryable INTEGER DEFAULT 0,
-			auto_hw INTEGER DEFAULT 0,
-			timeout DATETIME,
-			direct_paths TEXT DEFAULT '[]',
-			progress_percent REAL DEFAULT 0,
-			eta_seconds INTEGER DEFAULT 0,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			started_at DATETIME,
-			finished_at DATETIME
-		);
-	`)
+	if err := full.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
 	if err != nil {
-		t.Fatalf("create legacy schema: %v", err)
+		t.Fatalf("open raw db: %v", err)
 	}
-	if err := legacy.Close(); err != nil {
-		t.Fatalf("close legacy db: %v", err)
+	if _, err := raw.Exec(`ALTER TABLE jobs DROP COLUMN cached`); err != nil {
+		raw.Close()
+		t.Fatalf("drop cached column: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
 	}
 
 	d, err := New(dbPath)
@@ -934,38 +919,27 @@ func TestMigrationConvertsLegacyTimeoutDeadline(t *testing.T) {
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "legacy-timeout.db")
 
-	legacy, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	full, err := New(dbPath)
 	if err != nil {
-		t.Fatalf("open legacy db: %v", err)
+		t.Fatalf("create db: %v", err)
 	}
-	if _, err := legacy.Exec(`
-		CREATE TABLE jobs (
-			id TEXT PRIMARY KEY,
-			status TEXT NOT NULL,
-			input_files TEXT NOT NULL,
-			args TEXT NOT NULL,
-			output_filename TEXT DEFAULT '',
-			streaming_output INTEGER DEFAULT 0,
-			output_files TEXT DEFAULT '[]',
-			worker_id TEXT,
-			exit_code INTEGER,
-			error TEXT,
-			failure_type TEXT DEFAULT '',
-			failure_details TEXT DEFAULT '',
-			retryable INTEGER DEFAULT 0,
-			auto_hw INTEGER DEFAULT 0,
-			cached INTEGER DEFAULT 0,
-			timeout DATETIME,
-			direct_paths TEXT DEFAULT '[]',
-			progress_percent REAL DEFAULT 0,
-			eta_seconds INTEGER DEFAULT 0,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			started_at DATETIME,
-			finished_at DATETIME
-		);
-	`); err != nil {
-		t.Fatalf("create legacy schema: %v", err)
+	if err := full.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	// Age the timeout column back to DATETIME (the pre-TSI-2886 type) so the
+	// rename-and-convert migration is exercised on a realistic database.
+	if _, err := raw.Exec(`ALTER TABLE jobs DROP COLUMN timeout`); err != nil {
+		raw.Close()
+		t.Fatalf("drop timeout column: %v", err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE jobs ADD COLUMN timeout DATETIME`); err != nil {
+		raw.Close()
+		t.Fatalf("re-add timeout as DATETIME: %v", err)
 	}
 
 	now := time.Now()
@@ -982,12 +956,13 @@ func TestMigrationConvertsLegacyTimeoutDeadline(t *testing.T) {
 		{"job-null", "pending", nil},
 	}
 	for _, r := range rows {
-		if _, err := legacy.Exec(insert, r.id, r.status, r.timeout, now, now); err != nil {
+		if _, err := raw.Exec(insert, r.id, r.status, r.timeout, now, now); err != nil {
+			raw.Close()
 			t.Fatalf("insert legacy job %s: %v", r.id, err)
 		}
 	}
-	if err := legacy.Close(); err != nil {
-		t.Fatalf("close legacy db: %v", err)
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
 	}
 
 	d, err := New(dbPath)
