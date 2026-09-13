@@ -594,6 +594,15 @@ func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool
 
 // WaitForJobWithLogs waits for job completion with real-time log streaming via WebSocket
 func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	// terminalSeen is closed once the WebSocket delivers a terminal status or
+	// complete event. The backup HTTP poll runs on a 2s tick, so without this
+	// the CLI would linger up to a full poll interval after the worker's
+	// terminal report is broadcast (e.g. a --timeout verdict), even though the
+	// job is already done (TSI-3081).
+	var terminalOnce sync.Once
+	terminalSeen := make(chan struct{})
+	markTerminal := func() { terminalOnce.Do(func() { close(terminalSeen) }) }
+
 	// Start WebSocket connection for real-time logs
 	wsClient := NewWSClient(c.serverURL, jobID, c.token,
 		WithOnStderr(func(chunk string) {
@@ -609,7 +618,11 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 				}
 				fmt.Fprintln(os.Stderr)
 			}
+			if protocol.IsTerminalStatus(status) {
+				markTerminal()
+			}
 		}),
+		WithOnComplete(func(exitCode int) { markTerminal() }),
 		WithOnProgress(func(p protocol.WSProgressPayload) {
 			if quiet {
 				return
@@ -678,68 +691,85 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	// file itself is intact — surface it as a warning and still return the
 	// job so main.go proceeds to GET /api/v1/output/{fileId}. Only streaming
 	// output (stdout consumers) must fail on a gap.
-	select {
-	case job := <-pollDone:
-		if wsClient.HasGap() {
-			fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
-		}
-		return job, nil
-	case err := <-pollErr:
-		// TSI-2452-style race guard: the backup poll's budget may expire at
-		// the same moment the job actually reached a terminal status (WS
-		// healthy, only the backup poll flapped). One final GetJob with a
-		// fresh context distinguishes "job done" from "contact lost" before
-		// the distinct exit 2 is surfaced.
-		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+	for {
+		select {
+		case job := <-pollDone:
 			if wsClient.HasGap() {
 				fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
 			}
 			return job, nil
-		}
-		return nil, err
-	case err := <-listenDone:
-		if err != nil {
-			// A spent retry budget means "submitted, then disconnected":
-			// surface the distinct exit code instead of a poll fallback.
-			if errors.Is(err, ErrRetriesExhausted) {
-				return nil, &RetriesExhaustedError{JobID: jobID, Cause: err}
+		case <-terminalSeen:
+			// The WebSocket delivered the terminal status/complete event
+			// before the backup poll's next 2s tick. Fetch the job now so the
+			// CLI exits immediately instead of waiting out the poll interval
+			// (TSI-3081).
+			terminalSeen = nil // one-shot: a closed channel would busy-loop
+			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+				if wsClient.HasGap() {
+					fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+				}
+				return job, nil
 			}
-			// WebSocket failed, fall back to polling
-			return c.WaitForJob(ctx, jobID, !quiet)
-		}
-		// WebSocket closed normally; poll until terminal status is reached.
-		// A single GetJob call may return a non-terminal status if the
-		// WebSocket closes before the server DB is updated.
-		if _, err := c.WaitForJob(ctx, jobID, !quiet); err != nil {
+			// The terminal event raced the DB write, or the lookup failed
+			// transiently. Keep waiting: the backup poll still observes the
+			// terminal status on its next tick.
+		case err := <-pollErr:
+			// TSI-2452-style race guard: the backup poll's budget may expire at
+			// the same moment the job actually reached a terminal status (WS
+			// healthy, only the backup poll flapped). One final GetJob with a
+			// fresh context distinguishes "job done" from "contact lost" before
+			// the distinct exit 2 is surfaced.
+			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+				if wsClient.HasGap() {
+					fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+				}
+				return job, nil
+			}
 			return nil, err
-		}
-		job, err := c.GetJob(jobID)
-		if err != nil {
-			return nil, err
-		}
-		// Non-streaming mode: a log-stream gap must not block the output
-		// file download — stderr here is display-only. Warn and succeed.
-		if wsClient.HasGap() {
-			fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
-		}
-		return job, nil
-	case <-ctx.Done():
-		// Race guard (TSI-2452): the client-side timeout fired, but the
-		// job may have reached a terminal status on the server between
-		// the last poll and ctx.Done() (e.g. a cache hit). The poll
-		// goroutine may still be mid-GetJob, so pollDone is not yet
-		// written. Do a final GetJob with a fresh context — if the job
-		// is already done, return it instead of a spurious timeout.
-		// main.go also does this as a belt-and-suspenders fallback;
-		// doing it here means main.go's check is a no-op in the common
-		// case and the gap warning is preserved.
-		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+		case err := <-listenDone:
+			if err != nil {
+				// A spent retry budget means "submitted, then disconnected":
+				// surface the distinct exit code instead of a poll fallback.
+				if errors.Is(err, ErrRetriesExhausted) {
+					return nil, &RetriesExhaustedError{JobID: jobID, Cause: err}
+				}
+				// WebSocket failed, fall back to polling
+				return c.WaitForJob(ctx, jobID, !quiet)
+			}
+			// WebSocket closed normally; poll until terminal status is reached.
+			// A single GetJob call may return a non-terminal status if the
+			// WebSocket closes before the server DB is updated.
+			if _, err := c.WaitForJob(ctx, jobID, !quiet); err != nil {
+				return nil, err
+			}
+			job, err := c.GetJob(jobID)
+			if err != nil {
+				return nil, err
+			}
+			// Non-streaming mode: a log-stream gap must not block the output
+			// file download — stderr here is display-only. Warn and succeed.
 			if wsClient.HasGap() {
 				fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
 			}
 			return job, nil
+		case <-ctx.Done():
+			// Race guard (TSI-2452): the client-side timeout fired, but the
+			// job may have reached a terminal status on the server between
+			// the last poll and ctx.Done() (e.g. a cache hit). The poll
+			// goroutine may still be mid-GetJob, so pollDone is not yet
+			// written. Do a final GetJob with a fresh context — if the job
+			// is already done, return it instead of a spurious timeout.
+			// main.go also does this as a belt-and-suspenders fallback;
+			// doing it here means main.go's check is a no-op in the common
+			// case and the gap warning is preserved.
+			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+				if wsClient.HasGap() {
+					fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+				}
+				return job, nil
+			}
+			return nil, ctx.Err()
 		}
-		return nil, ctx.Err()
 	}
 }
 
