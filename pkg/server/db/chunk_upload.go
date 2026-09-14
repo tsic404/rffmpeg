@@ -210,7 +210,7 @@ func (d *Database) DeleteUploadSession(id string) error {
 
 // CreateUploadChunk creates a chunk record. Inserting a (upload_id,
 // chunk_index) pair that already exists is treated as idempotent success
-// (TSI-2359): the UNIQUE index on upload_chunks(upload_id, chunk_index)
+// the UNIQUE index on upload_chunks(upload_id, chunk_index)
 // rejects the duplicate insert, and the original row is returned.
 func (d *Database) CreateUploadChunk(uploadID string, chunkIndex int, chunkSize int64, checksum, path string) (*UploadChunk, error) {
 	id := uuid.New().String()
@@ -291,7 +291,7 @@ func (d *Database) DeleteUploadChunks(uploadID string) error {
 
 // ChunkExists checks if a chunk already exists. A query failure returns an
 // error rather than a silent false: treating "unknown" as "missing" would
-// let the caller overwrite an existing chunk under load (TSI-2359).
+// let the caller overwrite an existing chunk under load.
 func (d *Database) ChunkExists(uploadID string, chunkIndex int) (bool, error) {
 	var count int
 	err := d.db.QueryRow(`

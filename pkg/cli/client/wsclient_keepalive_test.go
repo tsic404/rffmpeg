@@ -11,22 +11,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// TestWSClient_KeepalivePreventsIdleReap is the TSI-2414 regression test.
-//
-// Production failure mode: a streaming-output job goes quiet for longer than
-// the read deadline (a long transcode with no stderr/stdout traffic). Before
-// the fix the client had no ping/pong keepalive, so its own 60s read deadline
-// reaped an idle but healthy connection; every broadcast the server sent
-// during the forced reconnect window was lost, and on reconnect the advanced
-// sequence counter surfaced as a spurious "seq gap" — failing an otherwise
-// intact job with exit code 1.
-//
-// The test shrinks wsReadTimeout below the ping interval and serves NO data
-// at all after the handshake. Without client-side keepalive the connection
-// would die of read-deadline timeout within ~wsReadTimeout; with it, pings
-// flow, the server's pong handler (mirrored here) keeps the connection open,
-// and the session survives several multiples of the old deadline without a
-// single disconnect/reconnect — so no gap can be manufactured.
+// TestWSClient_KeepalivePreventsIdleReap is the regression test: a streaming
+// job that goes quiet past the read deadline (a long transcode with no
+// traffic) used to have the client's 60s read deadline reap an idle but
+// healthy connection, losing broadcasts and surfacing a spurious "seq gap" on
+// reconnect. The test shrinks wsReadTimeout below the ping interval and serves
+// no data after the handshake: without keepalive the connection dies within
+// ~wsReadTimeout, with it pings keep it open so no gap can be manufactured.
 func TestWSClient_KeepalivePreventsIdleReap(t *testing.T) {
 	oldTimeout := time.Duration(wsReadTimeout.Load())
 	oldPing := time.Duration(wsPingInterval.Load())

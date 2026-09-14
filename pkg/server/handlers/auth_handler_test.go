@@ -88,7 +88,7 @@ func TestChunkUploadHandlers_RejectUnauthenticated(t *testing.T) {
 
 // TestSubmitJob_RejectsWithoutConfiguredToken verifies that when NO auth token
 // is configured, job submission is rejected (fail closed) rather than silently
-// accepted — the TSI-2353 gap where an unset token bypassed authentication.
+// accepted — the gap where an unset token bypassed authentication.
 func TestSubmitJob_RejectsWithoutConfiguredToken(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()

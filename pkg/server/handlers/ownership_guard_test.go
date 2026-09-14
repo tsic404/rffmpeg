@@ -1,13 +1,12 @@
 package handlers_test
 
-// End-to-end regression tests for the TSI-2362 review fixes:
+// End-to-end regression tests for the ownership-guard fixes:
 //
-//  1. The worker client sends worker_id on terminal updates, so the server's
-//     ownership guard actually fires in production: a stale completed PATCH
-//     from the OLD owner after failover gets 409 and must not overwrite the
-//     new owner's result.
-//  2. A late completion report from an OFFLINE (but still owning) worker does
-//     not resurrect it into the schedulable pool — the terminal hook uses the
+//  1. The worker client sends worker_id on terminal updates, so the guard
+//     fires in production: a stale completed PATCH from the OLD owner after
+//     failover gets 409 and must not overwrite the new owner's result.
+//  2. A late completion report from an OFFLINE (still owning) worker must not
+//     resurrect it into the schedulable pool — the terminal hook uses the
 //     guarded conditional idle transition.
 
 import (

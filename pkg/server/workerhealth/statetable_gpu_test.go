@@ -9,8 +9,7 @@ import (
 
 // TestWorkerStateTable_StaleGPUPreserved verifies that heartbeats without a
 // fresh GPU sample (GPUMetricsValid=false) do not wipe the last good reading:
-// a valid 0% sample must survive, and an invalid sample must not zero it out
-// (TSI-2365).
+// a valid 0% sample must survive, and an invalid sample must not zero it out.
 func TestWorkerStateTable_StaleGPUPreserved(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 

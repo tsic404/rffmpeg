@@ -63,7 +63,7 @@ func captureStderr(f func()) string {
 	return buf.String()
 }
 
-// TestRun_NoArgsReturnsError pins the TSI-2907 fix: invoking rffmpeg with no
+// TestRun_NoArgsReturnsError pins the fix: invoking rffmpeg with no
 // arguments must exit non-zero (ffmpeg exits 1) instead of printing usage and
 // reporting success.
 func TestRun_NoArgsReturnsError(t *testing.T) {
@@ -80,7 +80,7 @@ func TestRun_NoArgsReturnsError(t *testing.T) {
 	}
 }
 
-// TestRejectOverwriteIfNeeded pins the TSI-2964 CLI download guard: in the
+// TestRejectOverwriteIfNeeded pins the CLI download guard: in the
 // default upload/download mode the CLI is the sole writer of the user's output
 // file, so a pre-existing file must not be silently truncated.
 func TestRejectOverwriteIfNeeded(t *testing.T) {
@@ -123,7 +123,7 @@ func TestRejectOverwriteIfNeeded(t *testing.T) {
 
 // TestDefaultModeDownloadOverwriteGuard verifies the end-to-end default-mode
 // path: an existing output with no -y is refused (file preserved), while -y
-// downloads and overwrites it — the original TSI-2964 scenario.
+// downloads and overwrites it — the original scenario.
 func TestDefaultModeDownloadOverwriteGuard(t *testing.T) {
 	const payload = "transcoded-output-data"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1295,7 +1295,7 @@ func TestReportTerminalJob_Completed(t *testing.T) {
 	}
 }
 
-// TestResolveOutputFilename locks the TSI-2690 fix: in shared FS mode network
+// TestResolveOutputFilename locks the fix: in shared FS mode network
 // output URLs must pass through unchanged instead of being mangled into a
 // local path, while local paths (including file:// and paths that merely
 // contain "://" mid-string) are still resolved to absolute paths.
@@ -1412,7 +1412,7 @@ func TestClientWaitDeadline(t *testing.T) {
 	}
 
 	// running started-at anchor: the budget runs from started_at, not submit
-	// time (TSI-2886), so the give-up line shifts by the pre-exec latency.
+	// time, so the give-up line shifts by the pre-exec latency.
 	startedAt := now.Add(8 * time.Second)
 	got, has = clientWaitDeadline(now, timeout, protocol.JobStatusRunning, &startedAt, nil)
 	if !has {
@@ -1549,7 +1549,7 @@ func (s *scriptedJobClient) CancelJob(jobID string) error {
 	return nil
 }
 
-// TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert pins the TSI-2571 core
+// TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert pins the core
 // behavior at loop level: the client submits while the job is pending with no
 // NoWorkerDeadline (waiting behind a busy worker), its --timeout wait fires,
 // and the re-read after the deadline observes the job now carries a fresh
@@ -1667,7 +1667,7 @@ func TestWaitForJobLoop_DoesNotExtendTwice(t *testing.T) {
 	}
 }
 
-// TestWaitForJobLoop_ExtendsOnceAfterJobStarts is the TSI-2886 regression: the
+// TestWaitForJobLoop_ExtendsOnceAfterJobStarts is the regression: the
 // client's first wait is anchored to submit time (started_at nil), but once the
 // job starts running the worker's ffmpeg budget only begins at started_at. The
 // loop must re-anchor to started_at+timeout and wait for the worker's TIMEOUT
@@ -1714,7 +1714,7 @@ func TestWaitForJobLoop_ExtendsOnceAfterJobStarts(t *testing.T) {
 	}
 }
 
-// TestWaitForJobLoop_QueuedJobNotCancelledByTimeout is the TSI-2886 regression
+// TestWaitForJobLoop_QueuedJobNotCancelledByTimeout is the regression
 // for the download/probe phase: a queued job is already claimed by a worker and
 // spends --timeout on its pre-exec pipeline, which the worker bounds
 // independently (30m dataClient download + ffprobe executor). The client must not cancel a
@@ -1809,7 +1809,7 @@ func (d *disconnectedJobClient) CancelJob(jobID string) error { return nil }
 
 // TestWaitForJobLoop_RetriesExhausted maps a RetriesExhaustedError to
 // ExitDisconnected — the job was submitted but the client lost contact after
-// its retry budget, which operators must distinguish from ExitError (TSI-2697).
+// its retry budget, which operators must distinguish from ExitError.
 func TestWaitForJobLoop_RetriesExhausted(t *testing.T) {
 	fake := &disconnectedJobClient{jobID: "job-lost"}
 

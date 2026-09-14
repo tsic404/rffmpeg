@@ -539,7 +539,7 @@ func TestPruneHardwareParams_NoSwitchForSoftwareEncoder(t *testing.T) {
 // TestExecuteWithRetry_StdoutOutputSkipsFileValidation verifies that when the
 // output path is "-" (ffmpeg stdout, streaming mode), ExecuteWithRetry skips
 // file existence/size validation on success — otherwise os.Stat("-") fails and
-// a successful streaming job is misclassified as output_empty (TSI-2345).
+// a successful streaming job is misclassified as output_empty.
 func TestExecuteWithRetry_StdoutOutputSkipsFileValidation(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not installed")
@@ -570,7 +570,7 @@ func TestExecuteWithRetry_StdoutOutputSkipsFileValidation(t *testing.T) {
 }
 
 // signalCrashExecutor returns a SIGABRT (exit 134) crash on the first call,
-// then success — simulating ffmpeg's sporadic self-abort under load (TSI-2458).
+// then success — simulating ffmpeg's sporadic self-abort under load.
 type signalCrashExecutor struct {
 	called int
 }
@@ -591,7 +591,7 @@ func (s *signalCrashExecutor) ExecuteWithHandlers(ctx context.Context, args []st
 	return s.Execute(ctx, args)
 }
 
-// TestExecuteWithRetry_SigAbortRetriesAndSucceeds locks the TSI-2458 fix:
+// TestExecuteWithRetry_SigAbortRetriesAndSucceeds locks the fix:
 // a SIGABRT (exit 134) is classified as a retryable process crash, so the
 // retry executor re-runs the job and succeeds on the second attempt instead
 // of permanently failing.
@@ -634,7 +634,7 @@ func TestExecuteWithRetry_SigAbortRetriesAndSucceeds(t *testing.T) {
 
 // recordingExecutor records, per call, whether a non-nil stderrHandler reached
 // ExecuteWithHandlers and the stderr chunk the handler received. It is used to
-// lock the TSI-2523 contract that the retry executor streams stderr on every
+// lock the contract that the retry executor streams stderr on every
 // attempt, not just the first.
 type recordingExecutor struct {
 	calls   []recordingExecutorCall
@@ -674,7 +674,7 @@ func (r *recordingExecutor) run(ctx context.Context, args []string, stdoutHandle
 	return ExecResult{ExitCode: 0, Stdout: "ok"}
 }
 
-// TestExecuteWithRetry_StreamsStderrEveryAttempt locks the TSI-2523 review
+// TestExecuteWithRetry_StreamsStderrEveryAttempt locks the
 // fix: when a stderrHandler is supplied, it must reach the executor on every
 // retry attempt so the full ffmpeg log streams live each time — the
 // deduplication contract (concise terminal Error + per-attempt streaming)

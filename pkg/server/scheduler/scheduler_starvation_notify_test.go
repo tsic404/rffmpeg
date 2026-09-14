@@ -9,7 +9,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
-// TSI-2562 review fix: the starvation sweep fails jobs with a bulk UPDATE that
+// the starvation sweep fails jobs with a bulk UPDATE that
 // bypasses the per-job terminal-status writers. waitForProbeTerminal has no
 // periodic DB poll to fall back on, so the sweep must wake the notifier for
 // each failed job — otherwise a probe waiter idles to the 2-minute budget.

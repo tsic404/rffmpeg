@@ -8,26 +8,14 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 )
 
-// TestSlowWorkerEvictionE2E_ThroughputDriven is the integration test distillation
-// of the manual E2E verification (TSI-2432). It proves that slow-worker eviction
-// works on throughput (completed jobs per heartbeat interval) alone — no GPU
-// metrics required — mirroring a real cluster where two software-encoding workers
-// diverge in throughput and the slow one is evicted mid-flight.
-//
-// E2E run that this test codifies (local, no nvidia-smi):
-//   - server + 2 workers (libx264 ultrafast, no GPU)
-//   - slow worker's ffmpeg was wrapped with `sleep 3` before exec, so it
-//     completed far fewer jobs per 2s heartbeat than the fast worker
-//   - after both cleared MinJobsForEviction, the monitor evicted the slow
-//     worker: EWMA throughput below cluster median / SlowNodeThreshold, a
-//     'worker EWMA throughput below cluster median threshold' audit event was
-//     recorded, MarkWorkerEvicted set the DB flag, and the scheduler was
-//     triggered to reschedule in-flight jobs away from the evicted node.
-//
-// GPU-metrics environment validation (a worker whose throughput is real but
-// whose GPU utilization is the actual eviction signal) remains a leftover item
-// for an nvidia-smi-equipped environment — this test covers the throughput
-// path exclusively.
+// TestSlowWorkerEvictionE2E_ThroughputDriven is the integration distillation
+// of the manual E2E verification: slow-worker eviction works on throughput
+// (completed jobs per heartbeat interval) alone — no GPU metrics required. Two
+// software-encoding workers (libx264, no GPU) diverge in throughput (the slow
+// one's ffmpeg is wrapped with `sleep 3`); once both clear MinJobsForEviction,
+// the monitor evicts the slow worker on EWMA throughput below cluster median,
+// records the audit event, sets the DB flag, and reschedules its in-flight
+// jobs. GPU-metric validation stays a leftover for an nvidia-smi environment.
 func TestSlowWorkerEvictionE2E_ThroughputDriven(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
@@ -49,18 +37,13 @@ func TestSlowWorkerEvictionE2E_ThroughputDriven(t *testing.T) {
 
 	stateTable := NewWorkerStateTable(30 * time.Second)
 
-	// Simulate the EWMA convergence the real heartbeats produce: the fast
-	// worker reports a high per-interval throughput (it completes jobs
-	// quickly), the slow worker reports a low one (its 3s sleep dominates
-	// the 2s heartbeat interval). Send enough heartbeats to push both past
-	// MinJobsForEviction and to let the EWMA stabilize away from the first
-	// sample — a single sample would make the eviction threshold a coin flip
-	// on initialization noise rather than a converged signal.
-	//
-	// Fast worker: ~3 jobs/2s interval → 1.5 jobs/s per heartbeat.
-	// Slow worker: ~0.2 jobs/2s interval → 0.1 jobs/s per heartbeat.
-	// CompletedJobs advances each heartbeat (cumulative), crossing
-	// MinJobsForEviction(5) after ~6 heartbeats.
+	// Simulate the EWMA convergence real heartbeats produce: the fast worker
+	// reports high per-interval throughput, the slow one low (its 3s sleep
+	// dominates the 2s heartbeat). Send enough heartbeats to push both past
+	// MinJobsForEviction and let EWMA stabilize away from the first sample —
+	// a single sample would make the eviction threshold a coin flip on
+	// initialization noise. Fast ≈1.5 jobs/s, slow ≈0.1 jobs/s; CompletedJobs
+	// is cumulative, crossing MinJobsForEviction(5) after ~6 heartbeats.
 	for i := 1; i <= 8; i++ {
 		now := time.Now()
 		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{

@@ -90,7 +90,7 @@ func newRefuseOverwriteWorker(t *testing.T) (*Worker, *mockJobServer) {
 	return w, mockSrv
 }
 
-// TestProcessJob_RemovesStaleOutputBeforeFFmpeg locks the TSI-3126/TSI-3127
+// TestProcessJob_RemovesStaleOutputBeforeFFmpeg locks the
 // fix: a re-dispatched job (worker-failure migration or server-restart
 // recovery) re-enters processJob with a job-private temp directory that still
 // holds a partial output from its interrupted previous attempt. Without
@@ -130,7 +130,7 @@ func TestProcessJob_RemovesStaleOutputBeforeFFmpeg(t *testing.T) {
 	}
 }
 
-// TestProcessJob_PreservesExistingAbsoluteOutput locks the TSI-2964 boundary:
+// TestProcessJob_PreservesExistingAbsoluteOutput locks the boundary:
 // a user-specified absolute output that already exists must NOT be removed by
 // the stale-output cleanup (the cleanup is scoped to the job-private temp
 // directory), so ffmpeg's native refusal fails the job and the user's file

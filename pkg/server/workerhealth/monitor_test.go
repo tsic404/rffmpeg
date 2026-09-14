@@ -358,7 +358,7 @@ func TestGetMigrationEventsByWorker(t *testing.T) {
 	}
 }
 
-// --- Slow Node Eviction + Audit Tests (TSI-761 / TSI-762) ---
+// --- Slow Node Eviction + Audit Tests ---
 
 func TestSlowNodeEvictionDB(t *testing.T) {
 	database := setupTestDB(t)
@@ -715,7 +715,7 @@ func TestSlowNodeEvictionClearedWhenClusterShrinks(t *testing.T) {
 	}
 }
 
-// --- Multi-Worker Failover Tests (TSI-1641 Scene 10.1) ---
+// --- Multi-Worker Failover Tests ---
 
 func TestMultiWorkerHeartbeatTimeout(t *testing.T) {
 	database := setupTestDB(t)

@@ -61,7 +61,7 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 	// signal like SIGABRT=134 / SIGSEGV=139). ffmpeg n9.x sporadically
 	// self-aborts under high load / temp-space pressure — surface it as
 	// WORKER_CRASH with an explicit reason instead of a generic
-	// FFMPEG_ERROR so the job is retryable (TSI-2458 / TSI-2365).
+	// FFMPEG_ERROR so the job is retryable.
 	if isSignalDeath(exitCode) || isOOMKill(stderr) {
 		switch {
 		case exitCode == 137:
@@ -89,7 +89,7 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 	// the muxer", etc.) but the stderr also carries "... No such file or
 	// directory", which would otherwise match isInputUnreachable's
 	// "No such file" pattern and misreport the job as an input problem
-	// when the real cause is a bad output path/missing directory (TSI-2472).
+	// when the real cause is a bad output path/missing directory.
 	if isOutputOpenFailure(stderr) {
 		return protocol.FailureFFmpegError, "ffmpeg could not open or initialize the output file"
 	}
@@ -115,7 +115,7 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 // user-supplied source — if the worker cannot reach it, the job's input is
 // unreachable → INPUT_UNREACHABLE. A server file ID is fetched over the
 // worker↔server channel; failing there is infrastructure, not an input
-// problem → INFRA (TSI-2365; previously misreported as FFMPEG_ERROR).
+// problem → INFRA (previously misreported as FFMPEG_ERROR).
 func ClassifyInputDownloadFailure(fileID string) protocol.FailureType {
 	if pathutil.IsRemoteURL(fileID) {
 		return protocol.FailureInputUnreachable
@@ -170,7 +170,7 @@ func isInputUnreachable(stderr string) bool {
 		"Network is unreachable",
 		// Go net package error strings (lowercase style) — remote inputs are
 		// fetched by worker-side Go code, so its error text lands in stderr
-		// too (TSI-2365).
+		// too.
 		"connection refused",
 		"i/o timeout",
 		"no such host",
@@ -194,7 +194,7 @@ func isInputUnreachable(stderr string) bool {
 // failures. ffmpeg n9 exits 0 for these despite writing the error to stderr,
 // and the "... No such file or directory" tail would otherwise match
 // isInputUnreachable ("No such file") and misclassify an output-path
-// problem as an input problem (TSI-2472).
+// problem as an input problem.
 func isOutputOpenFailure(stderr string) bool {
 	lower := strings.ToLower(stderr)
 	patterns := []string{
@@ -240,7 +240,7 @@ func isEncoderUnsupported(stderr string) bool {
 
 // extractFFmpegSummary extracts a brief summary from stderr for FFMPEG_ERROR classification.
 // Truncation is rune-safe: cutting at a byte offset can split a multi-byte
-// UTF-8 character and produce an invalid string on the wire (TSI-2365).
+// UTF-8 character and produce an invalid string on the wire.
 func extractFFmpegSummary(stderr string) string {
 	const maxLen = 200
 	truncate := func(s string) string {

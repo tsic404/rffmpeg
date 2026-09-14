@@ -8,7 +8,7 @@ import (
 )
 
 // TestJobAttributionPersisted guards the executor attribution recorded on the
-// jobs table (TSI-2920): assigned_worker + worker_name are written at
+// jobs table: assigned_worker + worker_name are written at
 // assignment and survive the completed and failed terminal states, so
 // GET /api/v1/jobs no longer reports a null executing worker.
 func TestJobAttributionPersisted(t *testing.T) {

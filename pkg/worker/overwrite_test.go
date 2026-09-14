@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// TestBuildArgsOverwriteSemantics verifies the TSI-2964 fix end-to-end against
+// TestBuildArgsOverwriteSemantics verifies the fix end-to-end against
 // real ffmpeg: BuildArgs must not inject -y, so a pre-existing output file
 // follows native ffmpeg overwrite semantics.
 //

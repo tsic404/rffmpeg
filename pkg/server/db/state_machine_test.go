@@ -1,6 +1,6 @@
 package db
 
-// Regression tests for the scheduler state-machine fixes (TSI-2362):
+// Regression tests for the scheduler state-machine fixes:
 // ownership-guarded terminal updates, atomic assignment, conditional idle
 // transitions, and refresh-only heartbeats.
 

@@ -85,7 +85,7 @@ func FromDBEvent(event *db.MigrationEvent) EventInfo {
 
 // JobRedistributionTarget is the per-job target side of a migration: which
 // worker a single migrated job was reassigned to. A migration event's jobs can
-// fan out to different workers, so the target is a per-job fact (TSI-2929).
+// fan out to different workers, so the target is a per-job fact.
 type JobRedistributionTarget struct {
 	JobID            string `json:"job_id"`
 	TargetWorkerID   string `json:"target_worker_id,omitempty"`

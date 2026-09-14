@@ -50,7 +50,7 @@ type ProgressParser struct {
 	// arrived. Wall-clock elapsed since then divided by media time encoded
 	// gives the true end-to-end throughput, which naturally absorbs encoder
 	// warm-up, I/O, and finalization overhead — the EWMA-speed approach
-	// missed all of these (TSI-2438 QA: +37% early, -42% late).
+	// missed all of these.
 	firstSampleTime time.Time
 	// ewmaSpeed is kept for display (the instantaneous speed field on
 	// WSProgressPayload) but is no longer used for ETA computation.
@@ -204,8 +204,7 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 	// overall encode rate (media done / wall elapsed). Unlike the old
 	// EWMA-speed approach this naturally absorbs encoder warm-up,
 	// finalization overhead, and I/O stalls — all of which are invisible to
-	// ffmpeg's speed= multiplier but dominate short-to-medium task timing
-	// (TSI-2438 QA: +37% early / -42% late with the old formula).
+	// ffmpeg's speed= multiplier but dominate short-to-medium task timing.
 	if durationUs > 0 && timeUs > 0 && frame.Speed > 0 {
 		now := p.now()
 		if p.firstSampleTime.IsZero() {
@@ -345,12 +344,10 @@ type SeekWindow struct {
 // ParseSeekWindow scans ffmpeg-style args for output-side -ss/-t/-to values
 // and returns them in microseconds. An option may appear as "-ss value",
 // "-ss=value", or "-ss:value" (stream-specifier form). Only output-side
-// options (those after the last -i) affect the progress window — input-side
-// -ss (before -i) is a demuxer hint and is ignored.
-//
-// The args slice is the full ffmpeg command line (including -y, -i, etc.)
-// as the worker passes it to ffmpeg. Boolean/arity decisions use the
-// generated ffmpegopts table so -ss/-t/-to are never mistaken for switches.
+// options (after the last -i) affect the progress window — input-side -ss is
+// a demuxer hint and is ignored. The args slice is the full ffmpeg command
+// line; boolean/arity decisions use the generated ffmpegopts table so
+// -ss/-t/-to are never mistaken for switches.
 func ParseSeekWindow(args []string) SeekWindow {
 	var sw SeekWindow
 	// Find the index after the last -i (output section starts there).
@@ -451,7 +448,7 @@ func FilterProgressLine(line string) bool {
 // a digit or N/A. These lines are rewritten in place with \r by ffmpeg and are
 // already surfaced to the CLI as structured progress pushes by ProgressRouter,
 // so forwarding the raw line interleaves frame/fps noise with the [rffmpeg]
-// log channel (TSI-2928).
+// log channel.
 var ffmpegStatsLineRe = regexp.MustCompile(`^\s*(?:frame=\s*\d|(?:size|Lsize)=\s*(?:\d|N/A)).*time=\d`)
 
 // ffmpegSummaryLineRe matches ffmpeg's terminal -stats summary line emitted
@@ -478,19 +475,13 @@ type ETAVerificationResult struct {
 }
 
 // VerifyETAPrecision simulates ETA predictions for a long task and checks
-// that errors at key progress checkpoints stay within tolerance.
-//
-// checkpoints: pairs of (time microseconds, speed encoded as an integer
-// where 1_000_000 = 1.0x). They must be in ascending time order.
-//
-// durationUs: total media duration in microseconds.
-//
-// tolerance: maximum acceptable relative error (e.g., 0.20 for 20%).
-//
-// actualWallTimeUs: optional ground-truth total wall clock time in microseconds.
-// When 0, the function infers the wall time from the last checkpoint and assumes
-// the remaining portion from the last checkpoint to completion runs at the last
-// observed speed (best-effort approximation).
+// that errors at key progress checkpoints stay within tolerance. checkpoints
+// are (time microseconds, speed as integer where 1_000_000 = 1.0x) pairs in
+// ascending time order. durationUs is total media duration in microseconds;
+// tolerance is the max acceptable relative error (e.g. 0.20 for 20%).
+// actualWallTimeUs is optional ground-truth total wall time; when 0, the wall
+// time is inferred from the last checkpoint (remaining runs at last observed
+// speed).
 func VerifyETAPrecision(checkpoints [][2]int64, durationUs int64, tolerance float64, actualWallTimeUs int64) []ETAVerificationResult {
 	p := NewProgressParser()
 	p.SetDuration(durationUs)
@@ -538,14 +529,10 @@ func VerifyETAPrecision(checkpoints [][2]int64, durationUs int64, tolerance floa
 	}
 
 	// Inject wall-clock time via nowFunc so the wall-clock-rate ETA has
-	// deterministic data. Feed a priming sample at t=0 (which sets
-	// firstSampleTime), then each real checkpoint at t = cumulativeWallUs
-	// so wallElapsed = cumulativeWallUs — enough to pass etaMinWallSeconds
-	// for all but the very first checkpoints (which are expected to suppress).
-	// Inject wall-clock time via nowFunc so the wall-clock-rate ETA has
-	// deterministic data. A priming sample at t=0 sets firstSampleTime,
-	// then each real checkpoint i is fed at t = cumulativeWallUs[i] so
-	// wallElapsed = cumulativeWallUs[i].
+	// deterministic data. A priming sample at t=0 sets firstSampleTime, then
+	// each real checkpoint is fed at t = cumulativeWallUs so wallElapsed =
+	// cumulativeWallUs — enough to pass etaMinWallSeconds for all but the very
+	// first checkpoints (which are expected to suppress).
 	baseTime := time.Unix(0, 0)
 	var cpIdx int // index of the next checkpoint to feed (0 = priming)
 	p.nowFunc = func() time.Time {

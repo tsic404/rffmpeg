@@ -118,15 +118,10 @@ func (e *EngineCoordinator) SetNotifier(notifier Notifier) {
 	e.notifier = notifier
 }
 
-// Rewrite performs a complete rewrite of the encoder parameters.
-// It follows the workflow:
-// 1. Classify the scenario
-// 2. Select target encoder
-// 3. Translate parameters (if needed)
-// 4. Inject hardware parameters (if needed)
-// 5. Record audit information
-// 6. Generate notifications
-// 7. Return rewritten parameters
+// Rewrite performs a complete rewrite of the encoder parameters: classify the
+// scenario, select the target encoder, translate parameters, inject hardware
+// parameters, record audit information, generate notifications, and return the
+// rewritten parameters.
 func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequest) (*EncoderRewriteResponse, error) {
 	startTime := time.Now()
 
@@ -228,7 +223,7 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 	// x264-style naming, so they must be translated from the codec's software
 	// baseline (libx264 for H.264, etc.) to the chosen hardware encoder —
 	// otherwise an incompatible value (e.g. ultrafast on h264_qsv) reaches
-	// ffmpeg verbatim and fails with "Invalid argument" (TSI-2781).
+	// ffmpeg verbatim and fails with "Invalid argument".
 	translationSource := req.SpecifiedEncoder
 	if translationSource == "" {
 		translationSource = SoftwareEncoderForCodec(targetEncoder.CodecFormat())

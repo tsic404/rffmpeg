@@ -43,7 +43,7 @@ func formatETA(seconds int) string {
 // renderProgressLine formats a WS progress payload as the CLI stderr
 // progress line: "Progress: X% | ETA: <formatted or n/a>". The ETA segment is
 // always present so monitoring scripts can parse a stable shape even on short
-// tasks where the worker never produced an ETA (TSI-2845). Shared by every
+// tasks where the worker never produced an ETA. Shared by every
 // WebSocket wait/stream entry point.
 func renderProgressLine(p protocol.WSProgressPayload) string {
 	eta := "n/a"
@@ -71,13 +71,12 @@ const (
 	// server is lost mid-job. 14 retries on the WebSocket exponential-backoff
 	// schedule (1s, 2s, 4s, 8s, 16s, then 30s) span about 5 minutes of total
 	// retry time before the CLI gives up with a distinct "job submitted"
-	// exit code (TSI-2697).
+	// exit code.
 	DefaultMaxRetries = 14
 
 	// DefaultSubmitRetries bounds the CLI's rate-limit (HTTP 429) resubmission
 	// loop when --retry is enabled. Backoff starts at the server's retry_in
-	// hint (or 1s) and doubles per attempt, capped at submitRetryMaxDelay
-	// (TSI-2939).
+	// hint (or 1s) and doubles per attempt, capped at submitRetryMaxDelay.
 	DefaultSubmitRetries = 5
 
 	// submitRetryMaxDelay caps a single backoff wait so --retry never parks
@@ -88,19 +87,19 @@ const (
 	// the WebSocket to deliver its terminal event after the HTTP poll reports
 	// completion. The terminal event is sequenced after every stdout frame, so
 	// once it arrives the stream is fully delivered; the timeout is a safety
-	// bound for a stalled connection, never a normal-path cost (TSI-2905).
+	// bound for a stalled connection, never a normal-path cost.
 	StreamingDrainTimeout = 1 * time.Second
 )
 
 // Overridable poll interval for regression tests; production value mirrors
 // PollInterval. Internal tests swap this to a short duration to exercise
-// timing-sensitive code paths (e.g. the TSI-2452 race guard) without 2s waits.
+// timing-sensitive code paths without 2s waits.
 var pollInterval = PollInterval
 
 // Overridable sleep for rate-limit resubmission backoff; production value
 // waits d or until ctx is done (whichever comes first). Internal tests stub
 // it so the 429 retry loop runs instantly instead of waiting out real
-// exponential backoff (TSI-2939).
+// exponential backoff.
 var submitRetrySleep = sleepWithContext
 
 // sleepWithContext waits d, or returns ctx.Err() if ctx is cancelled first.
@@ -144,7 +143,7 @@ func WithMaxRetries(n int) ClientOption {
 // WithSubmitRetries sets the retry budget for rate-limit (HTTP 429) job
 // submission. 0 (the default) means "no retries" — a rate-limited submission
 // fails immediately. A positive n retries the submission up to n times with
-// exponential backoff honoring the server's retry_in hint (TSI-2939).
+// exponential backoff honoring the server's retry_in hint.
 func WithSubmitRetries(n int) ClientOption {
 	return func(c *Client) {
 		if n >= 0 {
@@ -179,8 +178,8 @@ func (e *RetriesExhaustedError) Unwrap() error {
 
 // RateLimitError reports an HTTP 429 rate-limit rejection from job
 // submission. It carries the server's suggested backoff so a caller with a
-// retry budget can honor it instead of re-submitting immediately (TSI-2939).
-// Error() renders the single-line message promised by the CLI (TSI-2938).
+// retry budget can honor it instead of re-submitting immediately.
+// Error renders the single-line message promised by the CLI.
 type RateLimitError struct {
 	Current int
 	Limit   int
@@ -246,8 +245,7 @@ func DrainAndClose(body io.ReadCloser) error {
 // parseErrorResponse decodes a non-200 response body as protocol.ErrorResponse
 // and reports whether it carried a usable (non-empty) server message. Callers
 // fall back to a status-code error when it reports false, so an empty or
-// undecodable body never degrades to a bare "<op> failed: " with no diagnostic
-// (TSI-2730).
+// undecodable body never degrades to a bare "<op> failed: " with no diagnostic.
 func parseErrorResponse(body io.Reader) (protocol.ErrorResponse, bool) {
 	var errResp protocol.ErrorResponse
 	if err := json.NewDecoder(body).Decode(&errResp); err != nil || errResp.Message == "" {
@@ -324,7 +322,7 @@ func (c *Client) UploadFile(filePath string) (string, error) {
 	// rejects unauthenticated uploads (fail-closed token check) without
 	// draining the streaming body, so the multipart writer races the closed
 	// connection and would otherwise surface "failed to copy file: io:
-	// read/write on closed pipe", masking the real cause (TSI-2598).
+	// read/write on closed pipe", masking the real cause.
 	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
 		if errResp, ok := parseErrorResponse(resp.Body); ok {
@@ -378,8 +376,7 @@ func calculateMultipartSize(boundary string, fileSize int64, filename string) in
 // escapeMultipartQuotes mirrors mime/multipart's internal escapeQuotes: the
 // stdlib escapes " and \ inside form-data parameter values. calculateMultipartSize
 // must measure the escaped form or a filename containing a quote yields a
-// Content-Length that disagrees with the real body and truncates the request
-// (TSI-2365).
+// Content-Length that disagrees with the real body and truncates the request.
 func escapeMultipartQuotes(s string) string {
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "\"", "\\\"")
@@ -391,19 +388,14 @@ func (c *Client) SubmitJob(inputFiles []string, args []string, outputFilename st
 	return c.SubmitJobWithOptions(context.Background(), inputFiles, nil, args, outputFilename, autoHW, false, 0)
 }
 
-// SubmitJobWithOptions submits a transcoding job with additional options.
-// timeout is the job timeout duration (0 means use server default).
-//
-// When the client is configured with a submit-retry budget (WithSubmitRetries),
-// a rate-limit rejection (HTTP 429) is retried with exponential backoff that
-// starts at the server's retry_in hint and doubles per attempt, capped at
-// submitRetryMaxDelay. Any other failure — network, auth, validation — fails
-// immediately, and once the budget is spent the last rate-limit error is
-// returned (TSI-2939).
-//
-// The backoff wait is interruptible: if ctx is cancelled it stops waiting and
-// returns ctx.Err(), so callers can abort a rate-limited submission from a
-// signal handler instead of blocking for the full backoff (TSI-2939).
+// SubmitJobWithOptions submits a transcoding job with additional options;
+// timeout is the job timeout duration (0 means use server default). With a
+// submit-retry budget (WithSubmitRetries), an HTTP 429 is retried with
+// exponential backoff starting at the server's retry_in hint, doubling per
+// attempt and capped at submitRetryMaxDelay; any other failure (network, auth,
+// validation) fails immediately, and once the budget is spent the last
+// rate-limit error is returned. The wait is interruptible: ctx cancellation
+// stops it and returns ctx.Err() instead of blocking for the full backoff.
 func (c *Client) SubmitJobWithOptions(ctx context.Context, inputFiles []string, directPath []string, args []string, outputFilename string, autoHW bool, streamingOutput bool, timeout time.Duration) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.submitRetries; attempt++ {
@@ -438,7 +430,7 @@ func (c *Client) submitJobOnce(ctx context.Context, inputFiles []string, directP
 	// The per-job timeout is an ffmpeg execution budget (a duration), not an
 	// absolute wall-clock deadline. The worker anchors it at the ffmpeg
 	// execution boundary, so upload/scheduling/probe time is never charged
-	// against it (TSI-2684, TSI-2886).
+	// against it.
 	if timeout > 0 {
 		req.Timeout = &timeout
 	}
@@ -464,7 +456,7 @@ func (c *Client) submitJobOnce(ctx context.Context, inputFiles []string, directP
 
 	if resp.StatusCode != http.StatusOK {
 		// Rate limit (429): surface a typed error so a caller with a retry
-		// budget can honor the server's backoff hint (TSI-2939).
+		// budget can honor the server's backoff hint.
 		if resp.StatusCode == http.StatusTooManyRequests {
 			return "", decodeRateLimitError(resp.Body)
 		}
@@ -510,7 +502,7 @@ func rateLimitBackoff(retryIn, attempt int) time.Duration {
 	// retryIn is a server-controlled int with no upper bound. Clamp it before
 	// the time.Duration conversion: a huge value would overflow int64 and can
 	// wrap to a small positive number that skips both the <=0 guard below and
-	// the submitRetryMaxDelay cap (TSI-2939).
+	// the submitRetryMaxDelay cap.
 	if retryIn > int(submitRetryMaxDelay/time.Second) {
 		retryIn = int(submitRetryMaxDelay / time.Second)
 	}
@@ -598,7 +590,7 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	// complete event. The backup HTTP poll runs on a 2s tick, so without this
 	// the CLI would linger up to a full poll interval after the worker's
 	// terminal report is broadcast (e.g. a --timeout verdict), even though the
-	// job is already done (TSI-3081).
+	// job is already done.
 	var terminalOnce sync.Once
 	terminalSeen := make(chan struct{})
 	markTerminal := func() { terminalOnce.Do(func() { close(terminalSeen) }) }
@@ -654,7 +646,7 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 
 	// Also poll for job completion as a backup. Consecutive GetJob failures
 	// are bounded by the same retry budget as the WS reconnect loop, so a
-	// server outage cannot wedge the CLI in a silent poll loop (TSI-2697).
+	// server outage cannot wedge the CLI in a silent poll loop.
 	pollDone := make(chan *protocol.JobInfo, 1)
 	pollErr := make(chan error, 1)
 	budget := retryBudget(c.maxRetries)
@@ -701,8 +693,7 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 		case <-terminalSeen:
 			// The WebSocket delivered the terminal status/complete event
 			// before the backup poll's next 2s tick. Fetch the job now so the
-			// CLI exits immediately instead of waiting out the poll interval
-			// (TSI-3081).
+			// CLI exits immediately instead of waiting out the poll interval.
 			terminalSeen = nil // one-shot: a closed channel would busy-loop
 			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
 				if wsClient.HasGap() {
@@ -714,7 +705,7 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 			// transiently. Keep waiting: the backup poll still observes the
 			// terminal status on its next tick.
 		case err := <-pollErr:
-			// TSI-2452-style race guard: the backup poll's budget may expire at
+			// Race guard: the backup poll's budget may expire at
 			// the same moment the job actually reached a terminal status (WS
 			// healthy, only the backup poll flapped). One final GetJob with a
 			// fresh context distinguishes "job done" from "contact lost" before
@@ -753,15 +744,13 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 			}
 			return job, nil
 		case <-ctx.Done():
-			// Race guard (TSI-2452): the client-side timeout fired, but the
-			// job may have reached a terminal status on the server between
-			// the last poll and ctx.Done() (e.g. a cache hit). The poll
-			// goroutine may still be mid-GetJob, so pollDone is not yet
-			// written. Do a final GetJob with a fresh context — if the job
-			// is already done, return it instead of a spurious timeout.
-			// main.go also does this as a belt-and-suspenders fallback;
-			// doing it here means main.go's check is a no-op in the common
-			// case and the gap warning is preserved.
+			// Race guard: the client-side timeout fired, but the job may have
+			// reached a terminal status on the server between the last poll and
+			// ctx.Done() (e.g. a cache hit), so the poll goroutine may still be
+			// mid-GetJob. Do a final GetJob with a fresh context — if the job
+			// is done, return it instead of a spurious timeout. main.go also
+			// does this fallback; doing it here makes main.go's check a no-op
+			// in the common case and preserves the gap warning.
 			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
 				if wsClient.HasGap() {
 					fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
@@ -779,7 +768,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	// stdoutBytes counts bytes actually written to stdout (partial writes and
 	// failures excluded); stdoutErr records the first write failure. A completed
 	// streaming job that delivered zero bytes — or whose stdout write failed —
-	// must surface as a failure, never a silent rc=0 (TSI-2905).
+	// must surface as a failure, never a silent rc=0.
 	var stdoutBytes atomic.Int64
 	var stdoutMu sync.Mutex
 	var stdoutErr error
@@ -837,7 +826,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	// integrityErr reports whether the streamed result is trustworthy: a
 	// sequence gap, a stdout write failure, or a completed job with zero
 	// delivered bytes. Shared by the connected path and every polling fallback
-	// so no completion path can bypass it (TSI-2905).
+	// so no completion path can bypass it.
 	integrityErr := func(job *protocol.JobInfo) error {
 		if wsClient.HasGap() {
 			return fmt.Errorf("streaming output incomplete: sequence gap detected (data lost during reconnect)")
@@ -888,7 +877,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	}()
 
 	// Poll for job completion as a backup, bounded by the same retry budget
-	// as the WS reconnect loop (TSI-2697).
+	// as the WS reconnect loop.
 	pollDone := make(chan *protocol.JobInfo, 1)
 	pollErr := make(chan error, 1)
 	budget := retryBudget(c.maxRetries)
@@ -930,7 +919,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		// fully-delivered stream instead of a transient 0-byte state.
 		drainStreamingOutput(ctx, terminalSeen, listenDone)
 	case err := <-pollErr:
-		// TSI-2452-style race guard (see WaitForJobWithLogs): a terminal
+		// Race guard (see WaitForJobWithLogs): a terminal
 		// status reached at the same moment the backup poll budget expired
 		// must not be reported as exit 2.
 		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
@@ -954,7 +943,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		// updated.
 		return fallbackToPolling()
 	case <-ctx.Done():
-		// Race guard (TSI-2452): the client-side timeout fired, but the
+		// Race guard: the client-side timeout fired, but the
 		// job may have reached a terminal status on the server between
 		// the last poll and ctx.Done() (e.g. a cache hit). The poll
 		// goroutine may still be mid-GetJob, so pollDone is not yet
@@ -980,7 +969,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 // drainStreamingOutput waits (bounded) for the WebSocket to deliver its
 // terminal event, which is sequenced after every stdout frame on the same
 // channel. It lets the streaming wait confirm the full stream was read before
-// running the integrity checks (TSI-2905).
+// running the integrity checks.
 func drainStreamingOutput(ctx context.Context, terminalSeen <-chan struct{}, listenDone <-chan error) {
 	timer := time.NewTimer(StreamingDrainTimeout)
 	defer timer.Stop()
@@ -1133,7 +1122,7 @@ func (c *Client) setAuthHeader(req *http.Request) {
 	}
 }
 
-// WorkerHealth carries live runtime metrics for a worker (TSI-2219).
+// WorkerHealth carries live runtime metrics for a worker.
 type WorkerHealth struct {
 	Status        string   `json:"status"`
 	GPUUtilPct    float64  `json:"gpu_util_percent,omitempty"`
@@ -1633,9 +1622,9 @@ func (c *Client) UploadFileChunked(filePath string, chunkSize int64) (string, er
 	defer DrainAndClose(resp.Body)
 
 	// Surface auth rejections with the status code first, matching UploadFile
-	// and uploadSingleChunk (TSI-2598 / TSI-2618). The init endpoint authenticates
+	// and uploadSingleChunk. The init endpoint authenticates
 	// before any chunk is uploaded, so a >100MB file with a bad token fails here
-	// and never reaches the chunk endpoint (TSI-2625).
+	// and never reaches the chunk endpoint.
 	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
 		if errResp, ok := parseErrorResponse(resp.Body); ok {
@@ -1744,8 +1733,7 @@ func isRetryableError(err error) bool {
 	// rather than substring matching: http.Client.Timeout surfaces as
 	// "context deadline exceeded (Client.Timeout exceeded ...)" — its
 	// capitalized "Client.Timeout" evades a lowercase "timeout" check, so the
-	// chunk retry path silently never retried the most common client timeout
-	// (TSI-2919 CI flake).
+	// chunk retry path silently never retried the most common client timeout.
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
@@ -1844,7 +1832,7 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 	// rejects unauthenticated chunk uploads (fail-closed token check) without
 	// draining the streaming body, so the multipart writer races the closed
 	// connection and would otherwise surface "chunk write failed: io:
-	// read/write on closed pipe", masking the real cause (TSI-2598).
+	// read/write on closed pipe", masking the real cause.
 	if resp.StatusCode == http.StatusUnauthorized {
 		msg := "missing or invalid token"
 		if errResp, ok := parseErrorResponse(resp.Body); ok {
@@ -1869,17 +1857,13 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 
 // calculateChunkMultipartSize calculates the exact size of a chunk multipart form
 func calculateChunkMultipartSize(boundary string, chunkSize int64, checksum string) int64 {
-	// Calculate exact multipart overhead for chunk
+	// Wire layout the size math below must match byte-for-byte:
 	// --boundary\r\n
 	// Content-Disposition: form-data; name="chunk"; filename="chunk"\r\n
-	// Content-Type: application/octet-stream\r\n
-	// \r\n
-	// [chunk content]
-	// \r\n--boundary\r\n
-	// Content-Disposition: form-data; name="checksum"\r\n
-	// \r\n
-	// [checksum]
-	// \r\n--boundary--\r\n
+	// Content-Type: application/octet-stream\r\n\r\n
+	// [chunk content]\r\n--boundary\r\n
+	// Content-Disposition: form-data; name="checksum"\r\n\r\n
+	// [checksum]\r\n--boundary--\r\n
 
 	preamble := fmt.Sprintf("--%s\r\n", boundary)
 	contentDisposition := "Content-Disposition: form-data; name=\"chunk\"; filename=\"chunk\"\r\n"

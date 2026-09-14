@@ -27,12 +27,12 @@ type Job struct {
 	WorkerName      sql.NullString // Human-readable name of the assigned worker
 	ExitCode        sql.NullInt32
 	Error           sql.NullString
-	FailureType     string        // Classified failure type (TSI-757)
+	FailureType     string        // Classified failure type
 	FailureDetails  string        // Human-readable failure detail
 	AutoHW          bool          // Enable automatic hardware encoder upgrade
-	Cached          bool          // Result was served from the worker cache (TSI-2519)
+	Cached          bool          // Result was served from the worker cache
 	Timeout         sql.NullInt64 // Per-job ffmpeg execution budget in nanoseconds (nil = worker default)
-	DirectPaths     string        // JSON array of direct output paths for pass-through mode (TSI-807)
+	DirectPaths     string        // JSON array of direct output paths for pass-through mode
 	ProgressPercent float64       // Current progress percentage (0-100)
 	EtaSeconds      int           // Estimated seconds remaining (0 if unknown)
 	CreatedAt       time.Time
@@ -83,7 +83,7 @@ type Database struct {
 }
 
 // sqliteDSN builds a SQLite DSN with the pragmas required for safe concurrent
-// use (TSI-2359): WAL journaling so readers never block the writer, a busy
+// use: WAL journaling so readers never block the writer, a busy
 // timeout so concurrent writes queue instead of failing with SQLITE_BUSY,
 // foreign-key enforcement so ON DELETE CASCADE fires (upload_chunks cleanup),
 // and immediate transactions so lock acquisition happens at BEGIN rather than
@@ -107,8 +107,7 @@ func sqliteDSN(dbPath string) string {
 func New(dbPath string) (*Database, error) {
 	if dbPath == "" {
 		// An empty path would silently become an in-memory database that
-		// "works" but loses everything on restart — reject it loudly instead
-		// (TSI-2359 review round 2).
+		// "works" but loses everything on restart — reject it loudly instead.
 		return nil, fmt.Errorf("database path must not be empty (use \":memory:\" explicitly for a test database)")
 	}
 
@@ -125,7 +124,7 @@ func New(dbPath string) (*Database, error) {
 		db.SetMaxOpenConns(1)
 	}
 
-	// TSI-3122: a restart whose WAL recovery did not land can leave a
+	// a restart whose WAL recovery did not land can leave a
 	// pre-existing database with missing tables. initTables' CREATE TABLE IF
 	// NOT EXISTS would silently recreate a missing table as empty — losing
 	// every job/file row — so an existing database is verified before any
@@ -157,7 +156,7 @@ func New(dbPath string) (*Database, error) {
 	// migrations have already upgraded a legacy database to the current
 	// shape. A table that is present but missing a column the server reads
 	// or writes would otherwise pass a name-only check and only fail at
-	// request time with a missing-column 500 (TSI-3122).
+	// request time with a missing-column 500.
 	if err := d.verifyColumns(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("database column check failed: %w", err)
@@ -265,7 +264,7 @@ func (d *Database) verifyIntegrity() error {
 // verifyCoreTables fails if any core table is absent from sqlite_master. It
 // must run before initTables: CREATE TABLE IF NOT EXISTS would otherwise
 // recreate a missing core table as empty, silently discarding the rows that
-// should have been there (TSI-3122). Non-core tables added by later releases
+// should have been there. Non-core tables added by later releases
 // are excluded — their absence is a legitimate upgrade gap that initTables
 // fills.
 func (d *Database) verifyCoreTables() error {
@@ -459,7 +458,7 @@ func (d *Database) initTables() error {
 		CREATE INDEX IF NOT EXISTS idx_upload_sessions_expires_at ON upload_sessions(expires_at);
 		CREATE INDEX IF NOT EXISTS idx_upload_chunks_upload_id ON upload_chunks(upload_id);
 
-		-- TSI-2359: a (upload_id, chunk_index) pair identifies one chunk.
+		-- a (upload_id, chunk_index) pair identifies one chunk.
 		-- Without this, a retried upload could insert duplicate rows; the
 		-- constraint makes CreateUploadChunk idempotent via conflict handling.
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_upload_chunks_upload_chunk
@@ -480,7 +479,7 @@ func (d *Database) initTables() error {
 		CREATE INDEX IF NOT EXISTS idx_migration_events_timestamp ON migration_events(timestamp);
 		CREATE INDEX IF NOT EXISTS idx_migration_events_worker_id ON migration_events(worker_id);
 
-		-- TSI-2929: per-job redistribution targets. A migration event records
+		-- per-job redistribution targets. A migration event records
 		-- the source worker and the full migrated job_ids list, but those jobs
 		-- are then reassigned independently and can fan out to different
 		-- workers — so the target is a per-job fact, not a per-event one. Rows
@@ -516,7 +515,7 @@ func (d *Database) initTables() error {
 			updated_at DATETIME NOT NULL
 		);
 
-		-- TSI-2379: per-job WebSocket sequence counters for gap detection.
+		-- per-job WebSocket sequence counters for gap detection.
 		-- Transient by design: rows live only while a job is streaming (the
 		-- hub deletes them on terminal broadcasts) and are safe to rebuild —
 		-- dropping the table only resets restart-resume numbering to 1, it
@@ -557,13 +556,13 @@ func (d *Database) initTables() error {
 		}
 	}
 
-	// TSI-2930: re-label historical submit-time encoder rejections before the
+	// re-label historical submit-time encoder rejections before the
 	// ENCODER_UNAVAILABLE value existed (see migrateEncoderUnavailableClassification).
 	if err := d.migrateEncoderUnavailableClassification(); err != nil {
 		return err
 	}
 
-	// TSI-2886: jobs.timeout must hold a nanosecond duration (INTEGER). Fresh
+	// jobs.timeout must hold a nanosecond duration (INTEGER). Fresh
 	// databases already create it INTEGER, but legacy databases declared it
 	// DATETIME — which makes the sqlite driver read INTEGER values back as
 	// time.Time (treating them as Unix seconds) and corrupt a nanosecond
@@ -583,7 +582,7 @@ func (d *Database) initTables() error {
 }
 
 // migrateTimeoutColumnType re-declares jobs.timeout from DATETIME to INTEGER
-// (TSI-2886). It runs inside a transaction so a crash cannot leave the column
+// It runs inside a transaction so a crash cannot leave the column
 // half-renamed. In-flight jobs carrying a future RFC3339 absolute deadline keep
 // their remaining budget in nanoseconds; expired and terminal deadlines are
 // dropped (their job is done or would fail anyway).
@@ -618,18 +617,13 @@ func (d *Database) migrateTimeoutColumnType() error {
 }
 
 // migrateEncoderUnavailableClassification re-labels historical submit-time
-// encoder rejections (TSI-2930). Before ENCODER_UNAVAILABLE existed, the
-// submit-time "no worker has this encoder" fast-fail persisted rows as
-// ENCODER_UNSUPPORTED with worker_id NULL — the job was rejected before
-// assignment, so no worker was ever recorded. Once ENCODER_UNAVAILABLE landed,
-// ENCODER_UNSUPPORTED became reserved for the worker's runtime classification
-// (a job that actually ran), which always carries a worker_id. Without this
-// relabel, those legacy NULL-worker rows would be indistinguishable from a
-// general no-attribution row under the new taxonomy.
-//
-// The WHERE predicate is bounded and idempotent: it touches exactly the legacy
-// submit-time rejections (ENCODER_UNSUPPORTED + no worker_id) and nothing else,
-// so it is safe to run on every open with no schema-version bookkeeping.
+// rejections. Before ENCODER_UNAVAILABLE existed, the submit-time "no worker
+// has this encoder" fast-fail persisted rows as ENCODER_UNSUPPORTED with
+// worker_id NULL; once ENCODER_UNAVAILABLE landed, ENCODER_UNSUPPORTED became
+// reserved for the worker's runtime classification (which always carries a
+// worker_id). Without this relabel those legacy NULL-worker rows would be
+// indistinguishable. The WHERE predicate is bounded and idempotent, so it is
+// safe to run on every open with no schema-version bookkeeping.
 func (d *Database) migrateEncoderUnavailableClassification() error {
 	if _, err := d.db.Exec(`
 		UPDATE jobs SET failure_type = ?
@@ -672,8 +666,7 @@ func (d *Database) CreateJobWithStreaming(inputFiles, args, outputFilename strin
 // directly in the failed state, so a deterministic submit-time rejection is
 // recorded atomically: there is no pending→failed window in which a crash
 // would leave the job pending and later failed by the starvation sweep as
-// NO_WORKER_AVAILABLE with a classification that contradicts the response
-// (TSI-2846).
+// NO_WORKER_AVAILABLE with a classification that contradicts the response.
 func (d *Database) CreateFailedJob(inputFiles, args, outputFilename string, autoHW bool, streamingOutput bool, timeout *time.Duration, directPaths, failureType, errMsg string) (*Job, error) {
 	id := uuid.New().String()
 	now := time.Now()
@@ -693,7 +686,7 @@ func (d *Database) CreateFailedJob(inputFiles, args, outputFilename string, auto
 		return nil, fmt.Errorf("failed to create failed job: %w", err)
 	}
 
-	// A terminal-state write must notify in-process DB waiters (TSI-2562),
+	// A terminal-state write must notify in-process DB waiters,
 	// matching every other terminal writer (UpdateJob, CancelJob, FailJob,
 	// starvation sweep).
 	d.notifyTerminal(id)
@@ -739,21 +732,19 @@ func (d *Database) JobExists(id string) (bool, error) {
 }
 
 // UpdateJobStatusWithFailure updates the job status along with failure
-// classification fields. Non-failure fields are ignored when the pointers are nil.
-//
-// TSI-2359: the update is guarded against stale writes. A late running
-// report (or a stale cancel racing a worker's completion) must never
-// resurrect or overwrite a finished job. The one legal terminal→terminal
-// transition is failed→completed/failed: a worker retries the job after a
-// failure and reports success (handlers clear stale failure metadata on
-// completed), so that path stays open. Everything else hitting a terminal
-// job is dropped and reported as ErrJobTerminal.
+// classification fields; non-failure fields are ignored when their pointers
+// are nil. The update is guarded against stale writes: a late running report
+// (or a stale cancel racing a worker's completion) must never resurrect or
+// overwrite a finished job. The one legal terminal→terminal transition is
+// failed→completed/failed (a worker retries a failed job and reports
+// success). Everything else hitting a terminal job is dropped as
+// ErrJobTerminal.
 func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
 	return d.updateJobStatusWithFailure(id, status, exitCode, errMsg, failureType, failureDetails, false)
 }
 
 // UpdateJobStatusWithFailureAndCache is UpdateJobStatusWithFailure with the
-// cached flag persisted on terminal completion (TSI-2519). cached is coerced
+// cached flag persisted on terminal completion. cached is coerced
 // to false for any status other than completed: the column records whether a
 // completed result was served from the worker cache.
 func (d *Database) UpdateJobStatusWithFailureAndCache(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
@@ -763,7 +754,7 @@ func (d *Database) UpdateJobStatusWithFailureAndCache(id string, status protocol
 func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
 	now := time.Now()
 
-	// TSI-2519 review: cached describes a completed result served from the
+	// cached describes a completed result served from the
 	// worker cache. PATCH /api/v1/jobs/{id} is public, so a client can craft
 	// {status:"failed", cached:true} — coerce the flag to only completed hits.
 	if status != protocol.JobStatusCompleted {
@@ -778,7 +769,7 @@ func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStat
 		finishedAt = &now
 	}
 
-	// TSI-2359: reject updates that would overwrite a terminal outcome.
+	// reject updates that would overwrite a terminal outcome.
 	// failed→completed / failed→failed remains allowed for the worker
 	// retry-after-failure flow; all other terminal targets are frozen.
 	var result sql.Result
@@ -853,7 +844,7 @@ func (d *Database) UpdateJobTerminalStatusWithOwner(jobID, workerID string, stat
 }
 
 // UpdateJobTerminalStatusWithOwnerAndCache is UpdateJobTerminalStatusWithOwner
-// with the cached flag persisted on the terminal transition (TSI-2519).
+// with the cached flag persisted on the terminal transition.
 // cached is coerced to false unless the target status is completed.
 func (d *Database) UpdateJobTerminalStatusWithOwnerAndCache(jobID, workerID string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
 	return d.updateJobTerminalStatusWithOwner(jobID, workerID, status, exitCode, errMsg, failureType, failureDetails, cached)
@@ -862,7 +853,7 @@ func (d *Database) UpdateJobTerminalStatusWithOwnerAndCache(jobID, workerID stri
 func (d *Database) updateJobTerminalStatusWithOwner(jobID, workerID string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
 	now := time.Now()
 
-	// TSI-2519 review: cached means a completed result served from cache.
+	// cached means a completed result served from cache.
 	if status != protocol.JobStatusCompleted {
 		cached = false
 	}
@@ -939,7 +930,7 @@ func (d *Database) AssignJobToWorker(jobID, workerID string) error {
 // CancelJob cancels a job if it's in a cancellable state
 // Jobs can be cancelled if they are pending, queued, or running.
 //
-// TSI-2359: the state check and the update are a single conditional UPDATE,
+// the state check and the update are a single conditional UPDATE,
 // so a worker completing the job between the check and the write can no longer
 // have its terminal status overwritten by a stale cancel (TOCTOU fix).
 func (d *Database) CancelJob(id string) error {
@@ -1112,19 +1103,16 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 	return d.GetWorker(id)
 }
 
-// CreateOrUpdateWorker creates a new worker or updates an existing one on re-registration.
-// If the worker already exists (matched by id), it updates capabilities, resets status to
-// idle, and clears eviction flags (TSI-1737 server restart recovery). When the id is new
-// but the name matches stale residue of the same logical worker — an offline row, or a
-// live row whose heartbeat has expired (crashed before the health monitor swept it) — that
-// stale row is deleted first so a worker process restart (fresh UUID, same name) overwrites
-// the old entry instead of creating a duplicate (TSI-2473, TSI-2670). Live same-name rows
-// with a fresh heartbeat belong to concurrently running workers and are never deleted.
-//
-// heartbeatTimeout is the worker freshness window; <=0 disables the heartbeat-staleness
-// test and deletes only offline residue.
+// CreateOrUpdateWorker creates a new worker or updates an existing one on
+// re-registration. If the id exists, it updates capabilities, resets status to
+// idle, and clears eviction flags. If the id is new but the name matches stale
+// residue of the same logical worker (an offline row, or a live row whose
+// heartbeat expired after a crash), that stale row is deleted first so a
+// process restart (fresh UUID, same name) overwrites it instead of forking a
+// duplicate. Live same-name rows with a fresh heartbeat are never deleted.
+// heartbeatTimeout is the freshness window; <=0 deletes only offline residue.
 func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCapabilities, heartbeatTimeout time.Duration) (*Worker, error) {
-	// TSI-2346: normalize on the write path too, so the same logical UUID
+	// normalize on the write path too, so the same logical UUID
 	// reported in different formats (hyphenated vs. compact, case, whitespace)
 	// converges on one row instead of forking into unreachable duplicates.
 	id = NormalizeWorkerID(id)
@@ -1177,18 +1165,14 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	}
 
 	if rows == 0 {
-		// TSI-2473/TSI-2670: a new worker process generates a fresh UUID while
-		// reusing the same name. The old row is stale residue of the same
-		// logical worker and must be deleted before the INSERT so a restart
-		// overwrites it instead of forking a duplicate. Stale means EITHER
-		// offline (the health monitor already flagged it) OR live-but-dead
-		// (last heartbeat older than the freshness window — a crash followed
-		// by an immediate restart lands here before the monitor's next tick).
-		// A live row with a fresh heartbeat is a concurrently running worker
-		// and must survive. Wrap DELETE+INSERT in a transaction so a failed
-		// INSERT rolls back the DELETE. Skip the DELETE for empty names: the
-		// handler rejects empty names, but defending here too avoids deleting
-		// unrelated empty-name rows.
+		// A new worker process generates a fresh UUID while reusing the same
+		// name; the old row is stale residue and must be deleted before the
+		// INSERT so a restart overwrites it instead of forking a duplicate.
+		// Stale means offline OR live-but-dead (heartbeat older than the
+		// freshness window — a crash before the monitor's next tick). A live
+		// row with a fresh heartbeat is a concurrent worker and must survive.
+		// Wrap DELETE+INSERT in a transaction so a failed INSERT rolls back
+		// the DELETE; skip the DELETE for empty names.
 		tx, err := d.db.Begin()
 		if err != nil {
 			return nil, fmt.Errorf("failed to begin worker upsert transaction: %w", err)
@@ -1237,7 +1221,7 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 // NormalizeWorkerID canonicalizes a worker ID so that lookups and ownership
 // comparisons tolerate UUID formatting differences (hyphenated vs. compact).
 // Non-UUID IDs pass through unchanged, since registration accepts arbitrary
-// identifiers (TSI-2346).
+// identifiers.
 func NormalizeWorkerID(id string) string {
 	if parsed, err := uuid.Parse(strings.TrimSpace(id)); err == nil {
 		return parsed.String()
@@ -1274,10 +1258,10 @@ func (d *Database) GetWorker(id string) (*Worker, error) {
 // touching its status. Worker status is derived state (active job count +
 // terminal-state hooks), not worker-authoritative: honoring the reported
 // status here let a late idle heartbeat overwrite the busy state written by
-// the pull path, resurrecting TSI-2347 through a race. Offline/evicted guards
+// the pull path, resurrecting a fixed bug through a race. Offline/evicted guards
 // keep dead workers from refreshing liveness.
 func (d *Database) UpdateWorkerHeartbeat(id string, status protocol.WorkerStatus) error {
-	// Same canonicalization as registration/lookup (TSI-2346): a heartbeat
+	// Same canonicalization as registration/lookup: a heartbeat
 	// carrying a non-canonical UUID format (compact/hyphenated variant) must
 	// hit the same row the worker registered under.
 	id = NormalizeWorkerID(id)
@@ -1397,7 +1381,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 	// Fetch the worker name once so the claimed Job objects carry the same
 	// attribution the UPDATE persists via subquery — the pull response is built
 	// from these in-memory objects, and a re-read would otherwise return null
-	// attribution for freshly claimed jobs (TSI-2920 review).
+	// attribution for freshly claimed jobs.
 	workerName := ""
 	if w, err := d.GetWorker(workerID); err == nil {
 		workerName = w.Name
@@ -1406,7 +1390,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 	now := time.Now()
 	claimedJobs := make([]*Job, 0, len(newJobs))
 	for _, job := range newJobs {
-		// TSI-2359: guard every claim with the exact preconditions read
+		// guard every claim with the exact preconditions read
 		// above. Two workers pulling concurrently run this inside separate
 		// write transactions; SQLite serializes them, and without the guard
 		// the second transaction would blindly re-claim the same row. A
@@ -1433,7 +1417,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 		claimedJobs = append(claimedJobs, job)
 	}
 
-	// TSI-2347: mark the worker busy atomically with the assignment so
+	// mark the worker busy atomically with the assignment so
 	// health.status reflects activity immediately instead of waiting for the
 	// next heartbeat. The idle guard keeps an offline worker offline.
 	// last_heartbeat is deliberately NOT refreshed here: assignment is not
@@ -1452,7 +1436,7 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// TSI-2929: write back the migration target for any claimed job that was
+	// write back the migration target for any claimed job that was
 	// previously migrated, so the chain is resolvable from migration_events
 	// alone. Best-effort audit write after commit: assignment is authoritative,
 	// and a failure here must not fail the pull.
@@ -1573,12 +1557,12 @@ func (d *Database) GetIdleWorkers() ([]*Worker, error) {
 
 // GetSchedulableWorkers retrieves all workers that are not offline and not evicted.
 // Unlike GetIdleWorkers, busy workers are included so a submitted job can be queued
-// while a worker is currently busy (TSI-2204).
+// while a worker is currently busy.
 //
 // The result is NOT filtered by heartbeat freshness: a worker whose last
 // heartbeat is stale but that has not yet been marked offline still counts as
 // schedulable. Callers that need liveness (submit-time fail-fast, starvation
-// sweeps) must use GetLiveSchedulableWorkers instead (TSI-2419).
+// sweeps) must use GetLiveSchedulableWorkers instead.
 func (d *Database) GetSchedulableWorkers() ([]*Worker, error) {
 	rows, err := d.db.Query(`
 		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
@@ -1597,7 +1581,7 @@ func (d *Database) GetSchedulableWorkers() ([]*Worker, error) {
 // heartbeat: not offline, not evicted, and last_heartbeat within freshness.
 // A worker whose heartbeat is older than the freshness window is dead in
 // practice — the health monitor only flips it offline on its next tick — so
-// callers must not treat it as available (TSI-2419). A non-positive
+// callers must not treat it as available. A non-positive
 // freshness disables the check (behaves like GetSchedulableWorkers).
 func (d *Database) GetLiveSchedulableWorkers(freshness time.Duration) ([]*Worker, error) {
 	freshnessClause, freshnessArgs := heartbeatFreshnessSQL(freshness)
@@ -1627,7 +1611,7 @@ func (d *Database) GetWorkerActiveJobCount(workerID string) (int, error) {
 // GetWorkerCompletedJobCount returns the number of completed jobs for a worker.
 // The scheduler uses it to break ties between idle workers with equal active
 // counts so the worker that has done fewer jobs is preferred, preventing
-// starvation of late-registered workers (TSI-2477).
+// starvation of late-registered workers.
 func (d *Database) GetWorkerCompletedJobCount(workerID string) (int, error) {
 	var count int
 	err := d.db.QueryRow(`
@@ -1678,12 +1662,12 @@ func (d *Database) GetTimedOutJobs(timeout time.Duration) ([]*Job, error) {
 
 // RescheduleJob resets a job for rescheduling after timeout.
 //
-// TSI-2359: conditional on the job still being running. A timeout sweep that
+// conditional on the job still being running. A timeout sweep that
 // races a worker's completion report must not drag a finished job back to
 // pending; the guarded UPDATE simply matches 0 rows and the caller logs it.
 func (d *Database) RescheduleJob(id string) error {
 	now := time.Now()
-	// TSI-2597: refresh created_at so a timeout requeue re-anchors the
+	// refresh created_at so a timeout requeue re-anchors the
 	// starvation sweep and NoWorkerDeadline clocks exactly like a failover
 	// reset does. Both "re-queue = re-submit" paths share jobs.created_at as
 	// their time base; MaxTimeoutRetries caps the requeues, so the restart
@@ -1720,7 +1704,7 @@ func (d *Database) RescheduleJob(id string) error {
 func (d *Database) FailJob(id, errMsg string, failureType string) error {
 	now := time.Now()
 	exitCode := -1
-	// TSI-2359: only fail jobs still in an active state. Failing a completed
+	// only fail jobs still in an active state. Failing a completed
 	// or cancelled job would overwrite a legitimate terminal outcome.
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL,
@@ -1752,7 +1736,7 @@ func (d *Database) FailJob(id, errMsg string, failureType string) error {
 
 // FailStarvedPendingJobs fails all pending jobs created before cutoff in a
 // single statement, returning the number of jobs failed. Used by the scheduler
-// starvation guard (TSI-2334) so a backlog larger than any fetch limit
+// starvation guard so a backlog larger than any fetch limit
 // converges within one tick.
 func (d *Database) FailStarvedPendingJobs(cutoff time.Time, errMsg, failureType string) (int64, error) {
 	now := time.Now()
@@ -1773,7 +1757,7 @@ func (d *Database) FailStarvedPendingJobs(cutoff time.Time, errMsg, failureType 
 // GetStarvedPendingJobIDs lists the IDs of pending jobs created before the
 // cutoff (the exact set FailStarvedPendingJobs fails). The scheduler uses it
 // to release rate-limit quota and broadcast WS updates per failed job — the
-// bulk UPDATE bypasses the handler that normally does both (TSI-2365).
+// bulk UPDATE bypasses the handler that normally does both.
 func (d *Database) GetStarvedPendingJobIDs(cutoff time.Time) ([]string, error) {
 	rows, err := d.db.Query(`
 		SELECT id FROM jobs
@@ -1799,15 +1783,13 @@ func (d *Database) GetStarvedPendingJobIDs(cutoff time.Time) ([]string, error) {
 // This is used during worker failover to re-queue a job for another worker.
 func (d *Database) ResetJobToPending(id string) error {
 	now := time.Now()
-	// TSI-2359: only reset jobs still in an active state. A failover sweep
-	// racing a worker's completion must not drag a finished job back to
-	// pending and re-run it.
-	//
-	// TSI-2597: refresh created_at so the starvation sweep and the
-	// NoWorkerDeadline it feeds both start from the migration moment. They
-	// share jobs.created_at as their time base, so re-anchoring it here keeps
-	// the sweep verdict and the CLI's client-side wait window consistent
-	// without touching either formula.
+	// Only reset jobs still in an active state: a failover sweep racing a
+	// worker's completion must not drag a finished job back to pending and
+	// re-run it. Refresh created_at so the starvation sweep and the
+	// NoWorkerDeadline it feeds both start from the migration moment — they
+	// share jobs.created_at as their time base, so re-anchoring it keeps the
+	// sweep verdict and the CLI's client-side wait window consistent without
+	// touching either formula.
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?,
 		                created_at = ?,
@@ -1870,7 +1852,7 @@ func (d *Database) RecoverState() (jobsReset int64, workersMarkedOffline int64, 
 	}
 	defer tx.Rollback()
 
-	// Reset running jobs to pending. TSI-2597: refresh created_at so the
+	// Reset running jobs to pending. Refresh created_at so the
 	// recovery requeue re-anchors the starvation sweep and NoWorkerDeadline
 	// clocks like every other requeue path — a restart clears the schedulable
 	// set, and the first starvation tick must not kill in-flight jobs on a
@@ -1908,20 +1890,13 @@ func (d *Database) RecoverState() (jobsReset int64, workersMarkedOffline int64, 
 }
 
 // RemoveStaleWorkers deletes worker records whose last heartbeat predates
-// now - staleThreshold. Called from cmd/server/main.go during startup
-// recovery, after RecoverState has marked every worker offline: a worker that
-// has not heartbeated within the threshold is dead, so its row is
-// stale residue from a previous run. Without this, records accumulate when the
-// server crashes or shuts down before the health monitor's offline-threshold
-// sweep (10m default) ever runs, leaving stale entries that /api/v1/workers
-// would keep returning as offline nodes (TSI-2366, TSI-2844).
-//
-// Fresh-heartbeat workers — a live process that survived a server restart —
-// are preserved: they re-register and are recreated as idle by
-// CreateOrUpdateWorker. Deleting only genuinely stale rows (last_heartbeat
-// older than 1.5× the heartbeat timeout, per TSI-2844) is what makes this
-// cleanup lazy versus the previous delete-everything-offline sweep, which
-// dropped the worker list to zero on every restart.
+// now - staleThreshold. It runs during startup recovery after RecoverState has
+// marked every worker offline; without it, records accumulate when the server
+// crashes before the health monitor's offline sweep (10m default), leaving
+// stale entries that /api/v1/workers keeps returning as offline nodes.
+// Fresh-heartbeat workers (a live process that survived a restart) are
+// preserved — they re-register and are recreated as idle. Deleting only
+// genuinely stale rows is what makes this lazy versus delete-everything.
 func (d *Database) RemoveStaleWorkers(staleThreshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-staleThreshold)
 	result, err := d.db.Exec(`DELETE FROM workers WHERE last_heartbeat < ?`, cutoff)
@@ -2020,11 +1995,11 @@ func (d *Database) GetIdleWorkersByEncoder(encoderName string) ([]*Worker, error
 
 // GetSchedulableWorkersByEncoder retrieves workers that are not offline and not evicted
 // and that have a specific encoder capability. Busy workers are included so a submitted
-// job can be queued while the worker is currently busy (TSI-2204).
+// job can be queued while the worker is currently busy.
 //
 // Like GetSchedulableWorkers, the result is NOT filtered by heartbeat
 // freshness; use GetLiveSchedulableWorkersByEncoder for the submit-time
-// fail-fast path (TSI-2419).
+// fail-fast path.
 func (d *Database) GetSchedulableWorkersByEncoder(encoderName string) ([]*Worker, error) {
 	rows, err := d.querySchedulableByEncoder(encoderName, 0)
 	if err != nil {
@@ -2035,7 +2010,7 @@ func (d *Database) GetSchedulableWorkersByEncoder(encoderName string) ([]*Worker
 
 // GetLiveSchedulableWorkersByEncoder is GetSchedulableWorkersByEncoder with a
 // heartbeat freshness window: workers whose last_heartbeat is older than
-// freshness are excluded (TSI-2419). A non-positive freshness disables the
+// freshness are excluded. A non-positive freshness disables the
 // check.
 func (d *Database) GetLiveSchedulableWorkersByEncoder(encoderName string, freshness time.Duration) ([]*Worker, error) {
 	rows, err := d.querySchedulableByEncoder(encoderName, freshness)
@@ -2145,7 +2120,7 @@ func (d *Database) UpdateWorkerCapabilities(id string, caps protocol.WorkerCapab
 // WorkerWithJobCount represents a worker with its active and completed job counts.
 // CompletedJobs breaks ties when multiple idle workers share the same active
 // count: the worker that has done fewer jobs wins, so a late-registered worker
-// is not starved by an earlier one that always appears first (TSI-2477).
+// is not starved by an earlier one that always appears first.
 type WorkerWithJobCount struct {
 	Worker        *Worker
 	ActiveJobs    int
@@ -2154,7 +2129,7 @@ type WorkerWithJobCount struct {
 
 // GetIdleWorkersWithJobCount retrieves idle workers with their active and
 // completed job counts. The active count drives scheduling; the completed
-// count breaks ties so late-registered workers are not starved (TSI-2477).
+// count breaks ties so late-registered workers are not starved.
 func (d *Database) GetIdleWorkersWithJobCount() ([]WorkerWithJobCount, error) {
 	workers, err := d.GetIdleWorkers()
 	if err != nil {
@@ -2186,7 +2161,7 @@ func (d *Database) GetIdleWorkersByEncoderWithJobCount(encoderName string) ([]Wo
 // fillWorkerJobCounts builds WorkerWithJobCount entries with active and
 // completed job counts for the given workers. It fetches both counts in a
 // single GROUP BY query instead of one COUNT per worker, so the cost is
-// constant rather than 2N (TSI-2477 review finding 1).
+// constant rather than 2N.
 func (d *Database) fillWorkerJobCounts(workers []*Worker) ([]WorkerWithJobCount, error) {
 	if len(workers) == 0 {
 		return nil, nil
@@ -2242,8 +2217,7 @@ func (d *Database) fillWorkerJobCounts(workers []*Worker) ([]WorkerWithJobCount,
 }
 
 // sortWorkersByJobCount sorts workers by active job count ascending, breaking
-// ties on completed job count so the worker that has done fewer jobs wins
-// (TSI-2477).
+// ties on completed job count so the worker that has done fewer jobs wins.
 func sortWorkersByJobCount(workers []WorkerWithJobCount) {
 	for i := 0; i < len(workers)-1; i++ {
 		for j := i + 1; j < len(workers); j++ {
@@ -2556,7 +2530,7 @@ func isAllDashes(s string) bool {
 // workers expose under the same name, the entry with the highest priority wins,
 // with is_hw and then the longer description as tie-breakers. This keeps a
 // later-registered hardware/priority encoder from being shadowed by an earlier
-// low-priority entry (TSI-2554).
+// low-priority entry.
 func (d *Database) GetAllEncodersInfo() ([]protocol.EncoderInfo, error) {
 	rows, err := d.db.Query(`SELECT video_encoders FROM workers WHERE video_encoders != '[]' ORDER BY rowid`)
 	if err != nil {
@@ -2623,7 +2597,7 @@ func mergeEncoderInfo(current, candidate protocol.EncoderInfo) protocol.EncoderI
 // column. Workers are scanned in registration order (rowid); for decoders that
 // multiple workers expose under the same name, is_hw wins and then the longer
 // description, so a later-registered hardware decoder is not shadowed by an
-// earlier software entry (TSI-2554).
+// earlier software entry.
 func (d *Database) GetAllDecodersInfo() ([]protocol.DecoderInfo, error) {
 	rows, err := d.db.Query(`SELECT video_decoders FROM workers WHERE video_decoders != '[]' ORDER BY rowid`)
 	if err != nil {
@@ -2940,7 +2914,7 @@ func (d *Database) GetRunningJobsByWorker(workerID string) ([]*Job, error) {
 // MigrateJobsFromWorker migrates all in-progress jobs from a worker back to
 // pending state. Returns the list of job IDs that were migrated.
 //
-// TSI-2359: the whole migration runs in one transaction, and each reset is a
+// the whole migration runs in one transaction, and each reset is a
 // conditional UPDATE on status IN (running, queued). This closes two holes:
 // (1) a job that reaches a terminal state after the snapshot is no longer
 // dragged back to pending and re-run, and (2) a partial failure mid-migration
@@ -2956,7 +2930,7 @@ func (d *Database) MigrateJobsFromWorker(workerID string) ([]string, error) {
 	// Conditional reset straight from the active-state set: rows that left
 	// the running/queued set between the caller's decision and this statement
 	// are simply not touched, and RETURNING gives exactly what we migrated.
-	// TSI-2597: created_at refreshes too — this is the same re-queue =
+	// created_at refreshes too — this is the same re-queue =
 	// re-submit semantic as ResetJobToPending/RescheduleJob/RecoverState.
 	rows, err := tx.Query(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?,
@@ -3120,20 +3094,12 @@ func (d *Database) GetJobTimeoutRetryCount(jobID string) (int, error) {
 
 // RecordJobTimeoutMigration atomically reschedules a timed-out job, records a
 // job_timeout migration event, and inserts its per-job redistribution
-// placeholder in a single transaction. All three succeed together or none do:
-//
-//   - The reschedule is a conditional UPDATE (status = 'running'). If the job
-//     already left the running set (raced a completion report or another
-//     sweep), zero rows match and the transaction rolls back — no ghost
-//     migration event and no permanently-NULL placeholder are left behind.
-//   - The event and its placeholder are written in the same transaction, so a
-//     placeholder insert failure rolls the event back too, instead of leaving
-//     a migration event whose target can never be resolved.
-//
-// workerID is the worker the job ran on when it timed out; the reschedule
-// clears worker_id, so it must be captured by the caller beforehand. Returns
-// rescheduled=false, nil when the job was no longer running (nothing written);
-// rescheduled=true, nil on success.
+// placeholder in one transaction — all three succeed together or none do. The
+// reschedule is a conditional UPDATE (status = 'running'); if the job already
+// left the running set, zero rows match and the transaction rolls back, leaving
+// no ghost event or permanently-NULL placeholder. workerID must be captured by
+// the caller beforehand, since the reschedule clears worker_id. Returns
+// rescheduled=false, nil when the job was no longer running.
 func (d *Database) RecordJobTimeoutMigration(workerID, jobID string, retryCount int) (bool, error) {
 	tx, err := d.db.Begin()
 	if err != nil {
@@ -3186,7 +3152,7 @@ func (d *Database) RecordJobTimeoutMigration(workerID, jobID string, retryCount 
 	return true, nil
 }
 
-// --- Worker Eviction Methods (TSI-761) ---
+// --- Worker Eviction Methods ---
 
 // MarkWorkerEvicted marks a worker as evicted (slow node) with the current timestamp.
 func (d *Database) MarkWorkerEvicted(workerID string) error {
@@ -3241,7 +3207,7 @@ func (d *Database) IsWorkerEvicted(workerID string) (bool, error) {
 	return evicted, nil
 }
 
-// --- Worker Eviction Events (TSI-762) ---
+// --- Worker Eviction Events ---
 
 // EvictionEventType represents the type of eviction event.
 type EvictionEventType string

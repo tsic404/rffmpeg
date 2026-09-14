@@ -119,7 +119,7 @@ func (b *StderrBatcher) flushLocked() {
 		defer b.wg.Done()
 		if err := b.client.SendStderrChunk(b.jobID, chunk); err != nil {
 			// Non-blocking: a dropped stderr chunk must not stall the job,
-			// but the failure must be visible somewhere (TSI-2365).
+			// but the failure must be visible somewhere.
 			log.Printf("Job %s: failed to send stderr batch: %v", b.jobID, err)
 		}
 	}(combined)
@@ -140,7 +140,7 @@ func (b *StderrBatcher) Flush() {
 // cancels the context, so callers may keep appending afterward. It exists so
 // a terminal job status can be reported after the tail stderr has actually
 // reached the server on the fast-failure path, where the batcher timer may
-// not have fired yet (TSI-2581).
+// not have fired yet.
 func (b *StderrBatcher) FlushAndWait() {
 	b.mu.Lock()
 	b.flushLocked()

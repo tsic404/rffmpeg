@@ -190,7 +190,7 @@ func TestReportFailureAlwaysSetsClassification(t *testing.T) {
 	}
 }
 
-// TestClassifyFailureOOMKill locks the TSI-2365 fix: OOM-killed processes
+// TestClassifyFailureOOMKill locks the fix: OOM-killed processes
 // (exit 137 / SIGKILL text) surface as WORKER_CRASH with an explicit reason,
 // not a generic FFMPEG_ERROR.
 func TestClassifyFailureOOMKill(t *testing.T) {
@@ -217,7 +217,7 @@ func TestClassifyFailureOOMKill(t *testing.T) {
 	}
 }
 
-// TestClassifyFailureSignalDeath locks the TSI-2458 fix: ffmpeg killed by
+// TestClassifyFailureSignalDeath locks the fix: ffmpeg killed by
 // an OS signal (SIGABRT=134, SIGSEGV=139, SIGKILL=137) is a process crash,
 // not a generic FFMPEG_ERROR, so the job is retryable. These sporadic
 // self-aborts happen under high load / temp-space pressure and succeed on
@@ -249,7 +249,7 @@ func TestClassifyFailureSignalDeath(t *testing.T) {
 	}
 }
 
-// TestClassifyInputDownloadFailure locks the TSI-2348 fix: a failed download
+// TestClassifyInputDownloadFailure locks the fix: a failed download
 // of a remote-URL input is the user's input being unreachable (INPUT_UNREACHABLE),
 // while a failed server-file fetch is worker↔server infrastructure (FFMPEG_ERROR).
 func TestClassifyInputDownloadFailure(t *testing.T) {
@@ -271,7 +271,7 @@ func TestClassifyInputDownloadFailure(t *testing.T) {
 		"",
 	}
 	for _, id := range serverFileIDs {
-		// TSI-2365: server-channel failures are infrastructure, not ffmpeg errors.
+		// server-channel failures are infrastructure, not ffmpeg errors.
 		if got := ClassifyInputDownloadFailure(id); got != protocol.FailureInfra {
 			t.Errorf("server file ID %q classified as %q, want INFRA", id, got)
 		}
@@ -319,7 +319,7 @@ func TestFailureTypeIsValid(t *testing.T) {
 	}
 }
 
-// TestReportFailureStoresConciseError locks the TSI-2523 fix: reportFailure
+// TestReportFailureStoresConciseError locks the fix: reportFailure
 // must store the concise classification summary as the job's terminal Error,
 // not echo the full ffmpeg stderr — the complete log already reached the CLI
 // once via the live stderr stream, so echoing it again duplicates it.
@@ -351,7 +351,7 @@ func TestReportFailureStoresConciseError(t *testing.T) {
 	}
 }
 
-// TestReportFailure_RetryExhaustedStoresConciseError locks the TSI-2523 fix on
+// TestReportFailure_RetryExhaustedStoresConciseError locks the fix on
 // the retry-exhausted path: even when worker.go prefixes the report with the
 // full "All retry attempts exhausted (…): <stderr>" banner, the terminal Error
 // must stay the concise ffmpeg summary — the full log already streamed live on

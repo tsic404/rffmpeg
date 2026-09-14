@@ -35,7 +35,7 @@ import (
 // staleWorkerFactor scales the heartbeat timeout into the startup cleanup
 // cutoff: a worker whose last heartbeat is older than staleWorkerFactor × the
 // heartbeat timeout is dead residue and is removed lazily at startup
-// (TSI-2844). Fresh-heartbeat workers survive the restart and re-register.
+// Fresh-heartbeat workers survive the restart and re-register.
 const staleWorkerFactor = 1.5
 
 func main() {
@@ -65,7 +65,7 @@ func main() {
 	}
 
 	log.Printf("Configuration: %s", cfg)
-	// Create the data directory if it does not exist (TSI-2606): sqlite
+	// Create the data directory if it does not exist: sqlite
 	// refuses to open a database whose parent directory is missing, and the
 	// resulting "unable to open database file" error gives no actionable
 	// hint. MkdirAll keeps --data-dir runnable out of the box.
@@ -77,7 +77,7 @@ func main() {
 	// that a panic or fatal in any goroutine — whose stack trace the runtime
 	// otherwise writes only to stderr — is captured on disk instead of
 	// vanishing with the process. This is what turns the "silent exit" into a
-	// diagnosable crash (TSI-3100).
+	// diagnosable crash.
 	logFile, err := setupLogFile(cfg.DataDir)
 	if err != nil {
 		log.Printf("Warning: failed to open log file: %v", err)
@@ -100,7 +100,7 @@ func main() {
 	}
 
 	// Lazily remove worker records whose heartbeat is stale — older than
-	// 1.5× the heartbeat timeout (TSI-2844). After a restart no worker is
+	// 1.5× the heartbeat timeout. After a restart no worker is
 	// serving, so a row that has gone that long without a heartbeat is dead
 	// residue; a fresh-heartbeat worker is a live process that survived the
 	// restart and re-registers to come back idle. Deleting only genuinely
@@ -123,7 +123,7 @@ func main() {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
 
-	// Initialize worker state table (shared between handler and monitor, TSI-759)
+	// Initialize worker state table (shared between handler and monitor)
 	stateTable := workerhealth.NewWorkerStateTable(cfg.WorkerHeartbeatTimeout)
 
 	// Create handler
@@ -158,7 +158,7 @@ func main() {
 
 	// Start job scheduler. DefaultConfig() carries MaxTimeoutRetries=2; the
 	// literal Config{} previously dropped it to 0 and failed jobs on the
-	// first timeout (TSI-2744). Override only the fields ServerConfig owns.
+	// first timeout. Override only the fields ServerConfig owns.
 	schedulerConfig := scheduler.DefaultConfig()
 	schedulerConfig.JobTimeout = cfg.JobTimeout
 	schedulerConfig.ScheduleInterval = cfg.ScheduleInterval
@@ -172,12 +172,12 @@ func main() {
 	// Connect the scheduler to the monitor so job migration triggers rescheduling
 	workerMonitor.SetScheduler(jobScheduler)
 
-	// Connect the scheduler to the handler for immediate job assignment (TSI-1501)
+	// Connect the scheduler to the handler for immediate job assignment
 	h.SetScheduler(jobScheduler)
 
 	// Submit-time fail-fast uses the same freshness window as the monitor:
 	// workers with stale heartbeats are treated as unavailable at submission
-	// (TSI-2419) instead of accepting jobs that would wait for the no-worker
+	// instead of accepting jobs that would wait for the no-worker
 	// job timeout.
 	h.SetHeartbeatTimeout(cfg.WorkerHeartbeatTimeout)
 	h.SetStarvationConfig(cfg.NoWorkerJobTimeout, cfg.TimeoutCheckInterval)
@@ -206,7 +206,7 @@ func main() {
 
 	// Scheduler releases rate-limit quota and broadcasts WS status for jobs
 	// it fails out-of-band (starvation sweep) — the handler path that normally
-	// does both is bypassed by the bulk DB update (TSI-2365).
+	// does both is bypassed by the bulk DB update.
 	jobScheduler.SetRateLimiter(h.GetRateLimiter())
 	jobScheduler.SetJobNotifier(h.GetWSHub())
 
@@ -298,7 +298,7 @@ func main() {
 
 		// Probe (ffprobe sync endpoint) — behind the job-submission rate
 		// limiter: a probe dispatches real work, so an unthrottled client can
-		// starve the queue just like unbounded job submissions (TSI-2365).
+		// starve the queue just like unbounded job submissions.
 		r.Group(func(r chi.Router) {
 			r.Use(ratelimit.JobSubmitMiddleware(h.GetRateLimiter(), rateLimitCfg))
 			r.Post("/probe", h.Probe)
@@ -392,7 +392,7 @@ func main() {
 // setupLogFile redirects the standard logger to write to both stderr and a
 // size/age-bounded log file in the data directory. lumberjack rotates the file
 // at MaxSize and prunes backups beyond MaxBackups/MaxAge, so a long-running
-// server's log cannot grow without bound (TSI-3100 review). Panics recovered
+// server's log cannot grow without bound. Panics recovered
 // by the background-goroutine guards log through this logger, so the crash
 // cause lands on disk even when the deployment only captures stdout. A non-nil
 // error means the file could not be opened and logging falls back to stderr

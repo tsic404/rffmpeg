@@ -31,8 +31,7 @@ func TestRetryBudget(t *testing.T) {
 
 // TestConnectWithReconnect_ExhaustsRetries pins the WS-side bound: a
 // permanently unreachable server must fail with an error wrapping
-// ErrRetriesExhausted once the retry budget is spent, not retry forever
-// (TSI-2697).
+// ErrRetriesExhausted once the retry budget is spent, not retry forever.
 func TestConnectWithReconnect_ExhaustsRetries(t *testing.T) {
 	// Port 1 is reserved and closed; dialing it fails immediately.
 	c := NewWSClient("http://127.0.0.1:1", "job-1", "", WithWSMaxRetries(1))

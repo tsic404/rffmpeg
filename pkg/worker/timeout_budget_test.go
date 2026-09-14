@@ -45,7 +45,7 @@ func writeSlowFFprobe(dir string, seconds int) (string, error) {
 // writeStatefulRetryFFmpeg creates an executable whose first invocation fails
 // with a retryable "Unknown encoder" error and whose subsequent invocations
 // sleep until killed — so the initial attempt enters the retry path and the
-// retry attempt itself exceeds the execution budget (TSI-2684).
+// retry attempt itself exceeds the execution budget.
 func writeStatefulRetryFFmpeg(dir, counterPath, markerPath, pidPath string, sleepSeconds int) (string, error) {
 	scriptPath := filepath.Join(dir, "stateful-retry-ffmpeg")
 	script := fmt.Sprintf(`#!/bin/sh
@@ -68,7 +68,7 @@ sleep %d
 }
 
 // TestProcessJob_ShortTimeoutReachesFFmpegAndClassifiesTimeout is the
-// TSI-2684 regression test. A short per-job timeout must be reserved for the
+// regression test. A short per-job timeout must be reserved for the
 // ffmpeg execution budget, not spent on the pre-execution pipeline. With the
 // old shared deadline, the 1s duration probe consumed the whole budget and the
 // job failed in encoder classification as FFMPEG_ERROR without ever reaching
@@ -133,7 +133,7 @@ func TestProcessJob_ShortTimeoutReachesFFmpegAndClassifiesTimeout(t *testing.T) 
 	}
 
 	// Short per-job timeout: must be reserved for ffmpeg execution, not spent
-	// on the 1s duration probe (TSI-2684).
+	// on the 1s duration probe.
 	timeout := 300 * time.Millisecond
 	job := protocol.JobInfo{
 		ID:             "test-job-short-timeout",
@@ -203,7 +203,7 @@ func TestProcessJob_ShortTimeoutReachesFFmpegAndClassifiesTimeout(t *testing.T) 
 	}
 }
 
-// TestProcessJob_RetryTimeoutClassifiedAsTimeout is the TSI-2684 retry-path
+// TestProcessJob_RetryTimeoutClassifiedAsTimeout is the retry-path
 // regression test. The initial attempt fails retryably (Unknown encoder) and
 // enters the multi-stage retry; the retry attempt then sleeps past the shared
 // execCtx budget and is killed. The retry-exhausted path must report the job as
@@ -335,7 +335,7 @@ func writeAlwaysRetryableFailFFmpeg(dir string) (string, error) {
 }
 
 // TestProcessJob_RetryBackoffBudgetExhaustionClassifiedAsTimeout is the
-// TSI-2684 backoff-interval regression test. Every attempt fails retryably
+// backoff-interval regression test. Every attempt fails retryably
 // immediately, so the execution budget (150ms) is exhausted inside the retry
 // executor's applyRetryInterval wait (1s default), not inside an attempt:
 // FinalResult.IsTimeout stays false and only execCtx.Err() reports

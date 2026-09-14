@@ -8,19 +8,14 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
-// TestMigrationEventObservableViaMonitorLoop closes the TSI-2800 acceptance
-// gap: the QA run never saw a migration event because its jobs finished before
-// the 90s heartbeat timeout, and every existing migration test calls
-// checkWorkers() directly with a hand-staled heartbeat. This test exercises
-// the real async path — Start()/Stop() with a shortened heartbeat timeout —
-// so a worker that stops heartbeating while a job is still running gets marked
-// offline and its job migrated, and that migration is observable via the same
-// query the GET /api/v1/migrations handler uses.
-//
-// It reproduces the issue's own recommendation (调小 --worker-heartbeat-timeout)
-// deterministically: HeartbeatTimeout=500ms, HealthCheckInterval=100ms, so the
-// worker's last_heartbeat goes stale without any manual UPDATE and the monitor
-// must detect it on its own ticker.
+// TestMigrationEventObservableViaMonitorLoop closes the gap: the QA run never
+// saw a migration event because its jobs finished before the 90s heartbeat
+// timeout, and other tests call checkWorkers() with a hand-staled heartbeat.
+// This test exercises the real async path (Start/Stop with a shortened
+// heartbeat timeout): a worker that stops heartbeating while a job runs gets
+// marked offline and its job migrated, observable via the GET
+// /api/v1/migrations query. HeartbeatTimeout=500ms + HealthCheckInterval=100ms
+// makes last_heartbeat go stale with no manual UPDATE.
 func TestMigrationEventObservableViaMonitorLoop(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

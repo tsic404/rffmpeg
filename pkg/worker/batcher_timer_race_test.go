@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestBatcherTimerConcurrentAccess is the TSI-2705 regression test: the
+// TestBatcherTimerConcurrentAccess is the regression test: the
 // StderrBatcher / StdoutBatcher flushTimer field used to be written by the
 // constructor and read by Close without holding b.mu, while the timer callback
 // (timedFlush) re-arms the same timer under b.mu. time.AfterFunc invokes its

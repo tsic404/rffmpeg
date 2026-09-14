@@ -63,8 +63,7 @@ func (d *Detector) sampleNVIDIAMetrics() (m Metrics, ok bool) {
 	// child that survives a plain ctx kill and keeps the output pipes open,
 	// blocking cmd.Output forever.
 	// Pdeathsig ensures the metrics subprocess is reaped if the worker
-	// itself dies, preventing orphaned nvidia-smi/intel_gpu_top processes
-	// (TSI-2476).
+	// itself dies, preventing orphaned nvidia-smi/intel_gpu_top processes.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid:   true,
 		Pdeathsig: syscall.SIGKILL,
@@ -102,17 +101,13 @@ func (d *Detector) sampleNVIDIAMetrics() (m Metrics, ok bool) {
 	return m, true
 }
 
-// sampleIntelMetrics queries Intel GPU utilization via intel_gpu_top. It
-// runs one JSON sample (-n 1) and sums the "busy" percentage across all
-// engine classes (Render, Video, VideoEnhance, Blitter). Memory is not
-// reported by intel_gpu_top, so MemUsedMB stays 0. ok is false if
-// intel_gpu_top is missing or the query fails.
-//
-// intel_gpu_top -J emits a top-level JSON array: [{ ...sample... }]. With
-// -n 1 the array contains exactly one element. Older versions may omit the
-// closing bracket when killed by timeout (per manpage: "JSON output will be
-// correctly terminated when the tool cleanly exits, otherwise one square
-// bracket needs to be added before parsing"); we handle both cases.
+// sampleIntelMetrics queries Intel GPU utilization via intel_gpu_top. It runs
+// one JSON sample (-n 1) and sums the "busy" percentage across all engine
+// classes (Render, Video, VideoEnhance, Blitter); memory is not reported, so
+// MemUsedMB stays 0. ok is false if intel_gpu_top is missing or the query
+// fails. intel_gpu_top -J emits a top-level JSON array; older versions may
+// omit the closing bracket when killed by timeout, so we handle both the
+// cleanly-terminated and the truncated-array case.
 func (d *Detector) sampleIntelMetrics() (m Metrics, ok bool) {
 	if _, err := exec.LookPath("intel_gpu_top"); err != nil {
 		return Metrics{}, false

@@ -30,7 +30,7 @@ func jobLogRequest(t *testing.T, header http.Header) *http.Request {
 	return req
 }
 
-// TestHandleJobLogWithValidationUpgradeRequired reproduces TSI-2713: a request
+// TestHandleJobLogWithValidationUpgradeRequired reproduces the regression: a request
 // carrying Connection: Upgrade but no Upgrade header is not a WebSocket
 // handshake, so the server must answer 426 Upgrade Required (RFC 6455 §4.1)
 // instead of gorilla's default 400, with the Upgrade: websocket header and a

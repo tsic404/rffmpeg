@@ -55,7 +55,7 @@ func stubSubmitSleep(t *testing.T) func() {
 
 // TestSubmitJobWithOptions_RetriesRateLimit pins the happy path: with a
 // submit-retry budget, a transient 429 is retried and the job eventually
-// submits instead of failing immediately (TSI-2939).
+// submits instead of failing immediately.
 func TestSubmitJobWithOptions_RetriesRateLimit(t *testing.T) {
 	defer stubSubmitSleep(t)()
 
@@ -134,7 +134,7 @@ func TestSubmitJobWithOptions_NonRateLimitNoRetry(t *testing.T) {
 }
 
 // TestSubmitJobWithOptions_CancelledCtxAbortsBackoff pins the signal-fix
-// (TSI-2939): a ctx cancelled during the rate-limit backoff aborts the retry
+// a ctx cancelled during the rate-limit backoff aborts the retry
 // loop and returns ctx.Err() instead of sleeping through the full backoff.
 func TestSubmitJobWithOptions_CancelledCtxAbortsBackoff(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -170,7 +170,7 @@ func (errReader) Read([]byte) (int, error) { return 0, errors.New("read failure"
 
 // TestDecodeRateLimitError covers all three branches of the 429 decoder: the
 // structured JSON path and the two fallback paths (undecodable body and read
-// failure), which previously had no coverage (TSI-2939).
+// failure), which previously had no coverage.
 func TestDecodeRateLimitError(t *testing.T) {
 	// Structured JSON populates the fields and renders the single-line message.
 	err := decodeRateLimitError(strings.NewReader(
@@ -220,7 +220,7 @@ func TestDecodeRateLimitError(t *testing.T) {
 // TestRateLimitBackoff pins the exponential schedule: start at retry_in,
 // double per attempt, cap at submitRetryMaxDelay, default to 1s when the
 // server gave no hint, and clamp an overflowing retry_in before the Duration
-// conversion (TSI-2939).
+// conversion.
 func TestRateLimitBackoff(t *testing.T) {
 	cases := []struct {
 		name    string

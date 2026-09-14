@@ -102,7 +102,7 @@ func defaultFormatEncodersMap() map[string][]string {
 //
 // Only same-format transitions are allowed: silently re-encoding across codec
 // families (e.g. AV1 -> H.264) changes the requested output format and is
-// rejected rather than performed implicitly (TSI-2671).
+// rejected rather than performed implicitly.
 func defaultSoftwareFallbackChain() map[string]string {
 	return map[string]string{
 		// AV1 software fallback chain (same format): libaom-av1 -> libsvtav1
@@ -232,18 +232,14 @@ func (f *EncoderFallback) PrepareFallbackArgs(args []string, outputPath string, 
 	return f.prepareFallbackArgsWithSource(args, outputPath, !isUserSelected)
 }
 
-// PrepareFallbackArgsWithSource prepares ffmpeg arguments for software encoder fallback
-// with explicit control over whether the current encoder was user-selected.
-//
-// Parameters:
-//   - args: current ffmpeg arguments
-//   - outputPath: output file path
-//   - isUserSelected: true if the current encoder was explicitly chosen by the user;
-//     false if it was selected by the system as a fallback from a previous failure.
-//
-// When isUserSelected is false and the current encoder is a known software encoder
-// that is the same as what GetSoftwareEncoder returns, the fallback chain is consulted
-// to try the next alternative instead of giving up.
+// PrepareFallbackArgsWithSource prepares ffmpeg arguments for software encoder
+// fallback with explicit control over whether the current encoder was
+// user-selected. args is the current ffmpeg arguments; outputPath is the
+// output file path; isUserSelected is true when the encoder was explicitly
+// chosen by the user (false when it was itself a system fallback). When
+// isUserSelected is false and the current encoder is the known software
+// encoder GetSoftwareEncoder returns, the fallback chain is consulted for the
+// next alternative instead of giving up.
 func (f *EncoderFallback) PrepareFallbackArgsWithSource(args []string, outputPath string, isUserSelected bool) []string {
 	return f.prepareFallbackArgsWithSource(args, outputPath, !isUserSelected)
 }
@@ -436,7 +432,7 @@ func (f *EncoderFallback) GetEncoderFormat(encoder string) string {
 // fallback guard. Unlike GetEncoderFormat, which returns the granular codec
 // format, this merges the VP8 and VP9 subfamilies into a single "vpx" family
 // so that libvpx -> libvpx-vp9 is treated as a same-family transition
-// (TSI-2760). The merge keys on the parsed format, not the literal encoder
+// The merge keys on the parsed format, not the literal encoder
 // name, so vp9_vaapi, vp8_vaapi and the bare vp9/vp8 names also resolve to
 // "vpx". Unknown encoders still resolve to "".
 func (f *EncoderFallback) GetEncoderFamily(encoder string) string {
@@ -459,16 +455,13 @@ func (f *EncoderFallback) GetAvailableSoftwareEncoders(format string) []string {
 }
 
 // GetAlternativeSoftwareEncoder returns the next software encoder to try when
-// the given encoder (which was itself chosen as a system fallback) is unavailable.
-// This enables multi-step fallback chains (e.g., libaom-av1 -> libsvtav1).
-//
-// Cross-format transitions are refused: when the chained encoder belongs to a
-// different codec family than the current one, the lookup returns empty instead
-// of silently downgrading the requested output format (TSI-2671). Encoders whose
-// family cannot be determined are also refused with a warning rather than
-// silently chained (TSI-2685).
-// Returns empty string if no alternative is configured, the configured
-// alternative would change the codec family, or either encoder is unknown.
+// the given encoder (itself a system fallback) is unavailable, enabling
+// multi-step fallback chains (e.g. libaom-av1 -> libsvtav1). Cross-format
+// transitions are refused: when the chained encoder belongs to a different
+// codec family, or its family cannot be determined, the lookup returns empty
+// (with a warning) instead of silently downgrading the output format. Returns
+// empty if no alternative is configured, it would change the codec family, or
+// either encoder is unknown.
 func (f *EncoderFallback) GetAlternativeSoftwareEncoder(encoder string) string {
 	next, ok := f.softwareFallbackChain[encoder]
 	if !ok || next == encoder {
@@ -480,7 +473,7 @@ func (f *EncoderFallback) GetAlternativeSoftwareEncoder(encoder string) string {
 	if fromFamily == "" || toFamily == "" {
 		// An encoder whose codec family cannot be determined must not be
 		// silently chained: a cross-family transition could otherwise slip
-		// through the format guard (TSI-2685). Log which side is unknown and
+		// through the format guard. Log which side is unknown and
 		// refuse the transition.
 		log.Printf("Refusing fallback %q -> %q: unknown encoder family (from=%q, to=%q)",
 			encoder, next, fromFamily, toFamily)
@@ -498,7 +491,7 @@ func (f *EncoderFallback) GetAlternativeSoftwareEncoder(encoder string) string {
 // family than 'from' (e.g. libsvtav1 (av1) -> libx264 (h264)). When either
 // encoder's family cannot be determined, the transition is treated as
 // cross-format so an unknown encoder is never silently chained across an
-// undetermined family boundary (TSI-2685).
+// undetermined family boundary.
 func (f *EncoderFallback) IsCrossFormatFallback(from, to string) bool {
 	fromFamily := f.GetEncoderFamily(from)
 	toFamily := f.GetEncoderFamily(to)
@@ -513,7 +506,7 @@ func (f *EncoderFallback) IsCrossFormatFallback(from, to string) bool {
 //
 // Entries whose format cannot be determined, or that transition across codec
 // families, are rejected at read time by GetAlternativeSoftwareEncoder with a
-// warning log (TSI-2685).
+// warning log.
 func (f *EncoderFallback) AddSoftwareFallbackChain(from, to string) {
 	if f.softwareFallbackChain == nil {
 		f.softwareFallbackChain = make(map[string]string)

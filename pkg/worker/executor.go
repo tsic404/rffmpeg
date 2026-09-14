@@ -88,7 +88,7 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	// Pdeathsig ensures ffmpeg is also killed if the worker itself dies
 	// (SIGKILL, crash): the kernel delivers the signal to the child the moment
 	// the parent exits, preventing orphaned ffmpeg processes from outliving the
-	// worker and holding GPU/encoder resources (TSI-2476).
+	// worker and holding GPU/encoder resources.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid:   true,
 		Pdeathsig: syscall.SIGKILL,
@@ -204,7 +204,7 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 			// real exit code (128+signal) so downstream classifiers
 			// (ClassifyFailure, ErrorAnalyzer) can recognize SIGABRT,
 			// SIGSEGV, etc. as process crashes and trigger retry
-			// (TSI-2458). Without this, SIGABRT falls through as a
+			// Without this, SIGABRT falls through as a
 			// generic FFMPEG_ERROR (exit -1) and the job never retries.
 			exitCode := exitErr.ExitCode()
 			if ps := exitErr.ProcessState; ps != nil {
@@ -225,21 +225,14 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	return result
 }
 
-// BuildArgs constructs ffmpeg arguments from job parameters and input/output paths.
-// It replaces <INPUT_FILE> placeholders in jobArgs with actual input file paths.
-// User-supplied overwrite semantics (-y / -n) pass through verbatim: the worker
-// never injects an overwrite flag, so a pre-existing output file follows native
-// ffmpeg behavior (reject with "Not overwriting - exiting" unless the caller
-// explicitly opted into -y). Retries remain safe because the RetryExecutor
-// removes any partial output left by a prior attempt before re-running.
-//
-// jobArgs is a trusted passthrough channel: unlike DirectPaths and
-// OutputFilename, it is deliberately NOT subject to the
-// RFFMPEG_SHARED_FS_ALLOWED_PREFIX allow-list. ffmpeg arguments can carry
-// paths in many forms (multiple -i, -map_metadata, filter paths, a dozen+
-// network protocols), so enumerating them would rewrite passthrough
-// semantics. Direct (shared-FS) mode is therefore a trust mode: the caller
-// that submits Args must itself be trusted (TSI-2674).
+// BuildArgs constructs ffmpeg arguments from job parameters and paths,
+// replacing <INPUT_FILE> placeholders with actual input file paths.
+// User-supplied -y / -n pass through verbatim: the worker never injects an
+// overwrite flag, and RetryExecutor removes partial output before retrying,
+// so a pre-existing file follows native ffmpeg behavior. jobArgs is a
+// trusted passthrough: unlike DirectPaths and OutputFilename, it is NOT
+// subject to the RFFMPEG_SHARED_FS_ALLOWED_PREFIX allow-list because args
+// carry paths in many forms; shared-FS mode trusts the submitting caller.
 func BuildArgs(jobArgs []string, inputPaths []string, outputPath string) []string {
 	args := make([]string, 0, len(jobArgs)+1)
 
@@ -293,14 +286,12 @@ func findSeparatorIndex(args []string) int {
 }
 
 // hasOutputArg checks if the args already contain an output file argument.
-//
 // ffmpeg grammar: inputs are introduced by -i/--input, outputs are bare
-// positional tokens (or "-" for stdout). A bare token is only a *clear*
-// output when it appears in the output section, i.e. after at least one
-// "-i <input>" pair. Before the first input, bare tokens are inputs whose
-// "-i" was omitted by the caller — treating them as outputs would suppress
-// the server-appended output path and leave ffmpeg with no input (TSI-2722).
-// Note: This function does NOT handle "--" separator - use BuildArgs for that.
+// positional tokens (or "-"). A bare token is only a clear output after at
+// least one "-i <input>" pair; before that it is an input whose "-i" was
+// omitted, and treating it as an output would suppress the server-appended
+// output path and leave ffmpeg with no input. Does NOT handle the "--"
+// separator — use BuildArgs for that.
 func hasOutputArg(args []string) bool {
 	expectingValue := false
 	seenInput := false
@@ -339,14 +330,12 @@ func hasOutputArg(args []string) bool {
 }
 
 // splitProgressLines is a bufio.SplitFunc that normalizes ffmpeg's
-// \r-separated -stats updates into \n-separated lines: the progress line
-// ("frame= ... time= ... speed= ...") is rewritten in place on stderr using
-// \r separators — one update roughly every 0.5s of encoded media — and the
-// default bufio.ScanLines collapses the whole run into a single token that
-// only becomes available when the next \n arrives (at job end), which starved
-// the ProgressRouter and reduced server-side progress pushes to 1-2 updates
-// per job (TSI-2425). Splitting on both keeps the streamed output identical
-// while making every intermediate update visible to the parser in real time.
+// \r-separated -stats updates into \n-separated lines: ffmpeg rewrites the
+// progress line in place with \r roughly every 0.5s, and the default
+// bufio.ScanLines collapses the whole run into one token available only at
+// job end, starving the ProgressRouter down to 1-2 updates per job. Splitting
+// on both keeps the streamed output identical while exposing every
+// intermediate update to the parser in real time.
 func splitProgressLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	if atEOF && len(data) == 0 {
 		return 0, nil, nil
@@ -394,7 +383,7 @@ var networkPrefixes = []string{
 func isNetworkOutput(outputPath string, args []string) bool {
 	// Check output path for network URL prefixes. HasPrefix, not Contains: a
 	// local path that merely contains "http://" (e.g. /data/http://x.mp4) is
-	// not a network output and its file must still be validated (TSI-2365).
+	// not a network output and its file must still be validated.
 	for _, prefix := range networkPrefixes {
 		if strings.HasPrefix(outputPath, prefix) {
 			return true

@@ -11,7 +11,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TestReportInputDownloadFailureFriendlyMessage locks the TSI-3082 fix: a
+// TestReportInputDownloadFailureFriendlyMessage locks the fix: a
 // user-supplied remote URL whose fetch fails at the transport layer (a
 // dataClient.Do error) is INPUT_UNREACHABLE, and its user-facing Error must be
 // a clear message naming the input — not the raw net/http transport text
@@ -87,7 +87,7 @@ func TestReportInputDownloadFailureServerFileKeepsRawMessage(t *testing.T) {
 	}
 }
 
-// TestReportInputDownloadFailureOversizeKeepsOriginalMessage locks the TSI-3082
+// TestReportInputDownloadFailureOversizeKeepsOriginalMessage locks the
 // boundary: a remote URL whose fetch succeeds but exceeds the size cap is not
 // "unreachable", so the actionable size-limit message must stay in Error — the
 // friendly INPUT_UNREACHABLE mapping applies only to transport-layer failures.

@@ -38,11 +38,11 @@ const (
 
 	// ScenarioFormatNotAvailable indicates the requested format has no
 	// available encoder at all — the rewrite engine could not satisfy the
-	// request (error-level, TSI-2365).
+	// request (error-level).
 	ScenarioFormatNotAvailable ScenarioType = "format_not_available"
 
 	// ScenarioEncoderUnsupported indicates the encoder name is unrecognized —
-	// error-level (TSI-2365).
+	// error-level.
 	ScenarioEncoderUnsupported ScenarioType = "encoder_unsupported"
 )
 

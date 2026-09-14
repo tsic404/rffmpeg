@@ -48,7 +48,7 @@ type WSProgressPayload struct {
 	TimeElapsed string  `json:"time_elapsed,omitempty"`
 }
 
-// WorkerHeartbeatPayload carries detailed worker metrics for heartbeat messages (TSI-756).
+// WorkerHeartbeatPayload carries detailed worker metrics for heartbeat messages.
 type WorkerHeartbeatPayload struct {
 	WorkerID        string    `json:"worker_id"`
 	Status          string    `json:"status"`

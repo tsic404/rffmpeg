@@ -12,7 +12,7 @@ import (
 // lines to the underlying StderrHandler so regular stderr batching is
 // unaffected, while swallowing ffmpeg's raw -stats output (incremental
 // frame/size updates and the terminal summary), which the CLI already
-// receives as structured progress pushes (TSI-2928).
+// receives as structured progress pushes.
 type ProgressRouter struct {
 	parser     *ProgressParser
 	client     *Client
@@ -62,7 +62,7 @@ func (r *ProgressRouter) Handler() StderrHandler {
 		// Forward the line to the underlying handler unless it is an ffmpeg
 		// -stats update: those are parsed below into structured progress
 		// pushes, so the raw frame/fps line must not pollute the CLI log
-		// stream (TSI-2928). Everything else — headers, warnings, errors and
+		// stream. Everything else — headers, warnings, errors and
 		// [rffmpeg] notifications — is forwarded unchanged.
 		if r.underlying != nil && !isFFmpegStatsLine(line) {
 			r.underlying(line)

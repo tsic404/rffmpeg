@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Acceptance tests for TSI-2364: parameter translation engine must never
+// Acceptance tests for: parameter translation engine must never
 // silently drop user parameters, emit illegal values, or combine mutually
 // exclusive rate-control options.
 

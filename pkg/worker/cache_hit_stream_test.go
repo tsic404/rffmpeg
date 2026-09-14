@@ -15,7 +15,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TestCacheHitStreamsStderrNotice is the TSI-2415 regression test: the
+// TestCacheHitStreamsStderrNotice is the regression test: the
 // worker's cache-hit notice must travel through the job's stderr stream
 // (SendStderrChunk → server PATCH /jobs/{id} → WS stderr broadcast) so CLI
 // clients observe it — not only the worker process' own log, which CLI users

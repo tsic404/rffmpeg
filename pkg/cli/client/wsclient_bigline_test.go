@@ -9,24 +9,14 @@ import (
 	"time"
 )
 
-// TestWSClient_LargeStdoutLineNoSpuriousGap is the TSI-2420 regression test.
-//
-// Failure mode (short streaming-output jobs, e.g. `-f mp4 -` finishing in
-// ~1s): the worker's StdoutBatcher concatenates up to 10×32KB executor
-// chunks and base64-encodes them into a single WSMsgStdout message — a JSON
-// line of several hundred KB. The client listen loop split frames with a
-// bufio.Scanner at its DEFAULT 64KB token limit and never checked
-// scanner.Err(), so the oversized line aborted the scan silently and every
-// later line in the frame was dropped. The next delivered message then tripped
-// the gap detector: "WebSocket stream gap detected ... expected seq N, got
-// N+1" — failing an intact job with exit code 1 even though nothing was lost
-// on the wire.
-//
-// The fix grows the scanner buffer to wsMaxFrameLineBytes (1MB, matching the
-// connection read limit) and logs scanner.Err() instead of swallowing it.
-// This test replays exactly that wire shape: huge stdout lines interleaved
-// with sequenced stderr in one frame, then asserts no gap is flagged and all
-// payloads arrive.
+// TestWSClient_LargeStdoutLineNoSpuriousGap is the regression test: a short
+// streaming job's StdoutBatcher concatenates up to 10×32KB executor chunks
+// into one base64 WSMsgStdout (a JSON line of several hundred KB). The client
+// split frames with bufio.Scanner at its default 64KB token limit and never
+// checked scanner.Err(), so the oversized line aborted silently and every
+// later line was dropped — tripping the gap detector on an intact job. The
+// fix grows the buffer to wsMaxFrameLineBytes (1MB) and logs scanner.Err().
+// This test replays that wire shape and asserts no gap is flagged.
 func TestWSClient_LargeStdoutLineNoSpuriousGap(t *testing.T) {
 	// 300KB of base64 payload: far above bufio's default 64KB token limit,
 	// below the 1MB connection read limit — the exact production shape of a

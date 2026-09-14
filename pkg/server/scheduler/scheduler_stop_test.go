@@ -18,7 +18,7 @@ func newTestScheduler(t *testing.T) (*Scheduler, func()) {
 	return s, func() { database.Close() }
 }
 
-// TestStopIdempotent verifies double-Stop does not panic (TSI-2365).
+// TestStopIdempotent verifies double-Stop does not panic.
 func TestStopIdempotent(t *testing.T) {
 	s, cleanup := newTestScheduler(t)
 	defer cleanup()
@@ -28,7 +28,7 @@ func TestStopIdempotent(t *testing.T) {
 	s.Stop() // must be a no-op, not a panic on double close
 }
 
-// TestStopConcurrent verifies concurrent Stop calls are safe (TSI-2365).
+// TestStopConcurrent verifies concurrent Stop calls are safe.
 func TestStopConcurrent(t *testing.T) {
 	s, cleanup := newTestScheduler(t)
 	defer cleanup()
@@ -45,7 +45,7 @@ func TestStopConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-// TestStopBeforeStart verifies Stop without Start neither panics nor blocks (TSI-2365).
+// TestStopBeforeStart verifies Stop without Start neither panics nor blocks.
 func TestStopBeforeStart(t *testing.T) {
 	s, cleanup := newTestScheduler(t)
 	defer cleanup()

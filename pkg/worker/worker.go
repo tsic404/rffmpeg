@@ -229,7 +229,7 @@ func (w *Worker) ID() string {
 
 // Register registers the worker with the server.
 // Performs initial registration and stores capabilities for later re-registration
-// after server restart (TSI-1737 recovery).
+// after server restart.
 func (w *Worker) Register(caps protocol.WorkerCapabilities) error {
 	return w.register(caps, w.totalJobsCompleted == 0 && len(w.activeJobs) == 0)
 }
@@ -256,7 +256,7 @@ func (w *Worker) register(caps protocol.WorkerCapabilities, firstRegistration bo
 
 	w.mu.Lock()
 	if firstRegistration {
-		// TSI-2365: reset the lifetime count only on FIRST registration.
+		// reset the lifetime count only on FIRST registration.
 		// On server-restart re-registrations totalJobsCompleted must survive:
 		// it feeds the server-side warmup/median sample pool — zeroing it on
 		// every re-registration would drop the worker out of slow-node
@@ -325,7 +325,7 @@ func (w *Worker) reregister() bool {
 // goroutine so a long-running, high-CPU ffmpeg job can never starve it: the
 // job-poll loop is the only path that blocks on job execution, and heartbeats
 // must keep flowing at heartbeatInterval regardless of ffmpeg's CPU demand
-// (TSI-2492 — a stalled heartbeat made the server mark the worker offline and
+// (a stalled heartbeat made the server mark the worker offline and
 // migrate its still-running jobs).
 func (w *Worker) Start(ctx context.Context) {
 	// Start cache background eviction
@@ -440,7 +440,7 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 
 // batcherCreateHook, when non-nil, receives every StderrBatcher created on
 // the cache-hit path of processJob. Nil in production; tests use it to
-// observe batcher lifecycle (TSI-2415 leak regression).
+// observe batcher lifecycle.
 var batcherCreateHook func(*StderrBatcher)
 
 // processJob processes a single job
@@ -498,7 +498,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	if len(job.Args) > 0 && job.Args[0] == "__rffmpeg_probe__" {
 		jobFailed = true // suppress counter increment in the deferred hook
 		// Probe jobs are not transcodes: counting them into completed_jobs
-		// floods the warmup window and skews the median sample pool (TSI-2365).
+		// floods the warmup window and skews the median sample pool.
 		w.processProbeJob(ctx, job)
 		return
 	}
@@ -507,18 +507,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	// The per-job timeout is a dedicated ffmpeg execution budget, not a
 	// wall-clock bound on the pre-execution pipeline. Download, duration
-	// probe, and encoder classification must NOT be charged against it: a
-	// short --timeout has to reach the ffmpeg execution path and be reported
-	// as TIMEOUT when ffmpeg itself exceeds the budget (TSI-2684). jobCtx
-	// therefore stays the cancellable worker context for pre-execution work;
-	// the timeout overlay is created fresh at the execution boundary below.
-	//
-	// Pre-execution phases keep their own, independent bounds rather than a
-	// shared per-job deadline: download is capped by the data-plane client
-	// timeout, duration probe and pixel-format check by the ffprobe executor
-	// timeout, and classification/rewrite are in-memory with no blocking I/O.
-	// The server scheduler's job_timeout and the CLI's client-side wait remain
-	// the overall safety net, so a stuck pre-execution phase still terminates.
+	// probe, and classification must NOT be charged against it: a short
+	// --timeout has to reach ffmpeg and surface as TIMEOUT only when ffmpeg
+	// itself exceeds the budget. Pre-execution phases keep their own bounds
+	// (data-plane client timeout, ffprobe executor timeout, in-memory work),
+	// with the scheduler's job_timeout and CLI wait as the overall safety net
+	// so a stuck pre-execution phase still terminates.
 	jobCtx := ctx
 	var execTimeout time.Duration
 	if job.Timeout != nil && *job.Timeout > 0 {
@@ -532,7 +526,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		// Validate direct paths: reject path traversal, resolve symlinks, and
 		// enforce the allow-list against the real path. The symlink resolution
 		// closes the bypass where a symlink inside an allowed prefix pointed at
-		// a path outside every prefix (TSI-2646).
+		// a path outside every prefix.
 		for _, path := range job.DirectPaths {
 			if pathutil.ContainsPathTraversal(path) {
 				jobFailed = true
@@ -556,9 +550,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// encoder the rewrite WILL select (not the requested one). auto_hw MUST
 	// be part of the key: a --auto-hw run may upgrade the encoder (e.g.
 	// libx264 -> h264_qsv), and that output must never be served to requests
-	// without --auto-hw (TSI-2352). The Check key must use the same encoder
+	// without --auto-hw. The Check key must use the same encoder
 	// basis as Put below — otherwise an auto-hw job caches under the rewritten
-	// encoder but checks under "" and can never hit (TSI-2430).
+	// encoder but checks under "" and can never hit.
 	cacheKey := GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW,
 		filepath.Ext(job.OutputFilename), w.rewriteAdapter.ResolveTargetEncoder(job.Args, job.AutoHW))
 	cached := false
@@ -575,7 +569,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 			// Stream the cache-hit notice through the job's stderr so CLI
 			// clients observe it, not only this worker process' own log
-			// (TSI-2349 precedent). Deferred Close guarantees the flush
+			// Deferred Close guarantees the flush
 			// timer is stopped on every exit path — including the early
 			// return below when MkdirAll fails — otherwise timedFlush
 			// re-arms itself forever and leaks the timer/goroutine.
@@ -606,7 +600,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				outputPath = filepath.Join(jobDir, outputFilename)
 			}
 
-			// Overwrite-policy guard (TSI-2964): a cache hit must never
+			// Overwrite-policy guard: a cache hit must never
 			// silently truncate a pre-existing output file. When the target
 			// already exists and the caller did not pass -y (or passed -n),
 			// degrade to a cache miss so the normal ffmpeg path applies native
@@ -669,15 +663,12 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	}
 
 	// Create job-specific temp directory. A re-dispatched job (worker-failure
-	// migration or server-restart recovery) re-enters here with a jobDir that
-	// still holds partial output left by its interrupted previous attempt; the
-	// deferred cleanupJobDir only ran on a graceful exit, so a crashed/aborted
-	// attempt leaves it behind. Remove it first so ffmpeg starts from a clean
-	// directory instead of refusing to overwrite the leftover ("Not overwriting
-	// - exiting" / "could not open output file"). The directory is job-private
-	// (tempDir/<jobID>/), so nothing here is user data that must be preserved —
-	// user-specified direct/shared-FS output paths live outside jobDir and are
-	// never touched.
+	// migration or server-restart recovery) re-enters here with a jobDir still
+	// holding partial output from its interrupted previous attempt (deferred
+	// cleanup only ran on a graceful exit). Remove it first so ffmpeg starts
+	// clean instead of refusing to overwrite the leftover ("Not overwriting -
+	// exiting"). The directory is job-private (tempDir/<jobID>/), so nothing
+	// here is user data — direct/shared-FS output paths live outside jobDir.
 	jobDir := filepath.Join(w.tempDir, job.ID)
 	// jobDir is derived from the server-supplied job.ID. Guard the removal
 	// scope before os.RemoveAll: an empty (or ".") ID collapses jobDir to the
@@ -706,7 +697,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Note: the job stays queued through the pre-execution pipeline below
 	// (download, probe, classification). The running/started_at transition is
 	// reported at the ffmpeg execution boundary so the server's started_at
-	// matches where the --timeout budget actually begins (TSI-2886).
+	// matches where the --timeout budget actually begins.
 
 	// Download input files (skip in direct mode)
 	inputPaths := make([]string, 0, len(job.InputFiles))
@@ -749,7 +740,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	}
 	// Validate the direct output path BEFORE computing outputPath and building
 	// args. A relative output used to be joined to jobDir and silently skipped
-	// the allow-list check; it is now rejected as non-absolute (TSI-2646).
+	// the allow-list check; it is now rejected as non-absolute.
 	if directMode && outputFilename != "-" && !pathutil.IsRemoteURL(outputFilename) {
 		// Defense in depth: traversal must be rejected independently of the
 		// allow-list so the check never depends on the path not existing.
@@ -778,22 +769,14 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		outputPath = filepath.Join(jobDir, outputFilename)
 	}
 
-	// Re-dispatch cleanup: a job migrated off a failed worker (retry
-	// count > 0) may point at a shared-FS output path where the previous worker
-	// left a truncated partial file. ffmpeg then refuses with "Not overwriting
-	// - exiting" and the self-heal chain breaks. Remove that stale output before
-	// the first execution here — the same idempotency RetryExecutor already
-	// applies between its attempts, but that path never runs for a migrated job
-	// whose initial ffmpeg invocation fails on the stale file. A genuinely fresh
-	// job (retry count 0) keeps native ffmpeg overwrite semantics.
-	//
-	// The overwrite policy still governs the removal: an explicit -n
-	// (OverwriteNever) is the user's "exists → fail" contract, so the file is
-	// left for ffmpeg to reject rather than silently re-transcoded and replaced.
-	// Default (OverwriteAsk) and -y (OverwriteForce) remove it; before doing so,
-	// size/mtime are logged so a valid-but-unreported output removed by this path
-	// stays auditable (the previous worker may have completed the encode and only
-	// crashed before reporting its terminal state).
+	// Re-dispatch cleanup: a job migrated off a failed worker (retry count > 0)
+	// may point at a shared-FS output path where the previous worker left a
+	// truncated partial file, so ffmpeg refuses with "Not overwriting - exiting"
+	// and the self-heal chain breaks. Remove that stale output before the first
+	// execution — RetryExecutor's between-attempt idempotency never runs for a
+	// migrated job whose initial invocation fails on the stale file. A fresh job
+	// (retry count 0) keeps native overwrite semantics. An explicit -n leaves
+	// the file for ffmpeg to reject; otherwise size/mtime are logged first.
 	if job.RetryCount > 0 && outputPath != "" && outputPath != "-" &&
 		ffmpegopts.OverwritePolicy(job.Args) != ffmpegopts.OverwriteNever {
 		if info, err := os.Stat(outputPath); err == nil {
@@ -830,7 +813,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	defer progressRouter.Reset()
 
 	// Seed the parser with the total media duration so percent/ETA are
-	// meaningful from the very first stats line (TSI-2425). ffmpeg's stderr
+	// meaningful from the very first stats line. ffmpeg's stderr
 	// header only carries a Duration: line when the input is seekable — for
 	// pipes and many network inputs it prints "Duration: N/A" and percent
 	// would stay -1 forever. Best-effort: probe failures leave the
@@ -861,7 +844,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 		// Emit the detailed audit chain line through the job's stderr
 		// batcher so it streams to CLI clients over the WebSocket stderr
-		// channel (TSI-2349). The shared audit notifier only writes to the
+		// channel. The shared audit notifier only writes to the
 		// worker process stderr, which CLI users never see, so the same
 		// formatted line is duplicated here onto the per-job stream.
 		// Format: [rffmpeg] INFO: Worker capabilities: <caps> | Requested: <orig> | Rewritten: <target> | Reason: <reason>
@@ -877,7 +860,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			}
 
 			// Record audit operation — a failed Record is logged (audit trail
-			// gaps must be visible), never silently discarded (TSI-2365).
+			// gaps must be visible), never silently discarded.
 			if w.auditRecorder != nil {
 				if err := w.auditRecorder.Record(audit.AuditOperation{
 					RequestID:           job.ID,
@@ -923,7 +906,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Streaming (stdout) output cannot be seeked by muxers like mp4/mov.
 	// Inject fragmented-output flags so the requested container still works
 	// instead of failing inside ffmpeg with "muxer does not support non
-	// seekable output" (TSI-2409). Runs after rewrite so the final args are
+	// seekable output". Runs after rewrite so the final args are
 	// what gets adjusted.
 	if job.StreamingOutput {
 		var note string
@@ -965,7 +948,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Mark the job running here, at the ffmpeg execution boundary, so the
 	// server's started_at matches where the --timeout budget actually begins.
 	// The pre-execution pipeline above keeps the job queued: a slow download
-	// or probe must not consume the client's --timeout wait window (TSI-2886).
+	// or probe must not consume the client's --timeout wait window.
 	if err := w.client.UpdateJob(job.ID, protocol.JobStatusRunning, 0, "", false); err != nil {
 		log.Printf("Failed to update job status to running: %v", err)
 		jobFailed = true
@@ -975,7 +958,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	// Reserve the per-job timeout budget for ffmpeg itself: the overlay is
 	// created here, not at job start, so the pre-execution pipeline above
-	// (download, probe, classification) can never consume it (TSI-2684).
+	// (download, probe, classification) can never consume it.
 	execCtx := jobCtx
 	var execCancel context.CancelFunc
 	if execTimeout > 0 {
@@ -1116,8 +1099,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// during the retry backoff interval (execCtx DeadlineExceeded with a
 			// non-timeout FinalResult — the loop breaks at the next ctx.Err()
 			// check before running again). Both mean the ffmpeg execution budget
-			// was exhausted and must be reported TIMEOUT, not FFMPEG_ERROR
-			// (TSI-2684).
+			// was exhausted and must be reported TIMEOUT, not FFMPEG_ERROR.
 			if retryResult.FinalResult.IsTimeout || execCtx.Err() == context.DeadlineExceeded {
 				timeoutResult := retryResult.FinalResult
 				if !timeoutResult.IsTimeout {
@@ -1189,7 +1171,7 @@ uploadOutput:
 	// terminal status and close its WebSocket before the bytes arrive, dropping
 	// the whole stream for short jobs. A send failure must abort the completion
 	// instead — the CLI would otherwise see a truncated stream with rc=0
-	// (TSI-2905). Mirrors StderrBatcher's FlushAndWait on the failure paths.
+	// Mirrors StderrBatcher's FlushAndWait on the failure paths.
 	if stdoutBatcher != nil {
 		if err := stdoutBatcher.FlushAndWait(); err != nil {
 			log.Printf("Job %s: failed to stream stdout to server: %v", job.ID, err)
@@ -1232,13 +1214,13 @@ func logTerminalReportError(jobID, action string, err error) {
 // never generic infrastructure text (see reportInfraFailure). The reported
 // Error is the concise classification summary, never the full stderr: the
 // complete ffmpeg log already reaches the CLI once via the live stderr stream,
-// so echoing it again in the terminal Error field duplicates it (TSI-2523).
+// so echoing it again in the terminal Error field duplicates it.
 func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached bool, flush ...func()) {
 	// Flush any pending stderr before reporting the terminal failure so the
 	// tail stderr reaches the server before the terminal status PATCH. On the
 	// fast-failure path the batcher timer may not have fired yet, and the
 	// deferred batcher.Close() would flush it only after this PATCH — letting
-	// CLI clients observe the terminal status before the tail stderr (TSI-2581).
+	// CLI clients observe the terminal status before the tail stderr.
 	for _, f := range flush {
 		if f != nil {
 			f()
@@ -1251,11 +1233,11 @@ func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached
 }
 
 // reportJobTimeout reports a timed-out job with the TIMEOUT classification
-// (TSI-2684). Shared by the initial-execution path and the retry-exhausted
+// Shared by the initial-execution path and the retry-exhausted
 // path so a timeout landing inside ExecuteWithRetry is classified identically
 // to one on the first attempt — otherwise the exhausted branch's isTimeout=false
 // would misreport it as FFMPEG_ERROR. Flush callbacks run before the terminal
-// PATCH so pending tail stderr reaches the server first (TSI-2581, mirroring
+// PATCH so pending tail stderr reaches the server first (mirroring
 // reportFailure); a nil callback is a safe no-op.
 func (w *Worker) reportJobTimeout(jobID string, result ExecResult, flush ...func()) {
 	log.Printf("Job %s timed out", jobID)
@@ -1278,7 +1260,7 @@ func (w *Worker) reportJobTimeout(jobID string, result ExecResult, flush ...func
 // outside ffmpeg execution (job directory creation, server communication,
 // output upload, probe plumbing). Pattern-matching this text would misclassify
 // it as INPUT_UNREACHABLE etc., so it uses the dedicated INFRA bucket —
-// FFMPEG_ERROR is reserved for actual ffmpeg execution failures (TSI-2365).
+// FFMPEG_ERROR is reserved for actual ffmpeg execution failures.
 func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
 	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, string(protocol.FailureInfra), errMsg); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
@@ -1296,7 +1278,7 @@ func (w *Worker) reportInputDownloadFailure(jobID string, fileID string, downloa
 	// is genuinely unreachable. Its raw error ("dial tcp: lookup … : no such
 	// host") is not user-friendly, so surface a clear message naming the input.
 	// Size-limit, HTTP-status, and local disk errors carry their own actionable
-	// messages and must pass through unchanged (TSI-3082).
+	// messages and must pass through unchanged.
 	userMsg := errMsg
 	if failureType == protocol.FailureInputUnreachable {
 		var transportErr *transportError
@@ -1311,7 +1293,7 @@ func (w *Worker) reportInputDownloadFailure(jobID string, fileID string, downloa
 
 // reportFailureWithType reports a job failure with an explicit failure type
 // and details. The optional flush callbacks run before the terminal PATCH so
-// any pending tail stderr reaches the server first (TSI-2594); a nil callback
+// any pending tail stderr reaches the server first; a nil callback
 // is a safe no-op for paths where no stderr batcher exists yet.
 func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failureType, failureDetails string, flush ...func()) {
 	for _, f := range flush {
@@ -1324,18 +1306,13 @@ func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failu
 	}
 }
 
-// probeInputDurationUs returns the total duration of the first local input
-// file that yields one via ffprobe, in microseconds, or 0 when none can be
-// determined (missing tool, unreadable inputs, non-local sources). Used to
-// seed the progress parser so percent/ETA work even when ffmpeg's own stderr
-// header reports "Duration: N/A" (pipes, some network inputs) — TSI-2425.
-//
-// Multi-input jobs (e.g. concat) skip over inputs that fail to probe or
-// carry no duration rather than giving up: a later input may still yield a
-// usable figure, and any estimate is better than percent staying -1 for the
-// whole job. For concat the result is the first probed segment's duration,
-// an intentional under-estimate — progress reaches 100% early instead of
-// never appearing at all.
+// probeInputDurationUs returns the duration of the first local input that
+// yields one via ffprobe, in microseconds, or 0 when none can be determined
+// (missing tool, unreadable, non-local). Used to seed the progress parser so
+// percent/ETA work even when ffmpeg reports "Duration: N/A" (pipes, some
+// network inputs). Inputs that fail to probe are skipped rather than
+// aborting; for concat the first segment's duration is an intentional
+// under-estimate so progress appears early instead of never at all.
 func (w *Worker) probeInputDurationUs(ctx context.Context, inputPaths []string) int64 {
 	for _, p := range inputPaths {
 		if p == "" || strings.HasPrefix(p, "-") {
@@ -1388,7 +1365,7 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 	// Resolve the probe input. Shared-FS direct paths (job.DirectPaths) are
 	// read in place after a traversal/stat check — they must never be
 	// downloaded over HTTP, which would send the absolute path to
-	// GET /api/v1/files/<path> and get rejected by ValidateFileID (TSI-2520).
+	// GET /api/v1/files/<path> and get rejected by ValidateFileID.
 	directMode := len(job.DirectPaths) > 0
 	var inputPath string
 	if directMode {
@@ -1576,7 +1553,7 @@ type directPathViolation struct {
 // validateDirectInputPath resolves symlinks in path and checks it against the
 // allow-list. It must be called only after pathutil.ContainsPathTraversal has
 // cleared the path. The resolved real path is checked, so a symlink inside an
-// allowed prefix pointing outside every prefix is rejected (TSI-2646).
+// allowed prefix pointing outside every prefix is rejected.
 func (w *Worker) validateDirectInputPath(path string) *directPathViolation {
 	if !filepath.IsAbs(path) {
 		return &directPathViolation{
@@ -1653,15 +1630,13 @@ var (
 	errOutputParentNotExist = errors.New("output path parent directory does not exist")
 )
 
-// resolveOutputRealPath returns the symlink-free real path for an output path.
-// An existing final component (file, symlink, etc.) is resolved in full; a
-// not-yet-existing file has its parent directory resolved and the base name
-// re-joined, so a symlinked parent is checked against the real target.
-//
-// The two NotExist outcomes are distinguished with sentinel errors so the
-// caller can report the actual cause: errOutputBrokenSymlink means path itself
-// exists but is a symlink whose target is missing; errOutputParentNotExist
-// means path's parent directory does not exist.
+// resolveOutputRealPath returns the symlink-free real path for an output
+// path: an existing final component is resolved in full, while a
+// not-yet-existing file has its parent resolved and the base name re-joined
+// so a symlinked parent is checked against the real target. The two NotExist
+// outcomes are distinguished with sentinel errors so the caller reports the
+// actual cause: errOutputBrokenSymlink means the path is a symlink to a
+// missing target; errOutputParentNotExist means its parent is missing.
 func resolveOutputRealPath(path string) (string, error) {
 	if _, err := os.Lstat(path); err == nil {
 		resolved, err := filepath.EvalSymlinks(path)
@@ -1733,7 +1708,7 @@ func ffmpegStderrIndicatesCriticalError(stderr string) bool {
 		"encoder not found",
 		// Output-open failures: ffmpeg n9 exits 0 when it cannot open or
 		// initialize the output muxer (bad path, missing directory, unknown
-		// container), so stderr is the only signal (TSI-2472).
+		// container), so stderr is the only signal.
 		"error opening output file",
 		"error opening output files",
 		"error initializing the muxer",

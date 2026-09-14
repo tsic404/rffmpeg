@@ -10,7 +10,7 @@ import (
 
 // TestBuildWorkerSummariesAndOverrides_Homogeneous verifies that when every
 // worker shares the executing worker's encoder list, no overrides are emitted
-// (TSI-3048: a homogeneous cluster serializes a single shared list).
+// (a homogeneous cluster serializes a single shared list).
 func TestBuildWorkerSummariesAndOverrides_Homogeneous(t *testing.T) {
 	shared := []string{"libx264", "h264_nvenc"}
 	allWorkers := []*db.Worker{

@@ -38,7 +38,7 @@ func CheckQSVHealth(renderDevicePath string) (healthy bool, errMsg string) {
 	}
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	// Pdeathsig reaps ffmpeg if the worker dies while a QSV health probe
-	// is in flight (TSI-2476).
+	// is in flight.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid:   true,
 		Pdeathsig: syscall.SIGKILL,

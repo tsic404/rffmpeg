@@ -395,7 +395,7 @@ func TestProcessJob_DirectOutputOutsideAllowedPrefixFails(t *testing.T) {
 	}
 }
 
-// TestProcessJob_DirectOutputFileURLRejected proves the TSI-2646 output-side
+// TestProcessJob_DirectOutputFileURLRejected proves the output-side
 // fix: a direct-mode "file://" output is a local ffmpeg protocol path, not a
 // remote URL, so it must fall through to direct-output validation and be
 // rejected as non-absolute instead of being passed to ffmpeg verbatim. Before
@@ -480,7 +480,7 @@ func TestProcessJob_DirectOutputFileURLRejected(t *testing.T) {
 	}
 }
 
-// TestProcessProbeJob_DirectInputInfixURLRejected proves the TSI-2646 fix on
+// TestProcessProbeJob_DirectInputInfixURLRejected proves the fix on
 // the input side: an absolute shared-FS path containing "://" mid-string must
 // be validated as a local path (and fail closed) instead of being mistaken for
 // a remote URL and fetched over HTTP. downloadCount == 0 is the load-bearing
@@ -561,7 +561,7 @@ func TestProcessProbeJob_DirectInputInfixURLRejected(t *testing.T) {
 	}
 }
 
-// TestProcessJob_DirectOutputInfixURLRejected proves the TSI-2646 fix on the
+// TestProcessJob_DirectOutputInfixURLRejected proves the fix on the
 // output side: an absolute shared-FS output path containing "://" mid-string
 // must be validated as a local path (and fail closed) instead of being passed
 // straight through to ffmpeg as a remote URL. The error must mention the
@@ -645,7 +645,7 @@ func TestProcessJob_DirectOutputInfixURLRejected(t *testing.T) {
 	}
 }
 
-// TestProcessJob_DirectOutputTraversalRejected proves the TSI-2646 defense in
+// TestProcessJob_DirectOutputTraversalRejected proves the defense in
 // depth: an output path containing a ".." component must be rejected before
 // the allow-list check, so the check never depends on the path not existing.
 func TestProcessJob_DirectOutputTraversalRejected(t *testing.T) {

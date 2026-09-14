@@ -295,7 +295,7 @@ func TestSilentNotifier(t *testing.T) {
 
 // syncBuffer is a thread-safe io.Writer for concurrency tests: the notifier
 // serializes its internal state but deliberately does not serialize writes
-// to the caller-supplied output (TSI-2365).
+// to the caller-supplied output.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

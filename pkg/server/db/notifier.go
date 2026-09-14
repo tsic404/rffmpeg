@@ -4,7 +4,7 @@ import "sync"
 
 // JobNotifier is a per-job, in-process terminal-status notifier. It lets a
 // waiter (e.g. the probe handler) block on a job reaching a terminal state
-// instead of polling the database on a fixed interval (TSI-2520).
+// instead of polling the database on a fixed interval.
 //
 // Notify is non-blocking: each subscriber holds a buffered channel of size 1,
 // so a Notify for a subscriber that is not currently blocked is collapsed to

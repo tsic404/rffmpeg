@@ -33,7 +33,7 @@ const (
 	// WSPingInterval bounds how often the client pings the server. It must
 	// stay well below WSReadTimeout (and below the server's 60s read
 	// deadline) so a healthy idle connection is never reaped by either
-	// side's deadline (TSI-2414).
+	// side's deadline.
 	WSPingInterval = 25 * time.Second
 
 	// wsMaxFrameLineBytes is the maximum size of a single JSON WSMessage
@@ -47,7 +47,7 @@ const (
 // Overridable keepalive timings for regression tests; production values
 // mirror the exported consts above. Stored atomically: tests shrink them
 // while a keepalive pinger goroutine from a prior Listen may still be
-// running and reading them (TSI-2804).
+// running and reading them.
 var (
 	wsReadTimeout  atomic.Int64 // nanoseconds
 	wsPingInterval atomic.Int64 // nanoseconds
@@ -86,7 +86,7 @@ type WSClient struct {
 	gapFound   bool // set once a gap is detected; sticky for the session
 	// sawDataAfterRestart records whether any data-bearing (stderr/stdout)
 	// message arrived on the current connection. A seq==1 restart observed
-	// before any post-reconnect data is a benign renumbering (TSI-2382); the
+	// before any post-reconnect data is a benign renumbering; the
 	// same reset after real data flowed proves messages were lost. Reset to
 	// false in connect() on every successful (re)connect.
 	sawDataAfterRestart bool
@@ -109,7 +109,7 @@ func WithOnStderr(handler func(chunk string)) WSClientOption {
 
 // WithOnStdout sets the stdout handler (streaming output mode).
 //
-// BREAKING (TSI-2355): the handler now receives decoded raw bytes. The
+// BREAKING: the handler now receives decoded raw bytes. The
 // WSMsgStdout Payload on the wire changed from raw text to standard base64 —
 // required because JSON text frames corrupt invalid UTF-8 to U+FFFD — so CLIs
 // built against the old protocol cannot parse stdout messages from new servers.
@@ -128,7 +128,7 @@ func WithOnStatus(handler func(status protocol.JobStatus, exitCode int, err stri
 
 // WithOnProgress sets the progress handler. The handler receives the full
 // WSProgressPayload — percent, speed, ETA and media timestamps — so callers
-// can render an ETA line instead of a bare percentage (TSI-2425).
+// can render an ETA line instead of a bare percentage.
 func WithOnProgress(handler func(p protocol.WSProgressPayload)) WSClientOption {
 	return func(c *WSClient) {
 		c.onProgress = handler
@@ -223,14 +223,14 @@ func (c *WSClient) connect(ctx context.Context) error {
 	// A fresh connection starts a new observation window: whether data has
 	// flowed "since the last reconnect" must be re-evaluated from zero, or
 	// the flag carried over from the dropped connection makes every seq==1
-	// reset look like proven loss (TSI-2382 review blocker #1).
+	// reset look like proven loss.
 	c.sawDataAfterRestart = false
 
 	// A pong from the server proves the connection is alive: push the read
 	// deadline out again. Without this, a quiet period (long transcode with
 	// no stderr/stdout output) longer than the deadline reaps an idle but
 	// healthy connection, and broadcasts sent during the forced reconnect
-	// window are lost — surfacing as a spurious seq gap (TSI-2414).
+	// window are lost — surfacing as a spurious seq gap.
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(time.Duration(wsReadTimeout.Load())))
 		return nil
@@ -309,8 +309,7 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 // retryBudget returns the total wall-clock time spent on maxRetries WebSocket
 // reconnect attempts under the exponential-backoff schedule (1s, 2s, 4s, 8s,
 // 16s, then 30s cap). The HTTP status-poll fallback reuses the same budget so
-// both retry paths give up after roughly the same amount of contact loss
-// (TSI-2697).
+// both retry paths give up after roughly the same amount of contact loss.
 func retryBudget(maxRetries int) time.Duration {
 	if maxRetries <= 0 {
 		return 0
@@ -330,21 +329,14 @@ func retryBudget(maxRetries int) time.Duration {
 // Listen starts listening for WebSocket messages
 func (c *WSClient) Listen(ctx context.Context) error {
 
-	// Client-side keepalive (TSI-2414): periodically ping the server; the
-	// server's pong handler pushes its read deadline out, and our pong
-	// handler (installed in connect) pushes ours out on every reply. A
-	// quiet period — a long transcode with no stderr/stdout traffic — used
-	// to trip the read deadline and force a reconnect whose missed
-	// broadcasts surfaced downstream as a spurious seq gap.
-	//
-	// The pinger is a dedicated goroutine rather than a select arm: the
-	// loop body blocks in ReadMessage for up to the read deadline, which
-	// can exceed the ping interval — a select arm would starve. It is
-	// deliberately NOT joined on return: a graceful server close (1000)
-	// must return promptly while the pinger may still be inside its
-	// WSWriteTimeout-bounded write. Its lifetime is bounded by ctx/done
-	// and by conn.Close() (called by Close() and on ping failure), so it
-	// never outlives the session meaningfully.
+	// Client-side keepalive: periodically ping the server; the server's pong
+	// handler pushes its read deadline out, and ours (installed in connect)
+	// pushes ours out on every reply. A quiet period (a long transcode with no
+	// traffic) used to trip the read deadline and force a reconnect whose missed
+	// broadcasts surfaced as a spurious seq gap. The pinger is a dedicated
+	// goroutine, not a select arm (the loop blocks in ReadMessage past the ping
+	// interval), and is deliberately NOT joined on return: a graceful close must
+	// return promptly. Its lifetime is bounded by ctx and conn.Close().
 	go func() {
 		ticker := time.NewTicker(time.Duration(wsPingInterval.Load()))
 		defer ticker.Stop()
@@ -426,16 +418,13 @@ func (c *WSClient) Listen(ctx context.Context) error {
 			continue
 		}
 
-		// Handle multiple messages (batched). The buffer MUST be grown
-		// beyond bufio's default 64KB token limit: a single WSMsgStdout
-		// message carries up to 10×32KB of base64-encoded media data
-		// (~430KB JSON) when the worker's StdoutBatcher flushes, and the
-		// hub's WritePump may batch several messages into one frame.
-		// With the default limit Scanner aborts with ErrTooLong — silently,
-		// since the error was never checked — dropping every remaining
-		// line in the frame. The next delivered message then trips the gap
-		// detector: "expected seq N, got N+1" on short streaming jobs even
-		// though nothing was lost on the wire.
+		// Handle multiple messages (batched). The buffer MUST be grown beyond
+		// bufio's default 64KB token limit: a single WSMsgStdout carries up to
+		// 10×32KB of base64 data (~430KB JSON) when StdoutBatcher flushes, and
+		// WritePump may batch several messages into one frame. At the default
+		// limit Scanner aborts with ErrTooLong — silently, since it was never
+		// checked — dropping every remaining line, so the next message trips the
+		// gap detector ("expected seq N, got N+1") even though nothing was lost.
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
 		scanner.Buffer(make([]byte, 64*1024), wsMaxFrameLineBytes)
 		for scanner.Scan() {
@@ -468,7 +457,7 @@ func (c *WSClient) handleMessage(msg protocol.WSMessage) {
 		// deletes the counter on its terminal-event broadcast, so anything
 		// still arriving afterwards (trailing complete, stderr drained in the
 		// same worker report) may legitimately carry fresh numbering. That
-		// reset is hub bookkeeping, not lost data (TSI-2382).
+		// reset is hub bookkeeping, not lost data.
 		if msg.Type == protocol.WSMsgStatus {
 			if payload, ok := msg.Data.(map[string]interface{}); ok {
 				if st, _ := payload["status"].(string); protocol.IsTerminalStatus(protocol.JobStatus(st)) {
@@ -496,20 +485,14 @@ func (c *WSClient) handleMessage(msg protocol.WSMessage) {
 			c.lastSeq = msg.Seq
 			c.gapFound = true
 		case msg.Seq == 1 && c.lastSeq > 1:
-			// First message after a reconnect with numbering reset to 1 (TSI-2382):
-			// the hub lost its counter (server restart/crash), but no sequenced
-			// data has arrived on this connection yet — nothing proves messages
-			// were lost between lastSeq and here. The job's terminal broadcasts
-			// may have drained during the outage; adopt the new base instead of
-			// false-flagging a gap.
-			//
-			// Adopting is a one-time amnesty for this reconnection: lastSeq
-			// becomes 1, so subsequent seq 2,3,... are contiguous by
-			// construction and the msg.Seq > lastSeq+1 branch cannot fire on
-			// this connection until another reset is observed. That is the
-			// accepted cost of not being able to distinguish "renumbered, all
-			// data intact" from "renumbered, hole at the seam" without server
-			// cooperation.
+			// First message after a reconnect with numbering reset to 1: the
+			// hub lost its counter (server restart/crash), but no sequenced data
+			// has arrived on this connection yet — nothing proves a message was
+			// lost between lastSeq and here, so adopt the new base instead of
+			// false-flagging a gap. Adopting is a one-time amnesty: lastSeq
+			// becomes 1 and seq 2,3,... are contiguous by construction, so the
+			// gap branch cannot fire until another reset. This accepts not
+			// distinguishing "renumbered, intact" from "hole at the seam".
 			log.Printf("WebSocket stream renumbered to 1 after reconnect for job %s (had seq %d): server likely restarted — adopting new base",
 				c.jobID, c.lastSeq)
 			c.lastSeq = msg.Seq

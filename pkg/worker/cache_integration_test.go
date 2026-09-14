@@ -394,7 +394,7 @@ func TestCacheIntegration_OrderSensitivity(t *testing.T) {
 }
 
 // TestCacheIntegration_AutoHWMissThenHit verifies the auto-hw cache key
-// consistency fix (TSI-2430): with rewrite enabled and a hardware encoder
+// consistency fix: with rewrite enabled and a hardware encoder
 // available, an --auto-hw job rewrites libx264 -> h264_nvenc and caches under
 // the REWRITTEN encoder key. A second identical submission must HIT instead
 // of missing again because Check used a different (encoder="") key.

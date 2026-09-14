@@ -482,7 +482,7 @@ func TestRewriteAdapter_ParseEncoderParamsFromArgs(t *testing.T) {
 
 // TestRewriteAdapter_NonEncoderParamsPreserved verifies that non-encoder
 // parameters (like -preset, -movflags) survive the rewrite pipeline.
-// Regression test for TSI-2331: -preset/-movflags were silently dropped when
+// Regression test for: -preset/-movflags were silently dropped when
 // the rewrite engine re-emitted args, even though the DB stored them correctly.
 func TestRewriteAdapter_NonEncoderParamsPreserved(t *testing.T) {
 	adapter := NewRewriteAdapter()
@@ -543,7 +543,7 @@ func TestRewriteAdapter_NonEncoderParamsPreserved(t *testing.T) {
 	}
 }
 
-// TestRewriteAdapter_AutoHWPresetCompatibility covers TSI-2781 scenario 5a:
+// TestRewriteAdapter_AutoHWPresetCompatibility covers scenario 5a:
 // when the worker's preferred encoder is a hardware encoder that only supports
 // a subset of x264 preset names (h264_qsv rejects "ultrafast"), an
 // auto-selected hardware upgrade must translate the preset to a supported

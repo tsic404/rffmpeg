@@ -30,7 +30,7 @@ func (s *seqPersistStore) DeleteWSJobSeq(jobID string) error {
 	return nil
 }
 
-// TestHub_SeqPersistsAcrossRestart is the TSI-2379 regression test: after a
+// TestHub_SeqPersistsAcrossRestart is the regression test: after a
 // server restart (fresh Hub, same store), numbering must continue from the
 // persisted counter. Before the fix a restarted hub renumbered from 1 and
 // reconnecting streaming clients flagged a spurious gap — failing the CLI

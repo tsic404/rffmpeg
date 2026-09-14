@@ -10,7 +10,7 @@ import (
 
 // TestSplitProgressLinesCarriageReturns verifies that ffmpeg's in-place
 // rewritten -stats line (updates separated by \r) yields one token per
-// update instead of a single token at the next \n. Regression for TSI-2425:
+// update instead of a single token at the next \n. Regression for:
 // the default ScanLines starved ProgressRouter so server-side progress
 // pushes only fired once per job.
 func TestSplitProgressLinesCarriageReturns(t *testing.T) {

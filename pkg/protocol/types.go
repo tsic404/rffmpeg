@@ -51,20 +51,18 @@ type JobInfo struct {
 	Cached          bool           `json:"cached,omitempty"`  // Whether the result was served from the worker cache
 	FailureType     string         `json:"failure_type,omitempty"`
 	FailureDetails  string         `json:"failure_details,omitempty"`
-	Retryable       bool           `json:"retryable"`             // Whether the failure type is worth retrying (TSI-2958)
+	Retryable       bool           `json:"retryable"`             // Whether the failure type is worth retrying
 	RetryCount      int            `json:"retry_count,omitempty"` // Times migrated for worker failure; >0 marks a re-dispatch
 	Timeout         *time.Duration `json:"timeout,omitempty"`     // Per-job ffmpeg execution budget (nil = worker default)
 	// NoWorkerDeadline is the server-computed wall-clock time at which a
-	// still-pending job will be failed as NO_WORKER_AVAILABLE by the
-	// starvation sweep (created_at + no_worker_job_timeout +
-	// timeout_check_interval). Nil for non-pending jobs, when the sweep is
-	// disabled, or when at least one live schedulable worker exists (a busy
-	// worker keeps the job waiting — the sweep's live-worker guard
-	// short-circuits). The CLI uses it to size its own wait window so a
-	// client-side timeout can never fire before the server verdict is
-	// observable.
+	// still-pending job will be failed as NO_WORKER_AVAILABLE by the starvation
+	// sweep (created_at + no_worker_job_timeout + timeout_check_interval). Nil
+	// for non-pending jobs, when the sweep is disabled, or when a live
+	// schedulable worker exists (the sweep's live-worker guard short-circuits).
+	// The CLI uses it to size its wait window so a client-side timeout can
+	// never fire before the server verdict is observable.
 	NoWorkerDeadline *time.Time `json:"no_worker_deadline,omitempty"`
-	DirectPaths      []string   `json:"direct_paths,omitempty"` // Direct output paths for pass-through mode (TSI-807)
+	DirectPaths      []string   `json:"direct_paths,omitempty"` // Direct output paths for pass-through mode
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 	StartedAt        *time.Time `json:"started_at,omitempty"`
@@ -303,7 +301,7 @@ type RateLimitResponse struct {
 	RetryIn int       `json:"retry_in"` // Suggested retry delay in seconds
 }
 
-// --- Failure Types (TSI-757) ---
+// --- Failure Types ---
 
 type FailureType string
 
@@ -339,7 +337,7 @@ func (f FailureType) Retryable() bool {
 	}
 }
 
-// --- Probe Types (TSI-754) ---
+// --- Probe Types ---
 
 type ProbeRequest struct {
 	Input string `json:"input"`
@@ -356,8 +354,7 @@ type ProbeResponse struct {
 type RffmpegMeta struct {
 	// WorkerEncoders is the shared encoder list of the worker that executed the
 	// probe, emitted once. Workers whose list differs appear sparsely in
-	// WorkerEncoderOverrides instead of repeating the full list per worker
-	// (TSI-3048).
+	// WorkerEncoderOverrides instead of repeating the full list per worker.
 	WorkerEncoders []string `json:"worker_encoders,omitempty"`
 	// WorkerEncoderOverrides maps only workers whose encoder list differs from
 	// the shared WorkerEncoders list. A homogeneous cluster emits no overrides.
@@ -368,8 +365,7 @@ type RffmpegMeta struct {
 
 // WorkerSummary is a lightweight worker representation for the probe _rffmpeg
 // response. It carries only identifying/lightweight fields; encoders live in
-// RffmpegMeta.WorkerEncoders (shared) plus WorkerEncoderOverrides (diffs)
-// (TSI-3048).
+// RffmpegMeta.WorkerEncoders (shared) plus WorkerEncoderOverrides (diffs).
 type WorkerSummary struct {
 	ID            string `json:"id"`
 	Name          string `json:"name,omitempty"`
@@ -383,13 +379,13 @@ type EncoderSuggestion struct {
 	Reason             string `json:"reason"`
 }
 
-// --- Worker State (TSI-756) ---
+// --- Worker State ---
 
 type WorkerState struct {
 	WorkerID        string    `json:"worker_id"`
 	Status          string    `json:"status"` // online / offline / degraded / busy
 	GPUMemUsedMB    int       `json:"gpu_mem_used_mb,omitempty"`
-	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPU metrics reflect a fresh sample from any source (TSI-2365/TSI-2466)
+	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPU metrics reflect a fresh sample from any source
 	GPUUtilPct      float64   `json:"gpu_util_percent,omitempty"`
 	ActiveJobs      []string  `json:"active_jobs,omitempty"`
 	ThroughputFPS   float64   `json:"throughput_fps,omitempty"`

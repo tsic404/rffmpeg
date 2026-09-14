@@ -367,7 +367,7 @@ func TestMigrateJobsFromWorker(t *testing.T) {
 	_ = db.AssignJobToWorker(job2.ID, "worker-1")
 	_ = db.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
-	// Backdate job1's created_at so the TSI-2597 refresh is observable:
+	// Backdate job1's created_at so the refresh is observable:
 	// MigrateJobsFromWorker is the same re-queue = re-submit semantic, so the
 	// starvation/NoWorkerDeadline clock must restart from migration moment.
 	migrationBackdated := time.Now().Add(-1 * time.Hour)
@@ -562,7 +562,7 @@ func TestGetJobRetryCount(t *testing.T) {
 	}
 
 	// A timeout-driven requeue is a separate budget: it must NOT increment the
-	// worker-failure migration count (TSI-2744). Otherwise a job rescheduled by
+	// worker-failure migration count. Otherwise a job rescheduled by
 	// the scheduler's MaxTimeoutRetries budget would burn MaxRetryCount.
 	_, err = db.CreateMigrationEvent("worker-2", "worker-2", "job_timeout", 2, []string{jobID}, 1)
 	if err != nil {
@@ -636,7 +636,7 @@ func TestRecordJobTimeoutMigration(t *testing.T) {
 
 	// Success: a running job is rescheduled, and the migration event + its
 	// per-job redistribution placeholder are written atomically. The event's
-	// worker_name is resolved from the workers table (TSI-3029), matching the
+	// worker_name is resolved from the workers table, matching the
 	// heartbeat_timeout events written by the health monitor.
 	if _, err := db.CreateWorker("worker-1", "gpu-worker-1", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
@@ -823,7 +823,7 @@ func TestResetJobToPending(t *testing.T) {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
-	// Backdate created_at so the refresh (TSI-2597) is observable: after a
+	// Backdate created_at so the refresh is observable: after a
 	// failover reset the starvation/NoWorkerDeadline clock must restart from
 	// the migration moment, not the original submission.
 	backdated := time.Now().Add(-1 * time.Hour)
@@ -866,7 +866,7 @@ func TestRescheduleJobRefreshesCreatedAt(t *testing.T) {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
-	// Backdate created_at so the refresh (TSI-2597) is observable: a timeout
+	// Backdate created_at so the refresh is observable: a timeout
 	// requeue is a re-submit, so the starvation/NoWorkerDeadline clock must
 	// restart from the requeue moment, not the original submission.
 	backdated := time.Now().Add(-1 * time.Hour)
@@ -909,7 +909,7 @@ func TestResetJobToPendingNotFound(t *testing.T) {
 }
 
 // TestMigrationAddsCachedColumn verifies that opening a database created
-// without the cached column (pre-TSI-2519 schema) adds it via the ALTER
+// without the cached column (legacy schema) adds it via the ALTER
 // migration. The cache-hit persistence depends on this column existing on
 // upgrade paths, not only on freshly created databases.
 func TestMigrationAddsCachedColumn(t *testing.T) {
@@ -917,7 +917,7 @@ func TestMigrationAddsCachedColumn(t *testing.T) {
 	dbPath := filepath.Join(tmp, "legacy.db")
 
 	// Build a complete database, then remove cached to simulate the
-	// pre-TSI-2519 jobs schema (no cached column) and reopen through New so
+	// legacy jobs schema (no cached column) and reopen through New so
 	// the ALTER migration re-adds it.
 	full, err := New(dbPath)
 	if err != nil {
@@ -955,7 +955,7 @@ func TestMigrationAddsCachedColumn(t *testing.T) {
 	}
 }
 
-// TestMigrationConvertsLegacyTimeoutDeadline pins the TSI-2886 timeout column
+// TestMigrationConvertsLegacyTimeoutDeadline pins the timeout column
 // migration: a legacy absolute-deadline timeout (RFC3339 text) on an in-flight
 // job is converted to its remaining nanosecond budget; expired and terminal
 // rows are dropped; a NULL timeout stays NULL.
@@ -975,7 +975,7 @@ func TestMigrationConvertsLegacyTimeoutDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open raw db: %v", err)
 	}
-	// Age the timeout column back to DATETIME (the pre-TSI-2886 type) so the
+	// Age the timeout column back to DATETIME (the legacy type) so the
 	// rename-and-convert migration is exercised on a realistic database.
 	if _, err := raw.Exec(`ALTER TABLE jobs DROP COLUMN timeout`); err != nil {
 		raw.Close()
@@ -1056,7 +1056,7 @@ func TestMigrationConvertsLegacyTimeoutDeadline(t *testing.T) {
 	}
 }
 
-// TestMigrationRelabelsEncoderUnsupportedNoWorker locks the TSI-2930 data
+// TestMigrationRelabelsEncoderUnsupportedNoWorker locks the data
 // correction: historical submit-time rejections persisted as
 // ENCODER_UNSUPPORTED with a NULL worker_id (before ENCODER_UNAVAILABLE
 // existed) are re-labeled ENCODER_UNAVAILABLE, while runtime
@@ -1114,7 +1114,7 @@ func TestMigrationRelabelsEncoderUnsupportedNoWorker(t *testing.T) {
 	}
 }
 
-// TestCachedFlagPersistedOnTerminalUpdate guards the TSI-2519 DB contract:
+// TestCachedFlagPersistedOnTerminalUpdate guards the DB contract:
 // a terminal completion recorded with the cached flag returns Cached=true
 // from GetJob; a non-cached completion stays false; non-terminal updates do
 // not set it.
@@ -1176,7 +1176,7 @@ func TestCachedFlagPersistedOnTerminalUpdate(t *testing.T) {
 		t.Errorf("expected Cached=true after unguarded cache-hit completion, got false")
 	}
 
-	// TSI-2519 review: cached is only meaningful for completed results.
+	// cached is only meaningful for completed results.
 	// A failed/cancelled/timeout report with cached=true must persist false,
 	// since PATCH /api/v1/jobs/{id} is public and clients could otherwise
 	// fabricate cache hits for non-completed outcomes.

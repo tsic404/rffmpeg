@@ -29,7 +29,7 @@ func TestContainsPathTraversal(t *testing.T) {
 	}
 }
 
-// TestIsRemoteURL locks the TSI-2646 fix: URL detection must anchor the scheme
+// TestIsRemoteURL locks the fix: URL detection must anchor the scheme
 // at the start of the string AND exclude the local "file" scheme. A "://"
 // appearing mid-string is part of a local path component, not a remote URL, so
 // it must never bypass the shared-FS allow-list validation; a leading "file://"

@@ -347,7 +347,7 @@ func TestMerge(t *testing.T) {
 }
 
 func TestMerge_PreservesFileAutoDetectAndManualWhenEnvUnset(t *testing.T) {
-	// Regression test for TSI-2640: a config file's false auto-detect flags and
+	// Regression test: a config file's false auto-detect flags and
 	// manual overrides must survive a merge against LoadFromEnv defaults when
 	// RFFMPEG_AUTO_DETECT_* are not set.
 	fileConfig := &Config{
@@ -383,7 +383,7 @@ func TestMerge_PreservesFileAutoDetectAndManualWhenEnvUnset(t *testing.T) {
 
 func TestMerge_EnvOverridesFileAutoDetect(t *testing.T) {
 	// An explicitly set env var must override the file value in both
-	// directions, and parsing must be case-insensitive (TSI-2662).
+	// directions, and parsing must be case-insensitive.
 	fileConfig := &Config{
 		AutoDetectGPU:    false,
 		AutoDetectCodecs: true,
@@ -408,7 +408,7 @@ func TestMerge_EnvOverridesFileAutoDetect(t *testing.T) {
 
 func TestMerge_InvalidEnvBoolKeepsFileValue(t *testing.T) {
 	// A non-empty but unrecognized env boolean must not count as an explicit
-	// override; the file value survives (TSI-2662).
+	// override; the file value survives.
 	fileConfig := &Config{
 		AutoDetectGPU:    false,
 		AutoDetectCodecs: true,
@@ -468,7 +468,7 @@ func TestLoadFromEnv_AutoDetectSymmetric(t *testing.T) {
 }
 
 func TestLoadFromEnv_BoolSymmetric(t *testing.T) {
-	// TSI-2731: the three legacy boolean env vars now follow the same
+	// the three legacy boolean env vars now follow the same
 	// symmetric parseBoolEnv contract as the auto-detect flags — only a
 	// recognized boolean counts as an explicit set (written to setKeys).
 	// Unrecognized values neither flip the flag nor override a file value,
@@ -524,7 +524,7 @@ func TestLoadFromEnv_BoolSymmetric(t *testing.T) {
 
 func TestMerge_BoolEnvOverridesFileSymmetric(t *testing.T) {
 	// A recognized boolean must override the file value in both directions
-	// (TSI-2731): true -> false and false -> true.
+	// true -> false and false -> true.
 	fileConfig := &Config{
 		CacheEnabled:                false,
 		RetryUseExponentialBackoff:  true,
@@ -549,7 +549,7 @@ func TestMerge_BoolEnvOverridesFileSymmetric(t *testing.T) {
 }
 
 func TestMerge_InvalidLegacyBoolEnvKeepsFileValue(t *testing.T) {
-	// TSI-2731: the three legacy boolean env vars now follow the numeric
+	// the three legacy boolean env vars now follow the numeric
 	// fields' rule — an unrecognized value does not count as an explicit
 	// override, so the file value survives.
 	fileConfig := &Config{
@@ -593,7 +593,7 @@ func TestMerge_InvalidNumericEnvKeepsFileValue(t *testing.T) {
 }
 
 func TestMerge_EnvExplicitDefaultOverridesFile(t *testing.T) {
-	// TSI-2693 deliberate semantics change: an env var explicitly set to the
+	// deliberate semantics change: an env var explicitly set to the
 	// default value counts as an explicit override under the setKeys contract,
 	// so it now overrides a differing file value. The old DefaultConfig()
 	// comparison silently kept the file value here.

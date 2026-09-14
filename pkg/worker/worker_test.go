@@ -56,7 +56,7 @@ func TestRegisterPreservesCountersOnReregister(t *testing.T) {
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	// TSI-2365: totalJobsCompleted is the process-lifetime count feeding the
+	// totalJobsCompleted is the process-lifetime count feeding the
 	// server-side median sample pool; it must SURVIVE re-registration.
 	if w.totalJobsCompleted != 42 {
 		t.Errorf("totalJobsCompleted = %d, want 42 (re-register must not reset)", w.totalJobsCompleted)

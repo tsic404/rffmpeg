@@ -15,19 +15,14 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TestCacheHitMkdirAllFailureDoesNotLeakBatcher is the TSI-2415 review-fix
-// regression test: when os.MkdirAll fails on the cache-hit path, the early
-// return must Close() the hit-path StderrBatcher.
-//
-// Leak mechanism (verified in TestStderrBatcherCloseStopsTimer): timedFlush
-// re-arms its timer unconditionally whenever the batcher context is alive,
-// even with nothing to flush. Skipping Close therefore pins an eternally
-// armed timer (one runtime wakeup every batchDelay) to an unreachable
-// batcher, per failed job, for the life of the worker. time.AfterFunc lives
-// on the runtime timer heap — not in a parked goroutine — so a goroutine
-// count cannot observe this; the deterministic observable is the batcher
-// contract itself: after processJob returns, the context must be cancelled
-// (exactly what Close guarantees).
+// TestCacheHitMkdirAllFailureDoesNotLeakBatcher is the regression test: when
+// os.MkdirAll fails on the cache-hit path, the early return must Close() the
+// hit-path StderrBatcher. timedFlush re-arms its timer unconditionally while
+// the batcher context is alive, so skipping Close pins an eternally armed
+// timer (a runtime wakeup every batchDelay) to an unreachable batcher for the
+// worker's life. time.AfterFunc lives on the runtime timer heap, so a
+// goroutine count cannot observe it; the observable is the batcher contract —
+// after processJob returns, the context must be cancelled (what Close does).
 func TestCacheHitMkdirAllFailureDoesNotLeakBatcher(t *testing.T) {
 	w, _ := setupTestWorker(t, 24*time.Hour)
 
@@ -67,7 +62,7 @@ func TestCacheHitMkdirAllFailureDoesNotLeakBatcher(t *testing.T) {
 	}
 	w.processJob(jobCtx, job2, cancel, false)
 
-	// TSI-2666 review-fix: the failed cache-hit run must not advance the
+	// the failed cache-hit run must not advance the
 	// completion counters. The first run was a real success (total=1); the
 	// second failing run must leave totalJobsCompleted untouched at 1.
 	// jobsCompleted is a per-heartbeat-interval counter that the idle

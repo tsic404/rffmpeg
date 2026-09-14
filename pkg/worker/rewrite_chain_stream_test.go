@@ -33,7 +33,7 @@ func TestFormatRewriteChainLine_EmptyFields(t *testing.T) {
 	}
 }
 
-// TestStderrBatcherCarriesRewriteChainLine is the TSI-2349 regression test:
+// TestStderrBatcherCarriesRewriteChainLine is the regression test:
 // the encoder-rewrite audit chain must travel through the job's stderr batcher
 // (SendStderrChunk → server PATCH /jobs/{id} → WS stderr broadcast) instead of
 // only being printed to the worker process' own stderr, which CLI clients
