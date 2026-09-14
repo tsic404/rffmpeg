@@ -34,7 +34,9 @@ type Event struct {
 	WorkerName string `json:"worker_name,omitempty"`
 	// Reason is why the migration occurred.
 	Reason Reason `json:"reason"`
-	// RetryCount is the number of times these jobs have been retried.
+	// RetryCount is the max cumulative migration count among the migrated jobs
+	// as of this event (the first migration records 1). Per-job exact counts
+	// live in job_redistributions.retry_count.
 	RetryCount int `json:"retry_count"`
 	// JobIDs is the list of job IDs that were migrated.
 	JobIDs []string `json:"job_ids"`
@@ -46,11 +48,13 @@ type Event struct {
 
 // EventInfo represents the public-facing migration event information.
 type EventInfo struct {
-	ID           string                    `json:"id"`
-	Timestamp    time.Time                 `json:"timestamp"`
-	WorkerID     string                    `json:"worker_id"`
-	WorkerName   string                    `json:"worker_name,omitempty"`
-	Reason       Reason                    `json:"reason"`
+	ID         string    `json:"id"`
+	Timestamp  time.Time `json:"timestamp"`
+	WorkerID   string    `json:"worker_id"`
+	WorkerName string    `json:"worker_name,omitempty"`
+	Reason     Reason    `json:"reason"`
+	// RetryCount is the event-level max cumulative migration count (first
+	// migration = 1); each job's exact count is in Targets[].RetryCount.
 	RetryCount   int                       `json:"retry_count"`
 	JobIDs       []string                  `json:"job_ids"`
 	JobsMigrated int                       `json:"jobs_migrated"`
@@ -87,7 +91,10 @@ func FromDBEvent(event *db.MigrationEvent) EventInfo {
 // worker a single migrated job was reassigned to. A migration event's jobs can
 // fan out to different workers, so the target is a per-job fact.
 type JobRedistributionTarget struct {
-	JobID            string `json:"job_id"`
+	JobID string `json:"job_id"`
+	// RetryCount is this job's exact cumulative migration count after the event
+	// (first migration = 1), where the event-level retry_count is the max.
+	RetryCount       int    `json:"retry_count"`
 	TargetWorkerID   string `json:"target_worker_id,omitempty"`
 	TargetWorkerName string `json:"target_worker_name,omitempty"`
 }
@@ -100,7 +107,7 @@ type JobRedistributionTarget struct {
 func RedistributionsByEvent(rs []db.JobRedistribution) map[string][]JobRedistributionTarget {
 	grouped := make(map[string][]JobRedistributionTarget)
 	for _, r := range rs {
-		t := JobRedistributionTarget{JobID: r.JobID}
+		t := JobRedistributionTarget{JobID: r.JobID, RetryCount: r.RetryCount}
 		if r.TargetWorkerID.Valid {
 			t.TargetWorkerID = r.TargetWorkerID.String
 		}

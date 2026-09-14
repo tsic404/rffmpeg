@@ -212,7 +212,7 @@ var requiredTables = []tableSpec{
 		"retry_count", "job_ids", "jobs_migrated", "created_at",
 	}},
 	{name: "job_redistributions", pk: "id", core: false, columns: []string{
-		"id", "migration_event_id", "job_id", "target_worker_id",
+		"id", "migration_event_id", "job_id", "retry_count", "target_worker_id",
 		"target_worker_name", "created_at",
 	}},
 	{name: "worker_eviction_events", pk: "id", core: true, columns: []string{
@@ -491,6 +491,7 @@ func (d *Database) initTables() error {
 			id TEXT PRIMARY KEY,
 			migration_event_id TEXT NOT NULL,
 			job_id TEXT NOT NULL,
+			retry_count INTEGER NOT NULL DEFAULT 0,
 			target_worker_id TEXT,
 			target_worker_name TEXT,
 			created_at DATETIME NOT NULL
@@ -546,6 +547,7 @@ func (d *Database) initTables() error {
 		`ALTER TABLE workers ADD COLUMN filters TEXT DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN pix_fmts TEXT DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN formats TEXT DEFAULT ''`,
+		`ALTER TABLE job_redistributions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := d.db.Exec(stmt); err != nil {
 			errStr := err.Error()
@@ -2654,11 +2656,15 @@ func mergeDecoderInfo(current, candidate protocol.DecoderInfo) protocol.DecoderI
 
 // MigrationEvent represents a migration event record in the database.
 type MigrationEvent struct {
-	ID           string
-	Timestamp    time.Time
-	WorkerID     string
-	WorkerName   sql.NullString
-	Reason       string
+	ID         string
+	Timestamp  time.Time
+	WorkerID   string
+	WorkerName sql.NullString
+	Reason     string
+	// RetryCount is the max cumulative migration count among the migrated jobs
+	// after this event (first migration = 1). Per-job exact counts, when jobs
+	// in one event differ, live in job_redistributions.retry_count. Legacy rows
+	// stored the pre-migration count and are not backfilled.
 	RetryCount   int
 	JobIDs       string // JSON array stored as string
 	JobsMigrated int
@@ -2666,6 +2672,11 @@ type MigrationEvent struct {
 }
 
 // CreateMigrationEvent creates a new migration event record.
+//
+// retryCount is the max cumulative migration count among the migrated jobs
+// after this event (the first migration records 1, not 0), persisted verbatim.
+// A batch whose jobs carry different histories stores each job's exact count
+// in job_redistributions.retry_count (see CreateJobRedistributions).
 func (d *Database) CreateMigrationEvent(workerID, workerName, reason string, retryCount int, jobIDs []string, jobsMigrated int) (*MigrationEvent, error) {
 	id := uuid.New().String()
 	now := time.Now()
@@ -2790,16 +2801,20 @@ type JobRedistribution struct {
 	ID               string
 	MigrationEventID string
 	JobID            string
+	RetryCount       int
 	TargetWorkerID   sql.NullString
 	TargetWorkerName sql.NullString
 	CreatedAt        time.Time
 }
 
 // CreateJobRedistributions inserts an unresolved placeholder row per migrated
-// job, linking it to the migration event that migrated it. The target is filled
-// later by RecordMigrationTarget when the scheduler/pull path reassigns the
-// job. This is a cold path (one call per worker-offline migration).
-func (d *Database) CreateJobRedistributions(migrationEventID string, jobIDs []string) error {
+// job, linking it to the migration event that migrated it. retryCounts maps
+// each job ID to its cumulative migration count after this event (first
+// migration = 1), persisted per job so a batch whose jobs carry different
+// migration histories keeps each job's exact count. The target is filled later
+// by RecordMigrationTarget when the scheduler/pull path reassigns the job. This
+// is a cold path (one call per worker-offline migration).
+func (d *Database) CreateJobRedistributions(migrationEventID string, retryCounts map[string]int) error {
 	tx, err := d.db.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -2807,12 +2822,12 @@ func (d *Database) CreateJobRedistributions(migrationEventID string, jobIDs []st
 	defer tx.Rollback()
 
 	now := time.Now()
-	for _, jobID := range jobIDs {
+	for jobID, retryCount := range retryCounts {
 		id := uuid.New().String()
 		if _, err := tx.Exec(`
-			INSERT INTO job_redistributions (id, migration_event_id, job_id, target_worker_id, target_worker_name, created_at)
-			VALUES (?, ?, ?, NULL, NULL, ?)
-		`, id, migrationEventID, jobID, now); err != nil {
+			INSERT INTO job_redistributions (id, migration_event_id, job_id, retry_count, target_worker_id, target_worker_name, created_at)
+			VALUES (?, ?, ?, ?, NULL, NULL, ?)
+		`, id, migrationEventID, jobID, retryCount, now); err != nil {
 			return fmt.Errorf("failed to create job redistribution for job %s: %w", jobID, err)
 		}
 	}
@@ -2869,7 +2884,7 @@ func (d *Database) GetJobRedistributionsByEvents(migrationEventIDs []string) ([]
 	}
 
 	rows, err := d.db.Query(fmt.Sprintf(`
-		SELECT id, migration_event_id, job_id, target_worker_id, target_worker_name, created_at
+		SELECT id, migration_event_id, job_id, retry_count, target_worker_id, target_worker_name, created_at
 		FROM job_redistributions
 		WHERE migration_event_id IN (%s)
 		ORDER BY created_at ASC, id ASC
@@ -2882,7 +2897,7 @@ func (d *Database) GetJobRedistributionsByEvents(migrationEventIDs []string) ([]
 	var redistributions []JobRedistribution
 	for rows.Next() {
 		r := JobRedistribution{}
-		if err := rows.Scan(&r.ID, &r.MigrationEventID, &r.JobID, &r.TargetWorkerID, &r.TargetWorkerName, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.MigrationEventID, &r.JobID, &r.RetryCount, &r.TargetWorkerID, &r.TargetWorkerName, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan job redistribution: %w", err)
 		}
 		redistributions = append(redistributions, r)
@@ -3097,7 +3112,9 @@ func (d *Database) GetJobTimeoutRetryCount(jobID string) (int, error) {
 // placeholder in one transaction — all three succeed together or none do. The
 // reschedule is a conditional UPDATE (status = 'running'); if the job already
 // left the running set, zero rows match and the transaction rolls back, leaving
-// no ghost event or permanently-NULL placeholder. workerID must be captured by
+// no ghost event or permanently-NULL placeholder. retryCount is the cumulative
+// timeout-requeue count after this event (first requeue = 1), persisted
+// verbatim in migration_events.retry_count. workerID must be captured by
 // the caller beforehand, since the reschedule clears worker_id. Returns
 // rescheduled=false, nil when the job was no longer running.
 func (d *Database) RecordJobTimeoutMigration(workerID, jobID string, retryCount int) (bool, error) {
@@ -3140,9 +3157,9 @@ func (d *Database) RecordJobTimeoutMigration(workerID, jobID string, retryCount 
 	}
 
 	if _, err := tx.Exec(`
-		INSERT INTO job_redistributions (id, migration_event_id, job_id, target_worker_id, target_worker_name, created_at)
-		VALUES (?, ?, ?, NULL, NULL, ?)
-	`, uuid.New().String(), eventID, jobID, now); err != nil {
+		INSERT INTO job_redistributions (id, migration_event_id, job_id, retry_count, target_worker_id, target_worker_name, created_at)
+		VALUES (?, ?, ?, ?, NULL, NULL, ?)
+	`, uuid.New().String(), eventID, jobID, retryCount, now); err != nil {
 		return false, fmt.Errorf("insert job redistribution for job %s: %w", jobID, err)
 	}
 

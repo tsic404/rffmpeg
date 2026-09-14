@@ -1355,6 +1355,11 @@ func TestCheckTimeoutsRecordsRedistribution(t *testing.T) {
 	if events[0].Reason != string(migration.ReasonJobTimeout) {
 		t.Fatalf("reason = %q, want %q", events[0].Reason, migration.ReasonJobTimeout)
 	}
+	// retry_count is the cumulative timeout-requeue count after this event:
+	// the first requeue records 1, not the pre-requeue 0.
+	if events[0].RetryCount != 1 {
+		t.Errorf("retry_count = %d, want 1 (cumulative after first timeout requeue)", events[0].RetryCount)
+	}
 
 	// The timeout event must carry a per-job redistribution placeholder so the
 	// reassignment write-back (RecordMigrationTarget) can record the target.
@@ -1367,6 +1372,9 @@ func TestCheckTimeoutsRecordsRedistribution(t *testing.T) {
 	}
 	if rs[0].JobID != job.ID {
 		t.Errorf("redistribution job_id = %q, want %q", rs[0].JobID, job.ID)
+	}
+	if rs[0].RetryCount != 1 {
+		t.Errorf("redistribution retry_count = %d, want 1 (first timeout requeue)", rs[0].RetryCount)
 	}
 	if rs[0].TargetWorkerID.Valid {
 		t.Errorf("placeholder target_worker_id should be NULL before reassignment, got %q", rs[0].TargetWorkerID.String)

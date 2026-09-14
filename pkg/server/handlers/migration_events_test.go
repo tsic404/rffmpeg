@@ -147,7 +147,7 @@ func TestGetMigrationEventTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	if err := h.GetDB().CreateJobRedistributions(event.ID, []string{"job-1", "job-2"}); err != nil {
+	if err := h.GetDB().CreateJobRedistributions(event.ID, map[string]int{"job-1": 1, "job-2": 1}); err != nil {
 		t.Fatalf("seed redistributions: %v", err)
 	}
 	if err := h.GetDB().RecordMigrationTarget("job-1", "worker-A", "gpu-A"); err != nil {

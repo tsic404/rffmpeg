@@ -122,3 +122,187 @@ func TestMigrationEventObservableViaMonitorLoop(t *testing.T) {
 		t.Error("Expected scheduler reschedule trigger after migration")
 	}
 }
+
+// TestMigrationEventRetryCountIsCumulative verifies that migration_events.
+// retry_count records the job's cumulative migration count after each event
+// (first migration = 1), not the pre-migration count (first = 0). Migrating
+// the same job twice through the monitor must record 1 then 2, so the
+// self-heal history is directly readable from the audit table without
+// per-job aggregation.
+func TestMigrationEventRetryCountIsCumulative(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	for _, w := range []struct{ id, name string }{
+		{"worker-1", "w1"}, {"worker-2", "w2"},
+	} {
+		if _, err := database.CreateWorker(w.id, w.name, protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "6.0",
+		}); err != nil {
+			t.Fatalf("create worker %s: %v", w.id, err)
+		}
+	}
+
+	job, err := database.CreateJob(`["input.mkv"]`, `["-c:v","libx264"]`, "output.mkv", false)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	monitor := New(database, Config{
+		HeartbeatTimeout:    30 * time.Second,
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 1 * time.Second,
+		MaxRetryCount:       3,
+	})
+	monitor.SetScheduler(&mockScheduler{})
+
+	// First migration: worker-1 crashes while running the job.
+	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+		t.Fatalf("assign to worker-1: %v", err)
+	}
+	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatalf("set running: %v", err)
+	}
+	if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		time.Now().Add(-60*time.Second), "worker-1"); err != nil {
+		t.Fatalf("stale worker-1: %v", err)
+	}
+	monitor.checkWorkers()
+
+	events, err := database.GetMigrationEventsByWorker("worker-1", 10)
+	if err != nil {
+		t.Fatalf("list worker-1 events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("worker-1 events = %d, want 1", len(events))
+	}
+	if events[0].RetryCount != 1 {
+		t.Errorf("first migration retry_count = %d, want 1", events[0].RetryCount)
+	}
+
+	// Second migration: worker-2 crashes after picking up the pending job.
+	if err := database.AssignJobToWorker(job.ID, "worker-2"); err != nil {
+		t.Fatalf("assign to worker-2: %v", err)
+	}
+	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatalf("set running (2nd): %v", err)
+	}
+	if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		time.Now().Add(-60*time.Second), "worker-2"); err != nil {
+		t.Fatalf("stale worker-2: %v", err)
+	}
+	monitor.checkWorkers()
+
+	events, err = database.GetMigrationEventsByWorker("worker-2", 10)
+	if err != nil {
+		t.Fatalf("list worker-2 events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("worker-2 events = %d, want 1", len(events))
+	}
+	if events[0].RetryCount != 2 {
+		t.Errorf("second migration retry_count = %d, want 2", events[0].RetryCount)
+	}
+}
+
+// TestMigrationEventRetryCountPerJobMixedBatch pins the multi-job case: when a
+// single worker's running set mixes jobs at different retry stages, the
+// event-level retry_count is the max over the migrated jobs only (not the
+// failed ones), and each migrated job's exact cumulative count is persisted
+// per job in job_redistributions. A worker holding a maxed-out job (will fail)
+// and a fresh job (first migration) must record 1 — not the failed job's count
+// + 1.
+func TestMigrationEventRetryCountPerJobMixedBatch(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	if _, err := database.CreateWorker("worker-1", "w1", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "6.0",
+	}); err != nil {
+		t.Fatalf("create worker: %v", err)
+	}
+
+	// jobA already migrated 3 times (== MaxRetryCount): it will fail, not migrate.
+	jobA, err := database.CreateJob(`["a.mkv"]`, `["-c:v","libx264"]`, "out_a.mkv", false)
+	if err != nil {
+		t.Fatalf("create jobA: %v", err)
+	}
+	for i, w := range []string{"old-w1", "old-w2", "old-w3"} {
+		if _, err := database.CreateMigrationEvent(w, w, string(migration.ReasonHeartbeatTimeout), i+1, []string{jobA.ID}, 1); err != nil {
+			t.Fatalf("seed jobA migration %d: %v", i+1, err)
+		}
+	}
+
+	// jobB is fresh: its first migration records a cumulative count of 1.
+	jobB, err := database.CreateJob(`["b.mkv"]`, `["-c:v","libx264"]`, "out_b.mkv", false)
+	if err != nil {
+		t.Fatalf("create jobB: %v", err)
+	}
+
+	for _, jid := range []string{jobA.ID, jobB.ID} {
+		if err := database.AssignJobToWorker(jid, "worker-1"); err != nil {
+			t.Fatalf("assign %s: %v", jid, err)
+		}
+		if err := database.UpdateJobStatusWithFailure(jid, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+			t.Fatalf("set %s running: %v", jid, err)
+		}
+	}
+	if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
+		time.Now().Add(-60*time.Second), "worker-1"); err != nil {
+		t.Fatalf("stale worker-1: %v", err)
+	}
+
+	monitor := New(database, Config{
+		HeartbeatTimeout:    30 * time.Second,
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 1 * time.Second,
+		MaxRetryCount:       3,
+	})
+	monitor.SetScheduler(&mockScheduler{})
+	monitor.checkWorkers()
+
+	// The event must record 1 (jobB's cumulative count), not jobA's count + 1.
+	events, err := database.GetMigrationEventsByWorker("worker-1", 10)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].RetryCount != 1 {
+		t.Errorf("event retry_count = %d, want 1 (max over migrated jobs)", events[0].RetryCount)
+	}
+
+	// jobA failed on budget exhaustion; jobB migrated back to pending.
+	gotA, err := database.GetJob(jobA.ID)
+	if err != nil {
+		t.Fatalf("get jobA: %v", err)
+	}
+	if gotA.Status != protocol.JobStatusFailed {
+		t.Errorf("jobA status = %s, want failed", gotA.Status)
+	}
+	gotB, err := database.GetJob(jobB.ID)
+	if err != nil {
+		t.Fatalf("get jobB: %v", err)
+	}
+	if gotB.Status != protocol.JobStatusPending {
+		t.Errorf("jobB status = %s, want pending", gotB.Status)
+	}
+
+	// jobB's exact per-job cumulative count is persisted on its redistribution.
+	rs, err := database.GetJobRedistributionsByEvent(events[0].ID)
+	if err != nil {
+		t.Fatalf("list redistributions: %v", err)
+	}
+	if len(rs) != 1 {
+		t.Fatalf("redistributions = %d, want 1 (only jobB migrated)", len(rs))
+	}
+	if rs[0].JobID != jobB.ID {
+		t.Errorf("redistribution job_id = %q, want %q", rs[0].JobID, jobB.ID)
+	}
+	if rs[0].RetryCount != 1 {
+		t.Errorf("redistribution retry_count = %d, want 1", rs[0].RetryCount)
+	}
+}
