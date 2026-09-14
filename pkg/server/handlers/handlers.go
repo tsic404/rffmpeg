@@ -639,7 +639,7 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 	if job.Status == protocol.JobStatusPending {
 		noLiveWorker = h.hasNoLiveSchedulableWorker()
 	}
-	jobInfo := h.dbJobToJobInfo(job, noLiveWorker)
+	jobInfo := h.dbJobToJobInfo(job, noLiveWorker, nil)
 	writeJSON(w, http.StatusOK, protocol.JobStatusResponse{Job: jobInfo})
 }
 
@@ -661,7 +661,7 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	noLiveWorker := h.hasNoLiveSchedulableWorker()
 	jobInfos := make([]protocol.JobInfo, len(jobs))
 	for i, job := range jobs {
-		jobInfos[i] = h.dbJobToJobInfo(job, noLiveWorker)
+		jobInfos[i] = h.dbJobToJobInfo(job, noLiveWorker, nil)
 	}
 
 	writeJSON(w, http.StatusOK, protocol.JobListResponse{Jobs: jobInfos})
@@ -1202,8 +1202,27 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 	// Pulled jobs are queued (assigned), never pending, so no NoWorkerDeadline
 	// applies and no live-worker lookup is needed.
 	jobInfos := make([]protocol.JobInfo, len(jobs))
+	jobIDs := make([]string, len(jobs))
 	for i, job := range jobs {
-		jobInfos[i] = h.dbJobToJobInfo(job, false)
+		jobIDs[i] = job.ID
+	}
+	// A migrated job (retry_count > 0) must signal its re-dispatch so the
+	// worker can remove the stale partial output left by the previous worker
+	// before re-running ffmpeg. One batched query, not N+1.
+	retryCounts, err := h.db.GetJobRetryCounts(jobIDs)
+	if err != nil {
+		log.Printf("Failed to get job retry counts for worker pull (attempt 1): %v", err)
+		// Retry once before degrading: a transient DB error must not silently
+		// turn every migrated job in this batch into a "fresh" job and disable
+		// its stale-output cleanup.
+		retryCounts, err = h.db.GetJobRetryCounts(jobIDs)
+		if err != nil {
+			log.Printf("Failed to get job retry counts for worker pull after retry; serving %d job(s) without retry_count: %v", len(jobIDs), err)
+			retryCounts = nil // degrade: workers treat nil as fresh jobs, not re-dispatches
+		}
+	}
+	for i, job := range jobs {
+		jobInfos[i] = h.dbJobToJobInfo(job, false, retryCounts)
 	}
 
 	writeJSON(w, http.StatusOK, protocol.WorkerJobPullResponse{
@@ -1706,8 +1725,10 @@ func (h *Handler) hasNoLiveSchedulableWorker() bool {
 	return len(liveWorkers) == 0
 }
 
-// dbJobToJobInfo converts database Job to protocol JobInfo
-func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool) protocol.JobInfo {
+// dbJobToJobInfo converts database Job to protocol JobInfo. retryCounts is an
+// optional precomputed map of worker-failure migration counts keyed by job ID;
+// when nil it defaults to 0 (used by paths that never hand a job to a worker).
+func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map[string]int) protocol.JobInfo {
 	var inputFiles, args, outputFiles, directPaths []string
 	if err := json.Unmarshal([]byte(job.InputFiles), &inputFiles); err != nil {
 		log.Printf("Failed to unmarshal input files for job %s: %v", job.ID, err)
@@ -1740,6 +1761,10 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool) protocol.JobInf
 		EtaSeconds:      job.EtaSeconds,
 		CreatedAt:       job.CreatedAt,
 		UpdatedAt:       job.UpdatedAt,
+	}
+
+	if retryCounts != nil {
+		info.RetryCount = retryCounts[job.ID]
 	}
 
 	if job.WorkerID.Valid {
