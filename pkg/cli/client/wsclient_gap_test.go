@@ -182,7 +182,7 @@ func TestWSClient_SeqRestartAfterDataStillFlagsGap(t *testing.T) {
 	}
 }
 
-// TestWSClient_TerminalRenumberOnSameConnectionNoGap is the core TSI-2382
+// TestWSClient_TerminalRenumberOnSameConnectionNoGap is the core
 // regression test (QA-reproduced 3/3, no reconnect involved): on ONE
 // connection the hub's terminal-status broadcast deleted the counter, so the
 // trailing complete broadcast — and any stderr chunks reported in the same
@@ -281,7 +281,7 @@ func wsReconnectServer(t *testing.T, firstPhase, secondPhase []string) *httptest
 	return httptest.NewServer(mux)
 }
 
-// TestWSClient_SeqRestartAfterReconnectNoGap is the TSI-2382 regression test,
+// TestWSClient_SeqRestartAfterReconnectNoGap is the regression test,
 // exercising the REAL reconnect path: a streaming job (-f mpegts -) streams
 // stdout (seq 1..2), completes, and the connection drops. The client
 // auto-reconnects — resetting sawDataAfterRestart in connect() — and only

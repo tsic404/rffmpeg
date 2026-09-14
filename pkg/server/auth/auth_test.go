@@ -65,7 +65,7 @@ func TestMiddleware_ExemptPath(t *testing.T) {
 }
 
 // TestMiddleware_WorkerEndpointsRequireAuth tests that worker registration and
-// heartbeat are authenticated even when a token is configured (TSI-2361).
+// heartbeat are authenticated even when a token is configured.
 // Without this, an attacker can inject ghost workers and keep them alive via
 // heartbeat, diverting real jobs to a worker they control.
 func TestMiddleware_WorkerEndpointsRequireAuth(t *testing.T) {

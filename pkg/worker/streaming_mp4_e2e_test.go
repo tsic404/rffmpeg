@@ -26,7 +26,7 @@ func writeArgRecordingFFmpeg(dir, recordFile string) (string, error) {
 	return scriptPath, nil
 }
 
-// TestProcessJob_StreamingMp4SingleOutputDash is the TSI-2683 regression test:
+// TestProcessJob_StreamingMp4SingleOutputDash is the regression test:
 // `rffmpeg -i in.mp4 -f mp4 -` must execute ffmpeg with exactly ONE output
 // dash ("-") for stdout. A duplicate ("- -") makes ffmpeg fail with
 // "Unable to choose an output format for 'pipe:'". The parser drops the output
@@ -120,7 +120,7 @@ func TestProcessJob_StreamingMp4SingleOutputDash(t *testing.T) {
 		t.Fatalf("ffmpeg argv contains %d output dashes, want exactly 1: %v", dashCount, args)
 	}
 
-	// The movflags assertion is intentionally coupled to the TSI-2409 worker
+	// The movflags assertion is intentionally coupled to the worker
 	// behavior: streaming mp4 must be made independent of a seekable output.
 	// If the single output dash is right but the fragmented flags are lost,
 	// this path would regress from "works" to ffmpeg's muxer error.

@@ -84,8 +84,7 @@ func (a *ErrorAnalyzer) Analyze(stderr string, exitCode int) *FFmpegError {
 	// kill (SIGABRT=134, SIGBUS=135, SIGSEGV=139, …) is a process crash
 	// regardless of stderr text. ffmpeg n9.x sporadically self-aborts under
 	// high load / temp-space pressure; classifying it as a generic unknown
-	// error made it non-retryable, failing jobs that succeed on re-run
-	// (TSI-2458).
+	// error made it non-retryable, failing jobs that succeed on re-run.
 	if isSignalDeath(exitCode) {
 		return &FFmpegError{
 			Type:      ErrorTypeProcessCrash,
@@ -284,7 +283,7 @@ func ClassifyErrorType(stderr string) FFmpegErrorType {
 // to the signal name. ffmpeg is killed by one of these when it self-aborts
 // (SIGABRT from an internal assertion / glibc abort) or hits a memory
 // fault (SIGSEGV/SIGBUS). They are process crashes, not normal ffmpeg
-// errors, and are retryable (TSI-2458).
+// errors, and are retryable.
 var signalExitCodes = map[int]string{
 	134: "SIGABRT",
 	135: "SIGBUS",

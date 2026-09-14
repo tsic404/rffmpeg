@@ -22,7 +22,7 @@ type Config struct {
 // DefaultConfig returns the default configuration. HeartbeatTimeout must
 // match ServerConfig.WorkerHeartbeatTimeout (pkg/config): two different
 // defaults for the same knob caused drift between the monitor and the rest
-// of the server (TSI-2365).
+// of the server.
 func DefaultConfig() Config {
 	return Config{
 		HeartbeatTimeout:    90 * time.Second,
@@ -40,7 +40,7 @@ type Monitor struct {
 	done       chan struct{}
 	mu         sync.Mutex
 	started    bool      // Set by Start; guards the Stop-before-Start path
-	stopOnce   sync.Once // Guarantees Stop is idempotent (TSI-2365)
+	stopOnce   sync.Once // Guarantees Stop is idempotent
 	sched      SchedulerInterface
 	stateTable *WorkerStateTable // Optional: enables slow node detection
 }
@@ -82,7 +82,7 @@ func (m *Monitor) Start() {
 
 // Stop stops the health monitor. Idempotent, and safe to call before Start:
 // when the loop goroutine never launched, done is closed here so Stop neither
-// double-closes nor blocks forever (TSI-2365).
+// double-closes nor blocks forever.
 func (m *Monitor) Stop() {
 	m.stopOnce.Do(func() {
 		m.mu.Lock()
@@ -151,7 +151,7 @@ func (m *Monitor) checkWorkers() {
 		log.Printf("Removed %d offline worker(s) exceeding offline threshold", len(removedIDs))
 	}
 
-	// Slow node detection (TSI-760)
+	// Slow node detection
 	m.detectSlowWorkers()
 }
 
@@ -292,7 +292,7 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 	// placeholders BEFORE any job becomes schedulable. ResetJobToPending (phase
 	// 3) is what makes a job claimable, and a job claimed in the window between
 	// reset and placeholder insert would never have its target written back —
-	// a permanent loss of that hop's target (TSI-2929 review).
+	// a permanent loss of that hop's target.
 	if len(migratedJobIDs) > 0 {
 		event, err := m.db.CreateMigrationEvent(
 			workerID,

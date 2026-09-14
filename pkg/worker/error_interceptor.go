@@ -52,14 +52,14 @@ const (
 
 	// ErrorTypeOutputOpen indicates ffmpeg could not open or initialize the
 	// output muxer (bad path, missing directory, unknown container). ffmpeg
-	// n9 exits 0 for these failures (TSI-2472), so the worker must classify
+	// n9 exits 0 for these failures, so the worker must classify
 	// them from stderr and flip the reported exit code to non-zero.
 	ErrorTypeOutputOpen
 
 	// ErrorTypeProcessCrash indicates ffmpeg was killed by an OS signal
 	// (SIGABRT=134, SIGSEGV=139, etc.). ffmpeg n9.x sporadically self-aborts
 	// under high load / temp-space pressure without a deterministic defect;
-	// re-running the same command succeeds, so this is retryable (TSI-2458).
+	// re-running the same command succeeds, so this is retryable.
 	ErrorTypeProcessCrash
 )
 
@@ -148,7 +148,7 @@ func DefaultErrorPatterns() []ErrorPattern {
 				// MUST be checked before ErrorTypeInvalidArgument: the muxer
 				// failure line carries "...: Invalid argument", which would
 				// otherwise match the generic errno pattern first and hide the
-				// real root cause (TSI-2472).
+				// real root cause.
 				"Error opening output file",
 				"Error opening output files",
 				"Error initializing the muxer",

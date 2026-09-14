@@ -24,7 +24,7 @@ func isBooleanFlag(arg string) bool {
 // isKnownOption reports whether arg names a known FFmpeg option (boolean or
 // value-taking), using the generated arity table in pkg/ffmpegopts. It
 // disambiguates a real "-i"-prefixed option such as "-itsoffset" from a
-// concatenated "-i<input>" input path (TSI-2907).
+// concatenated "-i<input>" input path.
 func isKnownOption(arg string) bool {
 	return ffmpegopts.IsKnown(arg)
 }
@@ -86,7 +86,7 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 
 		// Handle concatenated -i option: -iinputfile. A known "-i"-prefixed
 		// option such as "-itsoffset" is NOT an inline input; it falls through
-		// to the generic option handling below (TSI-2907).
+		// to the generic option handling below.
 		if strings.HasPrefix(arg, "-i") && len(arg) > 2 && !isKnownOption(arg) {
 			inputFile := arg[2:]
 			inputFiles = append(inputFiles, inputFile)
@@ -127,7 +127,7 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 			// "-map -1", "-ss -10", "-itsoffset -5"). Only a missing next
 			// token is a hard error, so "-c:v" with no codec reports the
 			// real problem instead of a misleading
-			// "no input/output file specified" (TSI-2907).
+			// "no input/output file specified".
 			if i+1 >= len(args) {
 				return nil, fmt.Errorf("option %s requires a value", arg)
 			}
@@ -161,7 +161,7 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	// otherwise it is treated as a literal output filename, the worker's
 	// ffmpeg writes the stream to its own stdout (never captured), and the
 	// job yields a 0-byte output the downloader reports as "moov atom not
-	// found" (TSI-3038). The comparison is case-insensitive because ffmpeg
+	// found". The comparison is case-insensitive because ffmpeg
 	// protocol names are matched without regard to case ("PIPE:1" == "pipe:1").
 	if strings.EqualFold(outputFile, "pipe:1") {
 		outputFile = "-"
@@ -182,7 +182,7 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 // which ffmpeg treats as the output file. It scans left-to-right so a
 // value-taking option consumes its next token even when that value begins
 // with "-" (e.g. "-map -1"); a right-to-left scan mistakes "-1" for an
-// option and skips the real output file (TSI-2907).
+// option and skips the real output file.
 func findOutputCandidate(args []string) int {
 	candidate := -1
 	for i := 0; i < len(args); {

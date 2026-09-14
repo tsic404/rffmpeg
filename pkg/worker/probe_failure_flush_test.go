@@ -13,7 +13,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TestProcessProbeJobDirectPathFailuresReportWithoutFlush locks the TSI-2665
+// TestProcessProbeJobDirectPathFailuresReportWithoutFlush locks the
 // convention: the two direct-path failure branches in processProbeJob pass an
 // explicit nil flush placeholder to reportFailureWithType, matching the
 // flushStderr call sites in processJob. A nil flush must be a safe no-op —

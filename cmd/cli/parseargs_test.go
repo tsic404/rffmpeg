@@ -714,7 +714,7 @@ func TestParseArgsTimeout(t *testing.T) {
 }
 
 // TestParseArgs_MissingValue verifies that value-taking flags without a value
-// are a hard error instead of silently falling back to defaults (TSI-2365).
+// are a hard error instead of silently falling back to defaults.
 func TestParseArgs_MissingValue(t *testing.T) {
 	for _, flag := range []string{"--server", "-server", "--token", "-token", "--timeout", "-timeout", "--max-retries", "-max-retries"} {
 		if _, err := parseArgs([]string{flag}); err == nil {

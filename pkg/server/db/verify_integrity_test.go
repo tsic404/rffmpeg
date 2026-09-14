@@ -1,6 +1,6 @@
 package db_test
 
-// Tests for TSI-3122 (startup schema gate): New must fail, not silently
+// Tests for (startup schema gate): New must fail, not silently
 // recreate, when a pre-existing database is missing a required table or
 // column, or is structurally corrupt. These tests construct the "existing
 // database in a broken state" scenario directly (bypassing initTables) so they
@@ -28,7 +28,7 @@ func openRaw(t *testing.T, path string) *sql.DB {
 	return raw
 }
 
-// TestNewFailsOnExistingDBMissingTable simulates the TSI-3122 restart failure:
+// TestNewFailsOnExistingDBMissingTable simulates the restart failure:
 // an existing database whose WAL recovery did not land is missing a required
 // table. New must fail instead of silently recreating it empty.
 func TestNewFailsOnExistingDBMissingTable(t *testing.T) {

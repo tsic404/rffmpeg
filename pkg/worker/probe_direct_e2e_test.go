@@ -113,7 +113,7 @@ func newProbeDirectMockServer() *probeDirectMockServer {
 }
 
 // TestProcessProbeJob_DirectPathProbesLocally verifies the end-to-end
-// shared-FS probe path (TSI-2520): a job whose DirectPaths carries an absolute
+// shared-FS probe path: a job whose DirectPaths carries an absolute
 // local media path must be probed in place by ffprobe and reported completed —
 // with no HTTP input download attempted. Before the fix, processProbeJob always
 // downloaded job.InputFiles[0], sending the absolute path to

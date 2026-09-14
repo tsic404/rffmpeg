@@ -1,6 +1,6 @@
 package db_test
 
-// Tests for TSI-2359 (SQLite data-layer integrity): dispatch-race guards,
+// Tests for (SQLite data-layer integrity): dispatch-race guards,
 // terminal-state protection, transactional migration, FK cascade cleanup,
 // concurrent-write robustness under WAL, and chunk idempotency.
 

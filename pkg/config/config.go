@@ -138,7 +138,7 @@ func LoadFromFile(path string) (*ServerConfig, error) {
 // LoadFromEnv loads configuration from environment variables
 
 // parseDurationOrLog parses a duration env var / flag value. On failure it
-// logs and returns fallback instead of silently ignoring the setting (TSI-2365):
+// logs and returns fallback instead of silently ignoring the setting:
 // a typo like "30 mintes" must be visible to the operator.
 func parseDurationOrLog(name, value string, fallback time.Duration) time.Duration {
 	d, err := time.ParseDuration(value)
@@ -225,7 +225,7 @@ func LoadFromEnv() *ServerConfig {
 		}
 	}
 
-	// Rate limit environment variables — symmetric boolean (TSI-2365)
+	// Rate limit environment variables — symmetric boolean
 	if v := os.Getenv("RATE_LIMIT_ENABLED"); v != "" {
 		config.RateLimitEnabled = parseBoolEnv("RATE_LIMIT_ENABLED", v, config.RateLimitEnabled)
 	}
@@ -247,7 +247,7 @@ func LoadFromEnv() *ServerConfig {
 			config.RedisDB = n
 		}
 	}
-	// TLS environment variables — symmetric boolean (TSI-2365)
+	// TLS environment variables — symmetric boolean
 	if v := os.Getenv("TLS_ENABLED"); v != "" {
 		config.TLS.Enabled = parseBoolEnv("TLS_ENABLED", v, config.TLS.Enabled)
 	}
@@ -289,7 +289,7 @@ func (c *ServerConfig) Merge(flags *Flags) {
 		c.AuthToken = flags.AuthToken
 	}
 
-	// Worker management flags — parse errors are logged, not swallowed (TSI-2365)
+	// Worker management flags — parse errors are logged, not swallowed
 	if flags.WorkerHeartbeatTimeout != "" {
 		c.WorkerHeartbeatTimeout = parseDurationOrLog("worker-heartbeat-timeout", flags.WorkerHeartbeatTimeout, c.WorkerHeartbeatTimeout)
 	}

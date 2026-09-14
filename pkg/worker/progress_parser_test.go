@@ -261,15 +261,10 @@ func TestProgressParser_ETAPrecision_VaryingSpeed(t *testing.T) {
 	// 1-hour video (3600 seconds) with varying speed per segment.
 	durationUs := int64(3600) * 1_000_000
 
-	// Speed encoded as integer (1_000_000 = 1.0x).
-	// Segments simulate real-world variation with moderate speed changes
-	// typical of a mixed-complexity encoding run (1.8x-2.1x range).
-	//   0% - 10%: moderate (1.9x)
-	//  10% - 25%: slightly faster (2.1x)
-	//  25% - 50%: slower section (1.8x)
-	//  50% - 75%: fast again (2.1x)
-	//  75% - 90%: moderate (1.9x)
-	//  90% - 100%: nominal (2.0x)
+	// Speed encoded as integer (1_000_000 = 1.0x). Segments simulate a
+	// mixed-complexity encoding run (1.8x-2.1x): 0-10% moderate (1.9x),
+	// 10-25% faster (2.1x), 25-50% slower (1.8x), 50-75% fast (2.1x),
+	// 75-90% moderate (1.9x), 90-100% nominal (2.0x).
 	checkpoints := [][2]int64{
 		{360 * 1_000_000, 1_900_000},  // 10% - speed 1.9x
 		{900 * 1_000_000, 2_100_000},  // 25% - speed 2.1x
@@ -528,19 +523,13 @@ func formatDuration(seconds int) string {
 	return fmt.Sprintf("%ds", s)
 }
 
-// TestProgressParser_WallClockETA_WarmupOverhead verifies that the
-// wall-clock-rate ETA stays within 20% for a non-trimmed task that has
-// significant encoder warm-up overhead — the exact scenario that failed
-// QA (TSI-2438: +37% early, -42% late with the old EWMA-speed formula).
-//
-// Simulates a 120s media task: 5s warm-up (0.5x speed) then steady 2.0x.
-// Total wall time = 5s warmup + (120-2.5)/2.0 = 5 + 58.75 = 63.75s.
-// At 28% progress (34s media): wall elapsed = 5 + (34-2.5)/2.0 = 20.75s.
-// Wall rate = 34/20.75 = 1.639x. Remaining = 86s / 1.639 = 52.5s.
-// Actual remaining = 63.75 - 20.75 = 43s. Error = |52.5-43|/43 = 22%.
-// With the wall-clock model the rate naturally absorbs warm-up, so the
-// error decreases as more data accumulates. At later checkpoints the
-// error drops well below 20%.
+// TestProgressParser_WallClockETA_WarmupOverhead verifies the wall-clock-rate
+// ETA stays within 20% for a non-trimmed task with significant encoder
+// warm-up overhead — the scenario that failed with the old EWMA-speed formula
+// (+37% early, -42% late). It simulates a 120s task (5s warm-up at 0.5x, then
+// steady 2.0x): the wall-clock model absorbs the warm-up, so the ETA error is
+// largest at early checkpoints (22% at 28% progress) and drops well below 20%
+// as more data accumulates.
 func TestProgressParser_WallClockETA_WarmupOverhead(t *testing.T) {
 	// 120s media, 5s warm-up at 0.5x, then steady at 2.0x.
 	durationUs := int64(120) * 1_000_000
@@ -864,7 +853,7 @@ func TestProgressRouter_SendFinal(t *testing.T) {
 // TestProgressRouterHandlerFiltersStatsLines verifies the Worker→CLI stream
 // drops ffmpeg -stats frame/fps lines while forwarding everything else — the
 // structured progress pushes replace them, so the CLI log channel stays free
-// of raw frame= ... fps= ... noise interleaved with [rffmpeg] lines (TSI-2928).
+// of raw frame=... fps=... noise interleaved with [rffmpeg] lines.
 func TestProgressRouterHandlerFiltersStatsLines(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

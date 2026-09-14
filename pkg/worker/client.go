@@ -43,7 +43,7 @@ const MaxRemoteInputBytes int64 = 20 * 1024 * 1024 * 1024 // 20GB
 // connection refused/reset, TLS handshake, timeout). DownloadInput wraps only
 // dataClient.Do errors in this type so callers can distinguish "input URL
 // genuinely unreachable" from size-limit, HTTP-status, and local disk errors
-// via errors.As, without string matching (TSI-3082).
+// via errors.As, without string matching.
 type transportError struct {
 	err error
 }
@@ -146,8 +146,8 @@ func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string
 // gpuMetrics carries GPU utilization samples. When Metrics.Valid is false the
 // GPU fields are sent as 0, which receivers treat as "no sample available";
 // a valid sample with UtilPct == 0 is a real 0% reading and must survive the
-// wire (TSI-2365). Valid samples may come from nvidia-smi, intel_gpu_top, or
-// amdgpu sysfs (TSI-2466).
+// wire. Valid samples may come from nvidia-smi, intel_gpu_top, or
+// amdgpu sysfs.
 func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int, gpuMetrics gpu.Metrics) ([]string, error) {
 	req := protocol.WorkerHeartbeatRequest{
 		WorkerID:        c.getWorkerID(),
@@ -387,7 +387,7 @@ func (c *Client) SendStdoutChunk(jobID string, chunk []byte) error {
 
 // UploadOutput uploads an output file to the server. The body is streamed
 // through a pipe with an exact Content-Length so the whole file is never
-// buffered in memory (TSI-2365).
+// buffered in memory.
 func (c *Client) UploadOutput(jobID, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {

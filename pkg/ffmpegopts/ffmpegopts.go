@@ -128,7 +128,7 @@ var valueFlags = map[string]bool{
 	// Hand-written corrections for value-taking options absent from
 	// `ffmpeg -h long` (demuxer-specific AVOptions). Without them IsKnown
 	// would misread "-input_format" / "-input_ts_offset" as a concatenated
-	// "-i<input>" input path (TSI-2907). The generator skips names already
+	// "-i<input>" input path. The generator skips names already
 	// written here, so regeneration cannot duplicate keys.
 	"input_format":    true,
 	"input_ts_offset": true,

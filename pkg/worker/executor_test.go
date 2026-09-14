@@ -123,7 +123,7 @@ func TestBuildArgs(t *testing.T) {
 }
 
 // TestStreamingOutputPath verifies the worker's output path resolution for
-// streaming jobs (TSI-2345): an empty OutputFilename must resolve to "-"
+// streaming jobs: an empty OutputFilename must resolve to "-"
 // (ffmpeg stdout) instead of a regular file, so transcoded data reaches the
 // stdoutBatcher and no 0-byte file is written.
 func TestStreamingOutputPath(t *testing.T) {
@@ -366,7 +366,7 @@ func TestFindSeparatorIndex(t *testing.T) {
 // exec.ExitError.ExitCode() returns -1 for signal deaths; without the
 // ProcessState.Sys().(syscall.WaitStatus) conversion in ExecuteWithHandlers,
 // SIGABRT would be reported as exit -1 and never trigger the
-// isSignalDeath(134) crash classification (TSI-2458).
+// isSignalDeath(134) crash classification.
 func TestExecutor_SignalDeathExitCode(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -387,7 +387,7 @@ func TestExecutor_SignalDeathExitCode(t *testing.T) {
 }
 
 // TestExecutor_SignalDeathSegvExitCode verifies SIGSEGV (signal 11) is
-// reported as exit 139 (128+11), not -1 (TSI-2458).
+// reported as exit 139 (128+11), not -1.
 func TestExecutor_SignalDeathSegvExitCode(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {

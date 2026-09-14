@@ -171,7 +171,7 @@ func TestHub_SeqCounterDeletedOnTerminalBroadcast(t *testing.T) {
 }
 
 // TestHub_TerminalStatusVariantsAllCleanup verifies every terminal status
-// keeps the counter alive for the trailing complete broadcast (TSI-2382:
+// keeps the counter alive for the trailing complete broadcast (
 // deleting at the status step renumbered the complete message from 1 and
 // clients misread that as data loss), and that the complete broadcast then
 // performs the deletion.
@@ -208,18 +208,13 @@ func TestHub_TerminalStatusVariantsAllCleanup(t *testing.T) {
 	}
 }
 
-// TestHub_ConcurrentBroadcastsPreserveSeqOrder is the TSI-2457 regression
-// test: when multiple handler goroutines call BroadcastWSMessage
-// concurrently for the same job (e.g. a StderrBatcher timed-flush racing
-// the final SendProgress + UpdateJob sequence), the messages must reach
-// client.send in seq order. Before the fix, the broadcast-channel send
-// happened OUTSIDE h.mu — after the lock was released — so two goroutines
-// that each incremented seq could reach the channel send in any order. The
-// client would see seq N+2 before N+1 and falsely flag a gap even though
-// no data was lost on the wire.
-//
-// The test fires N concurrent broadcasts and verifies every message arrives
-// on client.send with strictly increasing seq values — no jumps.
+// TestHub_ConcurrentBroadcastsPreserveSeqOrder is the regression test: when
+// multiple handler goroutines call BroadcastWSMessage concurrently for the
+// same job, messages must reach client.send in seq order. Before the fix the
+// broadcast-channel send happened outside h.mu, so two goroutines that each
+// incremented seq could send in any order — the client saw seq N+2 before N+1
+// and falsely flagged a gap with no data lost. The test fires N concurrent
+// broadcasts and verifies strictly increasing seq values, no jumps.
 func TestHub_ConcurrentBroadcastsPreserveSeqOrder(t *testing.T) {
 	hub := NewHub()
 	runHub(hub)

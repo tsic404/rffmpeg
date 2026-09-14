@@ -189,7 +189,7 @@ func (r *RingBufferRecorder) GetSummary(requestID string) (*AuditSummary, error)
 
 		summary.Scenarios[op.ScenarioType]++
 
-		// TSI-2365: HasErrors is derived from scenarios where the rewrite
+		// HasErrors is derived from scenarios where the rewrite
 		// engine could not satisfy the request at all, instead of staying
 		// hardcoded false.
 		switch op.ScenarioType {

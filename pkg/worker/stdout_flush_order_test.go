@@ -71,7 +71,7 @@ func newStdoutOrderMockServer() *stdoutOrderMockServer {
 	return m
 }
 
-// TestProcessJob_StreamingStdoutFlushedBeforeCompleted is the TSI-2905
+// TestProcessJob_StreamingStdoutFlushedBeforeCompleted is the
 // regression test: the worker must flush all streamed stdout chunks (and wait
 // for them to reach the server) BEFORE reporting the completed status. If it
 // reports completion first, the CLI observes the terminal status, closes its

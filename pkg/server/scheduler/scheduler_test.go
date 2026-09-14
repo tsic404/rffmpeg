@@ -621,7 +621,7 @@ func TestUpdateWorkerCapabilities(t *testing.T) {
 	}
 }
 
-// TSI-1500: Tests for encoder fallback functionality
+// Tests for encoder fallback functionality
 
 func TestSchedulerEncoderFallback(t *testing.T) {
 	database, err := db.New(":memory:")
@@ -683,7 +683,7 @@ func TestSchedulerEncoderFallback(t *testing.T) {
 // The job requests hevc_nvenc (HEVC family); the only worker has libx264
 // (H.264 family). A job explicitly requesting an encoder no worker provides
 // stays pending instead of being force-assigned to an incapable worker —
-// that would guarantee failure at run time (TSI-2362).
+// that would guarantee failure at run time.
 func TestSchedulerEncoderFallbackDifferentCodecFamily(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {
@@ -950,7 +950,7 @@ func TestSchedulerEncoderFallbackExactMatchPreferred(t *testing.T) {
 	_ = workerNVENC // Use to avoid unused variable warning
 }
 
-// TSI-2334: a pending job whose only worker went offline must be failed with
+// a pending job whose only worker went offline must be failed with
 // NO_WORKER_AVAILABLE after the grace period instead of waiting forever.
 func TestSchedulerNoWorkerStarvation(t *testing.T) {
 	database, err := db.New(":memory:")
@@ -1009,7 +1009,7 @@ func TestSchedulerNoWorkerStarvation(t *testing.T) {
 	}
 }
 
-// TSI-2204 contract: pending jobs queued behind BUSY workers must NOT be
+// pending jobs queued behind BUSY workers must NOT be
 // failed — schedulable workers exist, so the starvation check is a no-op.
 func TestSchedulerNoWorkerStarvation_SkipsWhenWorkerBusy(t *testing.T) {
 	database, err := db.New(":memory:")
@@ -1126,7 +1126,7 @@ func TestSchedulerNoWorkerStarvation_DisabledByZero(t *testing.T) {
 	}
 }
 
-// TSI-2334 review: a backlog of starved jobs larger than any fetch limit must
+// a backlog of starved jobs larger than any fetch limit must
 // converge within a single tick (bulk SQL failure, not per-job iteration).
 func TestSchedulerNoWorkerStarvation_BulkBacklog(t *testing.T) {
 	database, err := db.New(":memory:")
@@ -1180,7 +1180,7 @@ func TestSchedulerNoWorkerStarvation_BulkBacklog(t *testing.T) {
 
 // TestSchedulePendingJobsHeadOfLineBlocking verifies that a job no worker can
 // run (missing encoder capability, no capacity) does not block schedulable
-// jobs behind it in the queue (TSI-2362 acceptance 6).
+// jobs behind it in the queue.
 func TestSchedulePendingJobsHeadOfLineBlocking(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {
@@ -1224,7 +1224,7 @@ func TestSchedulePendingJobsHeadOfLineBlocking(t *testing.T) {
 
 // TestCheckTimeoutsRetryBudget verifies that a job failing repeatedly with
 // timeout is failed as TIMEOUT once the retry budget is exhausted instead of
-// being requeued forever (TSI-2362 acceptance 4).
+// being requeued forever.
 func TestCheckTimeoutsRetryBudget(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {
@@ -1306,7 +1306,7 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 // TestCheckTimeoutsRecordsRedistribution verifies that a timeout-driven
 // requeue (reason=job_timeout) creates a per-job redistribution placeholder, so
 // the migration target is resolvable once the job is reassigned — closing the
-// gap where only the heartbeat-timeout path tracked targets (TSI-3008).
+// gap where only the heartbeat-timeout path tracked targets.
 func TestCheckTimeoutsRecordsRedistribution(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {
@@ -1388,7 +1388,7 @@ func TestCheckTimeoutsRecordsRedistribution(t *testing.T) {
 // TestSchedulerLoadBalancingTieBreak verifies that when multiple idle workers
 // share the same (lowest) active job count, the scheduler breaks the tie by
 // least completed jobs. Without this, the first worker in the query result
-// always won ties, starving late-registered workers (TSI-2477).
+// always won ties, starving late-registered workers.
 func TestSchedulerLoadBalancingTieBreak(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {
@@ -1441,8 +1441,7 @@ func TestSchedulerLoadBalancingTieBreak(t *testing.T) {
 }
 
 // TestSchedulerLoadBalancingRoundRobin verifies that consecutive jobs
-// distribute across idle workers instead of piling onto the first one
-// (TSI-2477).
+// distribute across idle workers instead of piling onto the first one.
 func TestSchedulerLoadBalancingRoundRobin(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {

@@ -108,7 +108,7 @@ func TestUpdateWorkerHeartbeat(t *testing.T) {
 	}
 }
 
-// TestUpdateWorkerHeartbeatUUIDFormatMismatch (TSI-2346 follow-up): the
+// TestUpdateWorkerHeartbeatUUIDFormatMismatch: the
 // heartbeat path must canonicalize its ID argument like registration and
 // lookup do — a heartbeat carrying a compact/uppercase variant of a stored
 // hyphenated UUID refreshes the same row instead of returning 404.
@@ -313,7 +313,7 @@ func TestWorkerNotFound(t *testing.T) {
 	}
 }
 
-// TestGetWorkerUUIDFormatMismatch (TSI-2346): lookups must tolerate UUID
+// TestGetWorkerUUIDFormatMismatch: lookups must tolerate UUID
 // formatting differences between the stored ID and the query parameter
 // (hyphenated vs. compact, surrounding whitespace).
 func TestGetWorkerUUIDFormatMismatch(t *testing.T) {
@@ -346,7 +346,7 @@ func TestGetWorkerUUIDFormatMismatch(t *testing.T) {
 	}
 
 	// Registering the compact form of the same UUID must converge on the
-	// existing hyphenated row (write path normalizes too, TSI-2346): it
+	// existing hyphenated row (write path normalizes too): it
 	// upserts "uuid-worker" rather than inserting a second worker.
 	if _, err := database.CreateOrUpdateWorker(compact, "uuid-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
@@ -455,7 +455,7 @@ func TestRecoverState(t *testing.T) {
 		t.Fatalf("Failed to set job4 as completed: %v", err)
 	}
 
-	// Backdate job2's created_at so the recovery refresh (TSI-2597) is
+	// Backdate job2's created_at so the recovery refresh is
 	// observable: RecoverState must re-anchor the starvation/NoWorkerDeadline
 	// clock from the restart moment, not the pre-restart submission.
 	backdated := time.Now().Add(-1 * time.Hour)
@@ -618,7 +618,7 @@ func TestCreateOrUpdateWorker(t *testing.T) {
 	}
 }
 
-// TSI-2844: startup cleanup is lazy — it removes only workers whose last
+// startup cleanup is lazy — it removes only workers whose last
 // heartbeat is stale (older than the threshold), preserving fresh-heartbeat
 // workers that survived a restart.
 func TestRemoveStaleWorkers(t *testing.T) {
@@ -682,10 +682,10 @@ func TestRemoveStaleWorkers(t *testing.T) {
 	}
 }
 
-// TSI-2366 end-to-end residue scenario: register two workers, restart the
+// register two workers, restart the
 // server (RecoverState marks everything offline), then only one worker comes
 // back. The absent worker's record — whose heartbeat has gone stale — must be
-// gone after the lazy cleanup (TSI-2844); the returning worker's fresh row
+// gone after the lazy cleanup; the returning worker's fresh row
 // survives.
 func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 	database, cleanup := setupDBTest(t)
@@ -738,7 +738,7 @@ func TestRecoverStateRemovesStaleOfflineRecords(t *testing.T) {
 	}
 }
 
-// TSI-2473: a worker process restart generates a fresh UUID while reusing
+// a worker process restart generates a fresh UUID while reusing
 // the same name. The old row (offline residue) must be overwritten, not
 // duplicated — otherwise each restart accumulates a same-name entry.
 func TestCreateOrUpdateWorker_SameNameOverwritesStaleRow(t *testing.T) {
@@ -794,7 +794,7 @@ func TestCreateOrUpdateWorker_SameNameOverwritesStaleRow(t *testing.T) {
 	}
 }
 
-// TSI-2473: when name is empty, the DELETE guard must be skipped so an
+// when name is empty, the DELETE guard must be skipped so an
 // empty-name registration does not wipe other empty-name rows.
 func TestCreateOrUpdateWorker_EmptyNameSkipsDelete(t *testing.T) {
 	database, cleanup := setupDBTest(t)
@@ -828,7 +828,7 @@ func TestCreateOrUpdateWorker_EmptyNameSkipsDelete(t *testing.T) {
 	_ = worker3
 }
 
-// TSI-2670: two concurrently running workers may legitimately share a name
+// two concurrently running workers may legitimately share a name
 // while holding distinct IDs. The same-name DELETE in CreateOrUpdateWorker
 // must only remove stale offline residue, never a live (idle/busy) row —
 // otherwise each registration deletes the other live worker and they ping-pong
@@ -884,7 +884,7 @@ func TestCreateOrUpdateWorker_SameNameKeepsLiveRows(t *testing.T) {
 	}
 }
 
-// TSI-2670 review follow-up: a crashed worker's stale live row (idle/busy
+// a crashed worker's stale live row (idle/busy
 // with a heartbeat older than the freshness window) must be swept on same-name
 // re-registration, while a genuinely live same-name row with a fresh heartbeat
 // survives. This closes the window where a dead worker's row kept receiving
@@ -950,7 +950,7 @@ func TestCreateOrUpdateWorker_SameNameRemovesExpiredLiveRow(t *testing.T) {
 	}
 }
 
-// TSI-2366 companion fix: heartbeats and status updates from a UUID reported
+// heartbeats and status updates from a UUID reported
 // in non-canonical format (compact/hyphenless, uppercase) must reach the
 // canonical row instead of silently matching nothing.
 func TestHeartbeatAndStatusNormalizeUUID(t *testing.T) {
@@ -1003,7 +1003,7 @@ func TestHeartbeatAndStatusNormalizeUUID(t *testing.T) {
 	}
 }
 
-// TSI-2366 review follow-up: job read paths (pull queue, running-job lookup)
+// job read paths (pull queue, running-job lookup)
 // and UpdateWorkerCapabilities must also resolve non-canonical UUID formats,
 // otherwise a compact-format worker passes existence checks but silently
 // matches zero rows.

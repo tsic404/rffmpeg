@@ -24,7 +24,7 @@ func (f *fakeBroadcaster) BroadcastStatus(jobID string, status protocol.JobStatu
 	return nil
 }
 
-// TSI-2365 review fix: the starvation sweep fails jobs in the DB layer,
+// the starvation sweep fails jobs in the DB layer,
 // bypassing the HTTP handler that normally releases rate-limit quota and
 // broadcasts the terminal status. Both must happen here or clients stay
 // permanently 429'd and CLI listeners never learn the job died.

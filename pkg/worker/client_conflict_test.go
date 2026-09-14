@@ -12,7 +12,7 @@ import (
 // TestUpdateJobWithFailure_Conflict verifies that a 409 response from the
 // server surfaces as ErrJobConflict so callers can suppress benign log noise
 // from a terminal-report race (e.g. CLI cancel racing the worker's timeout
-// report — TSI-2451).
+// report —).
 func TestUpdateJobWithFailure_Conflict(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)

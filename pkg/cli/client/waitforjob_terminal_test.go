@@ -13,7 +13,7 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TestWaitForJobWithLogs_TerminalStatusReturnsPromptly is the TSI-3081
+// TestWaitForJobWithLogs_TerminalStatusReturnsPromptly is the
 // regression test: when the WebSocket delivers a terminal status (here a
 // --timeout verdict), WaitForJobWithLogs must return immediately — fetching
 // the terminal job with a single GetJob — instead of waiting out the backup
@@ -41,14 +41,12 @@ func TestWaitForJobWithLogs_TerminalStatusReturnsPromptly(t *testing.T) {
 			return
 		}
 		// Hold the connection open so the return can only come from the
-		// terminal status wake-up, not a graceful-close fallback. Drain reads
-		// until the client closes the connection (the wait returns and calls
-		// wsClient.Close, making gorilla's ReadMessage error), so the handler
-		// exits and its deferred conn.Close() runs. Waiting on r.Context().Done()
-		// would never fire here: net/http aborts its background read on hijack,
-		// so the request context is only cancelled when the handler returns —
-		// the same permanent block as select{} and the same leaked goroutine
-		// and TCP connection per test run.
+		// terminal-status wake-up, not a graceful-close fallback. Drain reads
+		// until the client closes the connection, so the handler exits and its
+		// deferred conn.Close() runs. Waiting on r.Context().Done() would never
+		// fire here: on hijack net/http aborts its background read, so the
+		// request context is only cancelled when the handler returns — a
+		// permanent block and leaked goroutine per test run.
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return

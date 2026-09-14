@@ -10,18 +10,14 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TestCacheHit_OverwritePolicyDegradesToMiss locks the TSI-2964 cache-hit fix:
-// when a cache hit would land on a pre-existing output file and the caller did
-// not opt into -y (or passed -n), the cache-hit copy must be skipped and the
-// job degraded to a cache miss so the normal ffmpeg path applies native
-// overwrite semantics ("Not overwriting - exiting") instead of silently
-// truncating the target with copyFile's O_TRUNC.
-//
-// The degradation is observable through the download counter: the cache-hit
-// path never downloads inputs, while the cache-miss path re-downloads them
-// before running ffmpeg. The mock ffmpeg used by setupTestWorker always
-// overwrites its target, so the file content is not a distinguishing signal
-// here — the real-ffmpeg rejection is covered by TestBuildArgsOverwriteSemantics.
+// TestCacheHit_OverwritePolicyDegradesToMiss locks the cache-hit fix: when a
+// cache hit would land on a pre-existing output file and the caller did not
+// opt into -y (or passed -n), the cache-hit copy is skipped and the job
+// degrades to a miss, so ffmpeg applies native overwrite semantics ("Not
+// overwriting - exiting") instead of silently truncating via copyFile's
+// O_TRUNC. The degradation is observable through the download counter: the
+// cache-hit path never downloads inputs, the miss path re-downloads them.
+// (The mock ffmpeg always overwrites, so content is not the signal here.)
 func TestCacheHit_OverwritePolicyDegradesToMiss(t *testing.T) {
 	w, mockSrv := setupTestWorker(t, 24*time.Hour)
 

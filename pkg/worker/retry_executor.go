@@ -213,15 +213,13 @@ func NewRetryExecutorWithFallback(executor *Executor, config *RetryConfig, fallb
 	}
 }
 
-// ExecuteWithRetry executes an ffmpeg command with automatic retry and fallback.
-// The outputPath parameter is required to ensure output file path consistency across retries.
-// networkOutput indicates the output is a network URL (RTMP, RTSP, etc.) — when true,
-// or the output is "-" (ffmpeg stdout, streaming mode), file existence/size validation
-// is skipped since no local file is produced.
-// stdoutHandler, when non-nil (streaming jobs), receives ffmpeg stdout chunks on every
-// retry attempt so streamed data reaches the client instead of being discarded.
-// stderrHandler, when non-nil, receives ffmpeg stderr lines on every retry attempt so
-// the full ffmpeg log streams to the CLI in real time on each attempt (TSI-2523).
+// ExecuteWithRetry executes an ffmpeg command with automatic retry and
+// fallback. outputPath keeps the output path consistent across retries.
+// networkOutput, or output "-" (streaming mode), skips file existence/size
+// validation since no local file is produced. stdoutHandler and
+// stderrHandler, when non-nil, receive stdout chunks / stderr lines on every
+// retry attempt so streamed data reaches the client and the full ffmpeg log
+// streams to the CLI in real time on each attempt.
 func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, outputPath string, networkOutput bool, stdoutHandler StdoutHandler, stderrHandler StderrHandler) *RetryResult {
 	result := &RetryResult{
 		AuditTrail:    make([]RetryAuditEntry, 0),

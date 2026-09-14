@@ -21,13 +21,13 @@ type Config struct {
 	// NoWorkerJobTimeout is how long a pending job may wait with no schedulable
 	// worker (offline/evicted pool) before being failed as NO_WORKER_AVAILABLE.
 	// 0 disables the check. Pending jobs queued behind busy workers are NOT
-	// affected: schedulable workers exist, so the job keeps waiting (TSI-2204).
+	// affected: schedulable workers exist, so the job keeps waiting.
 	NoWorkerJobTimeout time.Duration
 
 	// HeartbeatFreshness is the worker liveness window used by the starvation
 	// sweep: a worker whose last heartbeat is older than this is dead in
 	// practice even before the monitor flips it offline, so pending jobs do
-	// not keep waiting on it (TSI-2419). 0 disables the freshness filter.
+	// not keep waiting on it. 0 disables the freshness filter.
 	HeartbeatFreshness time.Duration
 
 	// MaxTimeoutRetries bounds how many times checkTimeouts may requeue the
@@ -59,13 +59,13 @@ func DefaultConfig() Config {
 // JobBroadcaster pushes terminal-state WebSocket updates for jobs that reach
 // a terminal status outside the HTTP handler path (starvation sweep). The
 // websocket.Hub satisfies it; an interface keeps scheduler decoupled from
-// the hub package (TSI-2365).
+// the hub package.
 type JobBroadcaster interface {
 	BroadcastStatus(jobID string, status protocol.JobStatus, exitCode int, err string) error
 }
 
 // SetRateLimiter wires the rate limiter so quota is released for jobs failed
-// outside the HTTP handler path (TSI-2365).
+// outside the HTTP handler path.
 func (s *Scheduler) SetRateLimiter(counter ratelimit.ClientJobCounter) {
 	s.rateLimiter = counter
 }
@@ -84,11 +84,10 @@ type Scheduler struct {
 	mu       sync.Mutex
 	started  bool          // Set by Start; guards the Stop-before-Start path
 	resched  chan struct{} // Channel to trigger immediate rescheduling
-	stopOnce sync.Once     // Guarantees Stop is idempotent (TSI-2365)
+	stopOnce sync.Once     // Guarantees Stop is idempotent
 
 	// rateLimiter releases the per-client quota of jobs failed outside the
-	// HTTP handler path (e.g. starvation sweep). Optional: nil skips release
-	// (TSI-2365).
+	// HTTP handler path (e.g. starvation sweep). Optional: nil skips release.
 	rateLimiter ratelimit.ClientJobCounter
 
 	// jobNotifier broadcasts terminal-state WS messages for jobs failed
@@ -122,7 +121,7 @@ func (s *Scheduler) Start() {
 
 // Stop stops the scheduler and waits for the loop to exit. Idempotent, and
 // safe to call before Start: when the loop goroutine never launched, done is
-// closed here so Stop neither double-closes nor blocks forever (TSI-2365).
+// closed here so Stop neither double-closes nor blocks forever.
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
@@ -233,7 +232,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 			log.Printf("Scheduler: Job %s requests encoder %s, but no idle workers have this capability",
 				job.ID, requestedEncoder)
 
-			// TSI-1500: Try encoder fallback within the same codec family
+			// Try encoder fallback within the same codec family
 			bestWorker, usedFallbackEncoder = s.tryEncoderFallback(job.ID, requestedEncoder)
 			if bestWorker != nil {
 				log.Printf("Scheduler: Job %s falling back from %s to encoder %s on worker %s",
@@ -273,7 +272,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 		return false
 	}
 
-	// TSI-2929: write back the migration target so a migrated job's chain
+	// write back the migration target so a migrated job's chain
 	// (source → target) is resolvable from migration_events alone. Best-effort
 	// audit write: assignment already succeeded, so a failure is logged, not
 	// surfaced.
@@ -297,7 +296,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 // selectBestWorker picks the worker with the most spare capacity (active jobs
 // furthest below its MaxConcurrent). Ties are broken by the least completed
 // job count so a late-registered worker is preferred over an earlier one that
-// would otherwise always win on the first-wins tie (TSI-2477). Callers may
+// would otherwise always win on the first-wins tie. Callers may
 // pass an unordered slice — GetIdleWorkersWithJobCount does not sort, while
 // GetIdleWorkersByEncoderWithJobCount does — so this explicit scan makes the
 // selection robust regardless of input ordering.
@@ -361,8 +360,7 @@ func (s *Scheduler) tryEncoderFallback(jobID, requestedEncoder string) (*db.Work
 		}
 
 		// Pick the worker with the most spare capacity; ties broken by
-		// least completed jobs so late-registered workers are not starved
-		// (TSI-2477).
+		// least completed jobs so late-registered workers are not starved.
 		bestWorker := s.selectBestWorker(workers)
 
 		if bestWorker != nil {
@@ -408,7 +406,7 @@ func (s *Scheduler) checkTimeouts() {
 			// and reschedule the job atomically. If the job already left the
 			// running set nothing is written, and an event/placeholder failure
 			// rolls the whole transaction back — no ghost migration event and
-			// no permanently-NULL placeholder (TSI-3008 review).
+			// no permanently-NULL placeholder.
 			rescheduled, err := s.db.RecordJobTimeoutMigration(job.WorkerID.String, job.ID, retries)
 			if err != nil {
 				log.Printf("Scheduler: Failed to record timeout migration for job %s: %v", job.ID, err)
@@ -426,7 +424,7 @@ func (s *Scheduler) checkTimeouts() {
 // checkNoWorkerStarvation fails pending jobs that have been waiting longer
 // than NoWorkerJobTimeout while the cluster has NO schedulable worker (all
 // offline or evicted). Without this, a job submitted just before its only
-// worker died would stay pending forever and CLI clients would hang (TSI-2334).
+// worker died would stay pending forever and CLI clients would hang.
 //
 // Jobs queued behind busy workers are deliberately untouched: schedulable
 // workers exist, so the job is expected to start once one frees up.
@@ -457,7 +455,7 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 	}
 	if len(schedulable) > 0 {
 		// At least one live worker can still take jobs; keep waiting
-		// (TSI-2204). Workers with stale heartbeats don't count (TSI-2419):
+		// Workers with stale heartbeats don't count:
 		// they would never pick up the job anyway.
 		return
 	}
@@ -470,7 +468,7 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 	// The bulk UPDATE bypasses the HTTP handler that normally releases the
 	// per-client quota and broadcasts the terminal status. Do both here, or
 	// clients get stuck behind a permanently inflated counter and CLI
-	// listeners never learn their job died (TSI-2365).
+	// listeners never learn their job died.
 	starvedIDs, err := s.db.GetStarvedPendingJobIDs(cutoff)
 	if err != nil {
 		log.Printf("Scheduler: Failed to list starved pending jobs: %v", err)
@@ -497,7 +495,7 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 			}
 			// Wake in-process DB waiters (probe handler). The bulk UPDATE
 			// bypasses the terminal-status writers that normally notify, so
-			// notifyTerminal must run here too (TSI-2562).
+			// notifyTerminal must run here too.
 			s.db.NotifyTerminal(jobID)
 		}
 	}

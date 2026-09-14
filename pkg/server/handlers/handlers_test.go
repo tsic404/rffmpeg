@@ -157,7 +157,7 @@ func TestUploadAndSubmitJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Register a worker with libx264 encoder (TSI-1428: required for job submission)
+	// Register a worker with libx264 encoder (required for job submission)
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Upload file
@@ -255,7 +255,7 @@ func TestListJobs(t *testing.T) {
 		t.Errorf("empty list has %d jobs, want 0", len(emptyResp.Jobs))
 	}
 
-	// Register a worker so jobs can be submitted (TSI-1428).
+	// Register a worker so jobs can be submitted.
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Submit three jobs with a remote URL input to skip the file-existence check.
@@ -330,7 +330,7 @@ func TestUpdateJobStatus(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Register a worker with libx264 encoder (TSI-1428: required for job submission)
+	// Register a worker with libx264 encoder (required for job submission)
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Upload and create job
@@ -420,7 +420,7 @@ func TestUpdateJobStatus(t *testing.T) {
 	}
 }
 
-// TestUpdateJobCachedFlag covers the TSI-2519 end-to-end contract through the
+// TestUpdateJobCachedFlag covers the end-to-end contract through the
 // HTTP layer: a worker that reports a completed job with cached=true persists
 // the flag, and a CLI-style GET observes cached:true on the job.
 func TestUpdateJobCachedFlag(t *testing.T) {
@@ -547,7 +547,7 @@ func TestUpdateJobCachedFlag(t *testing.T) {
 	}
 }
 
-// TestUpdateJobCachedFlagCoercedOnFailure guards the TSI-2519 review fix: the
+// TestUpdateJobCachedFlagCoercedOnFailure guards the fix: the
 // public PATCH /api/v1/jobs/{id} endpoint must not let a client fabricate a
 // cache hit for a non-completed outcome. A failed report with cached=true
 // persists cached=false.
@@ -728,7 +728,7 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	}
 }
 
-// TestUpdateJobFailureTypeAllEnumsAccepted locks the TSI-2802 gap: every one
+// TestUpdateJobFailureTypeAllEnumsAccepted locks the gap: every one
 // of the nine documented FailureType values must be accepted by the server
 // (not just TIMEOUT / INPUT_UNREACHABLE) and persisted onto the job, and each
 // must report the retryable flag it is defined with. A failed→failed update
@@ -835,7 +835,7 @@ func TestCancelJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Register a worker with libx264 encoder (TSI-1428: required for job submission)
+	// Register a worker with libx264 encoder (required for job submission)
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Create job
@@ -898,7 +898,7 @@ func TestCancelRunningJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Register a worker with libx264 encoder (TSI-1428: required for job submission)
+	// Register a worker with libx264 encoder (required for job submission)
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Create job
@@ -977,7 +977,7 @@ func TestUploadOutputAndDownload(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Register a worker with libx264 encoder (TSI-1428: required for job submission)
+	// Register a worker with libx264 encoder (required for job submission)
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Create job
@@ -1157,7 +1157,7 @@ func uploadOutputPayload(t *testing.T, router *chi.Mux, jobID string, size int) 
 
 // TestUploadLargeOutput verifies output uploads spanning both sides of the
 // 32MB ParseMultipartForm in-memory threshold succeed: 20MB stays in memory
-// while 50MB spills the file part to a temporary file on disk (TSI-3072).
+// while 50MB spills the file part to a temporary file on disk.
 func TestUploadLargeOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1269,7 +1269,7 @@ func TestWorkerRegistration(t *testing.T) {
 	}
 }
 
-// TSI-2522: a spec-conformant client registers only the canonical encoders
+// a spec-conformant client registers only the canonical encoders
 // list; the server must derive video_encoders from it so that the
 // GET /api/v1/encoders aggregation endpoint is not permanently empty.
 func TestRegisterWorker_DerivesVideoEncoders(t *testing.T) {
@@ -1465,7 +1465,7 @@ func TestWorkerReRegistration(t *testing.T) {
 	}
 }
 
-// TSI-2473: an empty worker name must be rejected at the handler. Without
+// an empty worker name must be rejected at the handler. Without
 // this guard, the DB-layer DELETE would wipe unrelated empty-name rows.
 func TestRegisterWorker_RejectsEmptyName(t *testing.T) {
 	_, router, cleanup := setupTest(t)
@@ -1632,7 +1632,7 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 }
 
 // TestWorkerHealthInListResponse verifies that the workers endpoints always
-// return a non-null health object (TSI-2219) and that GPU metrics sent via
+// return a non-null health object and that GPU metrics sent via
 // heartbeat flow into the response.
 // workerHealth mirrors the handler's health object for JSON decoding in tests.
 type WorkerHealth struct {
@@ -1763,7 +1763,7 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 // carries throughput_fps, even for an idle worker reporting zero throughput
 // (or no heartbeat yet). omitempty previously dropped the field at 0, leaving
 // an idle worker's health as {status, gpu_metrics_valid, last_seen} and
-// breaking the QA assertion that throughput_fps is present (TSI-2999).
+// breaking the QA assertion that throughput_fps is present.
 func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -1813,7 +1813,7 @@ func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
 	}
 }
 
-// TestListWorkersActiveOnlyFilter (TSI-2919) verifies GET /api/v1/workers
+// TestListWorkersActiveOnlyFilter verifies GET /api/v1/workers
 // returns every registered worker by default, and that ?active_only=true
 // excludes offline rows retained within the --worker-offline-threshold window.
 func TestListWorkersActiveOnlyFilter(t *testing.T) {
@@ -1872,7 +1872,7 @@ func TestListWorkersActiveOnlyFilter(t *testing.T) {
 	}
 }
 
-// TestWorkerHealthStatusTracksJobLifecycle (TSI-2347) verifies health.status
+// TestWorkerHealthStatusTracksJobLifecycle verifies health.status
 // reflects a running job as "busy" without requiring a busy heartbeat: the
 // scheduler and the job-pull path keep the DB status current, and health must
 // derive its status from that record rather than from the heartbeat-fed state
@@ -1989,7 +1989,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	}
 }
 
-// TestGetWorkerUUIDFormatMismatch (TSI-2346) verifies the detail endpoint
+// TestGetWorkerUUIDFormatMismatch verifies the detail endpoint
 // resolves a worker whose ID is a UUID regardless of hyphenation or case in
 // the URL, and that id/name/status/health are populated from the DB record
 // when no state-table entry matches.
@@ -2062,7 +2062,7 @@ func TestCancelCompletedJob(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Register a worker with libx264 encoder (TSI-1428: required for job submission)
+	// Register a worker with libx264 encoder (required for job submission)
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Create job
@@ -2125,7 +2125,7 @@ func TestHeartbeatReturnsCancelledJobs(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	// Register a worker with libx264 encoder (TSI-1428: required for job submission)
+	// Register a worker with libx264 encoder (required for job submission)
 	registerTestWorker(t, router, []string{"libx264"})
 
 	// Register worker
@@ -2242,7 +2242,7 @@ func TestWorkerRegistrationWithInvalidCapabilities(t *testing.T) {
 	}
 }
 
-// TestSubmitJobNoWorkerAvailable tests that job submission fails fast when no workers are available (TSI-1428)
+// TestSubmitJobNoWorkerAvailable tests that job submission fails fast when no workers are available
 func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2304,7 +2304,7 @@ func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 
 // TestSubmitJobNoWorkerWithEncoder verifies a job requesting an encoder no
 // worker supports is persisted and failed as ENCODER_UNAVAILABLE rather than
-// rejected with a 503 that leaves no DB row (TSI-2846; formerly TSI-1428).
+// rejected with a 503 that leaves no DB row.
 func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2342,7 +2342,7 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	// TSI-2846: the job is persisted and failed as ENCODER_UNAVAILABLE (200),
+	// the job is persisted and failed as ENCODER_UNAVAILABLE (200),
 	// not rejected with a 503 that leaves no DB row.
 	if w.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d: %s", w.Code, w.Body.String())
@@ -2374,7 +2374,7 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	if statusResp.Job.FailureType != string(protocol.FailureEncoderUnavailable) {
 		t.Errorf("Expected failure_type %q, got %q", protocol.FailureEncoderUnavailable, statusResp.Job.FailureType)
 	}
-	// TSI-2930: the pre-scheduling rejection never assigned a worker, so no
+	// the pre-scheduling rejection never assigned a worker, so no
 	// attribution is written — this distinguishes it from runtime failures.
 	if statusResp.Job.AssignedWorker != "" || statusResp.Job.WorkerName != "" {
 		t.Errorf("submit-time rejection must not write attribution, got assigned_worker=%q worker_name=%q",
@@ -2385,7 +2385,7 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 	}
 }
 
-// TestSubmitJobUnknownEncoderPersistedAsUnavailable locks the TSI-2846 issue
+// TestSubmitJobUnknownEncoderPersistedAsUnavailable locks the
 // example: an encoder no worker has ever registered (e.g. a typo) is persisted
 // and failed as ENCODER_UNAVAILABLE, not rejected with a 503 leaving no row.
 func TestSubmitJobUnknownEncoderPersistedAsUnavailable(t *testing.T) {
@@ -2434,7 +2434,7 @@ func TestSubmitJobUnknownEncoderPersistedAsUnavailable(t *testing.T) {
 	}
 }
 
-// TestSubmitJobEncoderCheckDBErrorFailsClosed locks the TSI-2846 review fix: a
+// TestSubmitJobEncoderCheckDBErrorFailsClosed locks the fix: a
 // DB error during the encoder-capability check must fail closed (503
 // worker_unavailable), not be treated as "no worker has the encoder" and
 // persisted as a terminal ENCODER_UNAVAILABLE.
@@ -2476,7 +2476,7 @@ func TestSubmitJobEncoderCheckDBErrorFailsClosed(t *testing.T) {
 	}
 }
 
-// TestSubmitJobCreateFailedJobErrorReturns500 locks the TSI-2846 review fix:
+// TestSubmitJobCreateFailedJobErrorReturns500 locks the fix:
 // when the atomic failed-job INSERT fails (transient DB fault), submission must
 // return 500 — never 200 claiming the job was recorded as ENCODER_UNAVAILABLE.
 func TestSubmitJobCreateFailedJobErrorReturns500(t *testing.T) {
@@ -2509,7 +2509,7 @@ func TestSubmitJobCreateFailedJobErrorReturns500(t *testing.T) {
 	}
 }
 
-// TSI-2204: Test that job submission is accepted (queued) when the only worker is busy,
+// Test that job submission is accepted (queued) when the only worker is busy,
 // instead of being rejected with 503.
 func TestSubmitJobBusyWorkerQueued(t *testing.T) {
 	_, router, cleanup := setupTest(t)
@@ -2599,7 +2599,7 @@ func TestSubmitJobBusyWorkerQueued(t *testing.T) {
 	}
 }
 
-// TSI-1500: Test that handler allows job submission when compatible encoder is available
+// Test that handler allows job submission when compatible encoder is available
 func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2649,7 +2649,7 @@ func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 	}
 }
 
-// TSI-1500/TSI-2846: a job requesting an encoder in a codec family no worker
+// a job requesting an encoder in a codec family no worker
 // supports is persisted and failed as ENCODER_UNAVAILABLE, not rejected 503.
 func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	_, router, cleanup := setupTest(t)
@@ -2694,7 +2694,7 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	// TSI-2846: persisted and failed as ENCODER_UNAVAILABLE (200), not 503.
+	// persisted and failed as ENCODER_UNAVAILABLE (200), not 503.
 	if w.Code != http.StatusOK {
 		t.Fatalf("Expected status 200, got %d. Body: %s", w.Code, w.Body.String())
 	}
@@ -2729,7 +2729,7 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 	}
 }
 
-// TSI-1500: Test that exact encoder match is preferred
+// Test that exact encoder match is preferred
 func TestSubmitJobExactEncoderMatchPreferred(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -2779,7 +2779,7 @@ func TestSubmitJobExactEncoderMatchPreferred(t *testing.T) {
 	}
 }
 
-// TSI-2419: a registered worker whose last heartbeat is older than the
+// a registered worker whose last heartbeat is older than the
 // configured heartbeat timeout must be treated as unavailable at submission
 // time, so the CLI gets an immediate 503 instead of a pending job that only
 // fails after the no-worker job timeout (default 2m).
@@ -2829,8 +2829,8 @@ func TestSubmitJobStaleHeartbeatWorkerRejected(t *testing.T) {
 	}
 }
 
-// TSI-2419: a worker with a fresh heartbeat still counts as available even
-// when a freshness window is configured — busy workers queue (TSI-2204),
+// a worker with a fresh heartbeat still counts as available even
+// when a freshness window is configured — busy workers queue,
 // stale ones are the only ones filtered out.
 func TestSubmitJobFreshHeartbeatWorkerAccepted(t *testing.T) {
 	h, router, cleanup := setupTest(t)
@@ -2859,7 +2859,7 @@ func TestSubmitJobFreshHeartbeatWorkerAccepted(t *testing.T) {
 	}
 }
 
-// TSI-2419: when no freshness window is configured (<=0), heartbeat age is
+// when no freshness window is configured (<=0), heartbeat age is
 // ignored and the pre-existing behavior applies — any schedulable
 // (non-offline, non-evicted) worker makes submission succeed.
 func TestSubmitJobNoFreshnessCheckWhenDisabled(t *testing.T) {
@@ -2895,7 +2895,7 @@ func TestSubmitJobNoFreshnessCheckWhenDisabled(t *testing.T) {
 	}
 }
 
-// TSI-2419 regression (review blocker #1 on PR #38): the requested-encoder
+// the requested-encoder
 // path must apply heartbeat freshness too. A stale-heartbeat worker with the
 // requested encoder must not satisfy the exact-match check just because
 // another live worker WITHOUT that encoder exists — that combination used to
@@ -2939,7 +2939,7 @@ func TestSubmitJobStaleEncoderWorkerWithLiveOtherWorkerRejected(t *testing.T) {
 	}
 }
 
-// TSI-2474: a probe request when no live worker is available must fail
+// a probe request when no live worker is available must fail
 // immediately with 503 worker_unavailable instead of dispatching a job that
 // sits pending for the entire 2-minute poll loop before returning "timeout".
 func TestProbeNoWorkerFailsImmediately(t *testing.T) {
@@ -2972,7 +2972,7 @@ func TestProbeNoWorkerFailsImmediately(t *testing.T) {
 	}
 }
 
-// TSI-2474: a stale-heartbeat worker (registered but dead in practice) must
+// a stale-heartbeat worker (registered but dead in practice) must
 // not satisfy the probe availability check — the probe must still fail fast.
 func TestProbeStaleHeartbeatWorkerFailsImmediately(t *testing.T) {
 	h, router, cleanup := setupTest(t)
@@ -3014,7 +3014,7 @@ func TestProbeStaleHeartbeatWorkerFailsImmediately(t *testing.T) {
 	}
 }
 
-// TSI-2474 happy path: a probe request when a live worker IS available must
+// a probe request when a live worker IS available must
 // pass the worker-availability guard and proceed to job creation — it must
 // NOT be rejected with 503 worker_unavailable. No worker pulls the job in
 // this test, so the handler enters its poll loop; we cancel the request
@@ -3068,7 +3068,7 @@ func TestProbeWithLiveWorkerProceeds(t *testing.T) {
 	}
 }
 
-// TSI-2520: in shared-FS mode the CLI sends an absolute local path as the
+// in shared-FS mode the CLI sends an absolute local path as the
 // probe input. The input-exists check must resolve direct paths against the
 // server's filesystem (not the storage base dir), so an existing path must
 // pass validation and reach the worker-availability guard (503 here, since
@@ -3098,7 +3098,7 @@ func TestProbeDirectPathExistsPassesInputValidation(t *testing.T) {
 	}
 }
 
-// TSI-2520: a direct path that does not exist on the server filesystem must
+// a direct path that does not exist on the server filesystem must
 // still be rejected with 404 before worker dispatch.
 func TestProbeDirectPathMissingRejected(t *testing.T) {
 	_, router, cleanup := setupTest(t)
@@ -3124,7 +3124,7 @@ func TestProbeDirectPathMissingRejected(t *testing.T) {
 	}
 }
 
-// TSI-2706: a bare-API probe input containing a ".." component must be
+// a bare-API probe input containing a ".." component must be
 // rejected server-side (same shared pathutil.ContainsPathTraversal the worker
 // uses), even when the cleaned path would stat to an existing file.
 func TestProbeDirectPathTraversalRejected(t *testing.T) {
@@ -3165,7 +3165,7 @@ func TestProbeDirectPathTraversalRejected(t *testing.T) {
 	}
 }
 
-// TSI-2718: a SubmitJob direct path containing a ".." component must be
+// a SubmitJob direct path containing a ".." component must be
 // rejected server-side (same shared pathutil.ContainsPathTraversal the worker
 // uses), fail-fast before job creation — the opposite of dispatching it and
 // letting the worker reject it at runtime.
@@ -3197,7 +3197,7 @@ func TestSubmitJobDirectPathTraversalRejected(t *testing.T) {
 	}
 }
 
-// TSI-2718: a legitimate dot-prefixed filename such as "my..video.mp4" must
+// a legitimate dot-prefixed filename such as "my..video.mp4" must
 // not be false-positived by the component-level guard.
 func TestSubmitJobDirectPathDotFilenameAccepted(t *testing.T) {
 	h, router, cleanup := setupTest(t)
@@ -3224,7 +3224,7 @@ func TestSubmitJobDirectPathDotFilenameAccepted(t *testing.T) {
 	}
 }
 
-// TSI-2721: a SubmitJob output filename containing a ".." component must be
+// a SubmitJob output filename containing a ".." component must be
 // rejected server-side in direct mode, symmetric with the worker's directMode
 // output guard — refused before dispatch instead of by the worker at runtime.
 func TestSubmitJobOutputFilenameTraversalRejected(t *testing.T) {
@@ -3256,7 +3256,7 @@ func TestSubmitJobOutputFilenameTraversalRejected(t *testing.T) {
 	}
 }
 
-// TSI-2721: a remote output URL containing a ".." path segment must not be
+// a remote output URL containing a ".." path segment must not be
 // false-positived by the component-level guard — the worker passes remote
 // outputs through unchanged, so the server mirrors that exemption.
 func TestSubmitJobOutputFilenameRemoteURLExempt(t *testing.T) {
@@ -3285,7 +3285,7 @@ func TestSubmitJobOutputFilenameRemoteURLExempt(t *testing.T) {
 	}
 }
 
-// TSI-2721: a "file://" output or a local path with a mid-string "://" must be
+// a "file://" output or a local path with a mid-string "://" must be
 // treated as local, not remote — the worker's IsRemoteURL predicate excludes the
 // file scheme and anchors the scheme at the start. Both must be rejected as
 // traversal server-side rather than being exempted and refused by the worker.
@@ -3329,7 +3329,7 @@ func TestSubmitJobOutputFilenameLocalSchemeRejected(t *testing.T) {
 	}
 }
 
-// TSI-2721: a legitimate dot-prefixed output filename such as "my..video.mp4"
+// a legitimate dot-prefixed output filename such as "my..video.mp4"
 // must not be false-positived by the component-level guard in direct mode.
 func TestSubmitJobOutputFilenameDotFilenameAccepted(t *testing.T) {
 	h, router, cleanup := setupTest(t)
@@ -3360,7 +3360,7 @@ func TestSubmitJobOutputFilenameDotFilenameAccepted(t *testing.T) {
 // TestProbeDirectPathStoredInJob verifies that a shared-FS direct path input is
 // persisted as the probe job's direct_paths so the worker can probe it locally.
 // A storage file ID must keep direct_paths empty (downloaded normally), while a
-// remote URL must also keep direct_paths empty. (TSI-2520)
+// remote URL must also keep direct_paths empty.
 func TestProbeDirectPathStoredInJob(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()

@@ -162,7 +162,7 @@ func TestClient_StreamingOutputMode(t *testing.T) {
 }
 
 // TestClient_SendStdoutChunk_BinaryIntegrity verifies that arbitrary binary
-// stdout data survives the JSON transport byte-for-byte (TSI-2355). Before the
+// stdout data survives the JSON transport byte-for-byte. Before the
 // fix, SendStdoutChunk put raw bytes in a JSON string field and encoding/json
 // replaced invalid UTF-8 bytes with U+FFFD on both ends.
 func TestClient_SendStdoutChunk_BinaryIntegrity(t *testing.T) {
@@ -264,7 +264,7 @@ func TestClient_StdoutBatcher(t *testing.T) {
 	}
 }
 
-// TestStdoutBatcher_FlushAndWait is the TSI-2905 regression test for the
+// TestStdoutBatcher_FlushAndWait is the regression test for the
 // stdout side of the flush-before-terminal-status contract. With a batch
 // delay far longer than the test, only FlushAndWait (not the timer) can
 // trigger a flush; it must drain the buffered chunks and block until the
@@ -316,7 +316,7 @@ func TestStdoutBatcher_FlushAndWait(t *testing.T) {
 	}
 }
 
-// TestStdoutBatcher_FlushAndWaitReturnsSendError is the TSI-2905 regression
+// TestStdoutBatcher_FlushAndWaitReturnsSendError is the regression
 // test for the error half of the flush contract: a failed SendStdoutChunk must
 // not be swallowed. FlushAndWait must return it so processJob can report the
 // job failed instead of completed with a truncated stream.
@@ -382,7 +382,7 @@ func TestClient_UploadOutput(t *testing.T) {
 
 // TestClient_UploadOutputRecordsErrorBody verifies that a non-200 response's
 // body is surfaced in the returned error so upload failures are diagnosable
-// (TSI-3072). A JSON protocol error envelope is decoded to its Message field;
+// A JSON protocol error envelope is decoded to its Message field;
 // a non-JSON body falls back to the raw text.
 func TestClient_UploadOutputRecordsErrorBody(t *testing.T) {
 	for _, tc := range []struct {

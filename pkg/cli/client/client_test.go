@@ -66,7 +66,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *db.Database, *storage.Sto
 	r.Delete("/api/v1/jobs/{jobId}", h.CancelJob)
 	r.Get("/api/v1/output/{fileId}", h.DownloadOutput)
 	r.Get("/api/v1/health", h.Health)
-	r.Post("/api/v1/workers/register", h.RegisterWorker) // TSI-1428: needed for job submission
+	r.Post("/api/v1/workers/register", h.RegisterWorker) // needed for job submission
 
 	// Chunked upload endpoints
 	r.Post("/api/v1/upload/init", chunkHandler.InitChunkUpload)
@@ -77,7 +77,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *db.Database, *storage.Sto
 
 	server := httptest.NewServer(r)
 
-	// Register a test worker with common encoders (TSI-1428: required for job submission)
+	// Register a test worker with common encoders (required for job submission)
 	registerTestWorker(t, server.URL)
 
 	cleanup := func() {
@@ -321,7 +321,7 @@ func TestUploadFile(t *testing.T) {
 // TestUploadFileAuthRejected verifies that an HTTP 401 rejection from the
 // upload endpoint surfaces as a readable authentication error with the status
 // code and token hint — not the misleading "failed to copy file: io:
-// read/write on closed pipe" the pipe writer would otherwise report (TSI-2598).
+// read/write on closed pipe" the pipe writer would otherwise report.
 func TestUploadFileAuthRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -356,7 +356,7 @@ func TestUploadFileAuthRejected(t *testing.T) {
 // TestUploadFileChunkedAuthRejected verifies that an HTTP 401 rejection from
 // the chunk upload endpoint surfaces as a readable authentication error — not
 // the misleading "chunk write failed: io: read/write on closed pipe" the pipe
-// writer would otherwise report (TSI-2618).
+// writer would otherwise report.
 func TestUploadFileChunkedAuthRejected(t *testing.T) {
 	content := []byte("chunked auth test content")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -403,7 +403,7 @@ func TestUploadFileChunkedAuthRejected(t *testing.T) {
 // TestUploadFileChunkedInitAuthRejected verifies that an HTTP 401 rejection from
 // the init endpoint surfaces with the status code and server message. A >100MB
 // file with a bad token fails here before any chunk is uploaded, so this is the
-// error an operator actually sees for large-file auth failures (TSI-2625).
+// error an operator actually sees for large-file auth failures.
 func TestUploadFileChunkedInitAuthRejected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -441,7 +441,7 @@ func TestUploadFileChunkedInitAuthRejected(t *testing.T) {
 
 // TestUploadFileNonOKEmptyMessage verifies that a non-200 upload response with
 // a JSON body whose message field is empty falls back to a status-code error
-// instead of degrading to "upload failed: " with no diagnostic (TSI-2664).
+// instead of degrading to "upload failed: " with no diagnostic.
 func TestUploadFileNonOKEmptyMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -468,7 +468,7 @@ func TestUploadFileNonOKEmptyMessage(t *testing.T) {
 }
 
 // TestUploadFileChunkedInitNonOKEmptyMessage verifies that a non-200 init
-// response with an empty message falls back to a status-code error (TSI-2664).
+// response with an empty message falls back to a status-code error.
 func TestUploadFileChunkedInitNonOKEmptyMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/upload/init" {
@@ -498,8 +498,7 @@ func TestUploadFileChunkedInitNonOKEmptyMessage(t *testing.T) {
 }
 
 // TestUploadFileChunkedCompleteNonOKEmptyMessage verifies that a non-200
-// complete response with an empty message falls back to a status-code error
-// (TSI-2664).
+// complete response with an empty message falls back to a status-code error.
 func TestUploadFileChunkedCompleteNonOKEmptyMessage(t *testing.T) {
 	content := []byte("complete non-ok empty message")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -545,7 +544,7 @@ func TestUploadFileChunkedCompleteNonOKEmptyMessage(t *testing.T) {
 }
 
 // TestUploadFileChunkedChunkNonOKEmptyMessage verifies that a non-200 chunk
-// response with an empty message falls back to a status-code error (TSI-2664).
+// response with an empty message falls back to a status-code error.
 // 403 is used instead of 503 so the chunk retry loop does not retry the error.
 func TestUploadFileChunkedChunkNonOKEmptyMessage(t *testing.T) {
 	content := []byte("chunk non-ok empty message")
@@ -586,7 +585,7 @@ func TestUploadFileChunkedChunkNonOKEmptyMessage(t *testing.T) {
 
 // TestNonUploadNonOKEmptyMessage verifies that every non-upload endpoint falls
 // back to a status-code error when a non-200 JSON body has an empty message,
-// instead of degrading to a bare "... failed: " suffix (TSI-2730).
+// instead of degrading to a bare "... failed: " suffix.
 func TestNonUploadNonOKEmptyMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -853,7 +852,7 @@ func TestMultipartSizeCalculation(t *testing.T) {
 }
 
 // calculateMultipartSizeForTest mirrors the production calculation, including
-// the quote escaping added in TSI-2365.
+// the quote escaping.
 func calculateMultipartSizeForTest(boundary string, fileSize int64, filename string) int64 {
 	escaped := strings.ReplaceAll(strings.ReplaceAll(filename, "\\", "\\\\"), "\"", "\\\"")
 	preamble := fmt.Sprintf("--%s\r\n", boundary)
@@ -1155,7 +1154,7 @@ func TestSharedFSSubmitJobWithoutDirectPath(t *testing.T) {
 	}
 }
 
-// TestSubmitJobTimeoutSentAsDuration is the TSI-2886 regression test: the CLI
+// TestSubmitJobTimeoutSentAsDuration is the regression test: the CLI
 // must send --timeout as a duration budget (integer nanoseconds), not as an
 // absolute submit-time deadline. Encoding a deadline here re-introduces the
 // ~2x discrepancy where scheduling/download latency eats the ffmpeg budget.
@@ -1256,7 +1255,7 @@ func TestSubmitJobBackwardsCompat(t *testing.T) {
 	}
 }
 
-// TestSubmitJobRateLimitMessage is the TSI-2938 regression test: the rate-limit
+// TestSubmitJobRateLimitMessage is the regression test: the rate-limit
 // 429 error must render the exact single-line stderr promised by the QA skill
 // scenario 6d — "rate limit exceeded: 10/10 concurrent jobs. Retry after 5
 // seconds" — rather than burying the Retry hint in a verbose multi-line body.
@@ -1288,7 +1287,7 @@ func TestSubmitJobRateLimitMessage(t *testing.T) {
 // TestWaitForJob_ContextCancellation verifies that WaitForJob returns
 // context.DeadlineExceeded promptly when the job never reaches a terminal
 // status (e.g. a worker killed within the heartbeat window leaves the job
-// stuck in "queued"). This is the client-side timeout detection for TSI-2202.
+// stuck in "queued"). This is the client-side timeout detection.
 func TestWaitForJob_ContextCancellation(t *testing.T) {
 	var mu sync.Mutex
 	var polls int

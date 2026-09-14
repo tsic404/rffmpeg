@@ -27,7 +27,7 @@ func TestNormalizeBaseURL(t *testing.T) {
 	}
 }
 
-// TestNewClientDoesNotDoubleAPIPrefix is the TSI-2636 regression test: a
+// TestNewClientDoesNotDoubleAPIPrefix is the regression test: a
 // user-supplied "http://host/api/v1" must produce
 // "http://host/api/v1/workers/register", not
 // "http://host/api/v1/api/v1/workers/register" (which 404s).

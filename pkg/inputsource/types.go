@@ -35,6 +35,6 @@ type InputSource struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 
 	// AuthType specifies the authentication method required for this input
-	// Reserved for future iterations (depends on TSI-710)
+	// Reserved for future iterations
 	AuthType AuthType `json:"auth_type,omitempty"`
 }

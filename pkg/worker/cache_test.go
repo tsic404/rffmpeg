@@ -44,7 +44,7 @@ func TestGenerateCacheKey_DifferentArgs(t *testing.T) {
 	}
 }
 
-// TSI-2352: a --auto-hw run upgrades the encoder (e.g. libx264 → h264_qsv), so its
+// a --auto-hw run upgrades the encoder (e.g. libx264 → h264_qsv), so its
 // cached output must never be served to a request without --auto-hw (and vice versa).
 func TestGenerateCacheKey_DifferentAutoHW(t *testing.T) {
 	sources := []string{"file-a"}

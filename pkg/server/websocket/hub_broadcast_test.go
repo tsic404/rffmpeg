@@ -13,26 +13,14 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TSI-2388: the server process died silently during QA. Every broadcast
-// path (BroadcastStatus/Stderr/Stdout/Progress/Complete/Error →
-// BroadcastWSMessage) sends on the unbuffered h.broadcast channel, which is
-// only drained by the Run loop. If Run ever stops — a panic inside its loop,
-// a missed StartWSHub call, or a blocked iteration — every handler goroutine
-// that touches a job status update blocks forever on the channel send while
-// holding no way to report the failure: the server looks alive (listeners
-// open) but never answers. The same deadlock is reachable from inside Run
-// itself: the buffer-full branch does `h.unregister <- client`, but Run is
-// the only reader of h.unregister, so one slow client with a full 256-slot
-// send buffer freezes the entire hub loop and, through it, every HTTP
-// handler that broadcasts.
-//
-// These tests pin both halves of that contract:
-//
-//  1. Broadcast must not block indefinitely when the hub loop is down — it
-//     must return an error instead of wedging the caller goroutine forever.
-//  2. The Run-loop broadcast path must never block on unregister: a full
-//     client buffer must drop the message (and shed the client), not stall
-//     delivery to every other connected client.
+// The server process died silently during QA: every broadcast path sends on
+// the unbuffered h.broadcast channel, which only the Run loop drains. If Run
+// stops (panic, missed StartWSHub, blocked iteration), every handler that
+// broadcasts blocks forever with no way to report the failure — the server
+// looks alive but never answers. The same deadlock is reachable inside Run:
+// the buffer-full branch sends h.unregister <- client, but Run is the only
+// reader, so one slow client freezes the whole loop. These tests pin both
+// halves of that contract.
 
 // TestHub_BroadcastDoesNotBlockWhenLoopDown covers half 1: with nobody
 // draining h.broadcast, Hub.Broadcast must return an error within a bounded
@@ -66,14 +54,12 @@ func TestHub_BroadcastDoesNotBlockWhenLoopDown(t *testing.T) {
 }
 
 // TestHub_RunSurvivesFullClientBuffer covers half 2: a client whose send
-// buffer is full must not wedge the Run loop, and — the review blocker —
-// the shed must be atomic: after the hub closes a saturated client, a
-// broadcast for the SAME job must not select-send on the now-closed send
-// channel (a panic that kills the Run goroutine, i.e. silent server death).
-//
-// The healthy client is observed through its own dial-up connection (the
-// test acts as the WebSocket peer), so delivery proves the Run loop kept
-// dispatching through the shed and the post-shed same-job broadcasts.
+// buffer is full must not wedge the Run loop, and the shed must be atomic —
+// after the hub closes a saturated client, a broadcast for the SAME job must
+// not select-send on the now-closed channel (a panic that kills the Run
+// goroutine, i.e. silent server death). The healthy client is observed through
+// its own dial-up connection, so delivery proves the Run loop kept
+// dispatching through the shed and post-shed same-job broadcasts.
 func TestHub_RunSurvivesFullClientBuffer(t *testing.T) {
 	upgrader := &websocket.Upgrader{}
 	received := make(chan []byte, 8)
@@ -210,15 +196,12 @@ func newHalfOpenClient(t *testing.T, hub *Hub, jobID string) *Client {
 }
 
 // TestHub_ClientWritePumpExitDoesNotCloseSend is the regression test for a
-// second door into the TSI-2388 "silent server death" crash. The first door
-// (full client buffer -> shed) was fixed by delete-then-close under h.mu. This
-// door is client churn: WritePump's deferred cleanup used to call Close(),
-// which closed c.send while the client was still in h.clients. A broadcast for
-// that job then select-sent on the closed channel and panicked the Run loop.
-//
-// Unlike the earlier version, this test runs the victim's WritePump for real
-// and drives it out through a genuine write error, so a regression of the
-// WritePump defer from closeConn back to Close fails here.
+// second door into the "silent server death" crash: WritePump's deferred
+// cleanup used to call Close(), closing c.send while the client was still in
+// h.clients, so a broadcast for that job select-sent on the closed channel and
+// panicked the Run loop. This test runs the victim's WritePump for real and
+// drives it out through a genuine write error, so a regression of the defer
+// from closeConn back to Close fails here.
 func TestHub_ClientWritePumpExitDoesNotCloseSend(t *testing.T) {
 	hub := NewHub()
 	runHub(hub)

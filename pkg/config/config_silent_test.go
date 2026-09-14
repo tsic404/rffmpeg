@@ -7,7 +7,7 @@ import (
 )
 
 // TestDurationEnvInvalidLogged verifies that an unparsable duration env var
-// keeps the default (TSI-2365) instead of silently producing a zero duration.
+// keeps the default instead of silently producing a zero duration.
 func TestDurationEnvInvalidLogged(t *testing.T) {
 	os.Setenv("JOB_TIMEOUT", "not-a-duration")
 	defer os.Unsetenv("JOB_TIMEOUT")
@@ -33,7 +33,7 @@ func TestNegativeNoWorkerTimeoutRejected(t *testing.T) {
 }
 
 // TestRateLimitEnabledSymmetric verifies RATE_LIMIT_ENABLED accepts enabling
-// values too, not only "false"/"0" (TSI-2365).
+// values too, not only "false"/"0".
 func TestRateLimitEnabledSymmetric(t *testing.T) {
 	os.Setenv("RATE_LIMIT_ENABLED", "true")
 	cfg := LoadFromEnv()
@@ -50,7 +50,7 @@ func TestRateLimitEnabledSymmetric(t *testing.T) {
 }
 
 // TestTLSEnabledSymmetric verifies TLS_ENABLED can also be disabled explicitly
-// and rejects garbage (TSI-2365).
+// and rejects garbage.
 func TestTLSEnabledSymmetric(t *testing.T) {
 	os.Setenv("TLS_ENABLED", "true")
 	cfg := LoadFromEnv()

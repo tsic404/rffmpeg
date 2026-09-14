@@ -191,7 +191,7 @@ func TestProcessJob_PanicReportedWorkerSurvives(t *testing.T) {
 	if stillActive {
 		t.Error("job still registered in activeJobs after panic recovery")
 	}
-	// TSI-2666: a panic-recovered job must not advance the completion
+	// a panic-recovered job must not advance the completion
 	// counters — only successful jobs may inflate completed_jobs.
 	if jobsCompleted != 0 || totalJobsCompleted != 0 {
 		t.Errorf("completion counters advanced after panic: jobsCompleted=%d totalJobsCompleted=%d, want 0/0",
@@ -310,7 +310,7 @@ func TestStopRejectsNewJobsAndWaitsForInFlight(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestHeartbeatFlowsWhileJobBlocked verifies the TSI-2492 regression: the
+// TestHeartbeatFlowsWhileJobBlocked verifies the regression: the
 // heartbeat must keep flowing while the main poll loop is blocked. In the old
 // single-loop design, a synchronous PullJobs blocked the loop and starved the
 // heartbeat ticker; the server then marked the worker offline mid-job. With
@@ -544,16 +544,12 @@ func TestConcurrentReregisterSingleflight(t *testing.T) {
 }
 
 // TestExecutor_PdeathsigKillsChildOnParentDeath verifies that the executor
-// sets PR_SET_PDEATHSIG so ffmpeg is reaped by the kernel when the parent
-// worker dies (SIGKILL/crash), preventing orphaned ffmpeg processes from
-// outliving the worker and holding GPU/encoder resources (TSI-2476).
-//
-// The executor's ffmpeg subprocess is the DIRECT child of the worker
-// process. Pdeathsig kills that direct child the moment the parent exits.
-// We fork a helper Go process that starts the executor on `sh -c 'echo $$;
-// exec sleep 30'` (exec replaces sh with sleep, so sleep keeps sh's PID =
-// the direct child), then calls os.Exit(0). The kernel's Pdeathsig should
-// kill the direct child; the parent test verifies it is gone within 5s.
+// sets PR_SET_PDEATHSIG so ffmpeg is reaped when the parent worker dies
+// (SIGKILL/crash), preventing orphaned ffmpeg processes from holding GPU
+// resources. A helper Go process starts the executor on `sh -c 'echo $$; exec
+// sleep 30'` (exec keeps sh's PID as the direct child) then calls os.Exit(0);
+// the kernel's Pdeathsig should kill that direct child, and the parent
+// verifies it is gone within 5s.
 func TestExecutor_PdeathsigKillsChildOnParentDeath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping pdeathsig test in short mode")

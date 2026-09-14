@@ -372,7 +372,7 @@ func LoadFromEnv() *Config {
 
 	// Cache environment variables
 	if v := os.Getenv(envCacheEnabled); v != "" {
-		// Only a recognized boolean counts as an explicit set (TSI-2731):
+		// Only a recognized boolean counts as an explicit set:
 		// "false"/"0"/"no"/"off" disable, "true"/"1"/"yes"/"on" keep the
 		// default true, and any other value leaves the default untouched.
 		if parsed, ok := parseBoolEnv(v); ok {

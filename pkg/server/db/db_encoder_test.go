@@ -114,7 +114,7 @@ func TestGetAllEncodersInfoDedupByName(t *testing.T) {
 	}
 }
 
-// TestGetAllEncodersInfoMultiWorkerPriorityMerge (TSI-2554) covers the
+// TestGetAllEncodersInfoMultiWorkerPriorityMerge covers the
 // multi-worker same-name aggregation: an earlier-registered low-priority
 // encoder must not shadow a later-registered higher-priority entry.
 func TestGetAllEncodersInfoMultiWorkerPriorityMerge(t *testing.T) {
@@ -287,7 +287,7 @@ func TestGetAllDecodersInfoDedupByName(t *testing.T) {
 	}
 }
 
-// TestGetAllDecodersInfoMultiWorkerMerge (TSI-2554) covers the multi-worker
+// TestGetAllDecodersInfoMultiWorkerMerge covers the multi-worker
 // same-name aggregation: an earlier-registered software decoder must not
 // shadow a later-registered hardware entry.
 func TestGetAllDecodersInfoMultiWorkerMerge(t *testing.T) {

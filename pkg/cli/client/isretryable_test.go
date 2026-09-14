@@ -12,7 +12,7 @@ import (
 // lowercase "timeout" substring check missed http.Client.Timeout's
 // "context deadline exceeded (Client.Timeout ...)" form (capitalized
 // "Client.Timeout"), so one slow chunk under CI contention failed the whole
-// upload instead of retrying (TSI-2919).
+// upload instead of retrying.
 func TestIsRetryableError(t *testing.T) {
 	cases := []struct {
 		name string

@@ -28,7 +28,7 @@ func TestDefaultSoftwareFallbackChain(t *testing.T) {
 		})
 	}
 
-	// Cross-format transitions must not be configured (TSI-2671).
+	// Cross-format transitions must not be configured.
 	for _, cross := range []string{"libx265", "libvpx-vp9", "libsvtav1"} {
 		if got, ok := chain[cross]; ok {
 			t.Errorf("defaultSoftwareFallbackChain()[%q] = %q, want absent (cross-format)", cross, got)
@@ -71,7 +71,7 @@ func TestEncoderFallback_AddSoftwareFallbackChain(t *testing.T) {
 		t.Errorf("GetAlternativeSoftwareEncoder after AddSoftwareFallbackChain = %q, want %q", got, "libx264rgb")
 	}
 
-	// Unknown-format entries are refused at read time (TSI-2685).
+	// Unknown-format entries are refused at read time.
 	fallback.AddSoftwareFallbackChain("custom_encoder", "fallback_encoder")
 	if got := fallback.GetAlternativeSoftwareEncoder("custom_encoder"); got != "" {
 		t.Errorf("unknown-format chain entry = %q, want empty (refused)", got)
@@ -104,7 +104,7 @@ func TestEncoderFallback_PrepareFallbackArgs_IsUserSelected(t *testing.T) {
 	}
 
 	// System-chosen libx265 (isUserSelected=false): cross-format chain is refused,
-	// so no alternative is available (TSI-2671).
+	// so no alternative is available.
 	args3 := []string{"-i", "input.mp4", "-c:v", "libx265", "output.mp4"}
 	if got3 := fallback.PrepareFallbackArgs(args3, "output.mp4", false); got3 != nil {
 		t.Errorf("PrepareFallbackArgs should return nil for cross-format fallback, got %v", got3)
@@ -142,7 +142,7 @@ func TestEncoderFallback_PrepareFallbackArgsWithSource_SystemFallback(t *testing
 	fallback := NewEncoderFallback()
 
 	// System-selected fallback encoder (e.g., libx265) — cross-format chain is
-	// refused, so no alternative is available (TSI-2671).
+	// refused, so no alternative is available.
 	args := []string{"-i", "input.mp4", "-c:v", "libx265", "output.mp4"}
 	if got := fallback.PrepareFallbackArgsWithSource(args, "output.mp4", false); got != nil {
 		t.Errorf("PrepareFallbackArgsWithSource should return nil for cross-format fallback, got %v", got)
@@ -239,7 +239,7 @@ func TestEncoderFallback_SoftwareFallbackChain_MultiStep(t *testing.T) {
 	}
 
 	// Step 2: libsvtav1 has no same-family alternative, and the cross-format
-	// transition to libx264 must be refused (TSI-2671).
+	// transition to libx264 must be refused.
 	if got2 := fallback.PrepareFallbackArgsWithSource(got, "output.mp4", false); got2 != nil {
 		t.Errorf("step 2: should return nil (cross-format fallback refused), got %v", got2)
 	}
@@ -321,7 +321,7 @@ func TestEncoderFallback_VPXSubfamilyChainEntryAccepted(t *testing.T) {
 	fallback := NewEncoderFallback()
 
 	// libvpx (vp8) -> libvpx-vp9 (vp9) shares the vpx prefix and must be
-	// accepted as a same-family transition (TSI-2760).
+	// accepted as a same-family transition.
 	fallback.AddSoftwareFallbackChain("libvpx", "libvpx-vp9")
 	if got := fallback.GetAlternativeSoftwareEncoder("libvpx"); got != "libvpx-vp9" {
 		t.Errorf("GetAlternativeSoftwareEncoder(libvpx) = %q, want libvpx-vp9 (same vpx family)", got)

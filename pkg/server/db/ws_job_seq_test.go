@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// TestWSJobSeqPersistence covers the TSI-2379 store contract: save upserts,
+// TestWSJobSeqPersistence covers the store contract: save upserts,
 // load restores (0 when absent), delete clears.
 func TestWSJobSeqPersistence(t *testing.T) {
 	database, cleanup := setupDBTest(t)

@@ -21,7 +21,7 @@ import (
 // writeMockFFmpegOutputOpenFail creates an executable shell script that
 // simulates ffmpeg n9's behavior for an output-open failure: it writes the
 // "Error opening output file" line to stderr, does NOT create the output
-// file, and exits 0 — exactly the TSI-2472 QA scenario
+// file, and exits 0 — exactly the scenario
 // (`-vn -c:a libmp3lame` into a nonexistent directory).
 func writeMockFFmpegOutputOpenFail(dir string) (string, error) {
 	scriptPath := filepath.Join(dir, "mock-ffmpeg-output-open")
@@ -86,15 +86,12 @@ func newOutputOpenMockServer() *outputOpenMockServer {
 }
 
 // TestProcessJob_OutputOpenFailurePropagatesExitCode verifies the full
-// processJob validation chain for the TSI-2472 QA scenario: ffmpeg exits 0
-// with "Error opening output file" on stderr and no output file produced.
-//
-// Before the fix: os.Stat failure set result.Error but left result.ExitCode=0,
-// the critical-error check was skipped (result.Error != nil guard), and the
-// worker reported the job as completed with exit_code=0. After the fix:
-// os.Stat failure sets result.ExitCode=1, ClassifyFailure recognizes the
-// output-open stderr (not INPUT_UNREACHABLE), and the terminal update carries
-// a non-zero exit code with FFMPEG_ERROR.
+// processJob validation chain where ffmpeg exits 0 with "Error opening output
+// file" on stderr and no output produced. Before the fix, an os.Stat failure
+// set result.Error but left ExitCode=0, so the job was reported completed with
+// exit_code=0; after, ExitCode=1 and ClassifyFailure recognizes the
+// output-open stderr (not INPUT_UNREACHABLE), so the terminal update carries a
+// non-zero exit code with FFMPEG_ERROR.
 func TestProcessJob_OutputOpenFailurePropagatesExitCode(t *testing.T) {
 	tmpDir := t.TempDir()
 

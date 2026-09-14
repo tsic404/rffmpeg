@@ -173,7 +173,7 @@ func TestParseBasicInput(t *testing.T) {
 	}
 }
 
-// TestParseMissingValue pins the TSI-2907 fix: a value-taking option that
+// TestParseMissingValue pins the fix: a value-taking option that
 // finds no value must report "requires a value" instead of a misleading
 // "no input/output file specified".
 func TestParseMissingValue(t *testing.T) {
@@ -194,7 +194,7 @@ func TestParseMissingValue(t *testing.T) {
 	}
 }
 
-// TestParseNegativeOptionValue pins the TSI-2907 fix: a value-taking option
+// TestParseNegativeOptionValue pins the fix: a value-taking option
 // whose value begins with "-" (e.g. "-map -1") must consume that value and
 // preserve it, rather than misreading it as a missing value or another option.
 func TestParseNegativeOptionValue(t *testing.T) {
@@ -227,7 +227,7 @@ func TestParseNegativeOptionValue(t *testing.T) {
 	}
 }
 
-// TestParseIPrefixedDemuxerOption pins the TSI-2907 fix for demuxer
+// TestParseIPrefixedDemuxerOption pins the fix for demuxer
 // AVOptions absent from `ffmpeg -h long`: "-input_format" starts with "-i"
 // and must parse as a value-taking option (hand-written in valueFlags), not
 // as a concatenated "-i<input>" input path that would silently drop "mjpeg".
@@ -301,7 +301,7 @@ func TestParseImplicitInputAllArgs(t *testing.T) {
 	}
 
 	// The implicit input must be rewritten to the -i <INPUT_FILE> placeholder
-	// form so the worker can substitute the real path (TSI-2749).
+	// form so the worker can substitute the real path.
 	want := []string{"-c:v", "libx264", "-i", "<INPUT_FILE>"}
 	if len(result.AllArgs) != len(want) {
 		t.Fatalf("AllArgs = %v, want %v", result.AllArgs, want)
@@ -340,7 +340,7 @@ func TestParseStreamingDashExcludedFromAllArgs(t *testing.T) {
 
 			// The output token "-" must not leak into AllArgs: the worker
 			// resolves and appends the output path exactly once. A leaked "-"
-			// would produce "- -" in the exec args (TSI-2683).
+			// would produce "- -" in the exec args.
 			for _, arg := range result.AllArgs {
 				if arg == "-" {
 					t.Errorf("AllArgs must not contain the output dash '-': %v", result.AllArgs)
@@ -371,7 +371,7 @@ func TestParsePipe1NormalizedToStreamingOutput(t *testing.T) {
 			}
 
 			// pipe:1 (stdout) must be recognized as a streaming job, exactly
-			// as if the caller had written "-" (TSI-3038).
+			// as if the caller had written "-".
 			if !result.StreamingOutput {
 				t.Errorf("StreamingOutput = false, want true for output 'pipe:1'")
 			}
@@ -380,7 +380,7 @@ func TestParsePipe1NormalizedToStreamingOutput(t *testing.T) {
 			}
 
 			// The normalized token must not leak into AllArgs: the worker
-			// appends the output path exactly once (mirrors TSI-2683).
+			// appends the output path exactly once.
 			for _, arg := range result.AllArgs {
 				if strings.EqualFold(arg, "pipe:1") || arg == "-" {
 					t.Errorf("AllArgs must not contain the output token %q: %v", arg, result.AllArgs)
@@ -413,7 +413,7 @@ func TestParsePipe1AsInputNotNormalized(t *testing.T) {
 	// pipe:1 in the INPUT role (via -i) reads from stdin and must be left
 	// untouched: only the OUTPUT path is normalized to "-". The output here is
 	// a real file, so StreamingOutput stays false and InputFiles keeps "pipe:1"
-	// verbatim (TSI-3038).
+	// verbatim.
 	result, err := p.Parse([]string{"-i", "pipe:1", "out.mp4"})
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)

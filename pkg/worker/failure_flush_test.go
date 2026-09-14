@@ -56,7 +56,7 @@ func TestStderrBatcherFlushAndWaitDeliversPendingChunks(t *testing.T) {
 
 // TestReportFailureFlushesStderrBeforeTerminalStatus runs a fast-failing
 // ffmpeg job through processJob and asserts the tail stderr chunk reaches the
-// server before the terminal failed status (TSI-2581).
+// server before the terminal failed status.
 func TestReportFailureFlushesStderrBeforeTerminalStatus(t *testing.T) {
 	tmpDir := t.TempDir()
 	failingFFmpeg := filepath.Join(tmpDir, "fail-ffmpeg")
@@ -139,7 +139,7 @@ exit 1
 	}
 }
 
-// TestReportFailureWithTypeFlushesBeforeTerminalStatus locks the TSI-2594 fix:
+// TestReportFailureWithTypeFlushesBeforeTerminalStatus locks the fix:
 // reportFailureWithType must run its optional flush callback before issuing the
 // terminal failed PATCH, so pending tail stderr reaches the server first.
 func TestReportFailureWithTypeFlushesBeforeTerminalStatus(t *testing.T) {

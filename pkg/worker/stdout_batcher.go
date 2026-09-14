@@ -21,7 +21,7 @@ type StdoutBatcher struct {
 	wg         sync.WaitGroup // Track pending goroutines
 	// sendErr records the first SendStdoutChunk failure so FlushAndWait can
 	// surface it: a terminal status must not be reported when a stdout chunk
-	// failed to reach the server (TSI-2905). Guarded by mu.
+	// failed to reach the server. Guarded by mu.
 	sendErr error
 }
 
@@ -132,7 +132,7 @@ func (b *StdoutBatcher) flushLocked() {
 		if err := b.client.SendStdoutChunk(b.jobID, chunk); err != nil {
 			// Record the first failure (under mu) so FlushAndWait can report
 			// it; the terminal status report carries the log line instead of
-			// the error being swallowed here (TSI-2905).
+			// the error being swallowed here.
 			b.mu.Lock()
 			if b.sendErr == nil {
 				b.sendErr = err
@@ -152,16 +152,13 @@ func (b *StdoutBatcher) Flush() {
 	b.flushLocked()
 }
 
-// FlushAndWait flushes any pending chunks and blocks until all in-flight
-// stdout sends complete. Unlike Close it neither stops the flush timer nor
-// cancels the context, so callers may keep appending afterward. It exists so
-// a terminal job status can be reported after the tail stdout has actually
-// reached the server, where the batcher timer may not have fired yet
-// (TSI-2905; mirrors StderrBatcher.FlushAndWait, TSI-2581).
-//
-// It returns the first SendStdoutChunk failure, if any: a terminal status must
-// not be reported when a stdout chunk failed to reach the server, or the CLI
-// would observe a truncated stream with rc=0 (TSI-2905).
+// FlushAndWait flushes pending chunks and blocks until all in-flight stdout
+// sends complete. Unlike Close it neither stops the flush timer nor cancels
+// the context, so callers may keep appending; it lets a terminal job status
+// be reported only after the tail stdout has actually reached the server
+// (mirrors StderrBatcher.FlushAndWait). It returns the first
+// SendStdoutChunk failure, if any: a terminal status must not be reported
+// when a chunk failed, or the CLI would observe a truncated stream with rc=0.
 func (b *StdoutBatcher) FlushAndWait() error {
 	b.mu.Lock()
 	b.flushLocked()

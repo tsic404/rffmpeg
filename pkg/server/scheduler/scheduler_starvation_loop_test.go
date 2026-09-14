@@ -8,20 +8,14 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 )
 
-// TestSchedulerNoWorkerStarvationThroughLoop codifies the QA scenario 4
-// "无可用 Worker" acceptance (TSI-2936): a running server with no live worker
-// must fail a pending job through the starvation sweep once it has waited past
-// NoWorkerJobTimeout, classifying it NO_WORKER_AVAILABLE. The QA run observes
-// this after 300s of full offline against the default 2m timeout; the test
-// reproduces the same sweep at accelerated time by shrinking
-// NoWorkerJobTimeout and TimeoutCheckInterval.
-//
-// Unlike TestSchedulerNoWorkerStarvation and its companions, which invoke
-// checkNoWorkerStarvation directly with a backdated created_at, this test
-// drives the sweep through the real run() ticker: Start launches the loop and
-// the timeout ticker calls checkNoWorkerStarvation, so the end-to-end wiring
-// (loop -> sweep -> bulk failure -> terminal notify) is exercised rather than
-// the method in isolation.
+// TestSchedulerNoWorkerStarvationThroughLoop verifies the "no available
+// worker" acceptance end-to-end: a running server with no live worker fails a
+// pending job via the starvation sweep after NoWorkerJobTimeout, classifying
+// it NO_WORKER_AVAILABLE. Timeouts are shrunk to run the sweep at accelerated
+// time. Unlike TestSchedulerNoWorkerStarvation, which calls
+// checkNoWorkerStarvation directly with a backdated created_at, this drives the
+// real run() ticker so the loop -> sweep -> bulk-failure -> terminal-notify
+// wiring is exercised, not the method in isolation.
 func TestSchedulerNoWorkerStarvationThroughLoop(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {

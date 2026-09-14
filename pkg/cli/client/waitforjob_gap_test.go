@@ -78,7 +78,7 @@ func gapLogServer(t *testing.T, completedAfter time.Duration, holdWS bool) *http
 	return httptest.NewServer(mux)
 }
 
-// TestWaitForJobWithLogs_GapDoesNotBlockDownload is the TSI-2404 regression
+// TestWaitForJobWithLogs_GapDoesNotBlockDownload is the regression
 // test: in non-streaming (file output) mode a detected sequence gap on the
 // stderr log stream must NOT fail the wait — the transcoded file is intact,
 // so WaitForJobWithLogs returns the job and main.go proceeds to the output
@@ -132,7 +132,7 @@ func TestWaitForJobWithStreamingOutput_GapStillFails(t *testing.T) {
 // job — never (nil, nil), which makes main.go panic dereferencing job.Status.
 // The fallback must also apply the integrity checks: the streamed output
 // carried a sequenced hole, so the gap must surface as an error instead of a
-// clean rc=0 (TSI-2905).
+// clean rc=0.
 func TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling(t *testing.T) {
 	srv := gapLogServer(t, 400*time.Millisecond, false) // graceful close, then job completes
 	defer srv.Close()
@@ -150,21 +150,13 @@ func TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling(t *testin
 	}
 }
 
-// TestWaitForJobWithLogs_CtxDoneRaceWithPollDone is the TSI-2452 regression
-// test: when the client-side timeout fires after the job has already reached
-// a terminal status on the server (e.g. a cache hit completed between the
-// last poll and ctx.Done()), WaitForJobWithLogs must return the completed
-// job, not DeadlineExceeded.
-//
-// The mock server upgrades the WS (so ConnectWithReconnect succeeds and the
-// select is reached) and reports "completed" for every GetJob. The ctx
-// timeout is short — the poll goroutine may or may not write to pollDone
-// before ctx.Done(), but the race guard's final GetJob always sees the
-// terminal status and returns the job.
-//
-// The assertion is strict: the job must always be returned with status
-// completed, never an error. Without the race guard, ctx.Done() returns
-// DeadlineExceeded and the test fails.
+// TestWaitForJobWithLogs_CtxDoneRaceWithPollDone is the regression test: when
+// the client-side timeout fires after the job already reached a terminal
+// status (e.g. a cache hit landed between the last poll and ctx.Done()),
+// WaitForJobWithLogs must return the completed job, not DeadlineExceeded. The
+// mock server reports "completed" for every GetJob; the short ctx timeout
+// races pollDone against ctx.Done(), but the race guard's final GetJob always
+// sees the terminal status. Without the race guard the test fails.
 func TestWaitForJobWithLogs_CtxDoneRaceWithPollDone(t *testing.T) {
 	const jobID = "job-race"
 
@@ -214,7 +206,7 @@ func TestWaitForJobWithLogs_CtxDoneRaceWithPollDone(t *testing.T) {
 	}
 }
 
-// TestWaitForJobWithStreamingOutput_ZeroBytesFails is the TSI-2905 regression
+// TestWaitForJobWithStreamingOutput_ZeroBytesFails is the regression
 // test: a completed streaming job that delivered zero stdout bytes must return
 // an error (surfacing a non-zero exit), never rc=0 with an empty redirect
 // target. The worker produced output that never reached the client.

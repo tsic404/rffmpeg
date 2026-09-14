@@ -27,7 +27,7 @@ const hubBroadcastBuffer = 256
 
 // hubSendTimeout bounds how long any channel send into the hub may block.
 // The hub is a shared service: one stalled consumer must never wedge the
-// callers feeding it (TSI-2388).
+// callers feeding it.
 const hubSendTimeout = 5 * time.Second
 
 // Hub maintains the set of active WebSocket clients and broadcasts messages
@@ -45,7 +45,7 @@ type Hub struct {
 	// seq tracks the next per-job message sequence number for gap detection
 	seq map[string]int64
 	// seqStore, when non-nil, persists seq counters across server restarts
-	// (TSI-2379): without it a restart resets numbering to 1 and reconnecting
+	// without it a restart resets numbering to 1 and reconnecting
 	// streaming clients misread the new stream as lost data.
 	seqStore SeqStore
 	// seqPersistFailures counts failed store writes/deletes for observability.
@@ -117,15 +117,12 @@ func (h *Hub) Run() {
 			h.mu.Unlock()
 
 		case message := <-h.broadcast:
-			// Full write lock, not RLock: the shed path below mutates
-			// h.clients. The invariant is "after Close, no broadcast may
-			// touch client.send" — a select-send on the closed channel
-			// panics (the default branch does NOT save you) and would kill
-			// this Run goroutine, i.e. the exact silent-server-death this
-			// fix exists for (TSI-2388 review blocker #1). Removing the
-			// client from the map synchronously here — instead of waiting
-			// for ReadPump's async Unregister — closes that window
-			// entirely.
+			// Full write lock, not RLock: the shed path below mutates h.clients.
+			// The invariant is "after Close, no broadcast may touch client.send"
+			// — a select-send on the closed channel panics and would kill this
+			// Run goroutine (silent server death). Removing the client from the
+			// map synchronously here — instead of waiting for ReadPump's async
+			// Unregister — closes that window entirely.
 			h.mu.Lock()
 			clients, ok := h.clients[message.JobID]
 
@@ -134,22 +131,14 @@ func (h *Hub) Run() {
 					select {
 					case client.send <- message.Message:
 					default:
-						// Client buffer full: shed it now. Two hazards
-						// avoided:
-						//   - h.unregister <- client from inside the loop
-						//     deadlocks: Run is the only reader of that
-						//     channel, so once the buffered backlog fills,
-						//     the whole loop freezes.
-						//   - Close alone leaves the client in the map;
-						//     the next broadcast for this job would then
-						//     select-send on the closed channel — a panic,
-						//     not a default-branch skip. So delete from
-						//     the map FIRST (we hold the write lock), then
-						//     close: subsequent broadcasts can never reach
-						//     client.send again. WritePump exits on the
-						//     closed send channel; ReadPump's read error
-						//     triggers its Unregister, a no-op on an
-						//     already-removed entry.
+						// Client buffer full: shed it now. Sending
+						// h.unregister <- client from inside the loop deadlocks
+						// (Run is the only reader); Close alone leaves the client
+						// in the map, so the next broadcast select-sends on the
+						// closed channel — a panic. Delete from the map FIRST (we
+						// hold the write lock), then close: later broadcasts can
+						// never reach client.send again. WritePump exits on the
+						// closed channel; ReadPump's Unregister is then a no-op.
 						delete(clients, client)
 						if len(clients) == 0 {
 							delete(h.clients, message.JobID)
@@ -173,15 +162,13 @@ func (h *Hub) Unregister(client *Client) {
 	h.unregister <- client
 }
 
-// Broadcast sends a message to all clients listening for a job.
-//
-// TSI-2388: the send is bounded, not blocking. h.broadcast is only drained
-// by the Run loop; if that loop is wedged (or was never started), a blocking
-// send here would freeze every handler goroutine that touches a broadcast —
-// the process stays up (listeners open) but never answers another request,
-// which is exactly the "silent server death" seen in QA. A wedged or absent
-// loop means the message cannot be delivered, so callers get an error and
-// the drop is observable in the logs instead of an invisible hang.
+// Broadcast sends a message to all clients listening for a job. The send is
+// bounded, not blocking: h.broadcast is only drained by the Run loop, and if
+// that loop is wedged (or never started) a blocking send would freeze every
+// handler goroutine that broadcasts — the process stays up but never answers
+// again ("silent server death"). A wedged or absent loop means the message
+// cannot be delivered, so callers get an error and the drop is observable in
+// the logs instead of an invisible hang.
 func (h *Hub) Broadcast(jobID string, message []byte) error {
 	msg := &BroadcastMessage{
 		JobID:   jobID,
@@ -197,26 +184,12 @@ func (h *Hub) Broadcast(jobID string, message []byte) error {
 
 // BroadcastWSMessage stamps a per-job monotonically increasing sequence
 // number on data-bearing messages, then broadcasts to all clients for a job.
-// The counter lives for the whole job: it is only removed once the terminal
-// event broadcast (complete/error) has gone out — a terminal *status*
-// broadcast carries it forward so the trailing complete message continues the
-// numbering instead of restarting at 1 (TSI-2382) — keeping a reconnecting
-// client's lastSeq meaningful across disconnect windows.
-//
-// With a SeqStore configured, the counter is persisted on every increment
-// and restored on the first broadcast after a restart — a server restart no
-// longer resets numbering to 1, which streaming clients would read as lost
-// data and fail the job with a spurious gap error. Persistence happens
-// outside h.mu: the store has its own locking and must not be called under
-// the hub lock that Run-loop paths also take.
-//
-// Ordering (TSI-2457): the seq increment and the broadcast-channel send are
-// performed atomically under bcastMu. Without this, two goroutines that each
-// incremented seq under h.mu could reach the channel send in any order — the
-// client would see seq N+2 before N+1 and falsely flag a gap even though no
-// data was lost on the wire. bcastMu is independent of h.mu (which the Run
-// loop takes to drain the channel) so a blocked send cannot deadlock with
-// the loop.
+// The counter lives until the terminal event broadcast (complete/error), so
+// the trailing complete message continues the numbering and a reconnecting
+// client's lastSeq stays meaningful. With a SeqStore, the counter is persisted
+// on every increment (outside h.mu) and restored after a restart, so numbering
+// never resets to 1. The seq increment and channel send are atomic under
+// bcastMu so concurrent broadcasts stay in order.
 func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 	if msg.Type != protocol.WSMsgHeartbeat {
 		// Restore a persisted counter before locking, when the first
@@ -239,7 +212,7 @@ func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 		// failed/...) in the handlers, and deleting at the status step made
 		// the complete broadcast renumber from 1 — connected clients read
 		// that reset as proven data loss and failed intact jobs with a
-		// spurious gap (TSI-2382). The status carries lastSeq forward; the
+		// spurious gap. The status carries lastSeq forward; the
 		// complete/error branch below performs the actual deletion.
 		terminal := false
 		if msg.Type == protocol.WSMsgStatus {
@@ -478,7 +451,7 @@ func (c *Client) WritePump() {
 // only from the hub's Run loop (unregister/shed paths), after the client has
 // been removed from h.clients: closing c.send while a broadcast could still
 // reach it makes the Run loop panic ("send on closed channel") — the exact
-// silent-server-death crash this invariant prevents (TSI-2388).
+// silent-server-death crash this invariant prevents.
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -496,7 +469,7 @@ func (c *Client) Close() {
 // to wake the peer, but c.send must stay open until the Run loop's Unregister
 // removes the client — otherwise a broadcast for the still-registered job
 // select-sends on the now-closed channel and panics the Run loop (a second
-// door into the TSI-2388 crash, reachable under client churn rather than
+// door into the crash, reachable under client churn rather than
 // buffer shed).
 func (c *Client) closeConn() {
 	c.mu.Lock()

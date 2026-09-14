@@ -31,7 +31,7 @@ const (
 	// the client lost contact with the server after its retry budget was
 	// spent. The job keeps running server-side; query its final status via
 	// GET /api/v1/jobs/{id}. Distinct from ExitError, which also covers
-	// submission-phase failures where no job exists to query (TSI-2697).
+	// submission-phase failures where no job exists to query.
 	ExitDisconnected = 2
 
 	// clientVerdictGrace is the margin past the server's NO_WORKER_AVAILABLE
@@ -341,7 +341,7 @@ func run() int {
 
 	// If no ffmpeg args and not in probe mode, print usage and exit non-zero.
 	// ffmpeg exits 1 when invoked with no arguments, and rffmpeg must match
-	// so callers can detect a missing command (TSI-2907).
+	// so callers can detect a missing command.
 	if !opts.IsProbe && len(ffmpegArgs) == 0 {
 		printUsage()
 		return ExitError
@@ -413,9 +413,9 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 	// Streaming (stdout) output cannot be seeked by the server-side ffmpeg,
 	// and the worker only auto-fixes mp4/mov via fragmented movflags
-	// (TSI-2409). Fail fast here with guidance for any muxer that cannot
+	// Fail fast here with guidance for any muxer that cannot
 	// write to a pipe, instead of surfacing ffmpeg's opaque
-	// "Error initializing the muxer for pipe:: Invalid argument" (TSI-2696).
+	// "Error initializing the muxer for pipe:: Invalid argument".
 	if msg := args.StreamingOutputError(result); msg != "" {
 		fmt.Fprintln(os.Stderr, msg)
 		return ExitError
@@ -440,15 +440,12 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		}
 	}
 
-	// Setup signal handling for graceful cancellation.
-	// jobID/cancelled/submitting are guarded by sigMu: the handler goroutine
-	// reads them while the main flow writes. The mutex is never held across a
-	// network round-trip or a rate-limit backoff sleep, so SIGINT/SIGTERM is
-	// serviced immediately even during --retry backoff (TSI-2939).
-	// The first interrupt cancels ctx — aborting any in-flight submission
-	// (both the rate-limit backoff sleep and the submit HTTP request are
-	// ctx-bound) — and cancels a submitted job. A second interrupt after a
-	// submitted job was already cancelled force-quits the process.
+	// Setup signal handling for graceful cancellation. jobID/cancelled/submitting
+	// are guarded by sigMu; the mutex is never held across a network round-trip
+	// or rate-limit backoff, so SIGINT/SIGTERM is serviced immediately even
+	// during --retry. The first interrupt cancels ctx (aborting any in-flight
+	// submission) and cancels a submitted job; a second interrupt after that
+	// force-quits the process.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -497,7 +494,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 			// phase) or when this handler already issued the graceful cancel on
 			// a prior interrupt. Otherwise the main flow claimed the cancel for
 			// a just-submitted job and is cancelling it — loop back and let it
-			// exit (TSI-2939).
+			// exit.
 			if id == "" || handlerCancelled {
 				os.Exit(ExitError)
 			}
@@ -603,7 +600,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	// directly to the CLI-specified path instead of its own temp directory.
 	// Network URLs (rtmp://, srt://, https://, udp://, etc.) pass through
 	// as-is in both modes — resolving them as local paths would corrupt the
-	// URL (TSI-2690).
+	// URL.
 	outputFilename := ""
 	if result.OutputFile != "" {
 		outputFilename, err = resolveOutputFilename(result.OutputFile, sharedFS)
@@ -640,7 +637,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	interrupted := ctx.Err() != nil
 	// Claim the cancellation atomically with publishing jobID, so the signal
 	// handler (which reads both under the same mutex) never issues a second
-	// CancelJob for the same job (TSI-2939).
+	// CancelJob for the same job.
 	shouldCancel := false
 	if interrupted && err == nil && !cancelled {
 		cancelled = true
@@ -675,7 +672,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	// submit time carries no deadline, but if its worker dies and the job
 	// reverts to pending, the next GetJob reports one. Re-reading on each
 	// iteration lets the client extend its wait to the freshly attached
-	// verdict instead of giving up before the server can emit it (TSI-2571).
+	// verdict instead of giving up before the server can emit it.
 	job, code := waitForJobLoop(cli, jobID, timeout, result.StreamingOutput, quiet)
 	if code != ExitSuccess {
 		return code
@@ -717,7 +714,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 			// Enforce ffmpeg's overwrite semantics before writing the local
 			// output: in the default upload/download mode the CLI is the sole
 			// writer of the user's output file, so a pre-existing file must not
-			// be silently truncated (TSI-2964). Without -y (or with -n), refuse
+			// be silently truncated. Without -y (or with -n), refuse
 			// with ffmpeg's message and a non-zero exit, mirroring the worker's
 			// shared-FS guard.
 			if code := rejectOverwriteIfNeeded(outputPath, ffmpegArgs); code != ExitSuccess {
@@ -752,7 +749,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 // rejectOverwriteIfNeeded enforces ffmpeg's overwrite semantics on a local
 // output path before the CLI downloads and writes it. In the default
 // upload/download mode the CLI is the only writer of the user's output file, so
-// a pre-existing file must not be silently truncated (TSI-2964): when the target
+// a pre-existing file must not be silently truncated: when the target
 // exists and the caller did not pass -y (or passed -n), it refuses with ffmpeg's
 // message and returns a non-zero exit, without touching the file.
 func rejectOverwriteIfNeeded(outputPath string, ffmpegArgs []string) int {
@@ -775,15 +772,12 @@ func rejectOverwriteIfNeeded(outputPath string, ffmpegArgs []string) int {
 }
 
 // resolveOutputFilename determines the output filename sent to the server for
-// the given ffmpeg output argument.
-//
-// Network URLs (rtmp://, srt://, https://, udp://, etc.) pass through
-// unchanged in both modes, because treating them as local paths would corrupt
-// the URL (TSI-2690). Local paths — including file:// and paths that merely
-// contain "://" mid-string — are not remote: in shared FS mode they are
-// resolved to absolute paths so the Worker writes directly to the CLI-specified
-// path, otherwise they are reduced to their base name since the Worker writes
-// into its own job directory and the CLI downloads the result afterward.
+// the given ffmpeg output argument. Network URLs (rtmp://, srt://, https://,
+// udp://, etc.) pass through unchanged — treating them as local paths would
+// corrupt the URL. Local paths (including file:// and paths that merely
+// contain "://" mid-string) are not remote: in shared FS mode they are
+// resolved to absolute paths, otherwise reduced to their base name for the
+// worker's own job directory, which the CLI downloads from afterward.
 func resolveOutputFilename(outputFile string, sharedFS bool) (string, error) {
 	if pathutil.IsRemoteURL(outputFile) {
 		return outputFile, nil
@@ -807,12 +801,10 @@ type jobWaitClient interface {
 // waitForJobLoop waits for the job to reach a terminal status and returns it,
 // or cancels the job and returns ExitError when the client gives up. It loops
 // because the server's NO_WORKER_AVAILABLE verdict deadline is only attached
-// to pending/unassigned jobs: a job queued at submit time carries none, but if
-// its worker dies and the job reverts to pending, the next GetJob reports one.
-// Re-reading the deadline on each iteration lets the client extend its wait to
-// the freshly attached verdict instead of giving up before the server can emit
-// it (TSI-2571). The deadline is authoritative server config, not a local
-// guess; a failed GetJob lookup only means the client falls back to --timeout.
+// to pending/unassigned jobs: a job queued at submit time carries none, but
+// reverts to pending if its worker dies. Re-reading the deadline each
+// iteration lets the client extend its wait to a freshly attached verdict
+// instead of giving up before the server can emit it.
 func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, streamingOutput, quiet bool) (*protocol.JobInfo, int) {
 	var job *protocol.JobInfo
 	for {
@@ -853,18 +845,13 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 			return nil, ExitError
 		}
 
-		// Race guard (TSI-2452): the client-side wait deadline may have
-		// fired even though the job already reached a terminal status on
-		// the server (e.g. a cache hit completed between the last poll
-		// and the context deadline). WaitForJobWithLogs /
-		// WaitForJobWithStreamingOutput already do a final GetJob on
-		// ctx.Done(); this is a belt-and-suspenders fallback in case a
-		// future wait variant or a WS-reconnect edge case lets the
-		// deadline through without the check. If the job is already
-		// done, proceed with the result instead of cancelling a
-		// completed job (which the server rejects with 400). The server
-		// verdict (notably NO_WORKER_AVAILABLE) may have landed exactly
-		// at the deadline; report it as the server's judgement, not a
+		// Race guard: the client-side wait deadline may have fired even though
+		// the job already reached a terminal status (e.g. a cache hit landed
+		// between the last poll and the deadline). The primary wait paths do a
+		// final GetJob on ctx.Done(); this is a belt-and-suspenders fallback so
+		// a completed job is never cancelled (the server rejects that with 400),
+		// and a server verdict (notably NO_WORKER_AVAILABLE) that landed exactly
+		// at the deadline is reported as the server's judgement, not a
 		// client-side cancellation.
 		finalJob, finalErr := cli.GetJob(jobID)
 		if finalErr == nil && protocol.IsTerminalStatus(finalJob.Status) {
@@ -889,15 +876,13 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 			continue
 		}
 
-		// The job is genuinely not done. Cancel it server-side so it
-		// doesn't linger, and report a clear client-side timeout — distinct
-		// from a server verdict (NO_WORKER_AVAILABLE, TIMEOUT, ...) so
-		// operators can tell who gave up. The message distinguishes a job
-		// still waiting for a worker from one that had actually started but
-		// stalled. No server verdict can still be pending here: the extend
-		// guard above already continued whenever the server attached a
-		// NoWorkerDeadline, so reaching this branch means either the lookup
-		// failed or no deadline exists (sweep disabled or status not pending).
+		// The job is genuinely not done. Cancel it server-side so it doesn't
+		// linger, and report a clear client-side timeout — distinct from a
+		// server verdict (NO_WORKER_AVAILABLE, TIMEOUT, ...) so operators can
+		// tell who gave up. No server verdict can be pending here: the extend
+		// guard above already continued whenever a NoWorkerDeadline attached,
+		// so this branch means the lookup failed or no deadline exists (sweep
+		// disabled or status not pending).
 		if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
 		}
@@ -912,30 +897,13 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 }
 
 // clientWaitDeadline computes the client-side give-up time. timeout is the
-// per-job ffmpeg execution budget; status is the job's current status;
-// startedAt is the server's started_at (the budget's anchor); noWorkerDeadline
-// is the server's NO_WORKER_AVAILABLE verdict time for a pending job. The
-// client waits until the later bound (plus clientVerdictGrace) so it never
-// cancels before the server can emit its verdict. Returns false when neither
-// bound exists.
-//
-// --timeout is a worker-side execution budget, not a wall-clock bound
-// (TSI-2886). It bounds the client's wait only for pending jobs (anchored to
-// now — the "did not start within --timeout" give-up) and running jobs
-// (anchored to started_at so pre-exec latency is not charged and the worker's
-// TIMEOUT verdict stays observable).
-//
-// A queued job is already claimed by a worker and spends its pre-exec phase
-// (download, duration probe) in the queued state; that phase is bounded by the
-// worker's own timeouts (30m dataClient download + ffprobe executor), not by
-// --timeout, so the client must not cancel it before ffmpeg starts.
-//
-// The old code computed timeout+clientVerdictGrace as a duration sum, which
-// overflowed negative for a --timeout near math.MaxInt64 and made
-// context.WithTimeout expire immediately. The bounds are added to wall-clock
-// times separately; a duration near MaxInt64 (~292 years) plus a 5s grace
-// cannot wrap a time.Time anchored at the present (year ~2318), so no
-// clamping is needed.
+// per-job ffmpeg execution budget; noWorkerDeadline is the server's
+// NO_WORKER_AVAILABLE verdict time for a pending job; startedAt anchors the
+// running-job budget so pre-exec latency is not charged. The client waits
+// until the later bound (plus clientVerdictGrace) so it never cancels before
+// the server can emit its verdict. A queued job's pre-exec phase is bounded
+// by the worker's own timeouts, not --timeout. Bounds are added to wall-clock
+// times separately — summing durations overflowed for --timeout near MaxInt64.
 func clientWaitDeadline(now time.Time, timeout time.Duration, status protocol.JobStatus, startedAt, noWorkerDeadline *time.Time) (time.Time, bool) {
 	var deadline time.Time
 	has := false
@@ -976,7 +944,7 @@ func extendWaitForNoWorkerDeadline(exhaustedDeadline time.Time, noWorkerDeadline
 // worker's ffmpeg budget only begins at started_at, so the TIMEOUT verdict is
 // still ahead of the exhausted bound. The re-anchored bound (started_at +
 // timeout + grace) is fixed — started_at never advances — so this can extend
-// the wait at most once (TSI-2886).
+// the wait at most once.
 func extendWaitForStartedAt(exhaustedDeadline time.Time, startedAt *time.Time, timeout time.Duration) bool {
 	if startedAt == nil || timeout <= 0 {
 		return false
@@ -988,7 +956,7 @@ func extendWaitForStartedAt(exhaustedDeadline time.Time, startedAt *time.Time, t
 // the client-side deadline fired because the job was just claimed by a worker
 // (pending → queued). A queued job spends --timeout on its pre-exec phase
 // (download/probe), which the worker bounds independently, so the client must
-// not cancel it as if it had never started (TSI-2886).
+// not cancel it as if it had never started.
 func extendWaitForQueued(status protocol.JobStatus) bool {
 	return status == protocol.JobStatusQueued
 }
@@ -1394,15 +1362,11 @@ func parseFFmpegEncoderLines(output string) []protocol.EncoderInfo {
 }
 
 // parseFFmpegNameList parses simple ffmpeg info output that lists names
-// (hwaccels, filters, pix_fmts, formats). It skips header/legend lines and
-// extracts the name field (second whitespace-delimited token) from each data line.
-//
-// Two modes:
-//  1. Standard mode: if a separator line (--- / ------ ) is found, it parses
-//     the two-column format used by -filters, -pix_fmts, and -formats (flags + name).
-//  2. Fallback mode: if no separator is found, it treats the output as a
-//     single-column name list (used by -hwaccels). Header lines containing ':'
-//     are skipped, and every other non-empty line is treated as a name.
+// (hwaccels, filters, pix_fmts, formats), extracting the name field from each
+// data line. If a separator line (--- / ------ ) is present it parses the
+// two-column format (flags + name) used by -filters, -pix_fmts, -formats;
+// otherwise it treats the output as a single-column name list (-hwaccels),
+// skipping header lines containing ':'.
 func parseFFmpegNameList(output string) []string {
 	var names []string
 	lines := strings.Split(output, "\n")

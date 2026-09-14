@@ -10,15 +10,13 @@ import (
 )
 
 // TestDBJobToJobInfo_NoWorkerDeadline pins the NoWorkerDeadline attachment
-// semantics to the scheduler's starvation sweep filter: only unassigned
-// pending jobs in a cluster with NO live schedulable worker can ever be
-// failed with NO_WORKER_AVAILABLE, so only they carry the deadline.
-//
-// Queued jobs already own a worker_id and are never swept; a pending job
-// behind a busy-but-live worker is never swept either (the sweep's live-worker
-// guard short-circuits, TSI-2204), so neither carries a deadline. A stale
-// heartbeat does not count as live (TSI-2419), and noWorkerJobTimeout<=0
-// disables the deadline entirely.
+// semantics to the starvation sweep filter: only unassigned pending jobs in a
+// cluster with NO live schedulable worker can be failed with
+// NO_WORKER_AVAILABLE, so only they carry the deadline. Queued jobs already
+// own a worker_id and are never swept; a pending job behind a busy-but-live
+// worker is never swept either (the live-worker guard short-circuits), so
+// neither carries a deadline. A stale heartbeat is not live, and
+// noWorkerJobTimeout<=0 disables the deadline entirely.
 func TestDBJobToJobInfo_NoWorkerDeadline(t *testing.T) {
 	created := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	base := &db.Job{

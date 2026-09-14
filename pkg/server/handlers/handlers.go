@@ -37,11 +37,11 @@ type Handler struct {
 	wsHub       *websocket.Hub
 	rateLimiter ratelimit.ClientJobCounter
 	stateTable  *workerhealth.WorkerStateTable
-	scheduler   *scheduler.Scheduler // TSI-1501: scheduler reference for immediate job assignment
+	scheduler   *scheduler.Scheduler // scheduler reference for immediate job assignment
 	authToken   string               // Non-empty when auth is configured
 	// heartbeatTimeout mirrors the worker health monitor's knob: submit-time
 	// fail-fast treats workers whose last heartbeat is older than this as dead
-	// (TSI-2419). <=0 disables the freshness check.
+	// <=0 disables the freshness check.
 	heartbeatTimeout time.Duration
 	// noWorkerJobTimeout and timeoutCheckInterval mirror the scheduler's
 	// starvation knobs so GetJob/PullWorkerJobs can attach NoWorkerDeadline
@@ -100,7 +100,7 @@ func (h *Handler) GetWSHub() *websocket.Hub {
 	return h.wsHub
 }
 
-// GetStateTable returns the worker state table (TSI-759)
+// GetStateTable returns the worker state table
 func (h *Handler) GetStateTable() *workerhealth.WorkerStateTable {
 	return h.stateTable
 }
@@ -119,13 +119,13 @@ func (h *Handler) workerStateMap() map[string]*protocol.WorkerState {
 	return states
 }
 
-// SetScheduler sets the scheduler reference (TSI-1501)
+// SetScheduler sets the scheduler reference
 func (h *Handler) SetScheduler(sched *scheduler.Scheduler) {
 	h.scheduler = sched
 }
 
 // SetHeartbeatTimeout configures the submit-time worker freshness window
-// (TSI-2419). Should match ServerConfig.WorkerHeartbeatTimeout.
+// Should match ServerConfig.WorkerHeartbeatTimeout.
 func (h *Handler) SetHeartbeatTimeout(d time.Duration) {
 	h.heartbeatTimeout = d
 }
@@ -266,7 +266,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	// 32MB in-memory threshold for multipart parsing. Larger parts spill to
 	// temporary files on disk. The old 256MB threshold let a handful of
-	// concurrent uploads pin hundreds of MB of RSS (TSI-2365).
+	// concurrent uploads pin hundreds of MB of RSS.
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
@@ -354,7 +354,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	// Reject direct-path traversal server-side (fail-fast), so a bare API call
 	// carrying a ".." component is refused here instead of being dispatched
-	// and only rejected by the worker at runtime (TSI-2718). The shared
+	// and only rejected by the worker at runtime. The shared
 	// pathutil.ContainsPathTraversal keeps this symmetric with the worker.
 	for _, path := range req.DirectPath {
 		if pathutil.ContainsPathTraversal(path) {
@@ -367,7 +367,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject output-filename traversal server-side, symmetric with the worker's
-	// directMode output guard (TSI-2721). The worker only stats the output path
+	// directMode output guard. The worker only stats the output path
 	// in direct mode and passes "-" and remote URLs through unchanged, so those
 	// are exempt here too — using the same shared pathutil.IsRemoteURL predicate
 	// (anchored scheme + "file" exclusion) so the two layers never drift; a ".."
@@ -399,7 +399,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check if there are any available workers before creating the job (TSI-1428)
+	// Check if there are any available workers before creating the job
 	// This provides fast failure when no workers are available instead of waiting 30s+ timeout
 	argsJSON, err := json.Marshal(req.Args)
 	if err != nil {
@@ -411,7 +411,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 
 	// Marshal input files and direct paths to JSON up front: the
 	// ENCODER_UNAVAILABLE rejection path below also persists the job, so these
-	// must be available before the encoder-capability check (TSI-2846).
+	// must be available before the encoder-capability check.
 	inputFilesJSON, err := json.Marshal(req.InputFiles)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
@@ -434,7 +434,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	requestedEncoder := scheduler.ExtractEncoderFromArgs(string(argsJSON))
 
 	// Check for available workers with the requested encoder capability
-	// TSI-1500: Check for available workers with compatible encoder capability
+	// Check for available workers with compatible encoder capability
 	// Instead of exact match, check if any worker has an encoder in the same codec family
 	if requestedEncoder != "" {
 		// First try exact match
@@ -472,7 +472,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 				// cluster either has no schedulable worker at all, or a worker
 				// has the encoder but is merely stale — keep the fail-fast 503
 				// (worker_unavailable) rather than misclassifying it as
-				// ENCODER_UNAVAILABLE (TSI-2419). This is the worker_offline
+				// ENCODER_UNAVAILABLE. This is the worker_offline
 				// sub-case: use the user guidance copy, not the
 				// encoder-specific copy reserved for encoder_match_failed.
 				writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
@@ -483,7 +483,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			// TSI-2846: workers exist but none has the requested encoder or a
+			// workers exist but none has the requested encoder or a
 			// compatible one. Persist the job directly in the failed state
 			// (atomic single INSERT, symmetric with INPUT_UNREACHABLE /
 			// NO_WORKER_AVAILABLE) so the classification is recorded and
@@ -512,17 +512,13 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 jobCreate:
 
-	// Check for any live schedulable worker (not offline, not evicted, fresh
-	// heartbeat) before creating the job. Busy workers count as available: the
-	// job is created in pending state and the scheduler queues it until a
-	// worker becomes idle (TSI-2204).
-	//
-	// TSI-2419: freshness is enforced in SQL — a worker whose last heartbeat
-	// is older than the heartbeat timeout is dead in practice (the monitor
-	// only flips it offline on its next tick). Excluding such workers here
-	// fails the submission fast with "no worker available" instead of
-	// accepting the job and letting it sit pending until the no-worker job
-	// timeout (default 2m).
+	// Before creating the job, require at least one live schedulable worker
+	// (not offline, not evicted, fresh heartbeat). Busy workers qualify: the
+	// job is created pending and the scheduler queues it until a worker idles.
+	// Freshness is enforced in SQL — a worker past the heartbeat timeout is
+	// dead in practice (the monitor flips it offline only on its next tick),
+	// so excluding it here fails submission fast with "no worker available"
+	// instead of leaving the job pending until the no-worker timeout (2m).
 	liveWorkers, err := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
 	if err != nil {
 		log.Printf("SubmitJob: Failed to check schedulable workers: %v", err)
@@ -552,7 +548,7 @@ jobCreate:
 		h.rateLimiter.RegisterJob(clientID, job.ID)
 	}
 
-	// Trigger immediate scheduling to reduce race condition window (TSI-1501)
+	// Trigger immediate scheduling to reduce race condition window
 	if h.scheduler != nil {
 		h.scheduler.TriggerReschedule()
 	}
@@ -566,9 +562,9 @@ jobCreate:
 // failAsEncoderUnavailable reports whether a submission whose requested encoder
 // has no live worker should be persisted as ENCODER_UNAVAILABLE rather than
 // rejected as worker_unavailable. True only when at least one schedulable
-// worker exists (a stale heartbeat still counts — TSI-2419) but none of them
+// worker exists but none of them
 // has the requested encoder or a compatible one. A workerless cluster is
-// NO_WORKER_AVAILABLE, not an unavailable encoder (TSI-2846).
+// NO_WORKER_AVAILABLE, not an unavailable encoder.
 func (h *Handler) failAsEncoderUnavailable(requestedEncoder string, compatibleEncoders []string) bool {
 	// At least one schedulable worker must exist for a missing encoder to mean
 	// "unavailable" rather than "no worker available".
@@ -823,16 +819,14 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 			h.rateLimiter.DecrementByJob(jobID)
 		}
 
-		// When a job reaches terminal status, immediately flip the worker to
-		// idle if it has no remaining active jobs. This eliminates the 10-15
-		// second delay where the worker remains "busy" on the server until the
-		// next heartbeat, causing subsequent jobs to be rejected.
+		// On terminal status, immediately flip the worker to idle if it has no
+		// remaining active jobs — otherwise it stays "busy" on the server for
+		// 10-15s until the next heartbeat, rejecting subsequent jobs.
 		//
-		// SetWorkerIdleIfNoActiveJobs does the active-count check and the
-		// status write in ONE guarded statement (status != offline, no active
-		// jobs): an offline worker can no longer be resurrected into the
-		// schedulable pool by its own late completion report, and a racing
-		// pull-path busy write cannot be overwritten to idle.
+		// SetWorkerIdleIfNoActiveJobs checks the active count and writes the
+		// status in ONE guarded statement (status != offline, no active jobs):
+		// an offline worker can't be resurrected by its own late completion
+		// report, and a racing pull-path busy write can't be overwritten to idle.
 		if protocol.IsTerminalStatus(req.Status) {
 			job, err := h.db.GetJob(jobID)
 			if err == nil && job.WorkerID.Valid {
@@ -930,7 +924,7 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 	// 32MB in-memory threshold, matching Upload: larger parts spill to
 	// temporary files on disk. The old 256MB let concurrent uploads pin
-	// hundreds of MB of RSS (TSI-2365).
+	// hundreds of MB of RSS.
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		log.Printf("UploadJobOutput: failed to parse multipart form for job %s: %v", jobID, err)
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
@@ -1061,7 +1055,7 @@ func (h *Handler) RegisterWorker(w http.ResponseWriter, r *http.Request) {
 	// video_decoders) from the canonical flat lists when a minimal client
 	// registers without them. The rich lists feed GET /api/v1/encoders and
 	// GET /api/v1/decoders only; leaving them nil makes those endpoints return
-	// empty for every spec-conformant client (TSI-2522).
+	// empty for every spec-conformant client.
 	if len(req.Capabilities.VideoEncoders) == 0 {
 		for _, name := range req.Capabilities.Encoders {
 			req.Capabilities.VideoEncoders = append(req.Capabilities.VideoEncoders, protocol.EncoderInfo{
@@ -1094,7 +1088,7 @@ func (h *Handler) RegisterWorker(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// WorkerHeartbeat handles worker heartbeat (enhanced with GPU and throughput metrics, TSI-756).
+// WorkerHeartbeat handles worker heartbeat (enhanced with GPU and throughput metrics).
 func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var req protocol.WorkerHeartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1117,7 +1111,7 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update WorkerStateTable with throughput data (TSI-759)
+	// Update WorkerStateTable with throughput data
 	if h.stateTable != nil {
 		statePayload := protocol.WorkerHeartbeatPayload{
 			WorkerID:        req.WorkerID,
@@ -1240,7 +1234,7 @@ func inputExists(store *storage.Storage, input string) bool {
 	}
 	// Reject a direct path containing a ".." component before os.Stat resolves
 	// it. A bare API call can otherwise bypass the worker-side traversal guard
-	// (TSI-2706). The check lives in pathutil so both sides share one semantic.
+	// The check lives in pathutil so both sides share one semantic.
 	if pathutil.ContainsPathTraversal(input) {
 		return false
 	}
@@ -1267,7 +1261,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 
 	// Bound the JSON body — a probe request is a path/URL plus optional
 	// options, never megabytes. Without a cap the endpoint is a free
-	// memory-amplification DoS vector (TSI-2365).
+	// memory-amplification DoS vector.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 	var req protocol.ProbeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1288,7 +1282,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	// a storage file ID (64-hex content hash, resolved under the server's
 	// storage dir) vs. a direct local path (shared-FS passthrough, resolved
 	// against the server's own filesystem). FileExists can only resolve the
-	// former; feeding it a direct path always 404s (TSI-2520).
+	// former; feeding it a direct path always 404s.
 	if !strings.Contains(req.Input, "://") && !inputExists(h.storage, req.Input) {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeNotFound, "Input file not found: "+req.Input, nil,
@@ -1296,10 +1290,10 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Check for a live schedulable worker before creating the probe job
-	// (TSI-2474). Without this, a probe dispatched to a cluster with no
+	// Without this, a probe dispatched to a cluster with no
 	// online workers sits pending for the entire 2-minute poll loop before
 	// returning "timeout" — the user sees a hang, not an actionable error.
-	// Failing fast mirrors the submit-time check in SubmitJob (TSI-2419).
+	// Failing fast mirrors the submit-time check in SubmitJob.
 	liveWorkers, err := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
@@ -1334,7 +1328,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 
 	// Direct paths (shared-FS passthrough): when the input is neither a
 	// remote URL nor a storage file ID, it is a local path the worker must
-	// read directly instead of downloading over HTTP (TSI-2520).
+	// read directly instead of downloading over HTTP.
 	directPathsJSON := "[]"
 	if !strings.Contains(req.Input, "://") && !storage.ValidateFileID(req.Input) {
 		dp, err := json.Marshal([]string{req.Input})
@@ -1360,7 +1354,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	// Wait for the probe job to reach a terminal state. A per-job notifier
 	// (woken by every terminal-status DB write) replaces the old 2-second
 	// poll loop, so terminal-state propagation is immediate instead of up to
-	// 2s late (TSI-2520). The overall budget mirrors the previous 60x2s loop
+	// 2s late. The overall budget mirrors the previous 60x2s loop
 	// (~2 minutes), but the probe job itself times out after 60s, so the
 	// extra headroom only matters for a late report racing the deadline.
 	const probeWaitBudget = 2 * time.Minute
@@ -1436,7 +1430,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Populate _rffmpeg metadata (TSI-3048): workers[] stays lightweight, the
+	// Populate _rffmpeg metadata: workers[] stays lightweight, the
 	// executing worker's encoder list is emitted once as the shared list, and
 	// only workers whose list differs appear in worker_encoder_overrides — so a
 	// homogeneous cluster emits a single copy while a heterogeneous one keeps
@@ -1483,7 +1477,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 // buildWorkerSummariesAndOverrides reduces the worker list to lightweight
 // summaries and returns sparse per-worker encoder overrides relative to the
 // shared (executing-worker) list. Workers whose list matches the shared list
-// are elided, so a homogeneous cluster emits no overrides (TSI-3048).
+// are elided, so a homogeneous cluster emits no overrides.
 func buildWorkerSummariesAndOverrides(allWorkers []*db.Worker, sharedEncoders []string) ([]protocol.WorkerSummary, map[string][]string) {
 	workerSummaries := make([]protocol.WorkerSummary, 0, len(allWorkers))
 	overrides := make(map[string][]string)
@@ -1536,7 +1530,7 @@ func (h *Handler) waitForProbeTerminal(ctx context.Context, jobID string, waitTi
 		select {
 		case <-ctx.Done():
 			// Client went away: stop burning server resources and cancel
-			// the dispatched probe job (TSI-2365).
+			// the dispatched probe job.
 			_ = h.db.CancelJob(jobID)
 			return nil, ctx.Err()
 		case <-timer.C:
@@ -1796,7 +1790,7 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map
 	// AND the cluster has no live schedulable worker. A queued job already
 	// has a worker_id and can never receive NO_WORKER_AVAILABLE; a pending
 	// job behind a busy-but-live worker is never swept (the sweep's
-	// live-worker guard short-circuits, TSI-2204), so neither carries a
+	// live-worker guard short-circuits), so neither carries a
 	// deadline. noLiveWorker is computed once per request by the caller so a
 	// page of pending jobs does not re-run the same live-worker query N times.
 	if job.Status == protocol.JobStatusPending && h.noWorkerJobTimeout > 0 && noLiveWorker {
@@ -1817,7 +1811,7 @@ func (h *Handler) GetJobLogWS(w http.ResponseWriter, r *http.Request) {
 // GET /api/v1/workers
 // Query param active_only=true returns only non-offline workers. The default
 // list includes offline rows that are still retained within the
-// --worker-offline-threshold window after a worker dies (TSI-2919).
+// --worker-offline-threshold window after a worker dies.
 func (h *Handler) ListWorkers(w http.ResponseWriter, r *http.Request) {
 	// active_only is declared boolean in the OpenAPI spec, so parse it as one;
 	// any non-boolean value falls back to false (the default list).
@@ -2072,7 +2066,7 @@ func (h *Handler) ListAllHwaccels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// WorkerHealth carries live runtime metrics for a worker (TSI-2219).
+// WorkerHealth carries live runtime metrics for a worker.
 // Populated from the server's worker state table when at least one heartbeat
 // has been received; otherwise derived from the database record.
 type WorkerHealth struct {
@@ -2240,7 +2234,7 @@ func writeInfoFlagText(w http.ResponseWriter, header string, items []string) {
 // dbWorkerToWorkerInfo converts database Worker to WorkerInfo.
 // states may be nil; when provided, sampled live metrics (GPU, throughput,
 // active jobs) come from the worker state table, while health.status always
-// reflects the authoritative database state (TSI-2347).
+// reflects the authoritative database state.
 func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerState) WorkerInfo {
 	var encoders, decoders []string
 	if err := json.Unmarshal([]byte(worker.Encoders), &encoders); err != nil {
@@ -2272,7 +2266,7 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 		info.GPUModel = worker.GPUModel.String
 	}
 
-	// TSI-2347: health.status must track the worker's authoritative DB state,
+	// health.status must track the worker's authoritative DB state,
 	// which the scheduler, the terminal-status hook and heartbeats all keep
 	// current. The state table only refreshes on periodic heartbeats, so
 	// reading status from it left health stuck at "idle" between beats while a
