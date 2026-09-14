@@ -250,7 +250,7 @@ func TestMonitorRetryCount(t *testing.T) {
 	_ = database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Create a previous migration event for this job (simulating previous retry)
-	_, err = database.CreateMigrationEvent("worker-old", "old-worker", string(migration.ReasonHeartbeatTimeout), 0, []string{job1.ID}, 1)
+	_, err = database.CreateMigrationEvent("worker-old", "old-worker", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID}, 1)
 	if err != nil {
 		t.Fatalf("Failed to create previous migration event: %v", err)
 	}
@@ -283,9 +283,9 @@ func TestMonitorRetryCount(t *testing.T) {
 		t.Fatalf("Expected 1 migration event, got %d", len(events))
 	}
 
-	// The retry count should be 1 (previous migration)
-	if events[0].RetryCount != 1 {
-		t.Errorf("Expected retry count 1, got %d", events[0].RetryCount)
+	// The retry count should be 2 (one prior migration + this one)
+	if events[0].RetryCount != 2 {
+		t.Errorf("Expected retry count 2, got %d", events[0].RetryCount)
 	}
 }
 
@@ -1063,8 +1063,8 @@ func TestMultiWorkerRetryCountTracking(t *testing.T) {
 	database.AssignJobToWorker(job1.ID, "worker-A")
 	database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
-	database.CreateMigrationEvent("old-w1", "old-1", string(migration.ReasonHeartbeatTimeout), 0, []string{job1.ID}, 1)
-	database.CreateMigrationEvent("old-w2", "old-2", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID}, 1)
+	database.CreateMigrationEvent("old-w1", "old-1", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID}, 1)
+	database.CreateMigrationEvent("old-w2", "old-2", string(migration.ReasonHeartbeatTimeout), 2, []string{job1.ID}, 1)
 
 	// worker-B: fresh job, no prior migrations
 	job2, _ := database.CreateJob(`["fresh.mkv"]`, `["-c:v","libx264"]`, "out_fresh.mkv", false)
@@ -1086,22 +1086,22 @@ func TestMultiWorkerRetryCountTracking(t *testing.T) {
 	monitor.SetScheduler(&mockScheduler{})
 	monitor.checkWorkers()
 
-	// worker-A retry count should be 2 (previous migrations)
+	// worker-A retry count should be 3 (two previous migrations + this one)
 	eventsA, _ := database.GetMigrationEventsByWorker("worker-A", 10)
 	if len(eventsA) != 1 {
 		t.Fatalf("Expected 1 migration event for worker-A, got %d", len(eventsA))
 	}
-	if eventsA[0].RetryCount != 2 {
-		t.Errorf("Expected retry count 2 for worker-A, got %d", eventsA[0].RetryCount)
+	if eventsA[0].RetryCount != 3 {
+		t.Errorf("Expected retry count 3 for worker-A, got %d", eventsA[0].RetryCount)
 	}
 
-	// worker-B retry count should be 0 (fresh)
+	// worker-B retry count should be 1 (first migration)
 	eventsB, _ := database.GetMigrationEventsByWorker("worker-B", 10)
 	if len(eventsB) != 1 {
 		t.Fatalf("Expected 1 migration event for worker-B, got %d", len(eventsB))
 	}
-	if eventsB[0].RetryCount != 0 {
-		t.Errorf("Expected retry count 0 for worker-B, got %d", eventsB[0].RetryCount)
+	if eventsB[0].RetryCount != 1 {
+		t.Errorf("Expected retry count 1 for worker-B, got %d", eventsB[0].RetryCount)
 	}
 
 	// Both jobs should be pending after migration

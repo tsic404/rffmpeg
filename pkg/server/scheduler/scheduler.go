@@ -407,7 +407,7 @@ func (s *Scheduler) checkTimeouts() {
 			// running set nothing is written, and an event/placeholder failure
 			// rolls the whole transaction back — no ghost migration event and
 			// no permanently-NULL placeholder.
-			rescheduled, err := s.db.RecordJobTimeoutMigration(job.WorkerID.String, job.ID, retries)
+			rescheduled, err := s.db.RecordJobTimeoutMigration(job.WorkerID.String, job.ID, retries+1)
 			if err != nil {
 				log.Printf("Scheduler: Failed to record timeout migration for job %s: %v", job.ID, err)
 				continue

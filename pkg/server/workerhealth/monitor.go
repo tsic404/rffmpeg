@@ -264,11 +264,15 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 		workerName = worker.Name
 	}
 
-	// Phase 1: classify jobs (read-only) into migrated vs failed, tracking the
-	// max retry count for the audit event. No job is made schedulable here.
+	// Phase 1: classify jobs (read-only) into migrated vs failed. A migrated
+	// job's post-migration cumulative count (prior + 1) is tracked per job and
+	// as the event-level max, so the audit rows stay exact even when one
+	// worker's batch mixes jobs at different retry stages. No job is made
+	// schedulable here.
 	var migratedJobIDs []string
 	var failedJobIDs []string
-	retryCount := 0
+	retryCounts := make(map[string]int)
+	maxRetryCount := 0
 
 	for _, job := range jobs {
 		count, err := m.db.GetJobRetryCount(job.ID)
@@ -277,14 +281,15 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 			continue
 		}
 
-		if count > retryCount {
-			retryCount = count
-		}
-
 		if count >= m.config.MaxRetryCount {
 			failedJobIDs = append(failedJobIDs, job.ID)
 		} else {
 			migratedJobIDs = append(migratedJobIDs, job.ID)
+			postCount := count + 1
+			retryCounts[job.ID] = postCount
+			if postCount > maxRetryCount {
+				maxRetryCount = postCount
+			}
 		}
 	}
 
@@ -298,13 +303,13 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 			workerID,
 			workerName,
 			string(migration.ReasonHeartbeatTimeout),
-			retryCount,
+			maxRetryCount,
 			migratedJobIDs,
 			len(migratedJobIDs),
 		)
 		if err != nil {
 			log.Printf("Failed to create migration event for worker %s: %v", workerID, err)
-		} else if err := m.db.CreateJobRedistributions(event.ID, migratedJobIDs); err != nil {
+		} else if err := m.db.CreateJobRedistributions(event.ID, retryCounts); err != nil {
 			// The migration event is authoritative; a redistribution placeholder
 			// failure only degrades target observability.
 			log.Printf("Failed to create job redistributions for worker %s: %v", workerID, err)
@@ -327,7 +332,7 @@ func (m *Monitor) migrateJobsFromWorker(workerID string) {
 
 	if len(migratedJobIDs) > 0 {
 		log.Printf("Migrated %d job(s) from offline worker %s (retry count: %d)",
-			len(migratedJobIDs), workerID, retryCount)
+			len(migratedJobIDs), workerID, maxRetryCount)
 	}
 
 	if len(failedJobIDs) > 0 {

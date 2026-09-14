@@ -25,7 +25,8 @@ func TestCreateMigrationEvent(t *testing.T) {
 	defer db.Close()
 
 	jobIDs := []string{"job-1", "job-2", "job-3"}
-	event, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", string(protocol.WorkerStatusOffline), 0, jobIDs, 3)
+	// First migration: retry_count is the cumulative count after this event (1).
+	event, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", string(protocol.WorkerStatusOffline), 1, jobIDs, 3)
 	if err != nil {
 		t.Fatalf("Failed to create migration event: %v", err)
 	}
@@ -42,8 +43,8 @@ func TestCreateMigrationEvent(t *testing.T) {
 	if event.Reason != string(protocol.WorkerStatusOffline) {
 		t.Errorf("Expected reason 'offline', got '%s'", event.Reason)
 	}
-	if event.RetryCount != 0 {
-		t.Errorf("Expected retry count 0, got %d", event.RetryCount)
+	if event.RetryCount != 1 {
+		t.Errorf("Expected retry count 1, got %d", event.RetryCount)
 	}
 	if event.JobsMigrated != 3 {
 		t.Errorf("Expected 3 jobs migrated, got %d", event.JobsMigrated)
@@ -112,7 +113,7 @@ func TestRecordMigrationTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create migration event: %v", err)
 	}
-	if err := db.CreateJobRedistributions(event.ID, []string{"job-1"}); err != nil {
+	if err := db.CreateJobRedistributions(event.ID, map[string]int{"job-1": 1}); err != nil {
 		t.Fatalf("CreateJobRedistributions: %v", err)
 	}
 
@@ -146,7 +147,7 @@ func TestRecordMigrationTargetMultiJobFanout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create migration event: %v", err)
 	}
-	if err := db.CreateJobRedistributions(event.ID, []string{"job-1", "job-2", "job-3"}); err != nil {
+	if err := db.CreateJobRedistributions(event.ID, map[string]int{"job-1": 1, "job-2": 1, "job-3": 1}); err != nil {
 		t.Fatalf("CreateJobRedistributions: %v", err)
 	}
 
@@ -186,7 +187,7 @@ func TestRecordMigrationTargetMultiHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create first event: %v", err)
 	}
-	if err := db.CreateJobRedistributions(first.ID, []string{"job-1"}); err != nil {
+	if err := db.CreateJobRedistributions(first.ID, map[string]int{"job-1": 1}); err != nil {
 		t.Fatalf("CreateJobRedistributions (first): %v", err)
 	}
 	if err := db.RecordMigrationTarget("job-1", "worker-2", "gpu-worker-2"); err != nil {
@@ -198,7 +199,7 @@ func TestRecordMigrationTargetMultiHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create second event: %v", err)
 	}
-	if err := db.CreateJobRedistributions(second.ID, []string{"job-1"}); err != nil {
+	if err := db.CreateJobRedistributions(second.ID, map[string]int{"job-1": 2}); err != nil {
 		t.Fatalf("CreateJobRedistributions (second): %v", err)
 	}
 	if err := db.RecordMigrationTarget("job-1", "worker-3", "gpu-worker-3"); err != nil {

@@ -1223,6 +1223,8 @@ components:
       properties:
         job_id:
           type: string
+        retry_count:
+          type: integer
         target_worker_id:
           type: string
         target_worker_name:
