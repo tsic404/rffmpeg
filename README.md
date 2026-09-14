@@ -789,12 +789,18 @@ GET /api/v1/workers/{workerId}/jobs
 `migration_events` 与 `worker_eviction_events` 是服务端审计表，记录的是**非正常的调度事件**，
 不是每次 worker 退出都会写入。
 
-- `migration_events` 仅在作业被从某个 worker **迁移回 pending** 时写入，当前实现只有
-  `reason=heartbeat_timeout` 一种触发路径：worker 心跳超时（`worker_heartbeat_timeout`，默认
-  `90s`）被标记为 offline，其上 running/queued 作业迁回 pending；这包括 worker 进程退出
-  （优雅退出或崩溃）后未上报终态的作业——它们在服务端停留 `running`，直到心跳超时被迁移。
-- 作业执行超过 `job_timeout`（默认 `30m`）即 FAIL（`FailureTimeout`），当前实现不重排，
-  不写 `reason=job_timeout` 迁移事件。
+- `migration_events` 仅在作业被从某个 worker **迁移回 pending** 时写入，两种触发路径：
+  - `reason=heartbeat_timeout`：worker 心跳超时（`worker_heartbeat_timeout`，默认 `90s`）被标记
+    为 offline，其上 running/queued 作业迁回 pending；这包括 worker 进程退出（优雅退出或崩溃）
+    后未上报终态的作业——它们在服务端停留 `running`，直到心跳超时被迁移。
+  - `reason=job_timeout`：scheduler 超时 sweep 发现作业运行超过 `job_timeout`（默认 `30m`）后
+    将其重排回 pending；每次重排写一条 `job_timeout` 事件（受 `max_timeout_retries` 预算约束，
+    默认 2）。
+- 终态 TIMEOUT **不写迁移事件**：scheduler 在 `max_timeout_retries` 预算耗尽后 FAIL
+  （`FailureTimeout`）、以及 CLI `--timeout` 被 worker 按 ffmpeg 执行预算强制终止，两者都是
+  终态 `failure_type=TIMEOUT`，不是迁移，故不写 `migration_events`、也不计入
+  `GetJobTimeoutRetryCount`（该计数只统计重排次数，供 `max_timeout_retries` 预算使用）。
+  终态超时的可观测入口是 `jobs.status=timeout` + `jobs.failure_type=TIMEOUT`。
 - `worker_eviction_events` 仅在慢节点检测中写入：worker 的 EWMA 吞吐低于集群中位数 /
   `SlowNodeThreshold=3.0`（即低于中位数 1/3）被淘汰（`event_type=evicted`）；已 evicted 的 worker
   在吞吐恢复到中位数 / `RecoveryThreshold=1.5` 后重新入池（`event_type=recovered`）。单 worker
