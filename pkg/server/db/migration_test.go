@@ -731,6 +731,73 @@ func TestRecordJobTimeoutMigration(t *testing.T) {
 	}
 }
 
+// TestTerminalTimeoutDoesNotWriteMigrationEvent pins the intentional boundary
+// between the two timeout semantics: a terminal TIMEOUT (the CLI --timeout
+// path, reported by the worker via UpdateJobTerminalStatusWithOwner) is a
+// terminal failure, not a requeue, so it must not write a job_timeout
+// migration event and must not advance the scheduler's timeout-retry budget
+// (GetJobTimeoutRetryCount). Only the sweep's requeue (RecordJobTimeoutMigration)
+// records job_timeout events.
+func TestTerminalTimeoutDoesNotWriteMigrationEvent(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	if _, err := db.CreateWorker("worker-1", "gpu-worker-1", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "6.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := db.CreateJob(`["f.mkv"]`, `[]`, "o.mkv", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	exitCode := -1
+	errMsg := "ffmpeg command timed out"
+	failureType := string(protocol.FailureTimeout)
+	if err := db.UpdateJobTerminalStatusWithOwner(job.ID, "worker-1", protocol.JobStatusTimeout, &exitCode, &errMsg, &failureType, &errMsg); err != nil {
+		t.Fatalf("UpdateJobTerminalStatusWithOwner (terminal timeout): %v", err)
+	}
+
+	got, err := db.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != protocol.JobStatusTimeout {
+		t.Errorf("status = %s, want timeout", got.Status)
+	}
+	if got.FailureType != string(protocol.FailureTimeout) {
+		t.Errorf("failure_type = %q, want TIMEOUT", got.FailureType)
+	}
+
+	// A terminal timeout is not a requeue: it must leave no job_timeout
+	// migration event behind and must not be counted by the timeout-retry
+	// budget.
+	count, err := db.GetJobTimeoutRetryCount(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("GetJobTimeoutRetryCount = %d, want 0 (terminal timeout is not a requeue)", count)
+	}
+
+	events, err := db.GetMigrationEventsByWorker("worker-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("migration events = %d, want 0 (terminal TIMEOUT writes no job_timeout event)", len(events))
+	}
+}
+
 func TestCreateMigrationEventEmptyWorkerName(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
