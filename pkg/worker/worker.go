@@ -668,8 +668,34 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		log.Printf("Job %s: cache MISS (key=%s)", job.ID, cacheKey[:16])
 	}
 
-	// Create job-specific temp directory
+	// Create job-specific temp directory. A re-dispatched job (worker-failure
+	// migration or server-restart recovery) re-enters here with a jobDir that
+	// still holds partial output left by its interrupted previous attempt; the
+	// deferred cleanupJobDir only ran on a graceful exit, so a crashed/aborted
+	// attempt leaves it behind. Remove it first so ffmpeg starts from a clean
+	// directory instead of refusing to overwrite the leftover ("Not overwriting
+	// - exiting" / "could not open output file"). The directory is job-private
+	// (tempDir/<jobID>/), so nothing here is user data that must be preserved —
+	// user-specified direct/shared-FS output paths live outside jobDir and are
+	// never touched.
 	jobDir := filepath.Join(w.tempDir, job.ID)
+	// jobDir is derived from the server-supplied job.ID. Guard the removal
+	// scope before os.RemoveAll: an empty (or ".") ID collapses jobDir to the
+	// temp root itself, and a ".." component walks outside it, so RemoveAll
+	// would delete more than this job's own directory. job.ID is a
+	// server-generated UUID, but the check is cheap and mirrors
+	// pathutil.ContainsPathTraversal used by the direct-path validation.
+	if job.ID == "" || pathutil.ContainsPathTraversal(job.ID) ||
+		filepath.Clean(jobDir) == filepath.Clean(w.tempDir) {
+		jobFailed = true
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("invalid job ID %q: refusing to clean job directory", job.ID))
+		return
+	}
+	if err := os.RemoveAll(jobDir); err != nil {
+		jobFailed = true
+		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to clean stale job directory: %v", err))
+		return
+	}
 	if err := os.MkdirAll(jobDir, 0755); err != nil {
 		jobFailed = true
 		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to create job directory: %v", err))
