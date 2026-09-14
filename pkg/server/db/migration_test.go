@@ -586,6 +586,50 @@ func TestGetJobRetryCount(t *testing.T) {
 	}
 }
 
+func TestGetJobRetryCounts(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	// Seed: job-a migrated twice, job-b once, job-c zero, job-d only via a
+	// job_timeout requeue (which must not count as a worker-failure migration).
+	if _, err := db.CreateMigrationEvent("w1", "w1", "heartbeat_timeout", 0, []string{"job-a"}, 1); err != nil {
+		t.Fatalf("seed job-a #1: %v", err)
+	}
+	if _, err := db.CreateMigrationEvent("w2", "w2", "heartbeat_timeout", 1, []string{"job-a", "job-b"}, 2); err != nil {
+		t.Fatalf("seed job-a #2 + job-b: %v", err)
+	}
+	if _, err := db.CreateMigrationEvent("w2", "w2", "job_timeout", 1, []string{"job-d"}, 1); err != nil {
+		t.Fatalf("seed job-d timeout: %v", err)
+	}
+
+	counts, err := db.GetJobRetryCounts([]string{"job-a", "job-b", "job-c", "job-d"})
+	if err != nil {
+		t.Fatalf("GetJobRetryCounts: %v", err)
+	}
+
+	if counts["job-a"] != 2 {
+		t.Errorf("job-a retry count = %d, want 2", counts["job-a"])
+	}
+	if counts["job-b"] != 1 {
+		t.Errorf("job-b retry count = %d, want 1", counts["job-b"])
+	}
+	if _, ok := counts["job-c"]; ok {
+		t.Errorf("job-c should be absent (never migrated), got count %d", counts["job-c"])
+	}
+	if _, ok := counts["job-d"]; ok {
+		t.Errorf("job-d should be absent (only job_timeout, not a worker-failure migration), got count %d", counts["job-d"])
+	}
+
+	// Empty input must return an empty map without error.
+	empty, err := db.GetJobRetryCounts(nil)
+	if err != nil {
+		t.Fatalf("GetJobRetryCounts(nil): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("GetJobRetryCounts(nil) = %v, want empty map", empty)
+	}
+}
+
 func TestRecordJobTimeoutMigration(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

@@ -752,6 +752,39 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		outputPath = filepath.Join(jobDir, outputFilename)
 	}
 
+	// Re-dispatch cleanup: a job migrated off a failed worker (retry
+	// count > 0) may point at a shared-FS output path where the previous worker
+	// left a truncated partial file. ffmpeg then refuses with "Not overwriting
+	// - exiting" and the self-heal chain breaks. Remove that stale output before
+	// the first execution here — the same idempotency RetryExecutor already
+	// applies between its attempts, but that path never runs for a migrated job
+	// whose initial ffmpeg invocation fails on the stale file. A genuinely fresh
+	// job (retry count 0) keeps native ffmpeg overwrite semantics.
+	//
+	// The overwrite policy still governs the removal: an explicit -n
+	// (OverwriteNever) is the user's "exists → fail" contract, so the file is
+	// left for ffmpeg to reject rather than silently re-transcoded and replaced.
+	// Default (OverwriteAsk) and -y (OverwriteForce) remove it; before doing so,
+	// size/mtime are logged so a valid-but-unreported output removed by this path
+	// stays auditable (the previous worker may have completed the encode and only
+	// crashed before reporting its terminal state).
+	if job.RetryCount > 0 && outputPath != "" && outputPath != "-" &&
+		ffmpegopts.OverwritePolicy(job.Args) != ffmpegopts.OverwriteNever {
+		if info, err := os.Stat(outputPath); err == nil {
+			log.Printf("Job %s: removing output from previous worker (%d bytes, mtime %s): %s",
+				job.ID, info.Size(), info.ModTime().Format(time.RFC3339), outputPath)
+		}
+		if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+			// A real removal failure (EACCES, read-only mount, held lock, dead
+			// filesystem) leaves the stale file in place, so ffmpeg would still
+			// refuse and the self-heal would break silently. Fail fast as an
+			// infrastructure fault instead of swallowing the error.
+			jobFailed = true
+			w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to remove stale output %s: %v", outputPath, err))
+			return
+		}
+	}
+
 	// Build initial args
 	args := BuildArgs(job.Args, inputPaths, outputPath)
 

@@ -3056,6 +3056,48 @@ func (d *Database) GetJobRetryCount(jobID string) (int, error) {
 	return count, nil
 }
 
+// GetJobRetryCounts returns the worker-failure migration count for each job in
+// a single batched query, keyed by job ID. It mirrors GetJobRetryCount (same
+// json_each expansion, same job_timeout exclusion) but avoids an N+1 query
+// storm when a worker pull returns up to MaxJobsPerWorker jobs in one response.
+// Jobs with no migration history are absent from the map.
+func (d *Database) GetJobRetryCounts(jobIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(jobIDs))
+	if len(jobIDs) == 0 {
+		return counts, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(jobIDs)), ",")
+	args := make([]any, len(jobIDs))
+	for i, id := range jobIDs {
+		args[i] = id
+	}
+
+	rows, err := d.db.Query(`
+		SELECT json_each.value AS job_id, COUNT(*)
+		FROM migration_events me, json_each(me.job_ids)
+		WHERE me.reason != 'job_timeout' AND json_each.value IN (`+placeholders+`)
+		GROUP BY json_each.value
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get job retry counts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var jobID string
+		var count int
+		if err := rows.Scan(&jobID, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan job retry count: %w", err)
+		}
+		counts[jobID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate job retry counts: %w", err)
+	}
+	return counts, nil
+}
+
 // GetJobTimeoutRetryCount counts only timeout-driven requeues for a job. The
 // scheduler's MaxTimeoutRetries budget must not be consumed by unrelated
 // migrations: a job twice migrated for worker crashes would otherwise burn its
