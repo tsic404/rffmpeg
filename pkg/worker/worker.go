@@ -732,7 +732,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// file makes ffmpeg produce a local file and the CLI receive nothing.
 	outputFilename := job.OutputFilename
 	if job.StreamingOutput {
-		if outputFilename == "" || pathutil.IsRemoteURL(outputFilename) {
+		// "pipe:1" is ffmpeg's explicit stdout alias; mirror the CLI's
+		// normalization so a streaming job never falls through to a literal
+		// file named "pipe:1" in the job dir (which would skip the movflags
+		// injection and starve the stdoutBatcher).
+		if outputFilename == "" || pathutil.IsRemoteURL(outputFilename) || strings.EqualFold(outputFilename, "pipe:1") {
 			outputFilename = "-"
 		}
 	} else if outputFilename == "" {
