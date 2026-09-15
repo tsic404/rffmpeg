@@ -1336,49 +1336,16 @@ func (d *Database) GetJobsForWorker(workerID string, limit int) ([]*Job, error) 
 	return d.scanJobs(rows)
 }
 
-// AssignPendingJobsToWorker assigns pending jobs to a worker and returns jobs already assigned to it
-func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*Job, error) {
+// AssignPendingJobsToWorker returns every job already queued for the worker
+// plus as many newly claimed pending jobs as the worker's capacity allows.
+// Queued jobs are delivered in full: they are already committed to this worker
+// by the scheduler, so capping them would strand the overflow. The active-job
+// count and the claims share one write transaction, so two concurrent pulls
+// cannot both read a stale count and over-assign a worker past maxConcurrent.
+func (d *Database) AssignPendingJobsToWorker(workerID string, maxConcurrent int) ([]*Job, error) {
 	// Normalize so a compact/uppercase UUID pull reaches jobs stored under the
-	// canonical ID; GetJobsForWorker normalizes its own copy too.
+	// canonical ID, and the capacity COUNT below matches the claim UPDATEs.
 	workerID = NormalizeWorkerID(workerID)
-	// First, get jobs already assigned to this worker (queued status)
-	// This handles the race condition where the scheduler assigned jobs before the worker polled
-	queuedJobs, err := d.GetJobsForWorker(workerID, maxJobs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get queued jobs for worker: %w", err)
-	}
-
-	// If we already have enough jobs, return them
-	if len(queuedJobs) >= maxJobs {
-		return queuedJobs[:maxJobs], nil
-	}
-
-	// Get pending jobs and assign them to the worker
-	tx, err := d.db.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Calculate how many more jobs we can assign
-	remainingSlots := maxJobs - len(queuedJobs)
-
-	// Get pending jobs (status = pending AND worker_id IS NULL)
-	rows, err := tx.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
-		FROM jobs WHERE status = ? AND worker_id IS NULL
-		ORDER BY created_at ASC LIMIT ?
-	`, protocol.JobStatusPending, remainingSlots)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to get pending jobs: %w", err)
-	}
-
-	newJobs, err := d.scanJobs(rows)
-	if err != nil {
-		return nil, err
-	}
 
 	// Fetch the worker name once so the claimed Job objects carry the same
 	// attribution the UPDATE persists via subquery — the pull response is built
@@ -1387,6 +1354,66 @@ func (d *Database) AssignPendingJobsToWorker(workerID string, maxJobs int) ([]*J
 	workerName := ""
 	if w, err := d.GetWorker(workerID); err == nil {
 		workerName = w.Name
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Jobs already committed to this worker (queued) are delivered in full.
+	queuedRows, err := tx.Query(`
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
+		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
+		ORDER BY created_at ASC
+	`, workerID, protocol.JobStatusPending, protocol.JobStatusQueued)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get queued jobs for worker: %w", err)
+	}
+	queuedJobs, err := d.scanJobs(queuedRows)
+	if err != nil {
+		return nil, err
+	}
+
+	// Recheck capacity atomically with the claims below: the COUNT runs in
+	// this same write transaction (SQLite serializes writers), so a concurrent
+	// pull observes the jobs this one has already claimed instead of a stale
+	// zero and cannot push the worker past maxConcurrent.
+	var activeCount int
+	if err := tx.QueryRow(`
+		SELECT COUNT(*) FROM jobs WHERE worker_id = ? AND status IN (?, ?)
+	`, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued).Scan(&activeCount); err != nil {
+		return nil, fmt.Errorf("failed to get active job count: %w", err)
+	}
+
+	maxNewJobs := maxConcurrent - activeCount
+	if maxNewJobs < 0 {
+		maxNewJobs = 0
+	}
+	if maxNewJobs == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		return queuedJobs, nil
+	}
+
+	// Get pending jobs (status = pending AND worker_id IS NULL)
+	rows, err := tx.Query(`
+		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
+		       created_at, updated_at, started_at, finished_at, assigned_worker, worker_name
+		FROM jobs WHERE status = ? AND worker_id IS NULL
+		ORDER BY created_at ASC LIMIT ?
+	`, protocol.JobStatusPending, maxNewJobs)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pending jobs: %w", err)
+	}
+
+	newJobs, err := d.scanJobs(rows)
+	if err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
@@ -1600,6 +1627,7 @@ func (d *Database) GetLiveSchedulableWorkers(freshness time.Duration) ([]*Worker
 
 // GetWorkerActiveJobCount returns the number of active jobs (running or queued) for a worker
 func (d *Database) GetWorkerActiveJobCount(workerID string) (int, error) {
+	workerID = NormalizeWorkerID(workerID)
 	var count int
 	err := d.db.QueryRow(`
 		SELECT COUNT(*) FROM jobs WHERE worker_id = ? AND status IN (?, ?)
