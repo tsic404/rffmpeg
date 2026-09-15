@@ -178,8 +178,10 @@ func (e *RetriesExhaustedError) Unwrap() error {
 
 // RateLimitError reports an HTTP 429 rate-limit rejection from job
 // submission. It carries the server's suggested backoff so a caller with a
-// retry budget can honor it instead of re-submitting immediately.
-// Error renders the single-line message promised by the CLI.
+// retry budget can honor it instead of re-submitting immediately. Error
+// renders the rate-limit fact without a retry promise; the retry hint is
+// added only once a retry budget was spent, so the default (no --retry) path
+// never tells the user a retry is coming.
 type RateLimitError struct {
 	Current int
 	Limit   int
@@ -189,14 +191,20 @@ type RateLimitError struct {
 	decoded bool
 	// rawBody holds an undecodable response body (diagnostic only).
 	rawBody string
+	// retried reports that the client exhausted its submit-retry budget on
+	// this rate limit; only then does Error() carry the retry hint.
+	retried bool
 }
 
 func (e *RateLimitError) Error() string {
 	if e.decoded {
-		return fmt.Sprintf(
-			"rate limit exceeded: %d/%d concurrent jobs. Retry after %d seconds",
-			e.Current, e.Limit, e.RetryIn,
-		)
+		if e.retried {
+			return fmt.Sprintf(
+				"rate limit exceeded: %d/%d concurrent jobs. Retry after %d seconds",
+				e.Current, e.Limit, e.RetryIn,
+			)
+		}
+		return fmt.Sprintf("rate limit exceeded: %d/%d concurrent jobs", e.Current, e.Limit)
 	}
 	if e.rawBody != "" {
 		return fmt.Sprintf("rate limit exceeded (HTTP 429): %s", e.rawBody)
@@ -406,7 +414,17 @@ func (c *Client) SubmitJobWithOptions(ctx context.Context, inputFiles []string, 
 		lastErr = err
 
 		var rl *RateLimitError
-		if !errors.As(err, &rl) || attempt == c.submitRetries {
+		if !errors.As(err, &rl) {
+			break
+		}
+		if attempt == c.submitRetries {
+			// Budget spent on a rate limit. Mark it retried only when a
+			// retry budget was set, so the message carries the server's
+			// retry hint; the default (no --retry) path fails fast and must
+			// not promise a retry that never happens.
+			if c.submitRetries > 0 {
+				rl.retried = true
+			}
 			break
 		}
 		if sleepErr := submitRetrySleep(ctx, rateLimitBackoff(rl.RetryIn, attempt)); sleepErr != nil {
