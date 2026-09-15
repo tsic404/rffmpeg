@@ -1466,10 +1466,11 @@ func mustAbs(t *testing.T, p string) string {
 
 func TestClientWaitDeadline(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	timeout := time.Hour
+	pollTimeout := 10 * time.Minute
 
 	// pending timeout-only: deadline is now+timeout+clientVerdictGrace.
-	timeout := time.Hour
-	got, has := clientWaitDeadline(now, timeout, protocol.JobStatusPending, nil, nil)
+	got, has := clientWaitDeadline(now, timeout, 0, protocol.JobStatusPending, nil, nil)
 	if !has {
 		t.Fatal("clientWaitDeadline(pending timeout-only) has = false, want true")
 	}
@@ -1481,7 +1482,7 @@ func TestClientWaitDeadline(t *testing.T) {
 	// running started-at anchor: the budget runs from started_at, not submit
 	// time, so the give-up line shifts by the pre-exec latency.
 	startedAt := now.Add(8 * time.Second)
-	got, has = clientWaitDeadline(now, timeout, protocol.JobStatusRunning, &startedAt, nil)
+	got, has = clientWaitDeadline(now, timeout, 0, protocol.JobStatusRunning, &startedAt, nil)
 	if !has {
 		t.Fatal("clientWaitDeadline(started) has = false, want true")
 	}
@@ -1491,18 +1492,44 @@ func TestClientWaitDeadline(t *testing.T) {
 
 	// queued: --timeout is the ffmpeg budget, not the pre-exec budget, so a
 	// claimed job in download/probe must not be given a --timeout bound.
-	if _, has := clientWaitDeadline(now, timeout, protocol.JobStatusQueued, nil, nil); has {
+	if _, has := clientWaitDeadline(now, timeout, 0, protocol.JobStatusQueued, nil, nil); has {
 		t.Error("clientWaitDeadline(queued) has = true, want false (no --timeout bound)")
 	}
 
 	// no bounds: has must be false.
-	if _, has := clientWaitDeadline(now, 0, protocol.JobStatusPending, nil, nil); has {
+	if _, has := clientWaitDeadline(now, 0, 0, protocol.JobStatusPending, nil, nil); has {
 		t.Error("clientWaitDeadline(no bounds) has = true, want false")
+	}
+
+	// poll-cap fallback: pending + no --timeout + no verdict is bounded by the
+	// client-side poll timeout (now + pollTimeout + grace).
+	got, has = clientWaitDeadline(now, 0, pollTimeout, protocol.JobStatusPending, nil, nil)
+	if !has {
+		t.Fatal("clientWaitDeadline(pending poll-cap) has = false, want true")
+	}
+	if want := now.Add(pollTimeout + clientVerdictGrace); !got.Equal(want) {
+		t.Errorf("clientWaitDeadline(pending poll-cap) = %v, want %v", got, want)
+	}
+
+	// The poll cap bounds only the pending (wait-for-worker) phase: a queued
+	// or running job is bounded by the worker's own timeouts, never the poll
+	// cap.
+	if _, has := clientWaitDeadline(now, 0, pollTimeout, protocol.JobStatusQueued, nil, nil); has {
+		t.Error("clientWaitDeadline(queued poll-cap) has = true, want false")
+	}
+	if _, has := clientWaitDeadline(now, 0, pollTimeout, protocol.JobStatusRunning, &startedAt, nil); has {
+		t.Error("clientWaitDeadline(running poll-cap) has = true, want false")
+	}
+
+	// --timeout takes precedence over the poll cap for a pending job.
+	got, _ = clientWaitDeadline(now, timeout, pollTimeout, protocol.JobStatusPending, nil, nil)
+	if !got.Equal(now.Add(timeout + clientVerdictGrace)) {
+		t.Errorf("clientWaitDeadline(timeout over poll-cap) = %v, want timeout-bound", got)
 	}
 
 	// noWorkerDeadline-only: deadline is verdict + clientVerdictGrace.
 	verdict := now.Add(2 * time.Minute)
-	got, has = clientWaitDeadline(now, 0, protocol.JobStatusPending, nil, &verdict)
+	got, has = clientWaitDeadline(now, 0, pollTimeout, protocol.JobStatusPending, nil, &verdict)
 	if !has {
 		t.Fatal("clientWaitDeadline(verdict-only) has = false, want true")
 	}
@@ -1511,21 +1538,21 @@ func TestClientWaitDeadline(t *testing.T) {
 	}
 
 	// timeout later than verdict: deadline follows timeout.
-	got, _ = clientWaitDeadline(now, 3*time.Minute, protocol.JobStatusPending, nil, &verdict)
+	got, _ = clientWaitDeadline(now, 3*time.Minute, 0, protocol.JobStatusPending, nil, &verdict)
 	if !got.Equal(now.Add(3*time.Minute + clientVerdictGrace)) {
 		t.Errorf("clientWaitDeadline(timeout later) = %v, want timeout-bound", got)
 	}
 
 	// verdict later than timeout: deadline follows verdict.
 	laterVerdict := now.Add(10 * time.Minute)
-	got, _ = clientWaitDeadline(now, 2*time.Minute, protocol.JobStatusPending, nil, &laterVerdict)
+	got, _ = clientWaitDeadline(now, 2*time.Minute, 0, protocol.JobStatusPending, nil, &laterVerdict)
 	if !got.Equal(laterVerdict.Add(clientVerdictGrace)) {
 		t.Errorf("clientWaitDeadline(verdict later) = %v, want verdict-bound", got)
 	}
 
 	// Overflow input must not produce a deadline in the past.
 	maxDur := time.Duration(1<<63 - 1)
-	got, has = clientWaitDeadline(now, maxDur, protocol.JobStatusPending, nil, nil)
+	got, has = clientWaitDeadline(now, maxDur, 0, protocol.JobStatusPending, nil, nil)
 	if !has {
 		t.Fatal("clientWaitDeadline(overflow) has = false, want true")
 	}
@@ -1643,7 +1670,7 @@ func TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
 	})
 
 	if code != ExitSuccess {
@@ -1708,7 +1735,7 @@ func TestWaitForJobLoop_DoesNotExtendTwice(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
 	})
 
 	if code != ExitError {
@@ -1758,7 +1785,7 @@ func TestWaitForJobLoop_ExtendsOnceAfterJobStarts(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
 	})
 
 	if code != ExitSuccess {
@@ -1804,7 +1831,7 @@ func TestWaitForJobLoop_QueuedJobNotCancelledByTimeout(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
 	})
 
 	if code != ExitSuccess {
@@ -1841,7 +1868,7 @@ func TestWaitForJobLoop_PendingToQueuedNotCancelled(t *testing.T) {
 
 	var job *protocol.JobInfo
 	var code int
-	job, code = waitForJobLoop(fake, jobID, timeout, false, true)
+	job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
 
 	if code != ExitSuccess {
 		t.Fatalf("waitForJobLoop code = %d, want ExitSuccess (worker TIMEOUT verdict observed)", code)
@@ -1851,6 +1878,162 @@ func TestWaitForJobLoop_PendingToQueuedNotCancelled(t *testing.T) {
 	}
 	if fake.cancelCalls != 0 {
 		t.Errorf("CancelJob calls = %d, want 0 (claimed job must not be cancelled as 'did not start')", fake.cancelCalls)
+	}
+}
+
+// TestWaitForJobLoop_PollTimeoutCancelsPendingJob is the regression for the
+// silent-hang bug: a pending job behind busy-but-live workers never receives a
+// NoWorkerDeadline, and with no --timeout set the client previously polled
+// forever. The client-side poll cap must cancel the job and report an explicit
+// "did not start" error once it is exhausted.
+func TestWaitForJobLoop_PollTimeoutCancelsPendingJob(t *testing.T) {
+	jobID := "job-poll-timeout"
+	pollTimeout := 10 * time.Minute
+
+	fake := &scriptedJobClient{
+		jobID: jobID,
+		seq: []protocol.JobInfo{
+			{ID: jobID, Status: protocol.JobStatusPending},
+			{ID: jobID, Status: protocol.JobStatusPending},
+		},
+	}
+
+	var job *protocol.JobInfo
+	var code int
+	stderr := captureStderr(func() {
+		job, code = waitForJobLoop(fake, jobID, 0, pollTimeout, false, true)
+	})
+
+	if code != ExitError {
+		t.Fatalf("waitForJobLoop code = %d, want ExitError (poll cap exhausted)", code)
+	}
+	if job != nil {
+		t.Errorf("returned job = %+v, want nil on give-up path", job)
+	}
+	if fake.cancelCalls != 1 {
+		t.Errorf("CancelJob calls = %d, want 1 (poll cap must cancel the stuck job)", fake.cancelCalls)
+	}
+	if !strings.Contains(stderr, "did not start within 10m0s") {
+		t.Errorf("stderr = %q, want poll-cap duration in the give-up message", stderr)
+	}
+	if !strings.Contains(stderr, "still waiting for a worker") {
+		t.Errorf("stderr = %q, want pending-job give-up message", stderr)
+	}
+}
+
+// TestWaitForJobLoop_PollTimeoutDoesNotCancelRunningJob pins the other half of
+// the poll-cap contract: the cap bounds only the wait-for-worker (pending)
+// phase. A job that starts running before the cap fires must not be cancelled
+// as "still waiting" — the loop extends and awaits the worker's own verdict.
+func TestWaitForJobLoop_PollTimeoutDoesNotCancelRunningJob(t *testing.T) {
+	jobID := "job-poll-running"
+	pollTimeout := 10 * time.Minute
+	startedAt := time.Now()
+
+	fake := &scriptedJobClient{
+		jobID: jobID,
+		seq: []protocol.JobInfo{
+			{ID: jobID, Status: protocol.JobStatusPending},
+			{ID: jobID, Status: protocol.JobStatusRunning, StartedAt: &startedAt},
+			{ID: jobID, Status: protocol.JobStatusRunning, StartedAt: &startedAt},
+			{ID: jobID, Status: protocol.JobStatusCompleted},
+		},
+	}
+
+	var job *protocol.JobInfo
+	var code int
+	stderr := captureStderr(func() {
+		job, code = waitForJobLoop(fake, jobID, 0, pollTimeout, false, true)
+	})
+
+	if code != ExitSuccess {
+		t.Fatalf("waitForJobLoop code = %d, want ExitSuccess (job completed after starting)", code)
+	}
+	if job == nil || job.Status != protocol.JobStatusCompleted {
+		t.Fatalf("returned job = %+v, want completed job", job)
+	}
+	if fake.cancelCalls != 0 {
+		t.Errorf("CancelJob calls = %d, want 0 (running job must not be cancelled on the poll cap)", fake.cancelCalls)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty on terminal-result path", stderr)
+	}
+}
+
+// TestGiveUpBudget pins the give-up message duration attribution: the printed
+// duration must come from the bound that actually exhausted, not a re-derived
+// default. The key case is a wait bounded by the server's NO_WORKER_AVAILABLE
+// verdict deadline — it must report the verdict horizon, not the poll cap.
+func TestGiveUpBudget(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	created := now.Add(-2 * time.Minute)
+	verdict := now.Add(10 * time.Minute)
+
+	tests := []struct {
+		name         string
+		waitDeadline time.Time
+		job          *protocol.JobInfo
+		timeout      time.Duration
+		pollTimeout  time.Duration
+		want         time.Duration
+	}{
+		{
+			name:         "verdict-controlling bound reports verdict horizon",
+			waitDeadline: verdict.Add(clientVerdictGrace),
+			job:          &protocol.JobInfo{CreatedAt: created, NoWorkerDeadline: &verdict},
+			timeout:      0,
+			pollTimeout:  10 * time.Minute,
+			want:         verdict.Sub(created),
+		},
+		{
+			name:         "verdict not controlling (timeout later) reports timeout",
+			waitDeadline: now.Add(30*time.Minute + clientVerdictGrace),
+			job:          &protocol.JobInfo{CreatedAt: created, NoWorkerDeadline: &verdict},
+			timeout:      30 * time.Minute,
+			pollTimeout:  10 * time.Minute,
+			want:         30 * time.Minute,
+		},
+		{
+			name:         "timeout bound reports timeout",
+			waitDeadline: now.Add(30*time.Minute + clientVerdictGrace),
+			job:          &protocol.JobInfo{CreatedAt: created},
+			timeout:      30 * time.Minute,
+			pollTimeout:  10 * time.Minute,
+			want:         30 * time.Minute,
+		},
+		{
+			name:         "poll-cap bound reports poll timeout",
+			waitDeadline: now.Add(10*time.Minute + clientVerdictGrace),
+			job:          &protocol.JobInfo{CreatedAt: created},
+			timeout:      0,
+			pollTimeout:  10 * time.Minute,
+			want:         10 * time.Minute,
+		},
+		{
+			name:         "nil job falls back to timeout",
+			waitDeadline: now.Add(time.Hour),
+			job:          nil,
+			timeout:      time.Hour,
+			pollTimeout:  10 * time.Minute,
+			want:         time.Hour,
+		},
+		{
+			name:         "nil job and no timeout falls back to poll cap",
+			waitDeadline: now.Add(10 * time.Minute),
+			job:          nil,
+			timeout:      0,
+			pollTimeout:  10 * time.Minute,
+			want:         10 * time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := giveUpBudget(tt.waitDeadline, tt.job, tt.timeout, tt.pollTimeout)
+			if got != tt.want {
+				t.Errorf("giveUpBudget() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1882,7 +2065,7 @@ func TestWaitForJobLoop_RetriesExhausted(t *testing.T) {
 
 	var code int
 	stderr := captureStderr(func() {
-		_, code = waitForJobLoop(fake, "job-lost", 0, false, true)
+		_, code = waitForJobLoop(fake, "job-lost", 0, 0, false, true)
 	})
 
 	if code != ExitDisconnected {

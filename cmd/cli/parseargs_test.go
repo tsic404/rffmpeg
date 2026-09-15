@@ -716,10 +716,83 @@ func TestParseArgsTimeout(t *testing.T) {
 // TestParseArgs_MissingValue verifies that value-taking flags without a value
 // are a hard error instead of silently falling back to defaults.
 func TestParseArgs_MissingValue(t *testing.T) {
-	for _, flag := range []string{"--server", "-server", "--token", "-token", "--timeout", "-timeout", "--max-retries", "-max-retries"} {
+	for _, flag := range []string{"--server", "-server", "--token", "-token", "--timeout", "-timeout", "--poll-timeout", "-poll-timeout", "--max-retries", "-max-retries"} {
 		if _, err := parseArgs([]string{flag}); err == nil {
 			t.Errorf("parseArgs(%q) expected error for missing value, got nil", flag)
 		}
+	}
+}
+
+// TestParseArgsPollTimeout verifies --poll-timeout parsing: it is a Go
+// duration, non-negative (0 = opt out of the cap), and unset (0, wantSet
+// false) when omitted so the caller can fall back to config/env/default.
+func TestParseArgsPollTimeout(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		want      time.Duration
+		wantSet   bool
+		wantError bool
+	}{
+		{
+			name:      "unset by default",
+			args:      []string{"-i", "input.mp4", "output.mp4"},
+			want:      0,
+			wantSet:   false,
+			wantError: false,
+		},
+		{
+			name:      "poll timeout in minutes",
+			args:      []string{"--poll-timeout", "5m", "-i", "input.mp4", "output.mp4"},
+			want:      5 * time.Minute,
+			wantSet:   true,
+			wantError: false,
+		},
+		{
+			name:      "poll timeout short flag",
+			args:      []string{"-poll-timeout", "1h30m", "-i", "input.mp4", "output.mp4"},
+			want:      90 * time.Minute,
+			wantSet:   true,
+			wantError: false,
+		},
+		{
+			name:      "zero opts out of the cap",
+			args:      []string{"--poll-timeout", "0s", "-i", "input.mp4", "output.mp4"},
+			want:      0,
+			wantSet:   true,
+			wantError: false,
+		},
+		{
+			name:      "negative is invalid",
+			args:      []string{"--poll-timeout", "-5m", "-i", "input.mp4", "output.mp4"},
+			wantError: true,
+		},
+		{
+			name:      "malformed is invalid",
+			args:      []string{"--poll-timeout", "ten", "-i", "input.mp4", "output.mp4"},
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := parseArgs(tt.args)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("parseArgs(%v) expected error, got nil", tt.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
+			}
+			if opts.PollTimeout != tt.want {
+				t.Errorf("PollTimeout = %v, want %v", opts.PollTimeout, tt.want)
+			}
+			if opts.PollTimeoutSet != tt.wantSet {
+				t.Errorf("PollTimeoutSet = %v, want %v", opts.PollTimeoutSet, tt.wantSet)
+			}
+		})
 	}
 }
 
