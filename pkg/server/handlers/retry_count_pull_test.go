@@ -17,7 +17,7 @@ func TestPullWorkerJobsPopulatesRetryCount(t *testing.T) {
 	h, r, cleanup := setupTest(t)
 	defer cleanup()
 
-	workerID := registerTestWorker(t, r, []string{"libx264"})
+	workerID := registerTestWorkerWithCaps(t, r, "test-worker-1", "test-worker", []string{"libx264"}, 2)
 
 	fresh, err := h.GetDB().CreateJob(`["file-1"]`, `["-c:v","libx264"]`, "out.mp4", false)
 	if err != nil {

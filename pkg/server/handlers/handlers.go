@@ -43,6 +43,10 @@ type Handler struct {
 	// fail-fast treats workers whose last heartbeat is older than this as dead
 	// <=0 disables the freshness check.
 	heartbeatTimeout time.Duration
+	// maxJobsPerWorker mirrors the scheduler's MaxJobsPerWorker fallback:
+	// when a worker reports MaxConcurrent <= 0 (unset), the pull path bounds
+	// new claims by this value instead.
+	maxJobsPerWorker int
 	// noWorkerJobTimeout and timeoutCheckInterval mirror the scheduler's
 	// starvation knobs so GetJob/PullWorkerJobs can attach NoWorkerDeadline
 	// to unassigned pending jobs only when the cluster has no live
@@ -55,24 +59,26 @@ type Handler struct {
 // New creates a new Handler
 func New(database *db.Database, store *storage.Storage, version string, stateTable *workerhealth.WorkerStateTable) *Handler {
 	return &Handler{
-		db:          database,
-		storage:     store,
-		version:     version,
-		wsHub:       websocket.NewHubWithSeqStore(database),
-		rateLimiter: ratelimit.NewInMemoryCounter(),
-		stateTable:  stateTable,
+		db:               database,
+		storage:          store,
+		version:          version,
+		wsHub:            websocket.NewHubWithSeqStore(database),
+		rateLimiter:      ratelimit.NewInMemoryCounter(),
+		stateTable:       stateTable,
+		maxJobsPerWorker: 1,
 	}
 }
 
 // NewWithHub creates a new Handler with an existing WebSocket hub
 func NewWithHub(database *db.Database, store *storage.Storage, version string, hub *websocket.Hub, stateTable *workerhealth.WorkerStateTable) *Handler {
 	return &Handler{
-		db:          database,
-		storage:     store,
-		version:     version,
-		wsHub:       hub,
-		rateLimiter: ratelimit.NewInMemoryCounter(),
-		stateTable:  stateTable,
+		db:               database,
+		storage:          store,
+		version:          version,
+		wsHub:            hub,
+		rateLimiter:      ratelimit.NewInMemoryCounter(),
+		stateTable:       stateTable,
+		maxJobsPerWorker: 1,
 	}
 }
 
@@ -128,6 +134,12 @@ func (h *Handler) SetScheduler(sched *scheduler.Scheduler) {
 // Should match ServerConfig.WorkerHeartbeatTimeout.
 func (h *Handler) SetHeartbeatTimeout(d time.Duration) {
 	h.heartbeatTimeout = d
+}
+
+// SetMaxJobsPerWorker mirrors the scheduler's MaxJobsPerWorker so the pull
+// path applies the same fallback when a worker reports MaxConcurrent <= 0.
+func (h *Handler) SetMaxJobsPerWorker(maxJobs int) {
+	h.maxJobsPerWorker = maxJobs
 }
 
 // SetAuthToken sets the auth token for health check reporting
@@ -1184,8 +1196,18 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capacity guard aligned with scheduler.selectBestWorker: the pull path
+	// bounds new claims by the worker's MaxConcurrent. The active (running +
+	// queued) count is re-read atomically with the claim inside
+	// AssignPendingJobsToWorker, so a concurrent pull cannot over-assign. Jobs
+	// the scheduler already queued for this worker are delivered in full.
+	maxConcurrent := worker.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = h.maxJobsPerWorker
+	}
+
 	// Assign pending jobs to this worker and return them
-	jobs, err := h.db.AssignPendingJobsToWorker(workerID, 10) // Max 10 jobs at a time
+	jobs, err := h.db.AssignPendingJobsToWorker(workerID, maxConcurrent)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to assign jobs", err,
