@@ -1009,6 +1009,177 @@ func TestSchedulerNoWorkerStarvation(t *testing.T) {
 	}
 }
 
+// a pending job that reached pending via a worker-crash migration (its
+// worker's heartbeat timed out) must fail as WORKER_CRASH, not
+// NO_WORKER_AVAILABLE, once the starvation sweep finally fails it with no
+// surviving worker. The crash semantics must survive the migration +
+// starvation path.
+func TestSchedulerNoWorkerStarvation_PreservesWorkerCrash(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   1 * time.Minute,
+	})
+
+	broadcaster := &fakeBroadcaster{}
+	s.SetJobNotifier(broadcaster)
+
+	// The only worker, which later went offline after its heartbeat timed out.
+	if _, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// Recreate the state the health monitor leaves behind when the worker's
+	// heartbeat timed out: a heartbeat_timeout migration event plus the job
+	// reset back to pending (no surviving worker to take it over).
+	if _, err := database.CreateMigrationEvent("worker-1", "test-worker",
+		string(migration.ReasonHeartbeatTimeout), 1, []string{job.ID}, 1); err != nil {
+		t.Fatalf("Failed to create migration event: %v", err)
+	}
+	if err := database.ResetJobToPending(job.ID); err != nil {
+		t.Fatalf("Failed to reset job to pending: %v", err)
+	}
+
+	// ResetJobToPending refreshed created_at to now; backdate it past the
+	// grace period so the sweep fires.
+	if _, err := database.GetDB().Exec(`
+		UPDATE jobs SET created_at = ? WHERE id = ?
+	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {
+		t.Fatalf("Failed to backdate created_at: %v", err)
+	}
+
+	s.checkNoWorkerStarvation()
+
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusFailed {
+		t.Errorf("Expected status failed, got %s", updatedJob.Status)
+	}
+	if updatedJob.FailureType != string(protocol.FailureWorkerCrash) {
+		t.Errorf("Expected failure_type %q, got %q",
+			protocol.FailureWorkerCrash, updatedJob.FailureType)
+	}
+	if updatedJob.Error.String == "" {
+		t.Error("Expected non-empty error message")
+	}
+
+	// The crash-migrated subset must be broadcast with the crash message, not
+	// the generic no-worker starvation message.
+	if len(broadcaster.statuses) != 1 {
+		t.Fatalf("broadcasts = %d, want 1", len(broadcaster.statuses))
+	}
+	if broadcaster.statuses[0].jobID != job.ID {
+		t.Errorf("broadcast jobID = %s, want %s", broadcaster.statuses[0].jobID, job.ID)
+	}
+	if broadcaster.statuses[0].err != crashStarvationErrMsg {
+		t.Errorf("broadcast err = %q, want %q", broadcaster.statuses[0].err, crashStarvationErrMsg)
+	}
+}
+
+// classification must follow the MOST RECENT migration event, not any
+// historical heartbeat_timeout: a job crash-migrated then requeued for a
+// job_timeout reached pending because of the timeout, not a crash, so the
+// starvation sweep keeps it NO_WORKER_AVAILABLE.
+func TestSchedulerNoWorkerStarvation_TimeoutRequeueNotCrash(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   1 * time.Minute,
+	})
+
+	if _, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+
+	job, err := database.CreateJob(`["file1.mp4"]`, `["-i", "input.mp4"]`, "output.mp4", false)
+	if err != nil {
+		t.Fatalf("Failed to create job: %v", err)
+	}
+
+	// A worker-crash migration (heartbeat_timeout), then a later job_timeout
+	// requeue — the timeout is what put the job back in pending.
+	crashEvent, err := database.CreateMigrationEvent("worker-1", "test-worker",
+		string(migration.ReasonHeartbeatTimeout), 1, []string{job.ID}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create crash migration event: %v", err)
+	}
+	timeoutEvent, err := database.CreateMigrationEvent("worker-1", "test-worker",
+		string(migration.ReasonJobTimeout), 1, []string{job.ID}, 1)
+	if err != nil {
+		t.Fatalf("Failed to create timeout migration event: %v", err)
+	}
+
+	// Pin a deterministic chronological order: crash first, job_timeout last.
+	if _, err := database.GetDB().Exec(
+		`UPDATE migration_events SET timestamp = ? WHERE id = ?`,
+		time.Now().Add(-2*time.Hour), crashEvent.ID); err != nil {
+		t.Fatalf("Failed to backdate crash event: %v", err)
+	}
+	if _, err := database.GetDB().Exec(
+		`UPDATE migration_events SET timestamp = ? WHERE id = ?`,
+		time.Now().Add(-1*time.Hour), timeoutEvent.ID); err != nil {
+		t.Fatalf("Failed to backdate timeout event: %v", err)
+	}
+
+	if err := database.ResetJobToPending(job.ID); err != nil {
+		t.Fatalf("Failed to reset job to pending: %v", err)
+	}
+	if _, err := database.GetDB().Exec(`
+		UPDATE jobs SET created_at = ? WHERE id = ?
+	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {
+		t.Fatalf("Failed to backdate created_at: %v", err)
+	}
+
+	s.checkNoWorkerStarvation()
+
+	updatedJob, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updatedJob.Status != protocol.JobStatusFailed {
+		t.Errorf("Expected status failed, got %s", updatedJob.Status)
+	}
+	if updatedJob.FailureType != string(protocol.FailureNoWorkerAvailable) {
+		t.Errorf("Expected failure_type %q, got %q",
+			protocol.FailureNoWorkerAvailable, updatedJob.FailureType)
+	}
+}
+
 // pending jobs queued behind BUSY workers must NOT be
 // failed — schedulable workers exist, so the starvation check is a no-op.
 func TestSchedulerNoWorkerStarvation_SkipsWhenWorkerBusy(t *testing.T) {

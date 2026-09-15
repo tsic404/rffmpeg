@@ -186,8 +186,8 @@ func TestTerminalStateNotOverwritten(t *testing.T) {
 		{"late-running-report", func(d *db.Database, jobID string) error {
 			return d.UpdateJobStatusWithFailure(jobID, protocol.JobStatusRunning, nil, nil, nil, nil)
 		}},
-		{"starvation-sweep", func(d *db.Database, _ string) error {
-			_, err := d.FailStarvedPendingJobs(time.Now().Add(time.Hour), "starved", "timeout")
+		{"starvation-sweep", func(d *db.Database, jobID string) error {
+			_, err := d.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: jobID}}, "starved", "crash")
 			return err
 		}},
 	}

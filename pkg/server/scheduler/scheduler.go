@@ -9,9 +9,16 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/migration"
 	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
+
+// crashStarvationErrMsg is the terminal error for a pending job that reached
+// pending via a worker-crash migration (heartbeat timeout) and was then failed
+// by the starvation sweep with no surviving worker. It is distinct from the
+// generic no-worker message so the crash semantics stay observable.
+const crashStarvationErrMsg = "worker crashed (heartbeat timeout) and no surviving worker to take over the job"
 
 type Config struct {
 	JobTimeout           time.Duration // Maximum time a job can run before being considered timed out
@@ -468,14 +475,16 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 	// The bulk UPDATE bypasses the HTTP handler that normally releases the
 	// per-client quota and broadcasts the terminal status. Do both here, or
 	// clients get stuck behind a permanently inflated counter and CLI
-	// listeners never learn their job died.
-	starvedIDs, err := s.db.GetStarvedPendingJobIDs(cutoff)
+	// listeners never learn their job died. A job migrated off a crashed
+	// worker (heartbeat timeout) keeps WORKER_CRASH; the rest are genuine
+	// starvation (NO_WORKER_AVAILABLE).
+	starved, err := s.db.GetStarvedPendingJobs(cutoff, string(migration.ReasonHeartbeatTimeout))
 	if err != nil {
 		log.Printf("Scheduler: Failed to list starved pending jobs: %v", err)
 		return
 	}
 
-	failed, err := s.db.FailStarvedPendingJobs(cutoff, errMsg, string(protocol.FailureNoWorkerAvailable))
+	failed, err := s.db.FailStarvedPendingJobs(cutoff, starved, errMsg, crashStarvationErrMsg)
 	if err != nil {
 		log.Printf("Scheduler: Failed to fail starved pending jobs: %v", err)
 		return
@@ -484,19 +493,23 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 		log.Printf("Scheduler: Failed %d starved job(s) after waiting %s with no schedulable worker",
 			failed, s.config.NoWorkerJobTimeout)
 
-		for _, jobID := range starvedIDs {
+		for _, sj := range starved {
+			msg := errMsg
+			if sj.Crashed {
+				msg = crashStarvationErrMsg
+			}
 			if s.rateLimiter != nil {
-				s.rateLimiter.DecrementByJob(jobID)
+				s.rateLimiter.DecrementByJob(sj.ID)
 			}
 			if s.jobNotifier != nil {
-				if err := s.jobNotifier.BroadcastStatus(jobID, protocol.JobStatusFailed, -1, errMsg); err != nil {
-					log.Printf("Scheduler: Failed to broadcast starvation failure for job %s: %v", jobID, err)
+				if err := s.jobNotifier.BroadcastStatus(sj.ID, protocol.JobStatusFailed, -1, msg); err != nil {
+					log.Printf("Scheduler: Failed to broadcast starvation failure for job %s: %v", sj.ID, err)
 				}
 			}
 			// Wake in-process DB waiters (probe handler). The bulk UPDATE
 			// bypasses the terminal-status writers that normally notify, so
 			// notifyTerminal must run here too.
-			s.db.NotifyTerminal(jobID)
+			s.db.NotifyTerminal(sj.ID)
 		}
 	}
 }

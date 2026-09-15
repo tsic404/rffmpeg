@@ -203,7 +203,7 @@ func TestAtomicAssignNoOrphanState(t *testing.T) {
 	}
 
 	// Starvation fallback only sees genuinely unassigned jobs.
-	n, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), "x", string(protocol.FailureNoWorkerAvailable))
+	n, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []StarvedJob{{ID: job.ID}}, "x", "crash")
 	if err != nil {
 		t.Fatal(err)
 	}
