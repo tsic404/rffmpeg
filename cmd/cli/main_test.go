@@ -1244,14 +1244,11 @@ func TestReportTerminalJob_NoWorkerAvailable(t *testing.T) {
 	if code != ExitError {
 		t.Fatalf("reportTerminalJob() = %d, want ExitError", code)
 	}
-	if !strings.Contains(stderr, "server reported no worker available") {
-		t.Errorf("stderr = %q, want server-judged no-worker message", stderr)
+	if !strings.Contains(stderr, "Job failed: [NO_WORKER_AVAILABLE] server-side auto_fail: "+job.Error) {
+		t.Errorf("stderr = %q, want unified Job failed template with server-side auto_fail marker", stderr)
 	}
-	if !strings.Contains(stderr, "[NO_WORKER_AVAILABLE]") {
-		t.Errorf("stderr = %q, want NO_WORKER_AVAILABLE classification tag", stderr)
-	}
-	if !strings.Contains(stderr, job.ID) {
-		t.Errorf("stderr = %q, want job ID %q", stderr, job.ID)
+	if strings.Contains(stderr, "Error: job ") {
+		t.Errorf("stderr = %q, must use the generic Job failed template, not the legacy Error: job prefix", stderr)
 	}
 }
 
