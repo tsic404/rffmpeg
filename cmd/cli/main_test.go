@@ -1247,6 +1247,9 @@ func TestReportTerminalJob_NoWorkerAvailable(t *testing.T) {
 	if !strings.Contains(stderr, "server reported no worker available") {
 		t.Errorf("stderr = %q, want server-judged no-worker message", stderr)
 	}
+	if !strings.Contains(stderr, "[NO_WORKER_AVAILABLE]") {
+		t.Errorf("stderr = %q, want NO_WORKER_AVAILABLE classification tag", stderr)
+	}
 	if !strings.Contains(stderr, job.ID) {
 		t.Errorf("stderr = %q, want job ID %q", stderr, job.ID)
 	}
@@ -1268,11 +1271,75 @@ func TestReportTerminalJob_FailedOther(t *testing.T) {
 	if code != ExitError {
 		t.Fatalf("reportTerminalJob() = %d, want ExitError", code)
 	}
-	if !strings.Contains(stderr, "Job failed: encoder crashed") {
-		t.Errorf("stderr = %q, want generic Job failed message", stderr)
+	if !strings.Contains(stderr, "Job failed: [FFMPEG_ERROR] encoder crashed") {
+		t.Errorf("stderr = %q, want generic Job failed message with failure tag", stderr)
 	}
 	if strings.Contains(stderr, "no worker available") {
 		t.Errorf("stderr = %q, must not mention no-worker for non-starvation failure", stderr)
+	}
+}
+
+func TestReportTerminalJob_InputUnreachableTag(t *testing.T) {
+	job := &protocol.JobInfo{
+		ID:          "job-input",
+		Status:      protocol.JobStatusFailed,
+		FailureType: string(protocol.FailureInputUnreachable),
+		Error:       "Input file or stream cannot be reached: http://invalid.example/video.mp4",
+	}
+
+	var code int
+	stderr := captureStderr(func() {
+		code = reportTerminalJob(job)
+	})
+
+	if code != ExitError {
+		t.Fatalf("reportTerminalJob() = %d, want ExitError", code)
+	}
+	if !strings.Contains(stderr, "[INPUT_UNREACHABLE]") {
+		t.Errorf("stderr = %q, want INPUT_UNREACHABLE classification tag", stderr)
+	}
+	if !strings.Contains(stderr, "Job failed: [INPUT_UNREACHABLE] Input file or stream cannot be reached") {
+		t.Errorf("stderr = %q, want tag prefixed to the human error", stderr)
+	}
+}
+
+func TestReportTerminalJob_LegacyNoFailureType(t *testing.T) {
+	// A legacy job (or cancelled/unclassified terminal state) carries no
+	// failure_type and must render its bare message with no empty "[] " tag.
+	cases := []struct {
+		name string
+		job  *protocol.JobInfo
+		want string
+	}{
+		{
+			name: "failed legacy job keeps bare message",
+			job:  &protocol.JobInfo{ID: "job-legacy-failed", Status: protocol.JobStatusFailed, Error: "encoder crashed"},
+			want: "Job failed: encoder crashed",
+		},
+		{
+			name: "timeout legacy job keeps bare message",
+			job:  &protocol.JobInfo{ID: "job-legacy-timeout", Status: protocol.JobStatusTimeout, Error: "job exceeded its time limit"},
+			want: "Job timed out: job exceeded its time limit",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var code int
+			stderr := captureStderr(func() {
+				code = reportTerminalJob(tc.job)
+			})
+
+			if code != ExitError {
+				t.Fatalf("reportTerminalJob() = %d, want ExitError", code)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("stderr = %q, want %q", stderr, tc.want)
+			}
+			if strings.Contains(stderr, "[]") {
+				t.Errorf("stderr = %q, must not emit an empty failure tag for legacy jobs", stderr)
+			}
+		})
 	}
 }
 
@@ -1857,7 +1924,12 @@ func TestReportTerminalJob_Cancelled(t *testing.T) {
 }
 
 func TestReportTerminalJob_Timeout(t *testing.T) {
-	job := &protocol.JobInfo{ID: "job-timeout", Status: protocol.JobStatusTimeout, Error: "job exceeded its time limit"}
+	job := &protocol.JobInfo{
+		ID:          "job-timeout",
+		Status:      protocol.JobStatusTimeout,
+		FailureType: string(protocol.FailureTimeout),
+		Error:       "job exceeded its time limit",
+	}
 
 	var code int
 	stderr := captureStderr(func() {
@@ -1867,8 +1939,8 @@ func TestReportTerminalJob_Timeout(t *testing.T) {
 	if code != ExitError {
 		t.Fatalf("reportTerminalJob(timeout) = %d, want ExitError", code)
 	}
-	if !strings.Contains(stderr, "Job timed out: job exceeded its time limit") {
-		t.Errorf("stderr = %q, want timeout message", stderr)
+	if !strings.Contains(stderr, "Job timed out: [TIMEOUT] job exceeded its time limit") {
+		t.Errorf("stderr = %q, want timeout message with failure tag", stderr)
 	}
 }
 

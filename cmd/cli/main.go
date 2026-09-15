@@ -968,17 +968,23 @@ func extendWaitForQueued(status protocol.JobStatus) bool {
 // JobStatusFailed with FailureNoWorkerAvailable is the server's starvation
 // verdict (checkNoWorkerStarvation) — it must read as "the server judged this
 // failed", never "the client gave up", so operators can distinguish the two.
+//
+// Every failure terminal line carries the machine-readable failure_type tag
+// (e.g. "[INPUT_UNREACHABLE]") so operators can grep stderr by category
+// without parsing the human message.
 func reportTerminalJob(job *protocol.JobInfo) int {
 	if job == nil {
 		fmt.Fprintln(os.Stderr, "Error: no job result returned from server")
 		return ExitError
 	}
 
+	tag := failureTypeTag(job.FailureType)
+
 	if job.Status == protocol.JobStatusFailed {
 		if job.FailureType == string(protocol.FailureNoWorkerAvailable) {
-			fmt.Fprintf(os.Stderr, "Error: job %s failed: server reported no worker available (server-side auto_fail): %s\n", job.ID, job.Error)
+			fmt.Fprintf(os.Stderr, "Error: job %s failed: %sserver reported no worker available (server-side auto_fail): %s\n", job.ID, tag, job.Error)
 		} else {
-			fmt.Fprintf(os.Stderr, "Job failed: %s\n", job.Error)
+			fmt.Fprintf(os.Stderr, "Job failed: %s%s\n", tag, job.Error)
 		}
 		// Normalize all non-zero ffmpeg exit codes to 1 (standard error exit code)
 		// This ensures consistent error handling regardless of ffmpeg's specific exit codes
@@ -986,7 +992,7 @@ func reportTerminalJob(job *protocol.JobInfo) int {
 	}
 
 	if job.Status == protocol.JobStatusTimeout {
-		fmt.Fprintf(os.Stderr, "Job timed out: %s\n", job.Error)
+		fmt.Fprintf(os.Stderr, "Job timed out: %s%s\n", tag, job.Error)
 		return ExitError
 	}
 
@@ -1004,6 +1010,16 @@ func reportTerminalJob(job *protocol.JobInfo) int {
 	}
 
 	return ExitSuccess
+}
+
+// failureTypeTag renders the machine-readable failure_type prefix for a
+// terminal failure line (e.g. "[INPUT_UNREACHABLE] "), or "" when the job
+// carries no classification.
+func failureTypeTag(failureType string) string {
+	if failureType == "" {
+		return ""
+	}
+	return "[" + failureType + "] "
 }
 
 // runProbe handles the "probe" subcommand.
