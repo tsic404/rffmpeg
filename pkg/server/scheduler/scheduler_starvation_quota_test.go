@@ -17,10 +17,11 @@ type fakeBroadcaster struct {
 type broadcastCall struct {
 	jobID  string
 	status protocol.JobStatus
+	err    string
 }
 
 func (f *fakeBroadcaster) BroadcastStatus(jobID string, status protocol.JobStatus, exitCode int, err string) error {
-	f.statuses = append(f.statuses, broadcastCall{jobID: jobID, status: status})
+	f.statuses = append(f.statuses, broadcastCall{jobID: jobID, status: status, err: err})
 	return nil
 }
 

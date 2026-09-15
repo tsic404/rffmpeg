@@ -1764,49 +1764,141 @@ func (d *Database) FailJob(id, errMsg string, failureType string) error {
 	return nil
 }
 
-// FailStarvedPendingJobs fails all pending jobs created before cutoff in a
-// single statement, returning the number of jobs failed. Used by the scheduler
-// starvation guard so a backlog larger than any fetch limit
-// converges within one tick.
-func (d *Database) FailStarvedPendingJobs(cutoff time.Time, errMsg, failureType string) (int64, error) {
-	now := time.Now()
-	exitCode := -1
-	result, err := d.db.Exec(`
-		UPDATE jobs SET status = ?, worker_id = NULL,
-		                exit_code = ?, error = ?,
-		                failure_type = ?, finished_at = ?, updated_at = ?
-		WHERE status = ? AND worker_id IS NULL AND created_at < ?
-	`, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now,
-		protocol.JobStatusPending, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("failed to fail starved pending jobs: %w", err)
-	}
-	return result.RowsAffected()
+// StarvedJob identifies a pending job eligible for the starvation sweep,
+// together with its terminal classification source: Crashed is true when the
+// job's most recent migration event was a worker crash (reason == crashReason,
+// i.e. heartbeat_timeout), which changes the terminal failure from
+// NO_WORKER_AVAILABLE to WORKER_CRASH.
+type StarvedJob struct {
+	ID      string
+	Crashed bool
 }
 
-// GetStarvedPendingJobIDs lists the IDs of pending jobs created before the
-// cutoff (the exact set FailStarvedPendingJobs fails). The scheduler uses it
-// to release rate-limit quota and broadcast WS updates per failed job — the
-// bulk UPDATE bypasses the handler that normally does both.
-func (d *Database) GetStarvedPendingJobIDs(cutoff time.Time) ([]string, error) {
+// GetStarvedPendingJobs lists the pending jobs created before the cutoff (the
+// set the starvation sweep fails) and classifies each by its most recent
+// migration event. The classification is computed once here and reused by
+// FailStarvedPendingJobs and the scheduler's per-job broadcast, instead of
+// rescanning migration_events three times per tick.
+//
+// A job whose most recent migration was a worker-crash heartbeat timeout keeps
+// the WORKER_CRASH semantics; a job last requeued for a job_timeout (or never
+// migrated) is genuine starvation and is classified NO_WORKER_AVAILABLE.
+func (d *Database) GetStarvedPendingJobs(cutoff time.Time, crashReason string) ([]StarvedJob, error) {
 	rows, err := d.db.Query(`
-		SELECT id FROM jobs
-		WHERE status = ? AND worker_id IS NULL AND created_at < ?
-	`, protocol.JobStatusPending, cutoff)
+		SELECT j.id,
+		       COALESCE((
+		         SELECT me.reason
+		         FROM migration_events me, json_each(me.job_ids)
+		         WHERE json_each.value = j.id
+		         ORDER BY me.timestamp DESC, me.rowid DESC
+		         LIMIT 1
+		       ), '') = ?
+		FROM jobs j
+		WHERE j.status = ? AND j.worker_id IS NULL AND j.created_at < ?
+	`, crashReason, protocol.JobStatusPending, cutoff)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list starved pending job IDs: %w", err)
+		return nil, fmt.Errorf("failed to list starved pending jobs: %w", err)
 	}
 	defer rows.Close()
 
-	ids := make([]string, 0, 16)
+	starved := make([]StarvedJob, 0, 16)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("failed to scan starved job ID: %w", err)
+		var sj StarvedJob
+		if err := rows.Scan(&sj.ID, &sj.Crashed); err != nil {
+			return nil, fmt.Errorf("failed to scan starved pending job: %w", err)
 		}
-		ids = append(ids, id)
+		starved = append(starved, sj)
 	}
-	return ids, rows.Err()
+	return starved, rows.Err()
+}
+
+// FailStarvedPendingJobs fails the pre-classified starved jobs in a single
+// transaction, returning the number of jobs failed. Used by the scheduler
+// starvation guard so a backlog larger than any fetch limit converges within
+// one tick.
+//
+// The classification comes from GetStarvedPendingJobs and is reused here, not
+// recomputed: Crashed jobs keep WORKER_CRASH, the rest are NO_WORKER_AVAILABLE.
+// Both UPDATEs run in one transaction so a partial failure rolls back instead
+// of leaving already-failed jobs without their quota release and terminal
+// broadcast.
+func (d *Database) FailStarvedPendingJobs(cutoff time.Time, starved []StarvedJob, noWorkerErrMsg, crashErrMsg string) (int64, error) {
+	var crashIDs, noWorkerIDs []string
+	for _, sj := range starved {
+		if sj.Crashed {
+			crashIDs = append(crashIDs, sj.ID)
+		} else {
+			noWorkerIDs = append(noWorkerIDs, sj.ID)
+		}
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin starvation sweep: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	exitCode := -1
+
+	failed, err := failStarvedJobsChunked(tx, now, exitCode, crashIDs, crashErrMsg, string(protocol.FailureWorkerCrash), cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := failStarvedJobsChunked(tx, now, exitCode, noWorkerIDs, noWorkerErrMsg, string(protocol.FailureNoWorkerAvailable), cutoff)
+	if err != nil {
+		return 0, err
+	}
+	failed += n
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit starvation sweep: %w", err)
+	}
+	return failed, nil
+}
+
+// starvedUpdateChunkSize bounds the number of ids in one UPDATE ... IN (...)
+// clause, keeping each statement comfortably under SQLite's bind-variable
+// limit for arbitrarily large backlogs.
+const starvedUpdateChunkSize = 500
+
+// failStarvedJobsChunked applies the starvation failure to the given job IDs in
+// chunks, re-checking each is still a pending, unassigned job past the cutoff.
+// The guard matters because GetStarvedPendingJobs and this UPDATE are separate
+// statements: a job re-migrated (or claimed) in between has a fresh created_at
+// (or a worker_id) and must be left for the next tick.
+func failStarvedJobsChunked(tx *sql.Tx, now time.Time, exitCode int, ids []string, errMsg, failureType string, cutoff time.Time) (int64, error) {
+	var total int64
+	for start := 0; start < len(ids); start += starvedUpdateChunkSize {
+		end := start + starvedUpdateChunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk)+6)
+		args = append(args, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		args = append(args, protocol.JobStatusPending, cutoff)
+
+		res, err := tx.Exec(fmt.Sprintf(`
+			UPDATE jobs SET status = ?, worker_id = NULL,
+			                exit_code = ?, error = ?,
+			                failure_type = ?, finished_at = ?, updated_at = ?
+			WHERE id IN (%s) AND status = ? AND worker_id IS NULL AND created_at < ?
+		`, placeholders), args...)
+		if err != nil {
+			return total, fmt.Errorf("failed to fail starved pending jobs: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("failed to count starved pending jobs: %w", err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // ResetJobToPending resets a job to pending status, clearing worker assignment.
