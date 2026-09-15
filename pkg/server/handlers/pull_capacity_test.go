@@ -122,6 +122,47 @@ func TestPullWorkerJobsBusyWorkerGetsNoNewJobs(t *testing.T) {
 	}
 }
 
+// TestPullWorkerJobsRunningJobBlocksCapacity guards the running-capacity path:
+// a running job counts toward MaxConcurrent but is not re-delivered by a pull
+// (unlike a queued job), so a MaxConcurrent=1 worker holding a running job
+// must pull nothing and claim no new pending work until the job completes.
+func TestPullWorkerJobsRunningJobBlocksCapacity(t *testing.T) {
+	h, r, cleanup := setupTest(t)
+	defer cleanup()
+
+	workerID := registerTestWorkerWithCaps(t, r, "test-worker-1", "test-worker", []string{"libx264"}, 1)
+
+	for range 2 {
+		if _, err := h.GetDB().CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false); err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+	}
+
+	first := pullJobs(t, r, workerID)
+	if len(first.Jobs) != 1 {
+		t.Fatalf("first pull returned %d jobs, want 1", len(first.Jobs))
+	}
+
+	// Report the claimed job as running: it consumes the full MaxConcurrent=1
+	// budget but, unlike a queued job, the pull path does not re-deliver it.
+	if err := h.GetDB().UpdateJobStatusWithFailure(first.Jobs[0].ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatalf("mark job running: %v", err)
+	}
+
+	second := pullJobs(t, r, workerID)
+	if len(second.Jobs) != 0 {
+		t.Fatalf("second pull returned %d jobs, want 0 (running job blocks capacity)", len(second.Jobs))
+	}
+
+	pending, err := h.GetDB().GetPendingJobs(10)
+	if err != nil {
+		t.Fatalf("GetPendingJobs: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Errorf("pending jobs after second pull = %d, want 1 (no new claims)", len(pending))
+	}
+}
+
 // TestPullWorkerJobsFallsBackToMaxJobsPerWorker guards the MaxConcurrent<=0
 // path: an unset worker capacity uses the handler's maxJobsPerWorker fallback
 // (mirroring the scheduler) instead of claiming nothing or an unbounded batch.
