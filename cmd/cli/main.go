@@ -707,11 +707,11 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 
 	// Handle job result: print the outcome for any non-completed terminal
-	// status and return the process exit code. reportTerminalJob
-	// special-cases NO_WORKER_AVAILABLE so a server-side starvation verdict
-	// is observationally distinct from a client-side cancellation; it
-	// returns ExitSuccess only for a completed job, which then falls through
-	// to the output download below.
+	// status and return the process exit code. reportTerminalJob prefixes a
+	// NO_WORKER_AVAILABLE server-side starvation verdict with "server-side
+	// auto_fail" so it stays observationally distinct from a client-side
+	// cancellation; it returns ExitSuccess only for a completed job, which
+	// then falls through to the output download below.
 	if code := reportTerminalJob(job); code != ExitSuccess {
 		return code
 	}
@@ -1058,9 +1058,11 @@ func giveUpBudget(waitDeadline time.Time, job *protocol.JobInfo, timeout, pollTi
 // the process exit code. It returns ExitSuccess only for a completed job; all
 // other terminal statuses print an error to stderr and return ExitError.
 //
-// JobStatusFailed with FailureNoWorkerAvailable is the server's starvation
-// verdict (checkNoWorkerStarvation) — it must read as "the server judged this
-// failed", never "the client gave up", so operators can distinguish the two.
+// Every JobStatusFailed line uses the single "Job failed: <tag><message>"
+// template so stderr grep/automation has one parse branch. FailureNoWorkerAvailable
+// is the server's starvation verdict (checkNoWorkerStarvation) — it prefixes the
+// message with "server-side auto_fail: " so it reads as "the server judged this
+// failed", never "the client gave up", which lets operators distinguish the two.
 //
 // Every failure terminal line carries the machine-readable failure_type tag
 // (e.g. "[INPUT_UNREACHABLE]") so operators can grep stderr by category
@@ -1074,11 +1076,11 @@ func reportTerminalJob(job *protocol.JobInfo) int {
 	tag := failureTypeTag(job.FailureType)
 
 	if job.Status == protocol.JobStatusFailed {
+		message := job.Error
 		if job.FailureType == string(protocol.FailureNoWorkerAvailable) {
-			fmt.Fprintf(os.Stderr, "Error: job %s failed: %sserver reported no worker available (server-side auto_fail): %s\n", job.ID, tag, job.Error)
-		} else {
-			fmt.Fprintf(os.Stderr, "Job failed: %s%s\n", tag, job.Error)
+			message = "server-side auto_fail: " + message
 		}
+		fmt.Fprintf(os.Stderr, "Job failed: %s%s\n", tag, message)
 		// Normalize all non-zero ffmpeg exit codes to 1 (standard error exit code)
 		// This ensures consistent error handling regardless of ffmpeg's specific exit codes
 		return ExitError
