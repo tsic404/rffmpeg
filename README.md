@@ -101,6 +101,9 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 # 指定任务超时时间
 ./bin/rffmpeg --timeout 30m -i input.mp4 -c:v libx264 output.mp4
 
+# 指定等待 Worker 的轮询上限（默认 10m；也可用环境变量 RFFMPEG_POLL_TIMEOUT）
+./bin/rffmpeg --poll-timeout 20m -i input.mp4 -c:v libx264 output.mp4
+
 # 调整连接中断后的重试次数（默认 14 次，约 5 分钟；也可用环境变量 RFFMPEG_MAX_RETRIES）
 ./bin/rffmpeg --max-retries 5 -i input.mp4 -c:v libx264 output.mp4
 
@@ -117,6 +120,8 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 `-preset veryslow` 使软件编码耗时远超 5s，作业才会被 Worker 终止并返回 `timeout`。
 
 > **兼容性说明（破坏性变更）**：本版本的 `--timeout` 语义与线上格式均有变更——job 的 `timeout` 字段由 RFC3339 绝对截止时间改为整数纳秒的执行预算。server、worker、CLI 三个二进制**必须同步升级**，不支持滚动混合部署：旧版 worker/CLI 读取新版 server 下发的整数字段（或新版 server 读取旧版 CLI 上报的 RFC3339 字符串）会在 JSON 解码处直接失败。
+
+**轮询超时（`--poll-timeout`）**：`--poll-timeout`（Go duration 格式）限制 CLI 对「等待 Worker」阶段（作业 `pending`、尚未被任何 Worker 认领）的最长轮询时长，默认 `10m`。当集群 Worker **在线但全部忙碌**时，服务端的无 Worker 判定（NO_WORKER_AVAILABLE）不会触发（饿死扫描的活 Worker 守卫会短路），且用户未设置 `--timeout` 时，旧版 CLI 会无限轮询挂起；现在达到该上限后 CLI 会显式取消作业并以退出码 `1` 报错（stderr 提示「still waiting for a worker」）。`--poll-timeout` 只约束 pending 阶段——作业一旦被认领（`queued`/`running`），改由 Worker 自身超时（及 `--timeout`，若设置）约束，不受该轮询上限影响。三个配置通道（命令行 `--poll-timeout` / 环境变量 `RFFMPEG_POLL_TIMEOUT` / 配置文件 `"poll_timeout"`）优先级：命令行 > 环境变量 > 配置文件 > 默认值；三者均支持 `0` 表示**不设上限**（显式关闭轮询超时，长队列场景按需启用，需自行承担无限挂起风险）。
 
 **连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。重试次数达到上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / 配置文件 `"max_retries"`，默认 14 次、约 5 分钟）后 CLI 以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。三个通道均支持 `0`：显式设为 `0` 表示**不重试、首次失败即退出**，不会被静默回落为默认值。
 
@@ -313,7 +318,8 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 {
   "server_url": "http://localhost:8080", // /api/v1 suffix is optional
   "token": "your-auth-token",
-  "max_retries": 14
+  "max_retries": 14,
+  "poll_timeout": "10m"
 }
 ```
 
@@ -324,6 +330,7 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 | `RFFMPEG_SERVER_URL` | Server URL | `http://localhost:8080` |
 | `RFFMPEG_TOKEN` | 认证令牌（server 启用认证时必填） | - |
 | `RFFMPEG_MAX_RETRIES` | WS/HTTP 重试次数上限（连接中断后） | `14`（约 5 分钟） |
+| `RFFMPEG_POLL_TIMEOUT` | 等待 Worker（pending）阶段的最长轮询时长（`0` = 不设上限） | `10m` |
 
 #### 认证
 

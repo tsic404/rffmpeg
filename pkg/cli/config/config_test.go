@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadDefault(t *testing.T) {
@@ -81,6 +82,37 @@ func TestLoadMaxRetriesEnv(t *testing.T) {
 	}
 }
 
+func TestLoadPollTimeoutEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
+
+	// Unset -> nil (the caller falls back to DefaultPollTimeout).
+	if cfg, _ := Load(); cfg.PollTimeout != nil {
+		t.Errorf("Load() PollTimeout = %v, want nil when unset", cfg.PollTimeout)
+	}
+
+	// Valid duration overrides.
+	os.Setenv("RFFMPEG_POLL_TIMEOUT", "25m")
+	defer os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
+	if cfg, _ := Load(); cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 25*time.Minute {
+		t.Errorf("Load() PollTimeout = %v, want 25m", cfg.PollTimeout)
+	}
+
+	// 0 = opt out: it must be honored, not ignored.
+	os.Setenv("RFFMPEG_POLL_TIMEOUT", "0s")
+	if cfg, _ := Load(); cfg.PollTimeout == nil || *cfg.PollTimeout != 0 {
+		t.Errorf("Load() PollTimeout = %v, want 0 (opt out) for zero env", cfg.PollTimeout)
+	}
+
+	// Invalid or negative durations are ignored, leaving the field unset.
+	for _, v := range []string{"abc", "-5m"} {
+		os.Setenv("RFFMPEG_POLL_TIMEOUT", v)
+		if cfg, _ := Load(); cfg.PollTimeout != nil {
+			t.Errorf("Load() PollTimeout = %v for env %q, want nil", cfg.PollTimeout, v)
+		}
+	}
+}
+
 func TestLoadConfigFile(t *testing.T) {
 	// Create temp config file
 	tmpDir := t.TempDir()
@@ -110,6 +142,51 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 	if cfg.MaxRetries == nil || *cfg.MaxRetries != 7 {
 		t.Errorf("Load() MaxRetries = %v, want 7 from config file", cfg.MaxRetries)
+	}
+}
+
+func TestLoadPollTimeoutConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "rffmpeg.json")
+
+	oldDir, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldDir)
+	os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
+
+	// String form: "5m" must parse, not silently no-op.
+	if err := os.WriteFile(configPath, []byte(`{"poll_timeout": "5m"}`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 5*time.Minute {
+		t.Errorf("Load() PollTimeout = %v, want 5m from config file", cfg.PollTimeout)
+	}
+
+	// 0 in the config file is the opt-out value, not "unset".
+	if err := os.WriteFile(configPath, []byte(`{"poll_timeout": "0s"}`), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PollTimeout == nil || *cfg.PollTimeout != 0 {
+		t.Errorf("Load() PollTimeout = %v, want 0 (opt out) from config file", cfg.PollTimeout)
+	}
+
+	// Env overrides the config-file value.
+	os.Setenv("RFFMPEG_POLL_TIMEOUT", "30m")
+	defer os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 30*time.Minute {
+		t.Errorf("Load() PollTimeout = %v, want 30m from env override", cfg.PollTimeout)
 	}
 }
 

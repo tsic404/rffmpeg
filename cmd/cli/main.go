@@ -47,19 +47,21 @@ var version = "1.0.0"
 
 // Options holds the rffmpeg-specific options extracted from the command line.
 type Options struct {
-	ServerURL     string
-	Token         string
-	Quiet         bool
-	ShowHelp      bool
-	ShowVersion   bool
-	AutoHW        bool
-	IsProbe       bool
-	ProbeInput    string
-	Timeout       time.Duration
-	MaxRetries    int
-	MaxRetriesSet bool
-	Retry         bool
-	FmpegArgs     []string
+	ServerURL      string
+	Token          string
+	Quiet          bool
+	ShowHelp       bool
+	ShowVersion    bool
+	AutoHW         bool
+	IsProbe        bool
+	ProbeInput     string
+	Timeout        time.Duration
+	PollTimeout    time.Duration
+	PollTimeoutSet bool
+	MaxRetries     int
+	MaxRetriesSet  bool
+	Retry          bool
+	FmpegArgs      []string
 
 	// Info flags
 	ShowEncoders   bool
@@ -154,6 +156,22 @@ func parseArgs(argList []string) (*Options, error) {
 			}
 			warnDuplicate(arg)
 			opts.Timeout = parsed
+			i++
+		case "--poll-timeout", "-poll-timeout":
+			val, err := needValue(i, arg)
+			if err != nil {
+				return nil, err
+			}
+			parsed, perr := time.ParseDuration(val)
+			if perr != nil {
+				return nil, fmt.Errorf("invalid poll-timeout value: %s (use format like 30s, 5m, 2h, or 0 to disable)", val)
+			}
+			if parsed < 0 {
+				return nil, fmt.Errorf("poll-timeout must be non-negative: %s", val)
+			}
+			warnDuplicate(arg)
+			opts.PollTimeout = parsed
+			opts.PollTimeoutSet = true
 			i++
 		case "--max-retries", "-max-retries":
 			val, err := needValue(i, arg)
@@ -402,6 +420,16 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	quiet := opts.Quiet
 	autoHW := opts.AutoHW
 	timeout := opts.Timeout
+	// Client-side poll cap, resolved flag > env/config > default. 0 means "no
+	// cap" (opt out). config.Load already folds RFFMPEG_POLL_TIMEOUT and
+	// rffmpeg.json's "poll_timeout" into cfg.PollTimeout (nil = unset).
+	pollTimeout := config.DefaultPollTimeout
+	if cfg.PollTimeout != nil {
+		pollTimeout = time.Duration(*cfg.PollTimeout)
+	}
+	if opts.PollTimeoutSet {
+		pollTimeout = opts.PollTimeout
+	}
 
 	// Parse ffmpeg arguments
 	parser := args.NewParser()
@@ -673,7 +701,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	// reverts to pending, the next GetJob reports one. Re-reading on each
 	// iteration lets the client extend its wait to the freshly attached
 	// verdict instead of giving up before the server can emit it.
-	job, code := waitForJobLoop(cli, jobID, timeout, result.StreamingOutput, quiet)
+	job, code := waitForJobLoop(cli, jobID, timeout, pollTimeout, result.StreamingOutput, quiet)
 	if code != ExitSuccess {
 		return code
 	}
@@ -804,8 +832,10 @@ type jobWaitClient interface {
 // to pending/unassigned jobs: a job queued at submit time carries none, but
 // reverts to pending if its worker dies. Re-reading the deadline each
 // iteration lets the client extend its wait to a freshly attached verdict
-// instead of giving up before the server can emit it.
-func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, streamingOutput, quiet bool) (*protocol.JobInfo, int) {
+// instead of giving up before the server can emit it. pollTimeout is the
+// client-side cap on the wait-for-worker (pending) phase, applied only when no
+// --timeout budget and no server verdict deadline bound it.
+func waitForJobLoop(cli jobWaitClient, jobID string, timeout, pollTimeout time.Duration, streamingOutput, quiet bool) (*protocol.JobInfo, int) {
 	var job *protocol.JobInfo
 	for {
 		var noWorkerDeadline *time.Time
@@ -816,7 +846,7 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 			startedAt = submitted.StartedAt
 			status = submitted.Status
 		}
-		waitDeadline, hasDeadline := clientWaitDeadline(time.Now(), timeout, status, startedAt, noWorkerDeadline)
+		waitDeadline, hasDeadline := clientWaitDeadline(time.Now(), timeout, pollTimeout, status, startedAt, noWorkerDeadline)
 		waitCtx := context.Background()
 		var cancelWait context.CancelFunc
 		if hasDeadline {
@@ -886,10 +916,14 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 		if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
 		}
+		// Report the duration of the bound that actually exhausted, not a
+		// re-derived default: a wait bounded by the server's NO_WORKER_AVAILABLE
+		// verdict deadline must print that horizon, not the poll-cap fallback.
+		budget := giveUpBudget(waitDeadline, finalJob, timeout, pollTimeout)
 		if finalErr == nil && (finalJob.Status == protocol.JobStatusPending || finalJob.Status == protocol.JobStatusQueued) {
-			fmt.Fprintf(os.Stderr, "Error: job %s did not start within %s and was cancelled by the client (still waiting for a worker)\n", jobID, timeout)
+			fmt.Fprintf(os.Stderr, "Error: job %s did not start within %s and was cancelled by the client (still waiting for a worker)\n", jobID, budget)
 		} else {
-			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled by the client (client gave up; the job was still running)\n", jobID, timeout)
+			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s and was cancelled by the client (client gave up; the job was still running)\n", jobID, budget)
 		}
 		return nil, ExitError
 	}
@@ -897,14 +931,32 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout time.Duration, stre
 }
 
 // clientWaitDeadline computes the client-side give-up time. timeout is the
-// per-job ffmpeg execution budget; noWorkerDeadline is the server's
-// NO_WORKER_AVAILABLE verdict time for a pending job; startedAt anchors the
-// running-job budget so pre-exec latency is not charged. The client waits
-// until the later bound (plus clientVerdictGrace) so it never cancels before
-// the server can emit its verdict. A queued job's pre-exec phase is bounded
-// by the worker's own timeouts, not --timeout. Bounds are added to wall-clock
-// times separately — summing durations overflowed for --timeout near MaxInt64.
-func clientWaitDeadline(now time.Time, timeout time.Duration, status protocol.JobStatus, startedAt, noWorkerDeadline *time.Time) (time.Time, bool) {
+// per-job ffmpeg execution budget; pollTimeout is the client-side cap on the
+// wait-for-worker (pending) phase; status is the job's current status;
+// startedAt is the server's started_at (the budget's anchor); noWorkerDeadline
+// is the server's NO_WORKER_AVAILABLE verdict time for a pending job. The
+// client waits until the later bound (plus clientVerdictGrace) so it never
+// cancels before the server can emit its verdict. Returns false when neither
+// bound exists.
+//
+// --timeout is a worker-side execution budget, not a wall-clock bound. It
+// bounds the client's wait only for pending jobs (anchored to now — the "did
+// not start within --timeout" give-up) and running jobs (anchored to started_at
+// so pre-exec latency is not charged and the worker's TIMEOUT verdict stays
+// observable).
+//
+// A queued job is already claimed by a worker and spends its pre-exec phase
+// (download, duration probe) in the queued state; that phase is bounded by the
+// worker's own timeouts (30m dataClient download + ffprobe executor), not by
+// --timeout, so the client must not cancel it before ffmpeg starts.
+//
+// The old code computed timeout+clientVerdictGrace as a duration sum, which
+// overflowed negative for a --timeout near math.MaxInt64 and made
+// context.WithTimeout expire immediately. The bounds are added to wall-clock
+// times separately; a duration near MaxInt64 (~292 years) plus a 5s grace
+// cannot wrap a time.Time anchored at the present (year ~2318), so no
+// clamping is needed.
+func clientWaitDeadline(now time.Time, timeout, pollTimeout time.Duration, status protocol.JobStatus, startedAt, noWorkerDeadline *time.Time) (time.Time, bool) {
 	var deadline time.Time
 	has := false
 	if timeout > 0 && status != protocol.JobStatusQueued {
@@ -919,6 +971,16 @@ func clientWaitDeadline(now time.Time, timeout time.Duration, status protocol.Jo
 		if !has || noWorkerDeadline.After(deadline) {
 			deadline = *noWorkerDeadline
 		}
+		has = true
+	}
+	// Fallback cap for a pending (waiting-for-worker) job with neither a
+	// --timeout budget nor a server verdict deadline: a cluster whose workers
+	// are live but busy never attaches a NoWorkerDeadline (the starvation
+	// sweep's live-worker guard short-circuits), so without this the CLI polls
+	// forever. It applies only when nothing else bounds the wait — it must not
+	// shorten a wait for a server verdict nor override an explicit --timeout.
+	if !has && pollTimeout > 0 && status == protocol.JobStatusPending {
+		deadline = now.Add(pollTimeout)
 		has = true
 	}
 	if !has {
@@ -939,15 +1001,26 @@ func extendWaitForNoWorkerDeadline(exhaustedDeadline time.Time, noWorkerDeadline
 }
 
 // extendWaitForStartedAt reports whether the client should extend its wait
-// after the client-side deadline fired because the job just started running:
-// the first wait was anchored to submit time (started_at was nil), but the
-// worker's ffmpeg budget only begins at started_at, so the TIMEOUT verdict is
-// still ahead of the exhausted bound. The re-anchored bound (started_at +
-// timeout + grace) is fixed — started_at never advances — so this can extend
-// the wait at most once.
+// after the client-side deadline fired because the job just started running.
+// With --timeout set, the first wait was anchored to submit time (started_at
+// was nil) but the worker's ffmpeg budget only begins at started_at, so the
+// TIMEOUT verdict is still ahead of the exhausted bound; the re-anchored bound
+// (started_at + timeout + grace) is fixed — started_at never advances — so the
+// extension fires at most once. With --timeout unset the fired bound was the
+// client-side poll cap, which bounds only the wait-for-worker phase; a running
+// job is past that phase, so extend unconditionally and let the worker's own
+// timeout bound it from here.
 func extendWaitForStartedAt(exhaustedDeadline time.Time, startedAt *time.Time, timeout time.Duration) bool {
-	if startedAt == nil || timeout <= 0 {
+	if startedAt == nil {
 		return false
+	}
+	if timeout <= 0 {
+		// No worker ffmpeg budget: the fired bound was the client-side poll
+		// cap, which only bounds the wait-for-worker (pending) phase. A job
+		// that has since started running is past that phase — there is nothing
+		// to re-anchor to, so extend unconditionally and let the worker's own
+		// timeout (or server default) bound it from here.
+		return true
 	}
 	return startedAt.Add(timeout).Add(clientVerdictGrace).After(exhaustedDeadline)
 }
@@ -959,6 +1032,26 @@ func extendWaitForStartedAt(exhaustedDeadline time.Time, startedAt *time.Time, t
 // not cancel it as if it had never started.
 func extendWaitForQueued(status protocol.JobStatus) bool {
 	return status == protocol.JobStatusQueued
+}
+
+// giveUpBudget returns the duration to print in the client-gave-up error
+// message, derived from the bound that actually exhausted. When the server's
+// NO_WORKER_AVAILABLE verdict deadline was the controlling bound (the exhausted
+// waitDeadline equals verdict+grace), report that verdict's horizon
+// (no_worker_job_timeout + check interval, approximated by
+// NoWorkerDeadline−CreatedAt) instead of the poll cap — otherwise a job whose
+// wait was really bounded by the server prints a misleading "10m0s". Otherwise
+// report --timeout when set, else the poll cap.
+func giveUpBudget(waitDeadline time.Time, job *protocol.JobInfo, timeout, pollTimeout time.Duration) time.Duration {
+	if job != nil && job.NoWorkerDeadline != nil && job.NoWorkerDeadline.Add(clientVerdictGrace).Equal(waitDeadline) {
+		if d := job.NoWorkerDeadline.Sub(job.CreatedAt); d > 0 {
+			return d
+		}
+	}
+	if timeout > 0 {
+		return timeout
+	}
+	return pollTimeout
 }
 
 // reportTerminalJob prints the outcome for a terminal job status and returns
@@ -1795,6 +1888,7 @@ rffmpeg options:
   -q, --quiet     Quiet mode (suppress progress output)
   --auto-hw[=true|false]  Enable automatic hardware encoder upgrade (default: false)
   --timeout DURATION      Job execution timeout (e.g., 30s, 5m, 2h)
+  --poll-timeout DURATION Max time to poll a waiting-for-worker (pending) job (default: 10m; 0 = no cap)
   --max-retries N         Max WS reconnect attempts / HTTP poll retry budget (default: 14, ~5 min; 0 = no retries)
   --retry                 Retry job submission on rate-limit (429) with exponential backoff (default: off)
 
