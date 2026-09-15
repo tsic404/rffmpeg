@@ -249,9 +249,71 @@ func TestClassifyFailureSignalDeath(t *testing.T) {
 	}
 }
 
+// TestClassifyFailureDiskFull locks the fix: every disk-full stderr pattern
+// surfaces as DISK_FULL — a full worker disk is an out-of-space failure, not a
+// generic FFMPEG_ERROR — so the user can act on it directly.
+func TestClassifyFailureDiskFull(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"no space left on device", "Error writing output file: No space left on device"},
+		{"enospc", "ENOSPC: failed to write output"},
+		{"disk full capital", "Disk full: cannot extend output file"},
+		{"disk full lower", "write failed: disk full"},
+		{"not enough space", "not enough space to store output"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, details := ClassifyFailure(1, tc.stderr, "", false, false)
+			if got != protocol.FailureDiskFull {
+				t.Errorf("stderr %q classified as %q, want DISK_FULL", tc.stderr, got)
+			}
+			if details == "" {
+				t.Error("details should explain the disk-full failure")
+			}
+		})
+	}
+}
+
+// TestClassifyFailureEncoderUnsupported locks the fix: every unknown-encoder
+// stderr pattern surfaces as ENCODER_UNSUPPORTED — a deterministic user error
+// (typo / non-existent encoder) that must not fall back to FFMPEG_ERROR.
+func TestClassifyFailureEncoderUnsupported(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"no such encoder", "Error: No such encoder 'libx999'"},
+		{"unknown encoder", "Unknown encoder 'h265_fake'"},
+		{"encoder not found", "Encoder not found: h265_fake"},
+		{"encoder not recognized", "Encoder not recognized"},
+		{"is not recognized", "encoder 'h265_fake' is not recognized"},
+		{"not found in encoder list", "h265_fake not found in encoder list"},
+		{"requested encoder", "Requested encoder h265_fake is unavailable"},
+		{"selected encoder not available", "Selected encoder not available: h265_fake"},
+		{"device not found capital", "Device not found"},
+		{"cannot open device", "Cannot open device /dev/nvidia0"},
+		{"device not found lower", "device not found: /dev/nvidia0"},
+		{"unsupported codec", "Unsupported codec: h265_fake"},
+		{"codec not supported", "Codec not supported: h265_fake"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, details := ClassifyFailure(1, tc.stderr, "", false, false)
+			if got != protocol.FailureEncoderUnsupported {
+				t.Errorf("stderr %q classified as %q, want ENCODER_UNSUPPORTED", tc.stderr, got)
+			}
+			if details == "" {
+				t.Error("details should explain the encoder failure")
+			}
+		})
+	}
+}
+
 // TestClassifyInputDownloadFailure locks the fix: a failed download
 // of a remote-URL input is the user's input being unreachable (INPUT_UNREACHABLE),
-// while a failed server-file fetch is worker↔server infrastructure (FFMPEG_ERROR).
+// while a failed server-file fetch is worker↔server infrastructure (INFRA).
 func TestClassifyInputDownloadFailure(t *testing.T) {
 	remoteURLs := []string{
 		"http://example.com/video.mp4",

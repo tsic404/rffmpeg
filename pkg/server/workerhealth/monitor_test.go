@@ -1359,6 +1359,10 @@ func TestWorkerFailoverRetryLimit(t *testing.T) {
 	if jobAfter.Status != protocol.JobStatusFailed {
 		t.Errorf("Expected job status 'failed' after exceeding retry limit, got %s", jobAfter.Status)
 	}
+	if jobAfter.FailureType != string(protocol.FailureWorkerCrash) {
+		t.Errorf("Expected failure_type %q after exceeding retry limit, got %q",
+			protocol.FailureWorkerCrash, jobAfter.FailureType)
+	}
 	if !jobAfter.Error.Valid || jobAfter.Error.String != "max retry count exceeded after repeated worker failures" {
 		t.Errorf("Expected error message about max retries, got '%v'", jobAfter.Error)
 	}
