@@ -1256,9 +1256,9 @@ func TestSubmitJobBackwardsCompat(t *testing.T) {
 }
 
 // TestSubmitJobRateLimitMessage is the regression test: the rate-limit
-// 429 error must render the exact single-line stderr promised by the QA skill
-// scenario 6d — "rate limit exceeded: 10/10 concurrent jobs. Retry after 5
-// seconds" — rather than burying the Retry hint in a verbose multi-line body.
+// 429 error must render the exact single-line stderr message, without a retry
+// promise — the default path (no --retry) fails fast, so telling the user to
+// "Retry after N seconds" would promise a retry that never happens.
 func TestSubmitJobRateLimitMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1278,7 +1278,7 @@ func TestSubmitJobRateLimitMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected rate-limit error, got nil")
 	}
-	const want = "rate limit exceeded: 10/10 concurrent jobs. Retry after 5 seconds"
+	const want = "rate limit exceeded: 10/10 concurrent jobs"
 	if got := err.Error(); got != want {
 		t.Errorf("rate-limit error = %q, want %q", got, want)
 	}

@@ -92,7 +92,8 @@ func TestSubmitJobWithOptions_NoRetryByDefault(t *testing.T) {
 
 // TestSubmitJobWithOptions_RetryExhausted pins the bound: a persistently
 // rate-limited endpoint is tried exactly (budget+1) times, then the last
-// rate-limit error is surfaced.
+// rate-limit error is surfaced — carrying the server's retry hint because a
+// retry budget was actually spent.
 func TestSubmitJobWithOptions_RetryExhausted(t *testing.T) {
 	defer stubSubmitSleep(t)()
 
@@ -106,6 +107,9 @@ func TestSubmitJobWithOptions_RetryExhausted(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(attempts); got != 3 {
 		t.Errorf("attempts = %d, want 3 (1 initial + 2 retries)", got)
+	}
+	if got, want := rl.Error(), "rate limit exceeded: 10/10 concurrent jobs. Retry after 1 seconds"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
 	}
 }
 
@@ -185,7 +189,7 @@ func TestDecodeRateLimitError(t *testing.T) {
 	if rl.rawBody != "" {
 		t.Errorf("rawBody = %q, want empty for a decoded JSON body", rl.rawBody)
 	}
-	if got, want := rl.Error(), "rate limit exceeded: 7/5 concurrent jobs. Retry after 3 seconds"; got != want {
+	if got, want := rl.Error(), "rate limit exceeded: 7/5 concurrent jobs"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 
