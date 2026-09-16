@@ -583,6 +583,189 @@ func TestUploadFileChunkedChunkNonOKEmptyMessage(t *testing.T) {
 	}
 }
 
+// TestUploadFileChunkedChunkEarlyErrorNotClosedPipe is the regression test for
+// the "chunk write failed: io: read/write on closed pipe" report. A chunk
+// endpoint that answers with an error (session not found, not-in-progress,
+// ...) without draining the streaming body must surface that server error, not
+// the misleading closed-pipe write error the multipart writer would otherwise
+// report. The 4MB chunk keeps the writer blocked when the response arrives, so
+// without the status-first ordering this deterministically reports the pipe
+// error instead of the real cause.
+func TestUploadFileChunkedChunkEarlyErrorNotClosedPipe(t *testing.T) {
+	content := make([]byte, 4*1024*1024)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/upload/init":
+			json.NewEncoder(w).Encode(protocol.ChunkUploadInitResponse{
+				UploadID:    "session-gone",
+				ChunkSize:   int64(len(content)),
+				TotalChunks: 1,
+			})
+		case "/api/v1/upload/chunk/session-gone/0":
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(protocol.ErrorResponse{
+				Code:    protocol.ErrCodeNotFound,
+				Message: "Upload session not found",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, content)
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(len(content)))
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty on server rejection", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for an early 404 chunk response, got nil")
+	}
+	if strings.Contains(err.Error(), "closed pipe") {
+		t.Errorf("error %q must not mask the server response as a closed pipe", err)
+	}
+	if !strings.Contains(err.Error(), "Upload session not found") {
+		t.Errorf("error %q missing server message", err)
+	}
+}
+
+// TestUploadFileChunkedIdempotentChunkNotClosedPipe verifies that a chunk the
+// server already has (idempotent retry) succeeds even though the server
+// answers 200 without draining the body. The writer races the closed
+// connection, but the server confirmed the chunk, so the client must not
+// report "chunk write failed: io: read/write on closed pipe".
+func TestUploadFileChunkedIdempotentChunkNotClosedPipe(t *testing.T) {
+	content := make([]byte, 4*1024*1024)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/upload/init":
+			json.NewEncoder(w).Encode(protocol.ChunkUploadInitResponse{
+				UploadID:    "chunk-exists",
+				ChunkSize:   int64(len(content)),
+				TotalChunks: 1,
+			})
+		case "/api/v1/upload/chunk/chunk-exists/0":
+			// Idempotent short-circuit: confirm without draining the body.
+			json.NewEncoder(w).Encode(protocol.ChunkUploadResponse{
+				UploadID:   "chunk-exists",
+				ChunkIndex: 0,
+				Message:    protocol.ChunkAlreadyUploadedMessage,
+			})
+		case "/api/v1/upload/complete":
+			json.NewEncoder(w).Encode(protocol.ChunkUploadCompleteResponse{
+				FileID:  "file-id",
+				Message: "File uploaded successfully",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, content)
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(len(content)))
+	if err != nil {
+		t.Fatalf("idempotent chunk upload should succeed, got: %v", err)
+	}
+	if fileID != "file-id" {
+		t.Errorf("fileID = %q, want %q", fileID, "file-id")
+	}
+}
+
+// TestUploadFileChunkedChunkBare200NotIdempotentFails is the regression test
+// for the data-integrity review finding: a 200 that arrives without draining
+// the body and without the idempotent "chunk already uploaded" marker (a proxy
+// or non-compliant server answering early) must not be treated as a stored
+// chunk. The client reports the write failure instead of a false success.
+func TestUploadFileChunkedChunkBare200NotIdempotentFails(t *testing.T) {
+	content := make([]byte, 4*1024*1024)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/upload/init":
+			json.NewEncoder(w).Encode(protocol.ChunkUploadInitResponse{
+				UploadID:    "bare-200",
+				ChunkSize:   int64(len(content)),
+				TotalChunks: 1,
+			})
+		case "/api/v1/upload/chunk/bare-200/0":
+			// A 200 with no idempotent marker and no body drain — the chunk is
+			// not known to be stored.
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, content)
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFileChunked(tmpFile, int64(len(content)))
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty on unconfirmed chunk", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for a bare 200 without the idempotent marker, got nil")
+	}
+	if !strings.Contains(err.Error(), "closed pipe") {
+		t.Errorf("error %q must surface the write failure, not a false success", err)
+	}
+}
+
+// TestUploadFileEarlyErrorNotClosedPipe verifies the non-chunked upload path
+// has the same status-first ordering: a server error sent without draining the
+// streaming body surfaces as the real error, not "failed to copy file: io:
+// read/write on closed pipe".
+func TestUploadFileEarlyErrorNotClosedPipe(t *testing.T) {
+	content := make([]byte, 4*1024*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(protocol.ErrorResponse{
+			Code:    protocol.ErrCodeInvalidRequest,
+			Message: "Invalid file type",
+		})
+	}))
+	defer server.Close()
+
+	c := client.New(server.URL, "test-token")
+	tmpFile := createTestFile(t, content)
+	defer os.Remove(tmpFile)
+
+	fileID, err := c.UploadFile(tmpFile)
+	if fileID != "" {
+		t.Errorf("fileID = %q, want empty on server rejection", fileID)
+	}
+	if err == nil {
+		t.Fatal("expected an error for an early 400 upload response, got nil")
+	}
+	if strings.Contains(err.Error(), "closed pipe") {
+		t.Errorf("error %q must not mask the server response as a closed pipe", err)
+	}
+	if !strings.Contains(err.Error(), "Invalid file type") {
+		t.Errorf("error %q missing server message", err)
+	}
+}
+
 // TestNonUploadNonOKEmptyMessage verifies that every non-upload endpoint falls
 // back to a status-code error when a non-200 JSON body has an empty message,
 // instead of degrading to a bare "... failed: " suffix.

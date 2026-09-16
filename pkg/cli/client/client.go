@@ -326,29 +326,36 @@ func (c *Client) UploadFile(filePath string) (string, error) {
 	}
 	defer DrainAndClose(resp.Body)
 
-	// Check for an auth rejection before the pipe-writer error. The server
-	// rejects unauthenticated uploads (fail-closed token check) without
+	// Surface the server's error before the pipe-writer error. Every non-200
+	// response (auth rejection, validation, not found, ...) is sent without
 	// draining the streaming body, so the multipart writer races the closed
 	// connection and would otherwise surface "failed to copy file: io:
-	// read/write on closed pipe", masking the real cause.
-	if resp.StatusCode == http.StatusUnauthorized {
-		msg := "missing or invalid token"
-		if errResp, ok := parseErrorResponse(resp.Body); ok {
-			msg = errResp.Message
+	// read/write on closed pipe", masking the real cause. Only an HTTP 200
+	// reaches the pipe-writer error, where it means a genuine mid-body failure.
+	if resp.StatusCode != http.StatusOK {
+		// Join the writer goroutine before returning: the response may have
+		// arrived while the body was still streaming. The transport closes the
+		// request body once the response is received, so the writer unblocks
+		// and the channel drain guarantees it is reclaimed here rather than
+		// racing the deferred file close.
+		<-errChan
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			msg := "missing or invalid token"
+			if errResp, ok := parseErrorResponse(resp.Body); ok {
+				msg = errResp.Message
+			}
+			return "", fmt.Errorf("upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
 		}
-		return "", fmt.Errorf("upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
+		if errResp, ok := parseErrorResponse(resp.Body); ok {
+			return "", fmt.Errorf("upload failed: %s", errResp.Message)
+		}
+		return "", fmt.Errorf("upload failed with status %d", resp.StatusCode)
 	}
 
 	// Check for errors from the goroutine
 	if err := <-errChan; err != nil {
 		return "", err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		if errResp, ok := parseErrorResponse(resp.Body); ok {
-			return "", fmt.Errorf("upload failed: %s", errResp.Message)
-		}
-		return "", fmt.Errorf("upload failed with status %d", resp.StatusCode)
 	}
 
 	var uploadResp protocol.UploadResponse
@@ -1846,28 +1853,47 @@ func (c *Client) uploadSingleChunk(file *os.File, uploadID string, chunkIndex in
 	}
 	defer DrainAndClose(resp.Body)
 
-	// Check for an auth rejection before the pipe-writer error. The server
-	// rejects unauthenticated chunk uploads (fail-closed token check) without
-	// draining the streaming body, so the multipart writer races the closed
-	// connection and would otherwise surface "chunk write failed: io:
-	// read/write on closed pipe", masking the real cause.
-	if resp.StatusCode == http.StatusUnauthorized {
-		msg := "missing or invalid token"
-		if errResp, ok := parseErrorResponse(resp.Body); ok {
-			msg = errResp.Message
-		}
-		return fmt.Errorf("chunk upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
-	}
-
-	if err := <-errChan; err != nil {
-		return fmt.Errorf("chunk write failed: %w", err)
-	}
-
+	// Surface the server's error before the pipe-writer error. Every non-200
+	// response (auth rejection, session not found, not-in-progress, invalid
+	// chunk index, ...) is sent without draining the streaming body, so the
+	// multipart writer races the closed connection and would otherwise surface
+	// "chunk write failed: io: read/write on closed pipe", masking the real
+	// cause. Only an HTTP 200 reaches the pipe-writer error, where it means a
+	// genuine mid-body failure.
 	if resp.StatusCode != http.StatusOK {
+		// Join the writer goroutine before returning: the response may have
+		// arrived while the body was still streaming. The transport closes the
+		// request body once the response is received, so the writer unblocks
+		// and the channel drain guarantees it is reclaimed here rather than
+		// lingering past the caller's return.
+		<-errChan
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			msg := "missing or invalid token"
+			if errResp, ok := parseErrorResponse(resp.Body); ok {
+				msg = errResp.Message
+			}
+			return fmt.Errorf("chunk upload failed: authentication rejected (HTTP %d): %s", resp.StatusCode, msg)
+		}
 		if errResp, ok := parseErrorResponse(resp.Body); ok {
 			return fmt.Errorf("chunk upload failed: %s", errResp.Message)
 		}
 		return fmt.Errorf("chunk upload failed with status %d", resp.StatusCode)
+	}
+
+	if err := <-errChan; err != nil {
+		if errors.Is(err, io.ErrClosedPipe) {
+			// A closed pipe only proves the writer stopped, not that the chunk
+			// was stored. Suppress the error solely when the server explicitly
+			// marks the idempotent already-uploaded path — the one 200 it
+			// sends without draining the body. A bare 200 from a proxy or a
+			// non-compliant server must still surface the write failure.
+			var chunkResp protocol.ChunkUploadResponse
+			if decodeErr := json.NewDecoder(resp.Body).Decode(&chunkResp); decodeErr == nil && chunkResp.Message == protocol.ChunkAlreadyUploadedMessage {
+				return nil
+			}
+		}
+		return fmt.Errorf("chunk write failed: %w", err)
 	}
 
 	return nil

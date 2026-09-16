@@ -244,7 +244,7 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, protocol.ChunkUploadResponse{
 			UploadID:   uploadID,
 			ChunkIndex: chunkIndex,
-			Message:    "Chunk already uploaded",
+			Message:    protocol.ChunkAlreadyUploadedMessage,
 		})
 		return
 	}
