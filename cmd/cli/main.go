@@ -357,11 +357,12 @@ func run() int {
 
 	ffmpegArgs := opts.FmpegArgs
 
-	// If no ffmpeg args and not in probe mode, print usage and exit non-zero.
-	// ffmpeg exits 1 when invoked with no arguments, and rffmpeg must match
-	// so callers can detect a missing command.
+	// If no ffmpeg args and not in probe mode, print the short usage and exit
+	// non-zero. ffmpeg exits 1 when invoked with no arguments and prints only
+	// its one-line usage plus a "use -h" hint, not the full help; rffmpeg
+	// matches so callers can detect a missing command.
 	if !opts.IsProbe && len(ffmpegArgs) == 0 {
-		printUsage()
+		printShortUsage()
 		return ExitError
 	}
 
@@ -1847,6 +1848,14 @@ func runProbeRequest(cli *client.Client, input string, quiet bool) int {
 	}
 
 	return ExitSuccess
+}
+
+// printShortUsage prints only the one-line usage summary plus a hint to run
+// -h for full help. This is the no-arguments path, mirroring ffmpeg, which
+// prints its usage line and exits 1 without dumping the full option list.
+func printShortUsage() {
+	fmt.Fprintln(os.Stderr, "Usage: rffmpeg [rffmpeg_options] [ffmpeg_options]")
+	fmt.Fprintln(os.Stderr, "Use -h to get full help.")
 }
 
 func printUsage() {

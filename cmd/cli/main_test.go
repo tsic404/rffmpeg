@@ -64,19 +64,25 @@ func captureStderr(f func()) string {
 }
 
 // TestRun_NoArgsReturnsError pins the fix: invoking rffmpeg with no
-// arguments must exit non-zero (ffmpeg exits 1) instead of printing usage and
-// reporting success.
+// arguments must exit non-zero (ffmpeg exits 1) and print only the short
+// usage summary, not the full help.
 func TestRun_NoArgsReturnsError(t *testing.T) {
 	orig := os.Args
 	defer func() { os.Args = orig }()
 	os.Args = []string{"rffmpeg"}
 
 	code := ExitSuccess
-	captureStderr(func() {
+	stderr := captureStderr(func() {
 		code = run()
 	})
 	if code != ExitError {
 		t.Errorf("run() with no args = %d, want %d", code, ExitError)
+	}
+	if !strings.Contains(stderr, "Usage: rffmpeg") {
+		t.Errorf("run() with no args stderr = %q, want short usage line", stderr)
+	}
+	if strings.Contains(stderr, "Configuration:") {
+		t.Errorf("run() with no args printed full help, want short usage only")
 	}
 }
 
