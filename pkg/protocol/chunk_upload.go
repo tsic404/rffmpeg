@@ -35,6 +35,12 @@ type ChunkUploadResponse struct {
 	Message    string `json:"message,omitempty"`
 }
 
+// ChunkAlreadyUploadedMessage is the server's ChunkUploadResponse.Message for
+// the idempotent path where a chunk already exists on disk. The client treats
+// it as the protocol marker that the chunk is stored: it is the only 200 the
+// server sends without draining the streaming body.
+const ChunkAlreadyUploadedMessage = "Chunk already uploaded"
+
 // UploadProgressResponse returns the current upload progress
 type UploadProgressResponse struct {
 	UploadID        string    `json:"upload_id"`
