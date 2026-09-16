@@ -564,6 +564,12 @@ func (d *Database) initTables() error {
 		return err
 	}
 
+	// backfill retryable for rows persisted before the write-path fix
+	// (see migrateRetryableColumn).
+	if err := d.migrateRetryableColumn(); err != nil {
+		return err
+	}
+
 	// jobs.timeout must hold a nanosecond duration (INTEGER). Fresh
 	// databases already create it INTEGER, but legacy databases declared it
 	// DATETIME — which makes the sqlite driver read INTEGER values back as
@@ -636,6 +642,22 @@ func (d *Database) migrateEncoderUnavailableClassification() error {
 	return nil
 }
 
+// migrateRetryableColumn backfills the retryable column for rows persisted
+// before retryable was written alongside failure_type: those rows carry the
+// schema DEFAULT 0, so the retryable classifications (TIMEOUT, WORKER_CRASH —
+// the set protocol.FailureType.Retryable() returns true for) must be flipped
+// to 1. The predicate is bounded and idempotent, so it is safe to run on every
+// open with no schema-version bookkeeping.
+func (d *Database) migrateRetryableColumn() error {
+	if _, err := d.db.Exec(`
+		UPDATE jobs SET retryable = 1
+		WHERE failure_type IN (?, ?) AND retryable = 0
+	`, string(protocol.FailureTimeout), string(protocol.FailureWorkerCrash)); err != nil {
+		return fmt.Errorf("migrate retryable column: %w", err)
+	}
+	return nil
+}
+
 // CreateJob creates a new job record
 func (d *Database) CreateJob(inputFiles, args, outputFilename string, autoHW bool) (*Job, error) {
 	return d.CreateJobWithStreaming(inputFiles, args, outputFilename, autoHW, false, nil, "")
@@ -679,10 +701,11 @@ func (d *Database) CreateFailedJob(inputFiles, args, outputFilename string, auto
 	}
 
 	const exitCode = -1
+	retryable := protocol.FailureType(failureType).Retryable()
 	_, err := d.db.Exec(`
-		INSERT INTO jobs (id, status, input_files, args, output_filename, streaming_output, output_files, exit_code, error, failure_type, auto_hw, timeout, direct_paths, created_at, updated_at, finished_at)
-		VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, protocol.JobStatusFailed, inputFiles, args, outputFilename, streamingOutput, exitCode, errMsg, failureType, autoHW, timeoutVal, directPaths, now, now, now)
+		INSERT INTO jobs (id, status, input_files, args, output_filename, streaming_output, output_files, exit_code, error, failure_type, retryable, auto_hw, timeout, direct_paths, created_at, updated_at, finished_at)
+		VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, protocol.JobStatusFailed, inputFiles, args, outputFilename, streamingOutput, exitCode, errMsg, failureType, retryable, autoHW, timeoutVal, directPaths, now, now, now)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create failed job: %w", err)
@@ -780,6 +803,7 @@ func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStat
 		result, err = d.db.Exec(`
 			UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
 			                failure_type = COALESCE(?, failure_type),
+			                retryable = CASE WHEN COALESCE(?, failure_type) IN ('TIMEOUT', 'WORKER_CRASH') THEN 1 ELSE 0 END,
 			                failure_details = COALESCE(?, failure_details),
 			                started_at = COALESCE(started_at, ?), finished_at = ?,
 			                cached = ?,
@@ -789,20 +813,21 @@ func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStat
 			  AND NOT EXISTS (
 			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?)
 			  )
-		`, status, now, exitCode, errMsg, failureType, failureDetails,
+		`, status, now, exitCode, errMsg, failureType, failureType, failureDetails,
 			startedAt, finishedAt, cached, id, id,
 			protocol.JobStatusCompleted, protocol.JobStatusCancelled, protocol.JobStatusTimeout)
 	} else {
 		result, err = d.db.Exec(`
 			UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
 			                failure_type = COALESCE(?, failure_type),
+			                retryable = CASE WHEN COALESCE(?, failure_type) IN ('TIMEOUT', 'WORKER_CRASH') THEN 1 ELSE 0 END,
 			                failure_details = COALESCE(?, failure_details),
 			                started_at = COALESCE(started_at, ?), finished_at = ?
 			WHERE id = ?
 			  AND NOT EXISTS (
 			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?, ?)
 			  )
-		`, status, now, exitCode, errMsg, failureType, failureDetails,
+		`, status, now, exitCode, errMsg, failureType, failureType, failureDetails,
 			startedAt, finishedAt, id, id,
 			protocol.JobStatusCompleted, protocol.JobStatusFailed,
 			protocol.JobStatusCancelled, protocol.JobStatusTimeout)
@@ -864,12 +889,13 @@ func (d *Database) updateJobTerminalStatusWithOwner(jobID, workerID string, stat
 		UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?,
 		                error = ?,
 		                failure_type = COALESCE(?, failure_type),
+		                retryable = CASE WHEN COALESCE(?, failure_type) IN ('TIMEOUT', 'WORKER_CRASH') THEN 1 ELSE 0 END,
 		                failure_details = COALESCE(?, failure_details),
 		                finished_at = ?, cached = ?,
 		                assigned_worker = COALESCE(assigned_worker, ?),
 		                worker_name = COALESCE(worker_name, (SELECT name FROM workers WHERE id = ?))
 		WHERE id = ? AND worker_id = ? AND status IN (?, ?)
-	`, status, now, exitCode, errMsg, failureType, failureDetails, finishedAt, cached,
+	`, status, now, exitCode, errMsg, failureType, failureType, failureDetails, finishedAt, cached,
 		workerID, workerID, jobID, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
 	if err != nil {
 		return fmt.Errorf("failed to update job terminal status: %w", err)
@@ -1740,9 +1766,10 @@ func (d *Database) FailJob(id, errMsg string, failureType string) error {
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL,
 		                exit_code = ?, error = ?,
 		                failure_type = COALESCE(NULLIF(?, ''), failure_type),
+		                retryable = CASE WHEN COALESCE(NULLIF(?, ''), failure_type) IN ('TIMEOUT', 'WORKER_CRASH') THEN 1 ELSE 0 END,
 		                finished_at = ?, updated_at = ?
 		WHERE id = ? AND status IN (?, ?, ?)
-	`, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now, id,
+	`, protocol.JobStatusFailed, exitCode, errMsg, failureType, failureType, now, now, id,
 		protocol.JobStatusPending, protocol.JobStatusQueued, protocol.JobStatusRunning)
 	if err != nil {
 		return fmt.Errorf("failed to fail job: %w", err)
@@ -1869,6 +1896,7 @@ const starvedUpdateChunkSize = 500
 // (or a worker_id) and must be left for the next tick.
 func failStarvedJobsChunked(tx *sql.Tx, now time.Time, exitCode int, ids []string, errMsg, failureType string, cutoff time.Time) (int64, error) {
 	var total int64
+	retryable := protocol.FailureType(failureType).Retryable()
 	for start := 0; start < len(ids); start += starvedUpdateChunkSize {
 		end := start + starvedUpdateChunkSize
 		if end > len(ids) {
@@ -1876,8 +1904,8 @@ func failStarvedJobsChunked(tx *sql.Tx, now time.Time, exitCode int, ids []strin
 		}
 		chunk := ids[start:end]
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
-		args := make([]any, 0, len(chunk)+6)
-		args = append(args, protocol.JobStatusFailed, exitCode, errMsg, failureType, now, now)
+		args := make([]any, 0, len(chunk)+7)
+		args = append(args, protocol.JobStatusFailed, exitCode, errMsg, failureType, retryable, now, now)
 		for _, id := range chunk {
 			args = append(args, id)
 		}
@@ -1886,7 +1914,7 @@ func failStarvedJobsChunked(tx *sql.Tx, now time.Time, exitCode int, ids []strin
 		res, err := tx.Exec(fmt.Sprintf(`
 			UPDATE jobs SET status = ?, worker_id = NULL,
 			                exit_code = ?, error = ?,
-			                failure_type = ?, finished_at = ?, updated_at = ?
+			                failure_type = ?, retryable = ?, finished_at = ?, updated_at = ?
 			WHERE id IN (%s) AND status = ? AND worker_id IS NULL AND created_at < ?
 		`, placeholders), args...)
 		if err != nil {
@@ -1915,7 +1943,7 @@ func (d *Database) ResetJobToPending(id string) error {
 	result, err := d.db.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, updated_at = ?,
 		                created_at = ?,
-		                failure_type = '', failure_details = '', exit_code = NULL, error = NULL
+		                failure_type = '', retryable = 0, failure_details = '', exit_code = NULL, error = NULL
 		WHERE id = ? AND status IN (?, ?, ?)
 	`, protocol.JobStatusPending, now, now, id,
 		protocol.JobStatusQueued, protocol.JobStatusRunning, protocol.JobStatusPending)
