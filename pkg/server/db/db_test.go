@@ -1639,3 +1639,149 @@ func TestGetAllInfoFlagsEmptyWorkers(t *testing.T) {
 		t.Errorf("Expected 0 formats, got %d", len(formats))
 	}
 }
+
+// TestFailureTypeRetryablePersisted locks the write path: the retryable column
+// must be written wherever failure_type is, so direct SQLite consumers (not
+// the API, which recomputes) see the same verdict. TIMEOUT and WORKER_CRASH
+// are retryable; every other classification is not.
+func TestFailureTypeRetryablePersisted(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	assertRetryable := func(t *testing.T, id string, want int) {
+		t.Helper()
+		var got int
+		if err := database.GetDB().QueryRow(`SELECT retryable FROM jobs WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("read retryable for %s: %v", id, err)
+		}
+		if got != want {
+			t.Errorf("job %s retryable = %d, want %d", id, got, want)
+		}
+	}
+
+	errMsg := "boom"
+
+	t.Run("timeout via status update", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		ft := string(protocol.FailureTimeout)
+		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusTimeout, nil, &errMsg, &ft, nil); err != nil {
+			t.Fatalf("timeout update: %v", err)
+		}
+		assertRetryable(t, job.ID, 1)
+	})
+
+	t.Run("worker crash via FailJob", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		if err := database.FailJob(job.ID, errMsg, string(protocol.FailureWorkerCrash)); err != nil {
+			t.Fatalf("FailJob: %v", err)
+		}
+		assertRetryable(t, job.ID, 1)
+	})
+
+	t.Run("worker crash via starvation sweep", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		n, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: job.ID, Crashed: true}}, "no worker", "crashed")
+		if err != nil {
+			t.Fatalf("FailStarvedPendingJobs: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("failed %d jobs, want 1", n)
+		}
+		assertRetryable(t, job.ID, 1)
+	})
+
+	t.Run("no worker starvation stays non-retryable", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		n, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: job.ID}}, "no worker", "crashed")
+		if err != nil {
+			t.Fatalf("FailStarvedPendingJobs: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("failed %d jobs, want 1", n)
+		}
+		assertRetryable(t, job.ID, 0)
+	})
+
+	t.Run("non-retryable type via status update", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		ft := string(protocol.FailureInputUnreachable)
+		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, nil, &errMsg, &ft, nil); err != nil {
+			t.Fatalf("failed update: %v", err)
+		}
+		assertRetryable(t, job.ID, 0)
+	})
+
+	t.Run("submit-time rejection", func(t *testing.T) {
+		job, err := database.CreateFailedJob(`["in.mkv"]`, `["-c:v","hevc_nvenc"]`, "out.mkv", false, false, nil, "", string(protocol.FailureEncoderUnavailable), "no worker has encoder")
+		if err != nil {
+			t.Fatalf("CreateFailedJob: %v", err)
+		}
+		assertRetryable(t, job.ID, 0)
+	})
+
+	t.Run("owner guard timeout", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+			t.Fatalf("AssignJobToWorker: %v", err)
+		}
+		ft := string(protocol.FailureTimeout)
+		if err := database.UpdateJobTerminalStatusWithOwner(job.ID, "worker-1", protocol.JobStatusTimeout, nil, &errMsg, &ft, nil); err != nil {
+			t.Fatalf("owner terminal update: %v", err)
+		}
+		assertRetryable(t, job.ID, 1)
+	})
+
+	t.Run("completion empty string clears retryable", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		ft := string(protocol.FailureTimeout)
+		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, nil, &errMsg, &ft, nil); err != nil {
+			t.Fatalf("fail update: %v", err)
+		}
+		assertRetryable(t, job.ID, 1)
+		empty := ""
+		exitCode := 0
+		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusCompleted, &exitCode, nil, &empty, &empty); err != nil {
+			t.Fatalf("complete update: %v", err)
+		}
+		assertRetryable(t, job.ID, 0)
+	})
+
+	t.Run("reset clears retryable", func(t *testing.T) {
+		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		ft := string(protocol.FailureTimeout)
+		// A running job carrying a stale classification is what the failover
+		// reset clears when it re-queues the job for another worker.
+		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, &ft, nil); err != nil {
+			t.Fatalf("set running with failure_type: %v", err)
+		}
+		assertRetryable(t, job.ID, 1)
+		if err := database.ResetJobToPending(job.ID); err != nil {
+			t.Fatalf("ResetJobToPending: %v", err)
+		}
+		assertRetryable(t, job.ID, 0)
+	})
+}

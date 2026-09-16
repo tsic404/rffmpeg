@@ -1182,6 +1182,61 @@ func TestMigrationRelabelsEncoderUnsupportedNoWorker(t *testing.T) {
 	}
 }
 
+// TestMigrationBackfillsRetryableColumn locks the data correction for rows
+// persisted before retryable was written alongside failure_type: the two
+// retryable classifications (TIMEOUT, WORKER_CRASH) must be flipped from the
+// schema DEFAULT 0 to 1, while non-retryable rows stay 0. Idempotent like the
+// other startup migrations.
+func TestMigrationBackfillsRetryableColumn(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now()
+	seed := func(id, failureType string) {
+		t.Helper()
+		if _, err := db.db.Exec(`
+			INSERT INTO jobs (id, status, input_files, args, failure_type, retryable, created_at, updated_at)
+			VALUES (?, ?, '[]', '[]', ?, 0, ?, ?)
+		`, id, protocol.JobStatusFailed, failureType, now, now); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	seed("timeout-legacy", string(protocol.FailureTimeout))
+	seed("crash-legacy", string(protocol.FailureWorkerCrash))
+	seed("ffmpeg-legacy", string(protocol.FailureFFmpegError))
+
+	if err := db.migrateRetryableColumn(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	readRetryable := func(id string) int {
+		t.Helper()
+		var got int
+		if err := db.db.QueryRow(`SELECT retryable FROM jobs WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("read retryable %s: %v", id, err)
+		}
+		return got
+	}
+
+	if got := readRetryable("timeout-legacy"); got != 1 {
+		t.Errorf("timeout-legacy retryable = %d, want 1", got)
+	}
+	if got := readRetryable("crash-legacy"); got != 1 {
+		t.Errorf("crash-legacy retryable = %d, want 1", got)
+	}
+	if got := readRetryable("ffmpeg-legacy"); got != 0 {
+		t.Errorf("ffmpeg-legacy retryable = %d, want 0", got)
+	}
+
+	// Idempotent: a second run must not change anything.
+	if err := db.migrateRetryableColumn(); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	if got := readRetryable("timeout-legacy"); got != 1 {
+		t.Errorf("second run changed timeout-legacy retryable to %d", got)
+	}
+}
+
 // TestCachedFlagPersistedOnTerminalUpdate guards the DB contract:
 // a terminal completion recorded with the cached flag returns Cached=true
 // from GetJob; a non-cached completion stays false; non-terminal updates do
