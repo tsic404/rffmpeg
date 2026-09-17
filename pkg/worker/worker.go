@@ -109,7 +109,7 @@ func New(cfg Config) (*Worker, error) {
 		cfg.HeartbeatInterval = 30 * time.Second // Default heartbeat interval
 	}
 	if cfg.PollInterval == 0 {
-		cfg.PollInterval = 5 * time.Second // Default poll interval
+		cfg.PollInterval = 1 * time.Second // Default poll interval
 	}
 
 	// Create temp directory. A defaulted path (root FHS path, per-user XDG

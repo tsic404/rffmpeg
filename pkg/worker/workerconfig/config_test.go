@@ -677,8 +677,8 @@ func TestTimingEnvOverrides(t *testing.T) {
 		if cfg.HeartbeatInterval.ToDuration() != 30*time.Second {
 			t.Errorf("HeartbeatInterval = %v, want default %v", cfg.HeartbeatInterval.ToDuration(), 30*time.Second)
 		}
-		if cfg.PollInterval.ToDuration() != 5*time.Second {
-			t.Errorf("PollInterval = %v, want default %v", cfg.PollInterval.ToDuration(), 5*time.Second)
+		if cfg.PollInterval.ToDuration() != 1*time.Second {
+			t.Errorf("PollInterval = %v, want default %v", cfg.PollInterval.ToDuration(), 1*time.Second)
 		}
 	})
 }
