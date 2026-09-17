@@ -254,7 +254,7 @@ Usage of ./bin/worker:
   "ffmpeg_path": "ffmpeg",
   "timeout": "2h",
   "heartbeat_interval": "30s",
-  "poll_interval": "5s",
+  "poll_interval": "1s",
   "max_concurrent": 1,
   "auto_detect_gpu": true,
   "auto_detect_codecs": true,
@@ -290,7 +290,7 @@ Usage of ./bin/worker:
 | `RFFMPEG_TIMEOUT` | 任务执行超时时间 | `2h` |
 | `RFFMPEG_MAX_CONCURRENT` | 最大并发任务数 | `1` |
 | `RFFMPEG_HEARTBEAT_INTERVAL` | Worker 心跳上报间隔 | `30s` |
-| `RFFMPEG_POLL_INTERVAL` | Worker 任务轮询间隔 | `5s` |
+| `RFFMPEG_POLL_INTERVAL` | Worker 任务轮询间隔 | `1s` |
 | `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |
 | `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（同上布尔值语义） | `true` |
 | `RFFMPEG_CACHE_ENABLED` | 启用任务文件缓存（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |

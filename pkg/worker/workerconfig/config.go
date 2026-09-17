@@ -228,7 +228,7 @@ func DefaultConfig() *Config {
 		FFmpegPath:        "ffmpeg",
 		Timeout:           Duration(2 * time.Hour),
 		HeartbeatInterval: Duration(30 * time.Second),
-		PollInterval:      Duration(5 * time.Second),
+		PollInterval:      Duration(1 * time.Second),
 		MaxConcurrent:     1,
 		AutoDetectGPU:     true,
 		AutoDetectCodecs:  true,
