@@ -111,6 +111,8 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 ./bin/rffmpeg --retry -i input.mp4 -c:v libx264 output.mp4
 ```
 
+**静默模式（`-q` / `--quiet`）**：`--quiet` 抑制进度类输出——banner、上传/下载进度（`Uploading`/`Uploaded`/`Downloading`/`Output saved` 等）、`Job status:` 状态轮询、`Progress: …% | ETA: …` 转码进度行，以及 Worker 实时 stderr 中 ffmpeg 自身的输出（输入头/编码器信息、错误与警告行）。`[rffmpeg]` 前缀的通知行（如 `[rffmpeg] Cache hit: <key>`、编码器改写/回退）不属于进度输出，`--quiet` 下仍写入 stderr；任务终态失败报告（`Job failed:` / `Job timed out:` 等）始终打印、不受 `--quiet` 影响。需要查看 ffmpeg 原始错误/警告时，去掉 `--quiet` 重新运行即可。
+
 **任务超时（`--timeout`）**：`--timeout` 为每个转码任务的 **ffmpeg 执行预算**（Go duration 格式，如 `30s`/`5m`/`2h`），只约束 ffmpeg 进程本身的运行时长——上传、调度、输入下载、时长探测等执行前阶段不占用该预算。Worker 在 ffmpeg 执行起点开始计时，用完预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过 `--timeout`，例如：
 
 ```bash
@@ -612,7 +614,7 @@ Response:
 
 当任务结果命中 Worker 本地缓存时（TSI-2519）：
 
-- CLI 会在 stderr 收到 `[rffmpeg] Cache hit: <key>`（`<key>` 为完整的 64 位十六进制缓存键）。
+- CLI 会在 stderr 收到 `[rffmpeg] Cache hit: <key>`（`<key>` 为完整的 64 位十六进制缓存键）；该通知属于 `[rffmpeg]` 可观察性通道，即使 `--quiet`（静默模式）也照常打印——`--quiet` 只抑制 banner/进度/统计噪声与 ffmpeg 自身 stderr，不抑制 `[rffmpeg]` 通知行。
 - 任务的 `GET /api/v1/jobs/{jobId}` 响应中 `cached` 字段为 `true`，底层 SQLite `jobs` 表新增 `cached` 列（`INTEGER DEFAULT 0`，`1` 表示命中缓存），可直接查询：`SELECT id FROM jobs WHERE cached = 1;`
 
 ### 缓存按内容寻址
