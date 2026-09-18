@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -32,10 +34,25 @@ const DefaultChunkSize = 10 * 1024 * 1024
 // Max concurrent chunk uploads
 const MaxConcurrentChunkUploads = 4
 
+// chunkStorage is the subset of *storage.Storage the chunk upload handler
+// depends on. It exists so handler tests can inject a storage that fails,
+// exercising the 507/logging error path that a concrete *storage.Storage
+// cannot reproduce portably (close-time ENOSPC).
+type chunkStorage interface {
+	ChunkExists(uploadID string, chunkIndex int) bool
+	SaveChunk(uploadID string, chunkIndex int, reader io.Reader) (string, int64, string, error)
+	DeleteChunk(uploadID string, chunkIndex int) error
+	GetChunkPaths(uploadID string) ([]string, error)
+	AssembleChunks(uploadID string, fileID string, chunkPaths []string) (string, int64, string, error)
+	GetFilePath(fileID string) string
+	DeleteFile(fileID string) error
+	DeleteChunkDirectory(uploadID string) error
+}
+
 // ChunkUploadHandler handles chunked file uploads
 type ChunkUploadHandler struct {
 	db          *db.Database
-	storage     *storage.Storage
+	storage     chunkStorage
 	chunkSize   int64
 	authToken   string        // Non-empty when auth is configured
 	semaphore   chan struct{} // For concurrent upload control
@@ -184,6 +201,17 @@ func (h *ChunkUploadHandler) InitChunkUpload(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+// chunkSaveErrorStatus classifies a SaveChunk failure for the HTTP response.
+// A disk-full write (ENOSPC) is a client-actionable capacity failure: it is
+// reported as 507 with a distinct error code and a readable message so the CLI
+// can print an actionable hint. Every other error stays a generic 500.
+func chunkSaveErrorStatus(err error) (int, protocol.ErrorCode, string) {
+	if errors.Is(err, syscall.ENOSPC) {
+		return http.StatusInsufficientStorage, protocol.ErrCodeInsufficientStorage, "Insufficient storage: no space left on device"
+	}
+	return http.StatusInternalServerError, protocol.ErrCodeUploadFailed, "Failed to save chunk"
+}
+
 // UploadChunk handles uploading a single chunk
 func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.validateAuthToken(w, r); !ok {
@@ -287,9 +315,11 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 	// Save chunk to storage
 	chunkPath, size, actualChecksum, err := h.storage.SaveChunk(uploadID, chunkIndex, file)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-			protocol.ErrCodeUploadFailed, "Failed to save chunk", err,
-		))
+		// A full disk previously surfaced as a bare 500 with no server-side
+		// trace — log the cause so capacity failures are diagnosable.
+		log.Printf("Failed to save chunk for upload %s chunk %d: %v", uploadID, chunkIndex, err)
+		status, code, message := chunkSaveErrorStatus(err)
+		writeError(w, status, protocol.NewProtocolError(code, message, err))
 		return
 	}
 

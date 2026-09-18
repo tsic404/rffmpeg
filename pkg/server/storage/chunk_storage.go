@@ -26,15 +26,24 @@ func (s *Storage) SaveChunk(uploadID string, chunkIndex int, reader io.Reader) (
 	if err != nil {
 		return "", 0, "", fmt.Errorf("failed to create chunk file: %w", err)
 	}
-	defer file.Close()
 
 	// Calculate checksum while copying
 	hash := sha256.New()
 	writer := io.MultiWriter(file, hash)
 	size, err := io.Copy(writer, reader)
 	if err != nil {
+		file.Close()
 		os.Remove(chunkPath)
 		return "", 0, "", fmt.Errorf("failed to write chunk: %w", err)
+	}
+
+	// Close explicitly rather than via defer: on delayed-allocation filesystems
+	// (ext4 delalloc) and NFS, ENOSPC can surface only at close/flush, after
+	// io.Copy has returned success. Swallowing the close error would mark a
+	// truncated chunk as uploaded, so it is surfaced and the file removed.
+	if err := file.Close(); err != nil {
+		os.Remove(chunkPath)
+		return "", 0, "", fmt.Errorf("failed to close chunk file: %w", err)
 	}
 
 	checksum := hex.EncodeToString(hash.Sum(nil))
