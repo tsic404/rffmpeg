@@ -642,12 +642,17 @@ func StreamJobLogs(ctx context.Context, serverURL, jobID, token string, quiet bo
 	completeChan := make(chan int, 1)
 	errorChan := make(chan string, 1)
 
+	notices := &noticeFilter{}
 	client := NewWSClient(serverURL, jobID, token,
 		WithOnStderr(func(chunk string) {
 			// Write to local stderr
-			if !quiet {
-				fmt.Fprint(os.Stderr, chunk)
+			if quiet {
+				if line := notices.filter(chunk); line != "" {
+					fmt.Fprint(os.Stderr, line)
+				}
+				return
 			}
+			fmt.Fprint(os.Stderr, chunk)
 		}),
 		WithOnStatus(func(status protocol.JobStatus, exitCode int, err string) {
 			if !quiet && status != protocol.JobStatusRunning {

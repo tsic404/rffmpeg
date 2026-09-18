@@ -621,11 +621,16 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	markTerminal := func() { terminalOnce.Do(func() { close(terminalSeen) }) }
 
 	// Start WebSocket connection for real-time logs
+	notices := &noticeFilter{}
 	wsClient := NewWSClient(c.serverURL, jobID, c.token,
 		WithOnStderr(func(chunk string) {
-			if !quiet {
-				fmt.Fprint(os.Stderr, chunk)
+			if quiet {
+				if line := notices.filter(chunk); line != "" {
+					fmt.Fprint(os.Stderr, line)
+				}
+				return
 			}
+			fmt.Fprint(os.Stderr, chunk)
 		}),
 		WithOnStatus(func(status protocol.JobStatus, exitCode int, err string) {
 			if !quiet && status != protocol.JobStatusRunning {
@@ -807,6 +812,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	markTerminal := func() { terminalOnce.Do(func() { close(terminalSeen) }) }
 
 	// Start WebSocket connection for real-time stdout streaming
+	notices := &noticeFilter{}
 	wsClient := NewWSClient(c.serverURL, jobID, c.token,
 		WithOnStdout(func(chunk []byte) {
 			n, err := os.Stdout.Write(chunk)
@@ -821,9 +827,13 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		}),
 		WithOnStderr(func(chunk string) {
 			// Write stderr to stderr (progress info, etc.)
-			if !quiet {
-				fmt.Fprint(os.Stderr, chunk)
+			if quiet {
+				if line := notices.filter(chunk); line != "" {
+					fmt.Fprint(os.Stderr, line)
+				}
+				return
 			}
+			fmt.Fprint(os.Stderr, chunk)
 		}),
 		WithOnStatus(func(status protocol.JobStatus, exitCode int, err string) {
 			if !quiet && status != protocol.JobStatusRunning {
