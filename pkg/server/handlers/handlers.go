@@ -1452,13 +1452,15 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Populate _rffmpeg metadata: workers[] stays lightweight, the
-	// executing worker's encoder list is emitted once as the shared list, and
-	// only workers whose list differs appear in worker_encoder_overrides — so a
-	// homogeneous cluster emits a single copy while a heterogeneous one keeps
-	// every per-worker capability.
+	// Populate _rffmpeg metadata: workers[] stays lightweight and lists only
+	// live workers (fresh heartbeat, not offline, not evicted), so stale rows
+	// retained within the offline-threshold window don't masquerade as online
+	// nodes. The executing worker's encoder list is emitted once as the shared
+	// list, and only workers whose list differs appear in
+	// worker_encoder_overrides — so a homogeneous cluster emits a single copy
+	// while a heterogeneous one keeps every per-worker capability.
 	var rffmpegMeta *protocol.RffmpegMeta
-	allWorkers, workersErr := h.db.GetAllWorkers()
+	liveWorkers, workersErr := h.db.GetLiveSchedulableWorkers(h.heartbeatTimeout)
 
 	// The shared baseline is the encoder list of the worker that executed the
 	// probe; it also drives the suggestion.
@@ -1472,7 +1474,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	var workerSummaries []protocol.WorkerSummary
 	var overrides map[string][]string
 	if workersErr == nil {
-		workerSummaries, overrides = buildWorkerSummariesAndOverrides(allWorkers, sharedEncoders)
+		workerSummaries, overrides = buildWorkerSummariesAndOverrides(liveWorkers, sharedEncoders)
 	}
 
 	if len(sharedEncoders) > 0 {

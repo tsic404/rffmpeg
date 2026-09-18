@@ -303,6 +303,70 @@ func TestGetActiveWorkers(t *testing.T) {
 	}
 }
 
+// TestGetLiveSchedulableWorkers pins the liveness filter the probe
+// _rffmpeg.workers[] list and the submit-time fail-fast path depend on: only
+// non-offline, non-evicted workers whose last heartbeat is within the
+// freshness window are returned. Offline, stale-heartbeat, and evicted rows
+// are all excluded so stale residue never masquerades as an online node.
+func TestGetLiveSchedulableWorkers(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1.2",
+	}
+
+	fresh, err := database.CreateWorker("", "fresh-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create fresh worker: %v", err)
+	}
+	stale, err := database.CreateWorker("", "stale-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create stale worker: %v", err)
+	}
+	offline, err := database.CreateWorker("", "offline-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create offline worker: %v", err)
+	}
+	evicted, err := database.CreateWorker("", "evicted-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create evicted worker: %v", err)
+	}
+
+	now := time.Now()
+	seeds := []struct {
+		id   string
+		stmt string
+		args []any
+	}{
+		{stale.ID, `UPDATE workers SET last_heartbeat = ? WHERE id = ?`, []any{now.Add(-2 * time.Hour), stale.ID}},
+		{offline.ID, `UPDATE workers SET status = ? WHERE id = ?`, []any{protocol.WorkerStatusOffline, offline.ID}},
+		{evicted.ID, `UPDATE workers SET evicted = 1 WHERE id = ?`, []any{evicted.ID}},
+	}
+	for _, seed := range seeds {
+		if _, err := database.GetDB().Exec(seed.stmt, seed.args...); err != nil {
+			t.Fatalf("Failed to seed worker %q: %v", seed.id, err)
+		}
+	}
+
+	workers, err := database.GetLiveSchedulableWorkers(90 * time.Second)
+	if err != nil {
+		t.Fatalf("GetLiveSchedulableWorkers: %v", err)
+	}
+
+	if len(workers) != 1 {
+		ids := make([]string, 0, len(workers))
+		for _, w := range workers {
+			ids = append(ids, w.ID)
+		}
+		t.Fatalf("Expected exactly 1 live schedulable worker, got %d: %v", len(workers), ids)
+	}
+	if workers[0].ID != fresh.ID {
+		t.Errorf("Expected fresh worker %q, got %q", fresh.ID, workers[0].ID)
+	}
+}
+
 func TestWorkerNotFound(t *testing.T) {
 	database, cleanup := setupDBTest(t)
 	defer cleanup()
