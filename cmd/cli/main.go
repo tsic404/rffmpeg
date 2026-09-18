@@ -45,6 +45,11 @@ const (
 
 var version = "1.0.0"
 
+// jobSubmitted is set once a job is accepted by the server. It separates
+// pre-submit failures — where no server-side job exists to query, the target
+// of the RFFMPEG_LOG_FILE diagnostic — from post-submit failures.
+var jobSubmitted bool
+
 // Options holds the rffmpeg-specific options extracted from the command line.
 type Options struct {
 	ServerURL      string
@@ -290,7 +295,26 @@ func main() {
 	os.Exit(run())
 }
 
-func run() int {
+func run() (code int) {
+	// Mirror stderr so a pre-submit failure can be persisted even when the
+	// caller discards stderr. No-op unless RFFMPEG_LOG_FILE is set (see
+	// diaglog.go); a drop-in ffmpeg replacement must not touch stderr or the
+	// filesystem on the default path.
+	tee := startStderrTee()
+	// Reset per-run state: a second run() in the same process must not inherit
+	// a submitted-job marker from the previous invocation.
+	jobSubmitted = false
+	// Fall back to the config default so early failure paths (info flags, bad
+	// args) still record a non-empty server URL; the resolved value replaces
+	// it after config load below.
+	serverURL := config.DefaultServerURL
+	defer func() {
+		tee.stop()
+		if code != ExitSuccess && !jobSubmitted {
+			tee.record(code, serverURL)
+		}
+	}()
+
 	// Parse command-line arguments manually
 	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
@@ -380,6 +404,7 @@ func run() int {
 	if opts.Token != "" {
 		cfg.Token = opts.Token
 	}
+	serverURL = cfg.ServerURL
 	maxRetries := client.DefaultMaxRetries
 	if opts.MaxRetriesSet {
 		maxRetries = opts.MaxRetries
@@ -412,12 +437,12 @@ func run() int {
 		return runProbe(cli, opts.ProbeInput, opts.Quiet, sharedFS)
 	}
 
-	return runTranscode(cli, cfg, opts, ffmpegArgs, sharedFS)
+	return runTranscode(cli, cfg, opts, ffmpegArgs, sharedFS, tee)
 }
 
 // runTranscode submits the transcoding job described by opts/ffmpegArgs and
 // waits for it, streaming logs and downloading outputs.
-func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegArgs []string, sharedFS bool) int {
+func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegArgs []string, sharedFS bool, tee *stderrTee) int {
 	quiet := opts.Quiet
 	autoHW := opts.AutoHW
 	timeout := opts.Timeout
@@ -488,6 +513,12 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	)
 
 	go func() {
+		// Capture the real stderr once: the tee swaps the os.Stderr global and
+		// closes its pipe on stop, so reading os.Stderr here would race those
+		// writes and, after a successful submit, write to a closed fd. The real
+		// stderr (the tee's original fd, or os.Stderr when the tee is disabled)
+		// keeps interrupt/cancel notices visible regardless of tee state.
+		stderr := tee.realStderr()
 		var handlerCancelled bool
 		for range sigChan {
 			cancel()
@@ -503,12 +534,12 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 			if id != "" && !done {
 				handlerCancelled = true
-				fmt.Fprintln(os.Stderr, "\nReceived interrupt, cancelling job...")
+				fmt.Fprintln(stderr, "\nReceived interrupt, cancelling job...")
 				if err := cli.CancelJob(id); err != nil {
-					fmt.Fprintf(os.Stderr, "Failed to cancel job: %v\n", err)
+					fmt.Fprintf(stderr, "Failed to cancel job: %v\n", err)
 					os.Exit(ExitError)
 				}
-				fmt.Fprintln(os.Stderr, "Job cancellation requested. Press Ctrl+C again to force quit.")
+				fmt.Fprintln(stderr, "Job cancellation requested. Press Ctrl+C again to force quit.")
 				continue
 			}
 
@@ -525,6 +556,13 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 			// a just-submitted job and is cancelling it — loop back and let it
 			// exit.
 			if id == "" || handlerCancelled {
+				// A pre-submit force-quit (no job on the server) is exactly the
+				// failure the diagnostic log targets: persist the captured
+				// stderr before the process dies, since os.Exit skips run()'s
+				// deferred record.
+				if id == "" {
+					tee.record(ExitError, cfg.ServerURL)
+				}
 				os.Exit(ExitError)
 			}
 		}
@@ -662,6 +700,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	submitting = false
 	if err == nil {
 		jobID = submittedID
+		jobSubmitted = true
 	}
 	interrupted := ctx.Err() != nil
 	// Claim the cancellation atomically with publishing jobID, so the signal
@@ -690,6 +729,12 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		}
 		return ExitError
 	}
+
+	// The job is accepted: post-submit failures have a server-side record to
+	// query, so the pre-submit diagnostic no longer applies. Stop mirroring
+	// stderr now — this also guarantees the os.Stderr global is never swapped
+	// while the WebSocket listener goroutines write to it below.
+	tee.stop()
 
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "Job submitted: %s\n", jobID)
