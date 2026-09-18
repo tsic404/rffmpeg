@@ -39,20 +39,25 @@ type cacheI interface {
 
 // Worker is the main worker struct that handles job processing
 type Worker struct {
-	id                 string
-	name               string
-	caps               protocol.WorkerCapabilities // Stored for re-registration after server restart
-	client             *Client
-	executor           *Executor
-	retryExecutor      *RetryExecutor
-	rewriteAdapter     *RewriteAdapter
-	cache              cacheI
-	tempDir            string
-	mu                 sync.Mutex
-	activeJobs         map[string]context.CancelFunc
-	heartbeatInterval  time.Duration
-	pollInterval       time.Duration
-	lastHeartbeatTime  time.Time
+	id                string
+	name              string
+	caps              protocol.WorkerCapabilities // Stored for re-registration after server restart
+	client            *Client
+	executor          *Executor
+	retryExecutor     *RetryExecutor
+	rewriteAdapter    *RewriteAdapter
+	cache             cacheI
+	tempDir           string
+	mu                sync.Mutex
+	activeJobs        map[string]context.CancelFunc
+	heartbeatInterval time.Duration
+	pollInterval      time.Duration
+	lastHeartbeatTime time.Time
+	// pullConflictCount counts consecutive 409 pull conflicts (worker offline
+	// or evicted). It drives the poll-loop's exponential backoff and bounds
+	// when re-registration is attempted. Only the poll-loop goroutine reads or
+	// writes it.
+	pullConflictCount  int
 	jobsCompleted      int
 	totalJobsCompleted int
 	ffprobeExecutor    *FFprobeExecutor
@@ -405,11 +410,23 @@ func (w *Worker) Stop() {
 func (w *Worker) pollAndProcess(ctx context.Context) {
 	jobs, err := w.client.PullJobs()
 	if err != nil {
+		// A 409 Conflict means the worker is offline (its jobs were already
+		// migrated) or evicted from scheduling — a transient, recoverable
+		// state, not a server fault. Back off exponentially instead of
+		// re-registering on every 1s poll tick; the flapping re-registrations
+		// left a transient worker_unavailable window for CLI submissions.
+		if IsPullConflict(err) {
+			w.backoffPullConflict(ctx, err)
+			return
+		}
 		log.Printf("Failed to pull jobs: %v", err)
 		// Attempt re-registration if server may have restarted
 		w.reregister()
 		return
 	}
+	// A successful pull resets the conflict backoff so a later conflict starts
+	// over at the initial delay.
+	w.pullConflictCount = 0
 
 	for _, job := range jobs {
 		// Do not start new work once Stop was requested.
@@ -436,6 +453,67 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 			w.processJob(jobCtx, job, cancel, true)
 		}(job, jobCtx, cancel)
 	}
+}
+
+// Pull-conflict backoff schedule: a 409 on GET /workers/{id}/jobs means the
+// worker is offline (its jobs were already migrated) or evicted from
+// scheduling. Both are transient and recoverable without an immediate
+// re-registration, so the poll loop retries with exponential backoff and only
+// re-registers once the conflict persists.
+const (
+	pullConflictInitialDelay = 1 * time.Second
+	pullConflictMaxDelay     = 30 * time.Second
+
+	// pullConflictReregisterThreshold is the number of consecutive 409 pull
+	// conflicts after which the poll loop re-registers once. It is set past
+	// every backoff tier (1s→2s→4s→8s→16s→30s cap) so the schedule below is
+	// fully reachable and re-registration stays bounded (~61s of backoff).
+	pullConflictReregisterThreshold = 7
+)
+
+// pullConflictSleep waits out a pull-conflict backoff delay, or returns early
+// when the worker stops or the context is cancelled. A package var so tests
+// can stub the wait and run the backoff instantly.
+var pullConflictSleep = func(ctx context.Context, w *Worker, d time.Duration) {
+	select {
+	case <-time.After(d):
+	case <-ctx.Done():
+	case <-w.stopCh:
+	}
+}
+
+// backoffPullConflict handles a 409 pull conflict (worker offline or evicted).
+// It backs off exponentially for the first (threshold-1) consecutive conflicts,
+// then re-registers once on the threshold-th. A successful pull resets the
+// count in pollAndProcess, so sparse conflicts never accumulate into a
+// re-registration.
+func (w *Worker) backoffPullConflict(ctx context.Context, err error) {
+	w.pullConflictCount++
+	if w.pullConflictCount >= pullConflictReregisterThreshold {
+		w.pullConflictCount = 0
+		log.Printf("Pull jobs conflict persisted (%d consecutive): %v; re-registering", pullConflictReregisterThreshold, err)
+		w.reregister()
+		return
+	}
+	delay := pullConflictBackoff(w.pullConflictCount)
+	log.Printf("Pull jobs conflict (worker offline or evicted): %v; retrying in %s", err, delay)
+	pullConflictSleep(ctx, w, delay)
+}
+
+// pullConflictBackoff returns the wait before retrying after n consecutive 409
+// pull conflicts: the initial delay doubled per conflict, capped at
+// pullConflictMaxDelay. Production callers pass n in
+// [1, pullConflictReregisterThreshold-1]; other values degrade to the nearest
+// boundary (n<1 → initial delay, n≥threshold → max delay).
+func pullConflictBackoff(consecutive int) time.Duration {
+	delay := pullConflictInitialDelay
+	for i := 1; i < consecutive; i++ {
+		delay *= 2
+		if delay >= pullConflictMaxDelay {
+			return pullConflictMaxDelay
+		}
+	}
+	return delay
 }
 
 // batcherCreateHook, when non-nil, receives every StderrBatcher created on

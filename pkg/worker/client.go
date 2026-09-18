@@ -33,6 +33,16 @@ var ErrJobConflict = errors.New("job already in terminal state or not owned by t
 // update. Callers use it to suppress benign log noise from lost races.
 func IsConflict(err error) bool { return errors.Is(err, ErrJobConflict) }
 
+// ErrPullConflict is returned when the server rejects a job pull with HTTP 409
+// Conflict: the worker is offline (its jobs were already migrated) or evicted
+// from scheduling (slow-node detection). Both are transient, recoverable
+// conditions, so the poll loop backs off instead of re-registering on every
+// tick.
+var ErrPullConflict = errors.New("worker offline or evicted from scheduling")
+
+// IsPullConflict reports whether err is a 409 Conflict from a job pull.
+func IsPullConflict(err error) bool { return errors.Is(err, ErrPullConflict) }
+
 // MaxRemoteInputBytes caps the size of files downloaded from remote URLs via
 // DownloadInput. Server-side file downloads are already bounded by the
 // server's own upload limits; remote URLs have no such bound.
@@ -191,6 +201,9 @@ func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusConflict {
+			return nil, fmt.Errorf("%w: pull jobs failed with status: %d", ErrPullConflict, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("pull jobs failed with status: %d", resp.StatusCode)
 	}
 
