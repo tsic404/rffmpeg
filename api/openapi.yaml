@@ -120,6 +120,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /upload/progress/{uploadId}:
     get:
@@ -1268,6 +1270,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     InternalError:
       description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InsufficientStorage:
+      description: Insufficient storage to save the chunk (disk full)
       content:
         application/json:
           schema:
