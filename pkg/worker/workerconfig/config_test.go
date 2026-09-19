@@ -2,6 +2,7 @@ package workerconfig
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -819,6 +820,40 @@ func TestConfigValidate(t *testing.T) {
 				c.ManualGPUModel = "NVIDIA RTX 3080"
 			},
 			wantErr: false,
+		},
+		{
+			name:    "negative cache ttl",
+			mutate:  func(c *Config) { c.CacheTTL = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "zero cache ttl valid",
+			mutate:  func(c *Config) { c.CacheTTL = 0 },
+			wantErr: false,
+		},
+		{
+			name:    "negative cache max size",
+			mutate:  func(c *Config) { c.CacheMaxSizeMB = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "zero cache max size valid",
+			mutate:  func(c *Config) { c.CacheMaxSizeMB = 0 },
+			wantErr: false,
+		},
+		{
+			name: "cache max size at int64 byte boundary valid",
+			mutate: func(c *Config) {
+				c.CacheMaxSizeMB = math.MaxInt64 / (1024 * 1024)
+			},
+			wantErr: false,
+		},
+		{
+			name: "cache max size overflows int64 byte size",
+			mutate: func(c *Config) {
+				c.CacheMaxSizeMB = math.MaxInt64/(1024*1024) + 1
+			},
+			wantErr: true,
 		},
 	}
 
