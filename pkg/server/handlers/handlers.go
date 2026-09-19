@@ -1112,6 +1112,17 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.db.UpdateWorkerHeartbeat(req.WorkerID, req.Status); err != nil {
 		if errors.Is(err, protocol.ErrWorkerNotFound) {
+			// The worker is offline (or gone). RecoverState marks every worker
+			// offline at startup, so an evicted slow node also lands here; its
+			// heartbeat must surface as evicted (not 404) so the client skips
+			// re-registration — re-registration clears the eviction flag and
+			// flaps the slow node back into scheduling.
+			if worker, gErr := h.db.GetWorker(req.WorkerID); gErr == nil && worker.Evicted {
+				writeError(w, http.StatusConflict, protocol.NewProtocolError(
+					protocol.ErrCodeWorkerEvicted, "Worker is evicted from scheduling", nil,
+				))
+				return
+			}
 			writeError(w, http.StatusNotFound, protocol.NewProtocolError(
 				protocol.ErrCodeNotFound, "Worker not found", err,
 			))
@@ -1169,7 +1180,11 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Verify worker exists and is pull-eligible. An offline worker must
 	// re-register before pulling (its jobs were already migrated); an evicted
-	// (slow-node) worker gets no new work at all.
+	// (slow-node) worker gets no new work at all. Eviction is checked first:
+	// RecoverState marks every worker offline at startup, so a slow node that
+	// was evicted before the restart must still surface as evicted (not
+	// offline) — otherwise the worker would clear its eviction flag via
+	// re-registration and flap back into scheduling.
 	worker, err := h.db.GetWorker(workerID)
 	if err != nil {
 		if errors.Is(err, protocol.ErrWorkerNotFound) {
@@ -1183,15 +1198,15 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
-	if worker.Status == protocol.WorkerStatusOffline {
+	if worker.Evicted {
 		writeError(w, http.StatusConflict, protocol.NewProtocolError(
-			protocol.ErrCodeConflict, "Worker is offline; re-register to resume pulling", nil,
+			protocol.ErrCodeWorkerEvicted, "Worker is evicted from scheduling", nil,
 		))
 		return
 	}
-	if worker.Evicted {
+	if worker.Status == protocol.WorkerStatusOffline {
 		writeError(w, http.StatusConflict, protocol.NewProtocolError(
-			protocol.ErrCodeConflict, "Worker is evicted from scheduling", nil,
+			protocol.ErrCodeConflict, "Worker is offline; re-register to resume pulling", nil,
 		))
 		return
 	}

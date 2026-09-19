@@ -129,6 +129,42 @@ func registerTestWorkerWithID(t *testing.T, router *chi.Mux, workerID, name stri
 	return workerID
 }
 
+// TestPullWorkerJobs_EvictedPrecedesOffline verifies an evicted worker returns
+// the worker_evicted code even when it is also offline (RecoverState marks
+// every worker offline at startup). Checking offline first would let the
+// client treat it as a plain server restart and clear the eviction flag via
+// re-registration.
+func TestPullWorkerJobs_EvictedPrecedesOffline(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	workerID := registerTestWorker(t, router, []string{"libx264"})
+
+	// Post-restart state of an evicted slow node: evicted AND offline.
+	if err := h.GetDB().MarkWorkerEvicted(workerID); err != nil {
+		t.Fatalf("failed to mark worker evicted: %v", err)
+	}
+	if err := h.GetDB().UpdateWorkerStatus(workerID, protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("failed to mark worker offline: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/workers/"+workerID+"/jobs", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for evicted+offline worker, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeWorkerEvicted {
+		t.Errorf("expected worker_evicted code for evicted+offline worker, got %q", errResp.Code)
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -1561,6 +1597,48 @@ func TestWorkerHeartbeatNonExistent(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("Expected status 404, got %d", w.Code)
+	}
+}
+
+// TestWorkerHeartbeat_EvictedOfflineWorkerReturnsEvicted verifies a heartbeat
+// from an evicted worker that is also offline (RecoverState marks every worker
+// offline at startup) surfaces as worker_evicted, not 404: the client must skip
+// re-registration rather than clear the eviction flag.
+func TestWorkerHeartbeat_EvictedOfflineWorkerReturnsEvicted(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	workerID := registerTestWorker(t, router, []string{"libx264"})
+
+	// Post-restart state of an evicted slow node: evicted AND offline.
+	if err := h.GetDB().MarkWorkerEvicted(workerID); err != nil {
+		t.Fatalf("failed to mark worker evicted: %v", err)
+	}
+	if err := h.GetDB().UpdateWorkerStatus(workerID, protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("failed to mark worker offline: %v", err)
+	}
+
+	heartbeatReq := protocol.WorkerHeartbeatRequest{
+		WorkerID: workerID,
+		Status:   protocol.WorkerStatusIdle,
+	}
+	heartbeatBody, _ := json.Marshal(heartbeatReq)
+
+	req := httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for evicted+offline heartbeat, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeWorkerEvicted {
+		t.Errorf("expected worker_evicted code, got %q", errResp.Code)
 	}
 }
 

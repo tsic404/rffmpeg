@@ -28,6 +28,69 @@ func TestPullJobs_Conflict(t *testing.T) {
 	}
 }
 
+// TestPullJobs_Evicted verifies a 409 pull carrying the worker_evicted code
+// surfaces as ErrWorkerEvicted (and still satisfies IsPullConflict), so the
+// poll loop keeps the eviction backoff distinct from offline recovery.
+func TestPullJobs_Evicted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"code":"worker_evicted","message":"Worker is evicted from scheduling"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "worker-1", "")
+	_, err := c.PullJobs()
+	if err == nil {
+		t.Fatal("expected error for evicted 409 pull, got nil")
+	}
+	if !IsWorkerEvicted(err) {
+		t.Fatalf("expected IsWorkerEvicted, got: %v", err)
+	}
+	if !IsPullConflict(err) {
+		t.Fatalf("expected IsPullConflict for evicted 409, got: %v", err)
+	}
+}
+
+// TestPullJobs_UnknownConflictCode verifies a 409 pull carrying an
+// unrecognized code is treated conservatively as evicted (backoff), never as
+// offline (immediate re-registration): noise or a future code must not clear
+// an eviction flag.
+func TestPullJobs_UnknownConflictCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"code":"future_code","message":"something new"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "worker-1", "")
+	_, err := c.PullJobs()
+	if err == nil {
+		t.Fatal("expected error for unknown-code 409 pull, got nil")
+	}
+	if !IsWorkerEvicted(err) {
+		t.Fatalf("expected IsWorkerEvicted for unknown code, got: %v", err)
+	}
+}
+
+// TestPullJobs_UndecodableConflictBody verifies a 409 pull whose body is not
+// JSON is treated conservatively as evicted (backoff) rather than offline.
+func TestPullJobs_UndecodableConflictBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`<html>bad gateway</html>`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "worker-1", "")
+	_, err := c.PullJobs()
+	if err == nil {
+		t.Fatal("expected error for undecodable 409 pull, got nil")
+	}
+	if !IsWorkerEvicted(err) {
+		t.Fatalf("expected IsWorkerEvicted for undecodable body, got: %v", err)
+	}
+}
+
 // TestPullJobs_NonConflictError verifies a 500 pull does NOT report as a
 // conflict — it is a real server fault that still triggers re-registration.
 func TestPullJobs_NonConflictError(t *testing.T) {
@@ -70,10 +133,11 @@ func TestPullConflictBackoff(t *testing.T) {
 	}
 }
 
-// TestPollAndProcess_ConflictBacksOffThenReregisters verifies the core fix: a
-// 409 pull conflict backs off instead of re-registering immediately, and only
-// re-registers once the conflict persists past the threshold.
-func TestPollAndProcess_ConflictBacksOffThenReregisters(t *testing.T) {
+// TestPollAndProcess_OfflineConflictReregistersImmediately verifies that an
+// offline (server-restart) 409 pull conflict re-registers on the very first
+// conflict instead of backing off: the worker must re-enter the pool within
+// one poll tick rather than waiting out the 30s heartbeat clock.
+func TestPollAndProcess_OfflineConflictReregistersImmediately(t *testing.T) {
 	var mu sync.Mutex
 	registrations := 0
 	pulls := 0
@@ -90,6 +154,107 @@ func TestPollAndProcess_ConflictBacksOffThenReregisters(t *testing.T) {
 			mu.Unlock()
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"code":"conflict","message":"Worker is offline; re-register to resume pulling"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	w, err := New(Config{ServerURL: srv.URL, WorkerID: "worker-1"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	w.pollAndProcess(context.Background())
+
+	mu.Lock()
+	reg := registrations
+	pullCount := pulls
+	mu.Unlock()
+	if reg != 1 {
+		t.Fatalf("re-registered %d times on first offline conflict; want 1", reg)
+	}
+	if pullCount != 1 {
+		t.Fatalf("made %d pulls; want 1", pullCount)
+	}
+}
+
+// TestPollAndProcess_OfflineConflictFailedReregisterBacksOff verifies that an
+// offline conflict whose immediate re-registration fails falls back to the
+// eviction backoff (the sleep engages) instead of hammering the register
+// endpoint once per poll tick.
+func TestPollAndProcess_OfflineConflictFailedReregisterBacksOff(t *testing.T) {
+	var mu sync.Mutex
+	registrations := 0
+	pulls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workers/register":
+			mu.Lock()
+			registrations++
+			mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/v1/workers/worker-1/jobs":
+			mu.Lock()
+			pulls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"conflict","message":"Worker is offline; re-register to resume pulling"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	slept := 0
+	orig := pullConflictSleep
+	pullConflictSleep = func(ctx context.Context, w *Worker, d time.Duration) { slept++ }
+	defer func() { pullConflictSleep = orig }()
+
+	w, err := New(Config{ServerURL: srv.URL, WorkerID: "worker-1"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	w.pollAndProcess(context.Background())
+
+	mu.Lock()
+	reg := registrations
+	pullCount := pulls
+	mu.Unlock()
+	if reg != 1 {
+		t.Fatalf("re-registered %d times on first offline conflict; want exactly 1 immediate attempt", reg)
+	}
+	if pullCount != 1 {
+		t.Fatalf("made %d pulls; want 1", pullCount)
+	}
+	if slept != 1 {
+		t.Fatalf("backoff sleep engaged %d times after failed re-registration; want 1", slept)
+	}
+}
+
+// TestPollAndProcess_EvictedConflictBacksOffThenReregisters verifies that an
+// evicted (slow-node) 409 pull conflict backs off instead of re-registering
+// immediately, and only re-registers once the conflict persists past the
+// threshold — re-registering on eviction would clear the flag and flap a slow
+// node back into scheduling.
+func TestPollAndProcess_EvictedConflictBacksOffThenReregisters(t *testing.T) {
+	var mu sync.Mutex
+	registrations := 0
+	pulls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workers/register":
+			mu.Lock()
+			registrations++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"worker_id":"worker-1"}`))
+		case "/api/v1/workers/worker-1/jobs":
+			mu.Lock()
+			pulls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"worker_evicted","message":"Worker is evicted from scheduling"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -134,13 +299,13 @@ func TestPollAndProcess_ConflictBacksOffThenReregisters(t *testing.T) {
 	}
 }
 
-// TestPollAndProcess_ConflictResetsOnSuccess verifies a successful pull resets
-// the conflict counter. It drives the counter to (threshold-1) with consecutive
-// 409s, succeeds once, then issues one more 409 — the "409 → success → 409"
-// shape of the issue's sparse conflicts. That post-success 409 must restart at
-// the initial tier, not cross the threshold: without the reset, it would be the
-// threshold-th conflict and re-register.
-func TestPollAndProcess_ConflictResetsOnSuccess(t *testing.T) {
+// TestPollAndProcess_EvictedConflictResetsOnSuccess verifies a successful pull
+// resets the eviction conflict counter. It drives the counter to (threshold-1)
+// with consecutive evicted 409s, succeeds once, then issues one more — the
+// "409 → success → 409" shape of sparse slow-node conflicts. That post-success
+// 409 must restart at the initial tier, not cross the threshold: without the
+// reset, it would be the threshold-th conflict and re-register.
+func TestPollAndProcess_EvictedConflictResetsOnSuccess(t *testing.T) {
 	var mu sync.Mutex
 	registrations := 0
 	pulls := 0
@@ -162,7 +327,7 @@ func TestPollAndProcess_ConflictResetsOnSuccess(t *testing.T) {
 				return
 			}
 			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"code":"conflict","message":"Worker is offline; re-register to resume pulling"}`))
+			_, _ = w.Write([]byte(`{"code":"worker_evicted","message":"Worker is evicted from scheduling"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -196,5 +361,43 @@ func TestPollAndProcess_ConflictResetsOnSuccess(t *testing.T) {
 	wantPulls := pullConflictReregisterThreshold + 1
 	if pullCount != wantPulls {
 		t.Fatalf("made %d pulls; want %d", pullCount, wantPulls)
+	}
+}
+
+// TestSendHeartbeat_EvictedSkipsReregistration verifies that a heartbeat
+// rejected with worker_evicted does not trigger re-registration: re-registering
+// clears the eviction flag and flaps a slow node back into scheduling, so the
+// heartbeat path must skip it (matching the pull path's backoff).
+func TestSendHeartbeat_EvictedSkipsReregistration(t *testing.T) {
+	var mu sync.Mutex
+	registrations := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/workers/register":
+			mu.Lock()
+			registrations++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"worker_id":"worker-1"}`))
+		case "/api/v1/workers/heartbeat":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"worker_evicted","message":"Worker is evicted from scheduling"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	w, err := New(Config{ServerURL: srv.URL, WorkerID: "worker-1"})
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	w.sendHeartbeat()
+
+	mu.Lock()
+	reg := registrations
+	mu.Unlock()
+	if reg != 0 {
+		t.Fatalf("re-registered %d times on evicted heartbeat; want 0", reg)
 	}
 }
