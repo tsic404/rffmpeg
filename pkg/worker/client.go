@@ -425,8 +425,9 @@ func (c *Client) SendStdoutChunk(jobID string, chunk []byte) error {
 }
 
 // UploadOutput uploads an output file to the server. The body is streamed
-// through a pipe with an exact Content-Length so the whole file is never
-// buffered in memory.
+// through a pipe with an explicit Content-Length (file size plus multipart
+// overhead) so the whole file is never buffered in memory and the server can
+// pre-flight disk space against a known body size.
 func (c *Client) UploadOutput(jobID, filePath string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -434,8 +435,17 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 	}
 	defer file.Close()
 
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
+
+	// Exact multipart body size. Without it the transport sends chunked and the
+	// server sees Content-Length -1, which skips its disk-space pre-flight.
+	contentLength := calculateMultipartSize(writer.Boundary(), fileInfo.Size(), filepath.Base(filePath))
 
 	// Feed the multipart body from a goroutine: io.Pipe is synchronous, so
 	// the writer must run concurrently with the HTTP client's reads.
@@ -461,6 +471,7 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", writer.FormDataContentType())
+	httpReq.ContentLength = contentLength
 	c.setAuthHeader(httpReq)
 	resp, err := c.dataClient.Do(httpReq)
 	if err != nil {
@@ -487,6 +498,38 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 	}
 
 	return nil
+}
+
+// calculateMultipartSize returns the exact byte size of the multipart body
+// UploadOutput streams for a single "file" part with the given boundary, file
+// size, and filename.
+func calculateMultipartSize(boundary string, fileSize int64, filename string) int64 {
+	// Wire layout:
+	// --boundary\r\n
+	// Content-Disposition: form-data; name="file"; filename="..."\r\n
+	// Content-Type: application/octet-stream\r\n
+	// \r\n
+	// [file content]
+	// \r\n--boundary--\r\n
+	preamble := fmt.Sprintf("--%s\r\n", boundary)
+	contentDisposition := fmt.Sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", escapeMultipartQuotes(filename))
+	contentType := "Content-Type: application/octet-stream\r\n"
+	headerEnd := "\r\n"
+	epilogue := fmt.Sprintf("\r\n--%s--\r\n", boundary)
+
+	return int64(len(preamble)+len(contentDisposition)+len(contentType)+len(headerEnd)) +
+		fileSize +
+		int64(len(epilogue))
+}
+
+// escapeMultipartQuotes mirrors mime/multipart's internal escapeQuotes: the
+// stdlib escapes " and \ inside form-data parameter values, so the size must
+// measure the escaped form or a filename containing a quote disagrees with the
+// real body and truncates the request.
+func escapeMultipartQuotes(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "\\\"")
+	return s
 }
 
 // doRequest is a helper for making JSON requests

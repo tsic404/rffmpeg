@@ -299,6 +299,9 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 		))
 		return
 	}
+	// Oversized parts spill to temp files the stdlib keeps for the caller to
+	// read; unlink them when the request finishes so they cannot leak.
+	defer r.MultipartForm.RemoveAll()
 
 	file, _, err := r.FormFile("chunk")
 	if err != nil {
