@@ -54,6 +54,11 @@ type Handler struct {
 	// noWorkerJobTimeout disables the deadline.
 	noWorkerJobTimeout   time.Duration
 	timeoutCheckInterval time.Duration
+	// multipartTmpDir is where multipart upload bodies spill once they exceed
+	// the in-memory parse threshold. Empty means os.TempDir() (the parser's
+	// default); the server sets it to --data-dir/--multipart-tmp-dir so the
+	// pre-flight disk check and the actual spill agree.
+	multipartTmpDir string
 }
 
 // New creates a new Handler
@@ -140,6 +145,12 @@ func (h *Handler) SetHeartbeatTimeout(d time.Duration) {
 // path applies the same fallback when a worker reports MaxConcurrent <= 0.
 func (h *Handler) SetMaxJobsPerWorker(maxJobs int) {
 	h.maxJobsPerWorker = maxJobs
+}
+
+// SetMultipartTmpDir sets the directory multipart upload bodies spill to once
+// they exceed the in-memory parse threshold. Empty falls back to os.TempDir().
+func (h *Handler) SetMultipartTmpDir(dir string) {
+	h.multipartTmpDir = dir
 }
 
 // SetAuthToken sets the auth token for health check reporting
@@ -279,10 +290,11 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	// 32MB in-memory threshold for multipart parsing. Larger parts spill to
 	// temporary files on disk. The old 256MB threshold let a handful of
 	// concurrent uploads pin hundreds of MB of RSS.
+	if !h.ensureMultipartSpace(w, r.ContentLength) {
+		return
+	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
-		))
+		writeMultipartParseError(w, err)
 		return
 	}
 
@@ -937,11 +949,12 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 	// 32MB in-memory threshold, matching Upload: larger parts spill to
 	// temporary files on disk. The old 256MB let concurrent uploads pin
 	// hundreds of MB of RSS.
+	if !h.ensureMultipartSpace(w, r.ContentLength) {
+		return
+	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		log.Printf("UploadJobOutput: failed to parse multipart form for job %s: %v", jobID, err)
-		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
-		))
+		writeMultipartParseError(w, err)
 		return
 	}
 

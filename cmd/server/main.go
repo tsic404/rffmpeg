@@ -73,6 +73,24 @@ func main() {
 		log.Fatalf("Failed to create data directory %s: %v", cfg.DataDir, err)
 	}
 
+	// Multipart upload bodies that exceed the in-memory parse threshold spill
+	// to temporary files. The OS temp dir (/tmp) is often a small tmpfs, so a
+	// large worker output upload can exhaust it and drop an already produced
+	// file. Default the spill dir to the data directory's filesystem unless the
+	// operator overrides it with --multipart-tmp-dir.
+	if cfg.MultipartTmpDir == "" {
+		cfg.MultipartTmpDir = cfg.DataDir
+	}
+	if err := os.MkdirAll(cfg.MultipartTmpDir, 0755); err != nil {
+		log.Fatalf("Failed to create multipart temp directory %s: %v", cfg.MultipartTmpDir, err)
+	}
+	// mime/multipart hardcodes os.CreateTemp("", "multipart-*"), which resolves
+	// through os.TempDir() → $TMPDIR. Point TMPDIR at the spill dir before any
+	// request is served so large bodies never touch the tmpfs.
+	if err := os.Setenv("TMPDIR", cfg.MultipartTmpDir); err != nil {
+		log.Fatalf("Failed to set TMPDIR: %v", err)
+	}
+
 	// Route logging to a file in the data directory in addition to stderr so
 	// that a panic or fatal in any goroutine — whose stack trace the runtime
 	// otherwise writes only to stderr — is captured on disk instead of
@@ -128,6 +146,7 @@ func main() {
 
 	// Create handler
 	h := handlers.New(database, store, cfg.Version, stateTable)
+	h.SetMultipartTmpDir(cfg.MultipartTmpDir)
 
 	// Create chunk upload handler
 	chunkHandler := handlers.NewChunkUploadHandler(database, store, 0) // Uses default chunk size (10MB)
@@ -426,6 +445,7 @@ func parseFlags() *config.Flags {
 
 	flag.StringVar(&flags.Port, "port", "", "Server port (default: 8080)")
 	flag.StringVar(&flags.DataDir, "data-dir", "", "Data directory (default: ./data)")
+	flag.StringVar(&flags.MultipartTmpDir, "multipart-tmp-dir", "", "Directory for multipart upload temp files (default: --data-dir)")
 	flag.StringVar(&flags.Version, "version", "", "Server version")
 	flag.StringVar(&flags.Config, "config", "", "Path to configuration file (JSON)")
 
