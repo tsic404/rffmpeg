@@ -54,6 +54,11 @@ type Handler struct {
 	// noWorkerJobTimeout disables the deadline.
 	noWorkerJobTimeout   time.Duration
 	timeoutCheckInterval time.Duration
+	// multipartTmpDir is the filesystem ensureMultipartSpace pre-flights
+	// against. It does NOT control where the body actually spills — that
+	// follows os.TempDir()/$TMPDIR, which mime/multipart uses directly.
+	// main keeps the two in sync; see SetMultipartTmpDir.
+	multipartTmpDir string
 }
 
 // New creates a new Handler
@@ -140,6 +145,15 @@ func (h *Handler) SetHeartbeatTimeout(d time.Duration) {
 // path applies the same fallback when a worker reports MaxConcurrent <= 0.
 func (h *Handler) SetMaxJobsPerWorker(maxJobs int) {
 	h.maxJobsPerWorker = maxJobs
+}
+
+// SetMultipartTmpDir sets the directory ensureMultipartSpace pre-flights
+// against. It does not change where the body actually spills: mime/multipart
+// hardcodes os.CreateTemp("", ...) → os.TempDir() → $TMPDIR. Callers must set
+// the process TMPDIR to the same path (main does); otherwise the pre-flight
+// and the real spill silently disagree.
+func (h *Handler) SetMultipartTmpDir(dir string) {
+	h.multipartTmpDir = dir
 }
 
 // SetAuthToken sets the auth token for health check reporting
@@ -279,12 +293,17 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	// 32MB in-memory threshold for multipart parsing. Larger parts spill to
 	// temporary files on disk. The old 256MB threshold let a handful of
 	// concurrent uploads pin hundreds of MB of RSS.
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
-		))
+	if !h.ensureMultipartSpace(w, r.ContentLength) {
 		return
 	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		writeMultipartParseError(w, err)
+		return
+	}
+	// Parts above the 32MB threshold spill to temp files the stdlib keeps for
+	// the caller to read; unlink them when the request finishes so a long-lived
+	// server never accumulates leaked spill files in the data dir.
+	defer r.MultipartForm.RemoveAll()
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -937,13 +956,18 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 	// 32MB in-memory threshold, matching Upload: larger parts spill to
 	// temporary files on disk. The old 256MB let concurrent uploads pin
 	// hundreds of MB of RSS.
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		log.Printf("UploadJobOutput: failed to parse multipart form for job %s: %v", jobID, err)
-		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest, "Failed to parse multipart form", err,
-		))
+	if !h.ensureMultipartSpace(w, r.ContentLength) {
 		return
 	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		log.Printf("UploadJobOutput: failed to parse multipart form for job %s: %v", jobID, err)
+		writeMultipartParseError(w, err)
+		return
+	}
+	// Parts above the 32MB threshold spill to temp files the stdlib keeps for
+	// the caller to read; unlink them when the request finishes so a long-lived
+	// server never accumulates leaked spill files in the data dir.
+	defer r.MultipartForm.RemoveAll()
 
 	file, _, err := r.FormFile("file")
 	if err != nil {

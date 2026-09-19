@@ -380,6 +380,44 @@ func TestClient_UploadOutput(t *testing.T) {
 	}
 }
 
+// TestClient_UploadOutputSetsContentLength verifies UploadOutput declares an
+// explicit Content-Length (file size + multipart overhead) instead of falling
+// back to chunked transfer, so the server's disk-space pre-flight sees a known
+// body size for the worker-output path.
+func TestClient_UploadOutputSetsContentLength(t *testing.T) {
+	contentLengthCh := make(chan int64, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		contentLengthCh <- r.ContentLength
+		// Drain fully: a declared length that disagrees with the real bytes
+		// would surface here as an error or a truncated body.
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Errorf("reading body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, "test-worker", "")
+
+	tmpFile, err := os.CreateTemp("", "rffmpeg-cl-test-*.mp4")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write([]byte("transcoded-output-data")); err != nil {
+		t.Fatalf("Failed to write test data: %v", err)
+	}
+	tmpFile.Close()
+
+	if err := client.UploadOutput("test-job-id", tmpFile.Name()); err != nil {
+		t.Fatalf("UploadOutput failed: %v", err)
+	}
+
+	if got := <-contentLengthCh; got <= 0 {
+		t.Errorf("expected explicit Content-Length, got %d", got)
+	}
+}
+
 // TestClient_UploadOutputRecordsErrorBody verifies that a non-200 response's
 // body is surfaced in the returned error so upload failures are diagnosable
 // A JSON protocol error envelope is decoded to its Message field;

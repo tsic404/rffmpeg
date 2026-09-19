@@ -55,6 +55,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /upload/init:
     post:
@@ -404,6 +406,8 @@ paths:
                 $ref: '#/components/schemas/JobOutputUploadResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+        '507':
+          $ref: '#/components/responses/InsufficientStorage'
 
   /output/{fileId}:
     get:
@@ -1275,7 +1279,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     InsufficientStorage:
-      description: Insufficient storage to save the chunk (disk full)
+      description: Insufficient disk space to complete the upload (disk full)
       content:
         application/json:
           schema:

@@ -18,7 +18,12 @@ type ServerConfig struct {
 	// Server settings
 	Port    string `json:"port" yaml:"port"`
 	DataDir string `json:"data_dir" yaml:"data_dir"`
-	Version string `json:"version" yaml:"version"`
+	// MultipartTmpDir is where multipart upload bodies spill once they exceed
+	// the in-memory parse threshold. Empty defers to the data directory's
+	// filesystem at startup; the OS temp dir (/tmp) is often a small tmpfs
+	// that drops large worker outputs.
+	MultipartTmpDir string `json:"multipart_tmp_dir" yaml:"multipart_tmp_dir"`
+	Version         string `json:"version" yaml:"version"`
 
 	// Authentication settings
 	AuthToken string `json:"auth_token" yaml:"auth_token"` // PSK token for authentication
@@ -64,6 +69,7 @@ type ServerConfig struct {
 type Flags struct {
 	Port                      string
 	DataDir                   string
+	MultipartTmpDir           string
 	Version                   string
 	Config                    string
 	AuthToken                 string
@@ -177,6 +183,9 @@ func LoadFromEnv() *ServerConfig {
 	if dataDir := os.Getenv("DATA_DIR"); dataDir != "" {
 		config.DataDir = dataDir
 	}
+	if multipartTmpDir := os.Getenv("MULTIPART_TMP_DIR"); multipartTmpDir != "" {
+		config.MultipartTmpDir = multipartTmpDir
+	}
 	if version := os.Getenv("VERSION"); version != "" {
 		config.Version = version
 	}
@@ -281,6 +290,9 @@ func (c *ServerConfig) Merge(flags *Flags) {
 	}
 	if flags.DataDir != "" {
 		c.DataDir = flags.DataDir
+	}
+	if flags.MultipartTmpDir != "" {
+		c.MultipartTmpDir = flags.MultipartTmpDir
 	}
 	if flags.Version != "" {
 		c.Version = flags.Version
@@ -390,6 +402,13 @@ func (c *ServerConfig) ResolvePaths(baseDir string) error {
 	c.DataDir, err = resolvePath(c.DataDir, baseDir)
 	if err != nil {
 		return err
+	}
+
+	if c.MultipartTmpDir != "" {
+		c.MultipartTmpDir, err = resolvePath(c.MultipartTmpDir, baseDir)
+		if err != nil {
+			return err
+		}
 	}
 
 	if c.TLS != nil {
