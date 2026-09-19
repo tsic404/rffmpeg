@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -129,12 +131,41 @@ func main() {
 	log.Println("Worker stopped")
 }
 
+// cacheEnabledValue adapts a *bool to flag.Value so -cache-enabled accepts the
+// same boolean aliases as RFFMPEG_CACHE_ENABLED (workerconfig.ParseBool).
+type cacheEnabledValue struct {
+	target *bool
+}
+
+// String returns the flag's value, used by flag for --help defaults.
+func (v cacheEnabledValue) String() string {
+	if v.target == nil {
+		return "false"
+	}
+	return strconv.FormatBool(*v.target)
+}
+
+// Set parses s via workerconfig.ParseBool so the CLI and env alias sets match.
+func (v cacheEnabledValue) Set(s string) error {
+	parsed, ok := workerconfig.ParseBool(s)
+	if !ok {
+		return errors.New("expected 1/true/yes/on or 0/false/no/off")
+	}
+	*v.target = parsed
+	return nil
+}
+
+// IsBoolFlag makes a bare -cache-enabled mean -cache-enabled=true.
+func (v cacheEnabledValue) IsBoolFlag() bool { return true }
+
 // registerCacheFlags registers the cache-related CLI flags on fs and returns
 // pointers to their values. Defaults derive from workerconfig.DefaultConfig so
 // --help cannot drift from the effective config defaults.
 func registerCacheFlags(fs *flag.FlagSet) (cacheEnabled *bool, cacheTTL *time.Duration, cacheMaxSizeMB *int64) {
 	defaults := workerconfig.DefaultConfig()
-	cacheEnabled = fs.Bool("cache-enabled", defaults.CacheEnabled, "Enable job output cache")
+	cacheEnabled = new(bool)
+	*cacheEnabled = defaults.CacheEnabled
+	fs.Var(cacheEnabledValue{cacheEnabled}, "cache-enabled", "Enable job output cache")
 	cacheTTL = fs.Duration("cache-ttl", defaults.CacheTTL.ToDuration(), "Cache entry TTL")
 	cacheMaxSizeMB = fs.Int64("cache-max-size-mb", defaults.CacheMaxSizeMB, "Cache max size in MiB")
 	return cacheEnabled, cacheTTL, cacheMaxSizeMB

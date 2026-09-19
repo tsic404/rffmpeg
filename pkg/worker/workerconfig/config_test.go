@@ -470,7 +470,7 @@ func TestLoadFromEnv_AutoDetectSymmetric(t *testing.T) {
 
 func TestLoadFromEnv_BoolSymmetric(t *testing.T) {
 	// the three legacy boolean env vars now follow the same
-	// symmetric parseBoolEnv contract as the auto-detect flags — only a
+	// symmetric ParseBool contract as the auto-detect flags — only a
 	// recognized boolean counts as an explicit set (written to setKeys).
 	// Unrecognized values neither flip the flag nor override a file value,
 	// so each field keeps its default.
