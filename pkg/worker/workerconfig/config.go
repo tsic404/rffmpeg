@@ -4,6 +4,7 @@ package workerconfig
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -269,6 +270,19 @@ func (c *Config) Validate() error {
 	}
 	if !c.AutoDetectGPU && c.ManualGPUModel == "" {
 		return fmt.Errorf("manual_gpu_model must be non-empty when auto_detect_gpu is disabled")
+	}
+	// Cache knobs must not silently disable caching: a negative TTL makes every
+	// entry expire immediately, and a negative (or int64-overflowing) max size
+	// makes LRU evict everything unconditionally. Zero stays valid — NewCache
+	// normalizes it to the default (24h / 10 GiB).
+	if c.CacheTTL < 0 {
+		return fmt.Errorf("cache_ttl must not be negative")
+	}
+	if c.CacheMaxSizeMB < 0 {
+		return fmt.Errorf("cache_max_size_mb must not be negative")
+	}
+	if c.CacheMaxSizeMB > math.MaxInt64/(1024*1024) {
+		return fmt.Errorf("cache_max_size_mb must not exceed %d (would overflow byte size)", math.MaxInt64/(1024*1024))
 	}
 	return nil
 }

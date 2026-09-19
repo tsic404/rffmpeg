@@ -230,11 +230,17 @@ Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提
 
 #### 命令行参数
 
-Worker 仅定义以下 3 个 flag（见 `cmd/worker/main.go:25`）：
+Worker 仅定义以下 6 个 flag（见 `cmd/worker/main.go`）：
 
 ```bash
 ./bin/worker --help
 Usage of ./bin/worker:
+  -cache-enabled
+    Enable job output cache (default true)
+  -cache-max-size-mb int
+    Cache max size in MiB (default 10240)
+  -cache-ttl duration
+    Cache entry TTL (default 24h0m0s)
   -config string
     Path to worker config file (JSON)
   -server-url string
@@ -242,6 +248,8 @@ Usage of ./bin/worker:
   -token string
     Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
 ```
+
+缓存 flag 语义与对应环境变量一致（`RFFMPEG_CACHE_ENABLED`/`RFFMPEG_CACHE_TTL`/`RFFMPEG_CACHE_MAX_SIZE_MB`），命令行优先级最高：例如 `./bin/worker -cache-enabled=false` 可直接关闭缓存，无需编辑配置文件或设置环境变量。
 
 #### 配置文件 (JSON)
 

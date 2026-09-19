@@ -23,6 +23,7 @@ func main() {
 	configPath := flag.String("config", getEnv("RFFMPEG_CONFIG", defaultConfigPath), "Path to worker config file (JSON)")
 	token := flag.String("token", "", "Worker authentication token (overrides config file and RFFMPEG_TOKEN env)")
 	serverURL := flag.String("server-url", "", "Server URL (overrides config file and RFFMPEG_SERVER_URL env)")
+	cacheEnabled, cacheTTL, cacheMaxSizeMB := registerCacheFlags(flag.CommandLine)
 	flag.Parse()
 
 	// Load configuration. On file-load failure, fall back to defaults but
@@ -51,6 +52,7 @@ func main() {
 	if *serverURL != "" {
 		cfg.ServerURL = *serverURL
 	}
+	applyCacheFlagOverrides(flag.CommandLine, cacheEnabled, cacheTTL, cacheMaxSizeMB, cfg)
 	// Validate configuration before building the worker.
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
@@ -125,6 +127,34 @@ func main() {
 	w.Start(ctx)
 
 	log.Println("Worker stopped")
+}
+
+// registerCacheFlags registers the cache-related CLI flags on fs and returns
+// pointers to their values. Defaults derive from workerconfig.DefaultConfig so
+// --help cannot drift from the effective config defaults.
+func registerCacheFlags(fs *flag.FlagSet) (cacheEnabled *bool, cacheTTL *time.Duration, cacheMaxSizeMB *int64) {
+	defaults := workerconfig.DefaultConfig()
+	cacheEnabled = fs.Bool("cache-enabled", defaults.CacheEnabled, "Enable job output cache")
+	cacheTTL = fs.Duration("cache-ttl", defaults.CacheTTL.ToDuration(), "Cache entry TTL")
+	cacheMaxSizeMB = fs.Int64("cache-max-size-mb", defaults.CacheMaxSizeMB, "Cache max size in MiB")
+	return cacheEnabled, cacheTTL, cacheMaxSizeMB
+}
+
+// applyCacheFlagOverrides maps the cache CLI flags onto cfg for every flag the
+// operator explicitly set. fs.Visit reports only set flags — not defaults — so
+// -cache-enabled=false stays expressible while an absent flag never clobbers a
+// value loaded from the config file or environment.
+func applyCacheFlagOverrides(fs *flag.FlagSet, cacheEnabled *bool, cacheTTL *time.Duration, cacheMaxSizeMB *int64, cfg *workerconfig.Config) {
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "cache-enabled":
+			cfg.CacheEnabled = *cacheEnabled
+		case "cache-ttl":
+			cfg.CacheTTL = workerconfig.Duration(*cacheTTL)
+		case "cache-max-size-mb":
+			cfg.CacheMaxSizeMB = *cacheMaxSizeMB
+		}
+	})
 }
 
 // detectCapabilities performs capability detection based on configuration.
