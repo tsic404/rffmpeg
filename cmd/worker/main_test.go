@@ -77,6 +77,35 @@ func TestCacheFlagBareBoolEnables(t *testing.T) {
 	}
 }
 
+func TestCacheEnabledFlagAcceptsParseBoolAliases(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{"yes", true},
+		{"on", true},
+		{"no", false},
+		{"off", false},
+		{"TRUE", true},
+		{"0", false},
+		{"1", true},
+	}
+	for _, tt := range tests {
+		_, _, _, cfg := parseAndApply(t, "-cache-enabled="+tt.value)
+		if cfg.CacheEnabled != tt.want {
+			t.Errorf("-cache-enabled=%s: CacheEnabled = %v, want %v", tt.value, cfg.CacheEnabled, tt.want)
+		}
+	}
+}
+
+func TestCacheEnabledFlagRejectsUnrecognizedValue(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	registerCacheFlags(fs)
+	if err := fs.Parse([]string{"-cache-enabled=maybe"}); err == nil {
+		t.Fatal("parse -cache-enabled=maybe: want error, got nil")
+	}
+}
+
 func TestCacheFlagPartialOverride(t *testing.T) {
 	cfg := &workerconfig.Config{
 		CacheEnabled:   true,

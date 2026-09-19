@@ -302,10 +302,12 @@ func LoadFromFile(path string) (*Config, error) {
 	return config, nil
 }
 
-// parseBoolEnv parses a boolean environment variable. It accepts 1/true/yes/on
-// and 0/false/no/off (case-insensitive). The second return value reports
-// whether the value was a recognized boolean.
-func parseBoolEnv(value string) (bool, bool) {
+// ParseBool parses a boolean string. It accepts 1/true/yes/on and
+// 0/false/no/off (case-insensitive). The second return value reports whether
+// the value was a recognized boolean. It is the single source of truth for the
+// RFFMPEG_* env vars and the -cache-enabled CLI flag, so both paths accept the
+// same alias set.
+func ParseBool(value string) (bool, bool) {
 	switch strings.ToLower(value) {
 	case "1", "true", "yes", "on":
 		return true, true
@@ -372,13 +374,13 @@ func LoadFromEnv() *Config {
 		}
 	}
 	if v := os.Getenv(envAutoDetectGPU); v != "" {
-		if parsed, ok := parseBoolEnv(v); ok {
+		if parsed, ok := ParseBool(v); ok {
 			config.AutoDetectGPU = parsed
 			config.setKeys[envAutoDetectGPU] = true
 		}
 	}
 	if v := os.Getenv(envAutoDetectCodecs); v != "" {
-		if parsed, ok := parseBoolEnv(v); ok {
+		if parsed, ok := ParseBool(v); ok {
 			config.AutoDetectCodecs = parsed
 			config.setKeys[envAutoDetectCodecs] = true
 		}
@@ -389,7 +391,7 @@ func LoadFromEnv() *Config {
 		// Only a recognized boolean counts as an explicit set:
 		// "false"/"0"/"no"/"off" disable, "true"/"1"/"yes"/"on" keep the
 		// default true, and any other value leaves the default untouched.
-		if parsed, ok := parseBoolEnv(v); ok {
+		if parsed, ok := ParseBool(v); ok {
 			config.CacheEnabled = parsed
 			config.setKeys[envCacheEnabled] = true
 		}
@@ -431,7 +433,7 @@ func LoadFromEnv() *Config {
 		}
 	}
 	if v := os.Getenv(envRetryExponentialBackoff); v != "" {
-		if parsed, ok := parseBoolEnv(v); ok {
+		if parsed, ok := ParseBool(v); ok {
 			config.RetryUseExponentialBackoff = parsed
 			config.setKeys[envRetryExponentialBackoff] = true
 		}
@@ -443,7 +445,7 @@ func LoadFromEnv() *Config {
 		}
 	}
 	if v := os.Getenv(envRetrySoftwareFallback); v != "" {
-		if parsed, ok := parseBoolEnv(v); ok {
+		if parsed, ok := ParseBool(v); ok {
 			config.RetryEnableSoftwareFallback = parsed
 			config.setKeys[envRetrySoftwareFallback] = true
 		}
