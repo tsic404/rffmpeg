@@ -36,12 +36,22 @@ func IsConflict(err error) bool { return errors.Is(err, ErrJobConflict) }
 // ErrPullConflict is returned when the server rejects a job pull with HTTP 409
 // Conflict: the worker is offline (its jobs were already migrated) or evicted
 // from scheduling (slow-node detection). Both are transient, recoverable
-// conditions, so the poll loop backs off instead of re-registering on every
-// tick.
+// conditions.
 var ErrPullConflict = errors.New("worker offline or evicted from scheduling")
 
 // IsPullConflict reports whether err is a 409 Conflict from a job pull.
 func IsPullConflict(err error) bool { return errors.Is(err, ErrPullConflict) }
+
+// ErrWorkerEvicted marks the evicted (slow-node) case reported by the server
+// via the pull or heartbeat endpoints. An evicted worker must not re-register:
+// re-registration clears the eviction flag and flaps a slow node back into
+// scheduling.
+var ErrWorkerEvicted = errors.New("worker evicted from scheduling")
+
+// IsWorkerEvicted reports whether err indicates slow-node eviction (as opposed
+// to offline). Pull and heartbeat errors both surface this via the server's
+// worker_evicted code.
+func IsWorkerEvicted(err error) bool { return errors.Is(err, ErrWorkerEvicted) }
 
 // MaxRemoteInputBytes caps the size of files downloaded from remote URLs via
 // DownloadInput. Server-side file downloads are already bounded by the
@@ -202,7 +212,23 @@ func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusConflict {
-			return nil, fmt.Errorf("%w: pull jobs failed with status: %d", ErrPullConflict, resp.StatusCode)
+			// A 409 conflates two recoverable states: offline (server restart —
+			// recover by re-registering) and evicted (slow node — back off). The
+			// response code distinguishes them; an undecodable body or an unknown
+			// code is treated as evicted (conservative backoff) rather than
+			// offline, so noise never clears an eviction flag via re-registration.
+			var errResp protocol.ErrorResponse
+			if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+				return nil, fmt.Errorf("%w: %w: pull jobs failed with status: %d (undecodable body)", ErrPullConflict, ErrWorkerEvicted, resp.StatusCode)
+			}
+			switch errResp.Code {
+			case protocol.ErrCodeWorkerEvicted:
+				return nil, fmt.Errorf("%w: %w: pull jobs failed with status: %d", ErrPullConflict, ErrWorkerEvicted, resp.StatusCode)
+			case protocol.ErrCodeConflict:
+				return nil, fmt.Errorf("%w: pull jobs failed with status: %d", ErrPullConflict, resp.StatusCode)
+			default:
+				return nil, fmt.Errorf("%w: %w: pull jobs failed with status: %d (unknown code %q)", ErrPullConflict, ErrWorkerEvicted, resp.StatusCode, errResp.Code)
+			}
 		}
 		return nil, fmt.Errorf("pull jobs failed with status: %d", resp.StatusCode)
 	}
@@ -495,6 +521,9 @@ func (c *Client) doRequest(method, path string, body interface{}) (*http.Respons
 		defer resp.Body.Close()
 		var errResp protocol.ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil {
+			if errResp.Code == protocol.ErrCodeWorkerEvicted {
+				return nil, fmt.Errorf("%w: %s", ErrWorkerEvicted, errResp.Message)
+			}
 			return nil, fmt.Errorf("%s: %s", errResp.Code, errResp.Message)
 		}
 		return nil, fmt.Errorf("request failed with status: %d", resp.StatusCode)

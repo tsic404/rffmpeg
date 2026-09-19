@@ -32,6 +32,7 @@ const (
 	ErrCodeUnauthorized        ErrorCode = "unauthorized"
 	ErrCodeNotFound            ErrorCode = "not_found"
 	ErrCodeConflict            ErrorCode = "conflict"
+	ErrCodeWorkerEvicted       ErrorCode = "worker_evicted"
 	ErrCodeInternalError       ErrorCode = "internal_error"
 	ErrCodeWorkerUnavailable   ErrorCode = "worker_unavailable"
 	ErrCodeJobFailed           ErrorCode = "job_failed"

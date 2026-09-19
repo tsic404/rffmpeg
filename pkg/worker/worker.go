@@ -53,9 +53,10 @@ type Worker struct {
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
 	lastHeartbeatTime time.Time
-	// pullConflictCount counts consecutive 409 pull conflicts (worker offline
-	// or evicted). It drives the poll-loop's exponential backoff and bounds
-	// when re-registration is attempted. Only the poll-loop goroutine reads or
+	// pullConflictCount counts consecutive pull conflicts that require the
+	// eviction backoff (evicted slow nodes, or offline workers whose immediate
+	// re-registration failed). It drives the exponential backoff and bounds
+	// when re-registration is retried. Only the poll-loop goroutine reads or
 	// writes it.
 	pullConflictCount  int
 	jobsCompleted      int
@@ -412,10 +413,27 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 	if err != nil {
 		// A 409 Conflict means the worker is offline (its jobs were already
 		// migrated) or evicted from scheduling — a transient, recoverable
-		// state, not a server fault. Back off exponentially instead of
-		// re-registering on every 1s poll tick; the flapping re-registrations
-		// left a transient worker_unavailable window for CLI submissions.
+		// state, not a server fault. Offline is server-restart recovery: the
+		// worker re-registers immediately so it re-enters the pool on the
+		// next tick instead of waiting out the 30s heartbeat clock (that gap
+		// left a transient worker_unavailable window for CLI submissions).
+		// Evicted is slow-node detection: re-registering would clear the
+		// eviction flag and flap the worker back into scheduling, so the
+		// exponential backoff stays.
 		if IsPullConflict(err) {
+			if IsWorkerEvicted(err) {
+				w.backoffPullConflict(ctx, err)
+				return
+			}
+			// Try one immediate re-registration. If it fails (server still
+			// down or restarting), fall through to the eviction backoff so a
+			// persistent failure doesn't hammer the register endpoint once per
+			// poll tick; the backoff re-registers again once the conflict
+			// persists past the threshold.
+			if w.reregister() {
+				w.pullConflictCount = 0
+				return
+			}
 			w.backoffPullConflict(ctx, err)
 			return
 		}
@@ -455,11 +473,10 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 	}
 }
 
-// Pull-conflict backoff schedule: a 409 on GET /workers/{id}/jobs means the
-// worker is offline (its jobs were already migrated) or evicted from
-// scheduling. Both are transient and recoverable without an immediate
-// re-registration, so the poll loop retries with exponential backoff and only
-// re-registers once the conflict persists.
+// Pull-conflict backoff schedule: the poll loop backs off on pull conflicts
+// that must not re-register immediately — evicted slow nodes, or offline
+// workers whose immediate re-registration failed. It retries with exponential
+// backoff and only re-registers once the conflict persists past the threshold.
 const (
 	pullConflictInitialDelay = 1 * time.Second
 	pullConflictMaxDelay     = 30 * time.Second
@@ -482,11 +499,12 @@ var pullConflictSleep = func(ctx context.Context, w *Worker, d time.Duration) {
 	}
 }
 
-// backoffPullConflict handles a 409 pull conflict (worker offline or evicted).
-// It backs off exponentially for the first (threshold-1) consecutive conflicts,
-// then re-registers once on the threshold-th. A successful pull resets the
-// count in pollAndProcess, so sparse conflicts never accumulate into a
-// re-registration.
+// backoffPullConflict handles a pull conflict that must back off: an evicted
+// (slow-node) worker, or an offline worker whose immediate re-registration
+// failed. It backs off exponentially for the first (threshold-1) consecutive
+// conflicts, then re-registers once on the threshold-th. A successful pull
+// resets the count in pollAndProcess, so sparse conflicts never accumulate
+// into a re-registration.
 func (w *Worker) backoffPullConflict(ctx context.Context, err error) {
 	w.pullConflictCount++
 	if w.pullConflictCount >= pullConflictReregisterThreshold {
@@ -496,7 +514,7 @@ func (w *Worker) backoffPullConflict(ctx context.Context, err error) {
 		return
 	}
 	delay := pullConflictBackoff(w.pullConflictCount)
-	log.Printf("Pull jobs conflict (worker offline or evicted): %v; retrying in %s", err, delay)
+	log.Printf("Pull jobs conflict: %v; retrying in %s", err, delay)
 	pullConflictSleep(ctx, w, delay)
 }
 
@@ -1552,6 +1570,12 @@ func (w *Worker) sendHeartbeat() {
 	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, throughputFPS, completedJobs, gpuMetrics)
 	if err != nil {
 		log.Printf("Failed to send heartbeat: %v", err)
+		// An evicted worker must not re-register: re-registration clears the
+		// eviction flag and flaps a slow node back into scheduling. Other
+		// failures (server restart, network) trigger re-registration.
+		if IsWorkerEvicted(err) {
+			return
+		}
 		// Attempt re-registration if server may have restarted
 		w.reregister()
 		return
