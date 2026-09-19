@@ -699,6 +699,14 @@ Content-Type: application/json
 
 集群内完全没有任何 Worker、或 Worker 持有该编码器但心跳已过期时，仍走上面的 503 `worker_unavailable` 快速失败（不落库，TSI-2419）。
 
+### 失败类别（failure_type）
+
+任务失败或超时后，`failure_type` 字段给出机器可读的失败类别，取值见 `api/openapi.yaml`（`INPUT_UNREACHABLE`、`ENCODER_UNSUPPORTED`、`ENCODER_UNAVAILABLE`、`DISK_FULL`、`TIMEOUT`、`WORKER_CRASH`、`FFMPEG_ERROR`、`NO_WORKER_AVAILABLE`、`INFRA`）。其中 `INFRA` 与 `ENCODER_UNSUPPORTED` 两个类别**无法通过 CLI 端到端触发**，仅由单元测试覆盖（`pkg/worker/failure_classify_test.go` 等）；全量回归验收不应将二者的「CLI 不可达」判定为缺陷。
+
+- **`INFRA`**：worker 侧 ffmpeg 执行之外的基建故障，由 `reportInfraFailure` 直接写入 `INFRA` 桶。`pkg/worker/worker.go` 中共十余处写点，覆盖作业目录创建/清理、server 通信（`running` 状态更新、stdout 流式回传）、输出上传、探测通道（ffprobe 失败、结果编组/写回/上传）等；上传输入文件（server file ID）经 worker↔server 通道取回失败也经 `reportInputDownloadFailure` 归入 `INFRA`（远程 URL 输入取回失败则归 `INPUT_UNREACHABLE`）。这些故障由运行期环境条件驱动（worker temp 目录、worker↔server 通道、磁盘、探测通道），与用户提交的 ffmpeg 参数无关，因此无法由一次正常的 CLI 提交确定性地触发，端到端回归中不可达，仅能通过故障注入（如作业级 temp 目录覆写）稳定复现。
+
+- **`ENCODER_UNSUPPORTED`**：需要 ffmpeg 输出 `Unknown encoder` / `No such encoder` 等才能命中 `isEncoderUnsupported` 的 13 个 pattern。但完全未知的编码器（拼写错误 / 不存在）在提交时即被服务端落库为 `ENCODER_UNAVAILABLE`（见上文「错误响应」），作业不会到达 worker、更不会执行 ffmpeg；`h264_v4l2m2m` 这类「已列出但设备缺失」的编码器会走 worker 多阶段重试 + 软编兜底，ffmpeg 实测 stderr 为 `Could not find a valid device` / `can't configure encoder`，不匹配上述任何 pattern，落入兜底分支归类为 `FFMPEG_ERROR`（实际归类随 FFmpeg 版本与 stderr 输出而异）。
+
 ### 输出下载
 
 ```
