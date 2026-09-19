@@ -400,6 +400,7 @@ func run() (code int) {
 	// Override config with command-line flags
 	if opts.ServerURL != "" {
 		cfg.ServerURL = opts.ServerURL
+		cfg.ServerURLSource = config.ServerURLSourceFlag
 	}
 	if opts.Token != "" {
 		cfg.Token = opts.Token
@@ -486,7 +487,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "rffmpeg %s - Remote FFmpeg Client\n", version)
-		fmt.Fprintf(os.Stderr, "Server: %s\n", cfg.ServerURL)
+		fmt.Fprintf(os.Stderr, "Server: %s (%s)\n", cfg.ServerURL, cfg.ServerURLSource)
 		fmt.Fprintf(os.Stderr, "Input files: %v\n", result.InputFiles)
 		fmt.Fprintf(os.Stderr, "Output file: %s\n", result.OutputFile)
 		if sharedFS {

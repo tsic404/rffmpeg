@@ -20,6 +20,18 @@ const (
 	DefaultPollTimeout = 10 * time.Minute
 )
 
+// ServerURLSource identifies which configuration level supplied the effective
+// server URL. The CLI banner prints it alongside the URL so operators can tell
+// apart a URL injected by RFFMPEG_SERVER_URL from one passed via --server.
+type ServerURLSource string
+
+const (
+	ServerURLSourceDefault ServerURLSource = "default"
+	ServerURLSourceConfig  ServerURLSource = "config file"
+	ServerURLSourceEnv     ServerURLSource = "env"
+	ServerURLSourceFlag    ServerURLSource = "flag"
+)
+
 // Duration is a time.Duration that unmarshals from either a JSON string
 // ("30s", "5m", "2h") or a numeric nanosecond value. It lets rffmpeg.json set
 // poll_timeout as a human-readable duration; time.Duration alone cannot parse
@@ -51,8 +63,11 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 // Config holds CLI configuration
 type Config struct {
 	ServerURL string `json:"server_url"`
-	Token     string `json:"token,omitempty"`
-	SharedFS  bool   `json:"shared_fs,omitempty"` // Shared filesystem mode: skip upload/download
+	// ServerURLSource records which level set ServerURL (default/config file/
+	// env); the CLI sets ServerURLSourceFlag when --server overrides it.
+	ServerURLSource ServerURLSource `json:"-"`
+	Token           string          `json:"token,omitempty"`
+	SharedFS        bool            `json:"shared_fs,omitempty"` // Shared filesystem mode: skip upload/download
 	// MaxRetries bounds the CLI's WS/HTTP retry loops (RFFMPEG_MAX_RETRIES).
 	// nil means "unset" (fall back to client.DefaultMaxRetries); a non-nil 0
 	// means "no retries" — fail fast instead of silently falling back.
@@ -69,7 +84,8 @@ type Config struct {
 // Search order: ./rffmpeg.json, ~/.rffmpeg.json, /etc/rffmpeg.json
 func Load() (*Config, error) {
 	cfg := &Config{
-		ServerURL: DefaultServerURL,
+		ServerURL:       DefaultServerURL,
+		ServerURLSource: ServerURLSourceDefault,
 	}
 
 	// Config file locations in priority order
@@ -82,6 +98,15 @@ func Load() (*Config, error) {
 		if data, err := os.ReadFile(path); err == nil {
 			if err := json.Unmarshal(data, cfg); err != nil {
 				return nil, err
+			}
+			// Record the source by key presence, not value: an explicit
+			// "server_url": "" (or null) overwrites the default with an empty
+			// URL and must still read as "config file", never "default".
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(data, &raw); err == nil {
+				if _, ok := raw["server_url"]; ok {
+					cfg.ServerURLSource = ServerURLSourceConfig
+				}
 			}
 			break
 		}
@@ -100,6 +125,7 @@ func Load() (*Config, error) {
 	// Environment variables override config file
 	if url := os.Getenv("RFFMPEG_SERVER_URL"); url != "" {
 		cfg.ServerURL = url
+		cfg.ServerURLSource = ServerURLSourceEnv
 	}
 	if token := os.Getenv("RFFMPEG_TOKEN"); token != "" {
 		cfg.Token = token
