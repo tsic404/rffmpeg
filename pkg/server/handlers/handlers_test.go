@@ -2375,7 +2375,7 @@ func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 		t.Errorf("Expected error code 'worker_unavailable', got '%s'", errResp.Code)
 	}
 
-	if errResp.Message != "No worker available. Please ensure at least one worker is registered and online." {
+	if errResp.Message != "No workers available. Please ensure at least one worker is registered and online." {
 		t.Errorf("Expected guidance message, got %q", errResp.Message)
 	}
 }

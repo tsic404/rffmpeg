@@ -508,7 +508,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 				// encoder-specific copy reserved for encoder_match_failed.
 				writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
 					protocol.ErrCodeWorkerUnavailable,
-					"No worker available. Please ensure at least one worker is registered and online.",
+					"No workers available. Please ensure at least one worker is registered and online.",
 					nil,
 				))
 				return
@@ -557,7 +557,7 @@ jobCreate:
 	} else if len(liveWorkers) == 0 {
 		writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
 			protocol.ErrCodeWorkerUnavailable,
-			"No worker available. Please ensure at least one worker is registered and online.",
+			"No workers available. Please ensure at least one worker is registered and online.",
 			nil,
 		))
 		return
@@ -1365,7 +1365,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	if len(liveWorkers) == 0 {
 		writeError(w, http.StatusServiceUnavailable, protocol.NewProtocolError(
 			protocol.ErrCodeWorkerUnavailable,
-			"No worker available. Please ensure at least one worker is registered and online.",
+			"No workers available. Please ensure at least one worker is registered and online.",
 			nil,
 		))
 		return
