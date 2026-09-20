@@ -86,6 +86,31 @@ func TestRun_NoArgsReturnsError(t *testing.T) {
 	}
 }
 
+// TestRun_HealthCheckFailurePrintsBanner pins the fix: when the server health
+// check fails (here, a malformed server URL with no scheme), the identity
+// banner must still print which URL and configuration source were used, so the
+// operator can tell where the bad URL came from instead of a bare
+// "unsupported protocol scheme" error.
+func TestRun_HealthCheckFailurePrintsBanner(t *testing.T) {
+	orig := os.Args
+	defer func() { os.Args = orig }()
+	os.Args = []string{"rffmpeg", "--server", "bad-scheme", "-i", "in.mp4", "out.mp4"}
+
+	code := ExitSuccess
+	stderr := captureStderr(func() {
+		code = run()
+	})
+	if code != ExitError {
+		t.Errorf("run() with malformed server URL = %d, want %d", code, ExitError)
+	}
+	if !strings.Contains(stderr, "Server: bad-scheme (flag)") {
+		t.Errorf("run() stderr = %q, want banner Server line with source", stderr)
+	}
+	if !strings.Contains(stderr, "server health check failed") {
+		t.Errorf("run() stderr = %q, want health check failure", stderr)
+	}
+}
+
 // TestRejectOverwriteIfNeeded pins the CLI download guard: in the
 // default upload/download mode the CLI is the sole writer of the user's output
 // file, so a pre-existing file must not be silently truncated.
