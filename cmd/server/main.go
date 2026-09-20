@@ -73,6 +73,10 @@ func main() {
 		log.Fatalf("Failed to create data directory %s: %v", cfg.DataDir, err)
 	}
 
+	// Warn at startup when the data directory's filesystem is nearly full so a
+	// large upload does not later fail with a swallowed ENOSPC.
+	warnLowDataDirSpace(cfg.DataDir)
+
 	// Multipart upload bodies that exceed the in-memory parse threshold spill
 	// to temporary files. The OS temp dir (/tmp) is often a small tmpfs, so a
 	// large worker output upload can exhaust it and drop an already produced
@@ -416,6 +420,28 @@ func main() {
 	}
 
 	log.Println("Server stopped")
+}
+
+// minDataDirFreeBytes is the free-space floor the data directory's filesystem
+// should hold at startup. Below it, chunk assembly and input/output blob
+// storage are one large upload away from ENOSPC, so the operator gets a
+// prominent warning instead of a silent 500 later.
+const minDataDirFreeBytes = 2 << 30 // 2 GiB
+
+// warnLowDataDirSpace logs a prominent warning when the filesystem holding the
+// data directory has less free space than minDataDirFreeBytes. It is a
+// best-effort startup snapshot, not a hard gate: a statfs quirk or an unusual
+// filesystem must not prevent startup, so a lookup failure only logs a warning.
+func warnLowDataDirSpace(dataDir string) {
+	free, err := handlers.FreeSpaceBytes(dataDir)
+	if err != nil {
+		log.Printf("Warning: cannot determine free space for data-dir %s: %v", dataDir, err)
+		return
+	}
+	if free < minDataDirFreeBytes {
+		log.Printf("WARNING: data-dir %s has only %.1f GiB free (below %.1f GiB); large uploads may fail with ENOSPC.",
+			dataDir, float64(free)/(1<<30), float64(minDataDirFreeBytes)/(1<<30))
+	}
 }
 
 // setupLogFile redirects the standard logger to write to both stderr and a

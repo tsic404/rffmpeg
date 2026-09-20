@@ -212,6 +212,18 @@ func chunkSaveErrorStatus(err error) (int, protocol.ErrorCode, string) {
 	return http.StatusInternalServerError, protocol.ErrCodeUploadFailed, "Failed to save chunk"
 }
 
+// assembleErrorStatus classifies an AssembleChunks failure for the HTTP
+// response. A disk-full write (ENOSPC) is a client-actionable capacity
+// failure: it is reported as 507 with a distinct error code and a message
+// naming the data directory so the CLI can print an actionable hint. Every
+// other error stays a generic 500 whose message preserves the wrapped cause.
+func assembleErrorStatus(err error) (int, protocol.ErrorCode, string) {
+	if errors.Is(err, syscall.ENOSPC) {
+		return http.StatusInsufficientStorage, protocol.ErrCodeInsufficientStorage, "Insufficient storage: no space left on device (data-dir)"
+	}
+	return http.StatusInternalServerError, protocol.ErrCodeUploadFailed, fmt.Sprintf("Failed to assemble file: %v", err)
+}
+
 // UploadChunk handles uploading a single chunk
 func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.validateAuthToken(w, r); !ok {
@@ -511,9 +523,12 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 	tempFileID := uuid.New().String()
 	filePath, totalSize, actualChecksum, err := h.storage.AssembleChunks(uploadID, tempFileID, chunkPaths)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-			protocol.ErrCodeUploadFailed, "Failed to assemble file", err,
-		))
+		// A full disk during assembly previously surfaced as a bare 500 with no
+		// server-side trace — log the cause and classify ENOSPC as a
+		// client-actionable 507, mirroring the SaveChunk path.
+		log.Printf("Failed to assemble chunks for upload %s: %v", uploadID, err)
+		status, code, message := assembleErrorStatus(err)
+		writeError(w, status, protocol.NewProtocolError(code, message, err))
 		return
 	}
 
