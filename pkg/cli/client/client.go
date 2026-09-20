@@ -63,9 +63,15 @@ const (
 	DefaultTimeout  = 30 * time.Second
 	UploadTimeout   = 10 * time.Minute
 	DownloadTimeout = 10 * time.Minute
-	PollInterval    = 2 * time.Second
-	MaxRetries      = 3
-	RetryDelay      = 1 * time.Second
+	// ProbeTimeout bounds a single probe request. The probe endpoint is
+	// synchronous: it dispatches a job and waits for a worker to run ffprobe,
+	// which on a cold worker (first ffmpeg/GPU initialization) can exceed the
+	// default 30s client timeout. The value aligns with the server's 2-minute
+	// probe wait budget plus margin for the terminal response to arrive.
+	ProbeTimeout = 2*time.Minute + 30*time.Second
+	PollInterval = 2 * time.Second
+	MaxRetries   = 3
+	RetryDelay   = 1 * time.Second
 
 	// DefaultMaxRetries bounds the CLI's retry loops when contact with the
 	// server is lost mid-job. 14 retries on the WebSocket exponential-backoff
@@ -95,6 +101,12 @@ const (
 // PollInterval. Internal tests swap this to a short duration to exercise
 // timing-sensitive code paths without 2s waits.
 var pollInterval = PollInterval
+
+// probeTimeout is the effective per-request timeout for the probe endpoint.
+// A var (rather than a direct const reference) so regression tests can stub
+// the wait and exercise the timing-sensitive path without a 30s+ real-time
+// delay.
+var probeTimeout = ProbeTimeout
 
 // Overridable sleep for rate-limit resubmission backoff; production value
 // waits d or until ctx is done (whichever comes first). Internal tests stub
@@ -1100,7 +1112,11 @@ func (c *Client) Probe(input string) (*protocol.ProbeResponse, error) {
 	httpReq.Header.Set("Content-Type", "application/json")
 	c.setAuthHeader(httpReq)
 
-	resp, err := c.http.Do(httpReq)
+	// The probe endpoint is synchronous and can wait up to ~2 minutes
+	// server-side; the shared client's 30s timeout is too short for a cold
+	// worker's first probe. Use a dedicated client bounded by probeTimeout.
+	probeClient := &http.Client{Timeout: probeTimeout}
+	resp, err := probeClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("probe request failed: %w", err)
 	}
