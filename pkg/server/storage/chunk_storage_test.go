@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -229,6 +231,33 @@ func TestAssembleChunks(t *testing.T) {
 	buf.ReadFrom(file)
 	if !bytes.Equal(buf.Bytes(), expectedData) {
 		t.Error("Assembled file content mismatch")
+	}
+}
+
+// failingWriteCloser is an io.WriteCloser whose Write succeeds but whose Close
+// returns a fixed error, simulating a close-time (flush) ENOSPC that a regular
+// filesystem cannot reproduce portably.
+type failingWriteCloser struct {
+	closeErr error
+}
+
+func (f *failingWriteCloser) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (f *failingWriteCloser) Close() error {
+	return f.closeErr
+}
+
+func TestAssembleChunksInto_CloseErrorPropagates(t *testing.T) {
+	dst := &failingWriteCloser{closeErr: syscall.ENOSPC}
+
+	_, _, err := assembleChunksInto(dst, nil)
+	if err == nil {
+		t.Fatal("expected close error to propagate, got nil")
+	}
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Errorf("expected ENOSPC in wrapped close error, got: %v", err)
 	}
 }
 

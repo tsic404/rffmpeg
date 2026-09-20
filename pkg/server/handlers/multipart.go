@@ -9,11 +9,11 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// freeSpaceBytes reports the bytes available to an unprivileged writer on the
+// FreeSpaceBytes reports the bytes available to an unprivileged writer on the
 // filesystem holding dir. A lookup failure is returned so callers can skip the
 // pre-flight check rather than reject a valid upload whose free space cannot be
 // queried.
-func freeSpaceBytes(dir string) (uint64, error) {
+func FreeSpaceBytes(dir string) (uint64, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		return 0, err
@@ -40,7 +40,7 @@ func (h *Handler) ensureMultipartSpace(w http.ResponseWriter, contentLength int6
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	free, err := freeSpaceBytes(dir)
+	free, err := FreeSpaceBytes(dir)
 	if err != nil {
 		return true
 	}

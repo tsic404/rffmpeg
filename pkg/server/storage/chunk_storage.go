@@ -106,31 +106,48 @@ func (s *Storage) AssembleChunks(uploadID string, fileID string, chunkPaths []st
 	if err != nil {
 		return "", 0, "", fmt.Errorf("failed to create final file: %w", err)
 	}
-	defer finalFile.Close()
 
-	// Calculate checksum while assembling
+	totalSize, checksum, err := assembleChunksInto(finalFile, chunkPaths)
+	if err != nil {
+		// Remove the partial output so no truncated file is left behind.
+		os.Remove(filePath)
+		return "", 0, "", err
+	}
+
+	return filePath, totalSize, checksum, nil
+}
+
+// assembleChunksInto copies the ordered chunk files into dst and closes it,
+// computing the total size and SHA256 checksum. The close error is captured
+// explicitly (not deferred) because delayed-allocation and NFS filesystems can
+// report ENOSPC only at flush/close time; discarding it would return success
+// on a truncated file.
+func assembleChunksInto(dst io.WriteCloser, chunkPaths []string) (int64, string, error) {
 	hash := sha256.New()
-	writer := io.MultiWriter(finalFile, hash)
+	writer := io.MultiWriter(dst, hash)
 	var totalSize int64
 
 	for _, chunkPath := range chunkPaths {
 		chunkFile, err := os.Open(chunkPath)
 		if err != nil {
-			os.Remove(filePath)
-			return "", 0, "", fmt.Errorf("failed to open chunk %s: %w", chunkPath, err)
+			dst.Close()
+			return 0, "", fmt.Errorf("failed to open chunk %s: %w", chunkPath, err)
 		}
 
 		size, err := io.Copy(writer, chunkFile)
 		chunkFile.Close()
 		if err != nil {
-			os.Remove(filePath)
-			return "", 0, "", fmt.Errorf("failed to copy chunk %s: %w", chunkPath, err)
+			dst.Close()
+			return 0, "", fmt.Errorf("failed to copy chunk %s: %w", chunkPath, err)
 		}
 		totalSize += size
 	}
 
-	checksum := hex.EncodeToString(hash.Sum(nil))
-	return filePath, totalSize, checksum, nil
+	if err := dst.Close(); err != nil {
+		return 0, "", fmt.Errorf("failed to close assembled file: %w", err)
+	}
+
+	return totalSize, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // CalculateChunkChecksum calculates SHA256 checksum for a chunk
