@@ -30,6 +30,15 @@ const (
 	WSReadTimeout       = 60 * time.Second
 	WSWriteTimeout      = 10 * time.Second
 
+	// wsNotFoundRetries bounds how many times a 404 WebSocket handshake is
+	// retried before giving up. The 404 right after submit is a transient
+	// job-visibility race (the server commits the job before responding, but
+	// the WS handler's existence check can briefly miss it under concurrency),
+	// so a couple of backoff retries absorb it; beyond that the job is
+	// genuinely absent and the caller must fall back to HTTP polling, whose
+	// GetJob reports "job not found".
+	wsNotFoundRetries = 2
+
 	// WSPingInterval bounds how often the client pings the server. It must
 	// stay well below WSReadTimeout (and below the server's 60s read
 	// deadline) so a healthy idle connection is never reaped by either
@@ -255,15 +264,20 @@ func (e *HandshakeError) Error() string {
 
 // ConnectWithReconnect establishes a WebSocket connection with automatic reconnection.
 // Transient failures retry with exponential backoff up to maxRetries attempts
-// (--max-retries / RFFMPEG_MAX_RETRIES); a 4xx handshake rejection (bad token,
-// unknown job, forbidden) is permanent and aborts immediately — no retry
-// interval can fix it. When the retry budget is spent it returns an error
-// wrapping ErrRetriesExhausted so callers can surface a distinct exit code.
+// (--max-retries / RFFMPEG_MAX_RETRIES). A 4xx handshake rejection is normally
+// permanent and aborts immediately — no retry interval can fix a bad token or
+// a forbidden route. A 404 (unknown job) is the one exception: it is retried a
+// bounded number of times (wsNotFoundRetries) because right after submit it is
+// a transient job-visibility race, not a missing job. When that small bound is
+// spent the original HandshakeError is returned so the caller falls back to
+// HTTP polling, whose GetJob reports "job not found" — a persistent 404 is
+// never wrapped as ErrRetriesExhausted ("submitted, then disconnected").
 func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 	reconnectDelay := WSReconnectDelay
 	maxRetries := c.maxRetries
 
 	retries := 0
+	notFoundRetries := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -280,13 +294,19 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 
 		var hsErr *HandshakeError
 		if errors.As(err, &hsErr) && hsErr.Status >= 400 && hsErr.Status < 500 {
-			return err
-		}
-
-		if retries >= maxRetries {
+			// 404 right after submit is the job-visibility race, not a
+			// missing job: retry a bounded number of times, then return the
+			// handshake error so the caller falls back to HTTP polling
+			// (GetJob → "job not found"). Every other 4xx is permanent.
+			if hsErr.Status != http.StatusNotFound || notFoundRetries >= wsNotFoundRetries {
+				return err
+			}
+			notFoundRetries++
+		} else if retries >= maxRetries {
 			return fmt.Errorf("%w: WebSocket connection failed after %d retries: %v", ErrRetriesExhausted, retries, err)
+		} else {
+			retries++
 		}
-		retries++
 
 		log.Printf("WebSocket connection failed: %v, retrying in %v...", err, reconnectDelay)
 
