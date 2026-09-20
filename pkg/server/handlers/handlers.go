@@ -421,9 +421,13 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 			if strings.Contains(fileID, "://") {
 				continue
 			}
-			if !h.storage.FileExists(fileID) {
+			// TouchFile refreshes mtime in addition to checking existence: a
+			// job that references an older blob marks it recently used so the
+			// TTL sweep cannot evict it between this validation and job commit.
+			exists, err := h.storage.TouchFile(fileID)
+			if err != nil || !exists {
 				writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-					protocol.ErrCodeNotFound, "Input file not found: "+fileID, nil,
+					protocol.ErrCodeNotFound, "Input file not found: "+fileID, err,
 				))
 				return
 			}

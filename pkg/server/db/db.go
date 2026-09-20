@@ -756,6 +756,44 @@ func (d *Database) JobExists(id string) (bool, error) {
 	return exists, nil
 }
 
+// ActiveInputFileIDs returns the set of input file IDs referenced by
+// non-terminal jobs (pending, queued, running). The input file cleaner uses
+// this to avoid deleting a content-addressed blob a live job still needs.
+// It fails closed: a malformed input_files row returns an error so the caller
+// aborts the sweep rather than treating that row's blobs as unreferenced and
+// evicting them.
+func (d *Database) ActiveInputFileIDs() (map[string]struct{}, error) {
+	rows, err := d.db.Query(`
+		SELECT input_files FROM jobs
+		WHERE status IN (?, ?, ?)
+	`, protocol.JobStatusPending, protocol.JobStatusQueued, protocol.JobStatusRunning)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query active job input files: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make(map[string]struct{})
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("failed to scan input files: %w", err)
+		}
+		var files []string
+		if err := json.Unmarshal([]byte(raw), &files); err != nil {
+			return nil, fmt.Errorf("failed to parse input_files JSON: %w", err)
+		}
+		for _, f := range files {
+			if f != "" {
+				ids[f] = struct{}{}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate input files: %w", err)
+	}
+	return ids, nil
+}
+
 // UpdateJobStatusWithFailure updates the job status along with failure
 // classification fields; non-failure fields are ignored when their pointers
 // are nil. The update is guarded against stale writes: a late running report

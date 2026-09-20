@@ -147,6 +147,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
   "worker_heartbeat_timeout": "90s",
   "worker_offline_threshold": "10m",
   "worker_health_check_interval": "30s",
+  "input_file_ttl": "24h",
+  "input_file_cleanup_interval": "10m",
   "job_timeout": "30m",
   "schedule_interval": "5s",
   "timeout_check_interval": "30s",
@@ -177,6 +179,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 | `WORKER_HEARTBEAT_TIMEOUT` | Worker 心跳超时时间 | `90s` |
 | `WORKER_OFFLINE_THRESHOLD` | Worker 离线阈值 | `10m` |
 | `WORKER_HEALTH_CHECK_INTERVAL` | Worker 健康检查间隔 | `30s` |
+| `INPUT_FILE_TTL` | 上传输入文件 blob 的保留时长，超过后由后台清扫删除；`0` 禁用清理 | `24h` |
+| `INPUT_FILE_CLEANUP_INTERVAL` | 输入文件清扫间隔 | `10m` |
 | `JOB_TIMEOUT` | 任务执行超时时间 | `30m` |
 | `SCHEDULE_INTERVAL` | 任务调度间隔 | `5s` |
 | `TIMEOUT_CHECK_INTERVAL` | 超时检查间隔 | `30s` |
@@ -201,6 +205,8 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
   --worker-heartbeat-timeout string    Timeout before marking worker offline (default: 90s)
   --worker-offline-threshold string    Duration after which offline workers are removed (default: 10m)
   --worker-health-check-interval string Interval for checking worker health (default: 30s)
+  --input-file-ttl string              Evict uploaded input blobs unused for this long; 0 disables cleanup (default: 24h)
+  --input-file-cleanup-interval string Interval for sweeping expired input blobs (default: 10m)
   --job-timeout string                 Timeout for running jobs (default: 30m)
   --schedule-interval string           Interval for job scheduling (default: 5s)
   --timeout-check-interval string      Interval for checking job timeouts (default: 30s)
