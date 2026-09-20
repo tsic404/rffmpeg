@@ -111,6 +111,69 @@ func TestRun_HealthCheckFailurePrintsBanner(t *testing.T) {
 	}
 }
 
+// TestRun_QuietSuppressesBannerOnRateLimit pins the --quiet contract on the
+// error path: a rate-limited submission under --quiet must emit exactly the
+// single "Error submitting job: rate limit exceeded: …" line — no identity
+// banner (version/Server), no "Input files"/"Output file" lines, no
+// "Submitting job..." or upload progress noise. Automation asserting a
+// one-line error message relies on --quiet suppressing the pre-error banner;
+// the terminal error itself is never suppressed.
+func TestRun_QuietSuppressesBannerOnRateLimit(t *testing.T) {
+	input := filepath.Join(t.TempDir(), "in.mp4")
+	if err := os.WriteFile(input, []byte("dummy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/health":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/upload":
+			if err := r.ParseMultipartForm(256 << 20); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			f, _, err := r.FormFile("file")
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			defer f.Close()
+			io.Copy(io.Discard, f)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(protocol.UploadResponse{FileID: "f1"})
+		case "/api/v1/jobs":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(protocol.RateLimitResponse{
+				Code:    protocol.ErrCodeRateLimitExceeded,
+				Message: "Too many concurrent jobs.",
+				Current: 10,
+				Limit:   10,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	orig := os.Args
+	defer func() { os.Args = orig }()
+	os.Args = []string{"rffmpeg", "--quiet", "--server", srv.URL, "-i", input, "-c:v", "libx264", "out.mp4"}
+
+	code := ExitSuccess
+	stderr := captureStderr(func() {
+		code = run()
+	})
+	if code != ExitError {
+		t.Errorf("run() --quiet rate-limit = %d, want %d", code, ExitError)
+	}
+	const want = "Error submitting job: rate limit exceeded: 10/10 concurrent jobs\n"
+	if stderr != want {
+		t.Errorf("run() --quiet rate-limit stderr = %q, want exactly %q", stderr, want)
+	}
+}
+
 // TestRejectOverwriteIfNeeded pins the CLI download guard: in the
 // default upload/download mode the CLI is the sole writer of the user's output
 // file, so a pre-existing file must not be silently truncated.
