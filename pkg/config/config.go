@@ -36,6 +36,12 @@ type ServerConfig struct {
 	// job from a failed worker before failing it. 0 disables migration.
 	MaxRetryCount int `json:"max_retry_count" yaml:"max_retry_count"`
 
+	// Input file persistence settings. Uploaded input blobs are
+	// content-addressed and would otherwise accumulate without bound; a
+	// background sweeper removes blobs unused for InputFileTTL (0 disables).
+	InputFileTTL             time.Duration `json:"input_file_ttl" yaml:"input_file_ttl"`
+	InputFileCleanupInterval time.Duration `json:"input_file_cleanup_interval" yaml:"input_file_cleanup_interval"`
+
 	// WebSocket settings
 	AllowedOrigins []string `json:"allowed_origins" yaml:"allowed_origins"`
 
@@ -76,6 +82,8 @@ type Flags struct {
 	WorkerHeartbeatTimeout    string
 	WorkerOfflineThreshold    string
 	WorkerHealthCheckInterval string
+	InputFileTTL              string
+	InputFileCleanupInterval  string
 	JobTimeout                string
 	ScheduleInterval          string
 	TimeoutCheckInterval      string
@@ -108,6 +116,8 @@ func DefaultServerConfig() *ServerConfig {
 		WorkerHeartbeatTimeout:     90 * time.Second, // Mark offline after 90s without heartbeat
 		WorkerOfflineThreshold:     10 * time.Minute, // Remove from pool after 10 min offline
 		WorkerHealthCheckInterval:  30 * time.Second, // Check worker health every 30s
+		InputFileTTL:               24 * time.Hour,   // Evict input blobs unused for 24h
+		InputFileCleanupInterval:   10 * time.Minute, // Sweep input blobs every 10m
 		JobTimeout:                 30 * time.Minute, // Job timeout after 30 minutes
 		ScheduleInterval:           5 * time.Second,  // Schedule jobs every 5 seconds
 		TimeoutCheckInterval:       30 * time.Second, // Check for timeouts every 30 seconds
@@ -203,6 +213,12 @@ func LoadFromEnv() *ServerConfig {
 	}
 	if v := os.Getenv("WORKER_HEALTH_CHECK_INTERVAL"); v != "" {
 		config.WorkerHealthCheckInterval = parseDurationOrLog("WORKER_HEALTH_CHECK_INTERVAL", v, config.WorkerHealthCheckInterval)
+	}
+	if v := os.Getenv("INPUT_FILE_TTL"); v != "" {
+		config.InputFileTTL = parseDurationOrLog("INPUT_FILE_TTL", v, config.InputFileTTL)
+	}
+	if v := os.Getenv("INPUT_FILE_CLEANUP_INTERVAL"); v != "" {
+		config.InputFileCleanupInterval = parseDurationOrLog("INPUT_FILE_CLEANUP_INTERVAL", v, config.InputFileCleanupInterval)
 	}
 	if v := os.Getenv("JOB_TIMEOUT"); v != "" {
 		config.JobTimeout = parseDurationOrLog("JOB_TIMEOUT", v, config.JobTimeout)
@@ -310,6 +326,12 @@ func (c *ServerConfig) Merge(flags *Flags) {
 	}
 	if flags.WorkerHealthCheckInterval != "" {
 		c.WorkerHealthCheckInterval = parseDurationOrLog("worker-health-check-interval", flags.WorkerHealthCheckInterval, c.WorkerHealthCheckInterval)
+	}
+	if flags.InputFileTTL != "" {
+		c.InputFileTTL = parseDurationOrLog("input-file-ttl", flags.InputFileTTL, c.InputFileTTL)
+	}
+	if flags.InputFileCleanupInterval != "" {
+		c.InputFileCleanupInterval = parseDurationOrLog("input-file-cleanup-interval", flags.InputFileCleanupInterval, c.InputFileCleanupInterval)
 	}
 
 	// Scheduler flags
@@ -480,7 +502,8 @@ func (c *ServerConfig) String() string {
 	if c.AuthToken != "" {
 		authStatus = "enabled"
 	}
-	return fmt.Sprintf("ServerConfig{port=%s, dataDir=%s, tls=%s, auth=%s, workerHeartbeatTimeout=%s, workerOfflineThreshold=%s, workerHealthCheckInterval=%s, jobTimeout=%s, scheduleInterval=%s, timeoutCheckInterval=%s, maxJobsPerWorker=%d, maxTimeoutRetries=%d, maxRetryCount=%d, rateLimitEnabled=%v, maxConcurrentJobsPerClient=%d}",
+	return fmt.Sprintf("ServerConfig{port=%s, dataDir=%s, tls=%s, auth=%s, workerHeartbeatTimeout=%s, workerOfflineThreshold=%s, workerHealthCheckInterval=%s, inputFileTTL=%s, inputFileCleanupInterval=%s, jobTimeout=%s, scheduleInterval=%s, timeoutCheckInterval=%s, maxJobsPerWorker=%d, maxTimeoutRetries=%d, maxRetryCount=%d, rateLimitEnabled=%v, maxConcurrentJobsPerClient=%d}",
 		c.Port, c.DataDir, tlsStatus, authStatus, c.WorkerHeartbeatTimeout, c.WorkerOfflineThreshold, c.WorkerHealthCheckInterval,
+		c.InputFileTTL, c.InputFileCleanupInterval,
 		c.JobTimeout, c.ScheduleInterval, c.TimeoutCheckInterval, c.MaxJobsPerWorker, c.MaxTimeoutRetries, c.MaxRetryCount, c.RateLimitEnabled, c.MaxConcurrentJobsPerClient)
 }

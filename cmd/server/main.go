@@ -141,6 +141,13 @@ func main() {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
 
+	// Content-addressed input blobs accumulate without bound across a long
+	// run; a background sweep removes blobs unused past the TTL while keeping
+	// any file still referenced by a non-terminal job.
+	inputCleaner := storage.NewInputFileCleaner(store, cfg.InputFileTTL, cfg.InputFileCleanupInterval, database.ActiveInputFileIDs)
+	inputCleaner.Start(context.Background())
+	defer inputCleaner.Stop()
+
 	// Initialize worker state table (shared between handler and monitor)
 	stateTable := workerhealth.NewWorkerStateTable(cfg.WorkerHeartbeatTimeout)
 
@@ -455,6 +462,8 @@ func parseFlags() *config.Flags {
 	flag.StringVar(&flags.WorkerHeartbeatTimeout, "worker-heartbeat-timeout", "", "Timeout before marking worker offline (default: 90s)")
 	flag.StringVar(&flags.WorkerOfflineThreshold, "worker-offline-threshold", "", "Duration after which offline workers are removed (default: 10m)")
 	flag.StringVar(&flags.WorkerHealthCheckInterval, "worker-health-check-interval", "", "Interval for checking worker health (default: 30s)")
+	flag.StringVar(&flags.InputFileTTL, "input-file-ttl", "", "Evict uploaded input blobs unused for this long; 0 disables cleanup (default: 24h)")
+	flag.StringVar(&flags.InputFileCleanupInterval, "input-file-cleanup-interval", "", "Interval for sweeping expired input blobs (default: 10m)")
 
 	// Scheduler flags
 	flag.StringVar(&flags.JobTimeout, "job-timeout", "", "Timeout for running jobs before rescheduling (default: 30m)")

@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sync"
+	"time"
 )
 
 // Storage manages file storage on the local filesystem
@@ -90,7 +92,15 @@ func (s *Storage) SaveFileByContent(reader io.Reader) (string, int64, string, er
 
 	// Check if file with same content already exists (dedup)
 	if _, err := os.Stat(finalPath); err == nil {
-		// File already exists — return existing file ID
+		// File already exists — refresh its mtime so the TTL sweep keeps a
+		// still-reused blob instead of treating a re-upload as age since the
+		// original write. A failed touch must not fail the upload (the blob is
+		// still valid), but it is logged: a silent failure would let the TTL
+		// sweep evict a still-reused blob.
+		now := time.Now()
+		if err := os.Chtimes(finalPath, now, now); err != nil {
+			log.Printf("Storage: failed to refresh mtime on dedup for %s: %v", checksum, err)
+		}
 		return finalPath, size, checksum, nil
 	}
 
@@ -140,11 +150,53 @@ func (s *Storage) FileExists(fileID string) bool {
 func (s *Storage) OpenFile(fileID string) (*os.File, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	file, err := os.Open(s.GetFilePath(fileID))
+	path := s.GetFilePath(fileID)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
+	// A download is the last-use event the TTL sweep keys off: refresh mtime
+	// so an actively-served blob is not evicted out from under a re-dispatch.
+	// The open itself already succeeded, so a failed touch is logged rather
+	// than failing the read.
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		log.Printf("Storage: failed to refresh mtime on download for %s: %v", fileID, err)
+	}
 	return file, nil
+}
+
+// TouchFile refreshes a blob's mtime (marking it recently used) and reports
+// whether it exists. Callers about to reference a blob — most importantly
+// SubmitJob, which validates inputs before committing the job — use this to
+// keep the TTL sweep from evicting it between validation and job commit. The
+// write lock serializes the touch with the sweep's per-file delete, closing
+// the check-then-delete window.
+//
+// fileID is client-controlled at the submit boundary, so it is validated
+// before it reaches the filesystem: a traversal fragment must never turn this
+// mtime refresh into a write syscall outside files/.
+func (s *Storage) TouchFile(fileID string) (bool, error) {
+	if !ValidateFileID(fileID) {
+		return false, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := s.GetFilePath(fileID)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // DeleteFile deletes a file
@@ -222,4 +274,54 @@ func CalculateChecksum(reader io.Reader) (string, error) {
 		return "", fmt.Errorf("failed to calculate checksum: %w", err)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// CleanupExpiredInputFiles removes content-addressed input blobs whose mtime
+// is at or before cutoff, except those listed in inUse (still referenced by a
+// non-terminal job). It returns the number of blobs removed. Only 64-char
+// lowercase-hex names are considered: stray temp files in files/ are left
+// alone so a concurrent upload is never interrupted.
+//
+// The directory scan runs under the read lock so a large blob set does not
+// block uploads/downloads for the whole walk. Each delete re-stats the file's
+// mtime under the write lock: a concurrent TouchFile (submit/download/dedup)
+// that refreshed the mtime in the meantime is serialized with the delete, so a
+// freshly-referenced blob is never evicted.
+func (s *Storage) CleanupExpiredInputFiles(cutoff time.Time, inUse map[string]struct{}) (int, error) {
+	filesDir := filepath.Join(s.baseDir, "files")
+
+	s.mu.RLock()
+	entries, err := os.ReadDir(filesDir)
+	s.mu.RUnlock()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to read files directory: %w", err)
+	}
+
+	var candidates []string
+	for _, entry := range entries {
+		if entry.IsDir() || !ValidateFileID(entry.Name()) {
+			continue
+		}
+		if _, ok := inUse[entry.Name()]; ok {
+			continue
+		}
+		candidates = append(candidates, entry.Name())
+	}
+
+	removed := 0
+	for _, name := range candidates {
+		path := filepath.Join(filesDir, name)
+		s.mu.Lock()
+		info, statErr := os.Stat(path)
+		if statErr == nil && !info.ModTime().After(cutoff) {
+			if rmErr := os.Remove(path); rmErr == nil {
+				removed++
+			}
+		}
+		s.mu.Unlock()
+	}
+	return removed, nil
 }
