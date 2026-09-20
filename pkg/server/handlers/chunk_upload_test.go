@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,11 +11,15 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
@@ -297,5 +302,63 @@ func TestCompleteChunkUpload_DiskFullReturns507AndLogs(t *testing.T) {
 	}
 	if !strings.Contains(logBuf.String(), "no space left on device") {
 		t.Errorf("expected ENOSPC cause in log, got: %q", logBuf.String())
+	}
+}
+
+// TestCleanupExpiredSessionsRemovesChunkDirectory is the regression test for
+// the residue bug: an abandoned/failed upload leaves chunks/<uuid>/ on disk
+// because expiring a session only flips its status. The sweep must also delete
+// the chunk directory and the session row.
+func TestCleanupExpiredSessionsRemovesChunkDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "rffmpeg.db")
+
+	database, err := db.New(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	store, err := storage.New(dataDir)
+	if err != nil {
+		t.Fatalf("Failed to create storage: %v", err)
+	}
+
+	h := NewChunkUploadHandler(database, store, DefaultChunkSize)
+	t.Cleanup(h.Shutdown)
+
+	session, err := database.CreateUploadSession("video.mp4", 1024, 1024, 1, nil)
+	if err != nil {
+		t.Fatalf("CreateUploadSession: %v", err)
+	}
+	if _, _, _, err := store.SaveChunk(session.ID, 0, strings.NewReader("data")); err != nil {
+		t.Fatalf("SaveChunk: %v", err)
+	}
+
+	chunkDir := filepath.Join(dataDir, "chunks", session.ID)
+	if _, err := os.Stat(chunkDir); err != nil {
+		t.Fatalf("expected chunk dir on disk: %v", err)
+	}
+
+	// Backdate expires_at so the session reads as expired. A file-backed DB
+	// lets a second connection reach the row; :memory: pins the pool to one
+	// connection and every other handle would see its own empty database.
+	raw, err := sql.Open("sqlite3", "file:"+dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`UPDATE upload_sessions SET expires_at = ? WHERE id = ?`,
+		time.Now().Add(-time.Hour), session.ID); err != nil {
+		t.Fatalf("backdate expires_at: %v", err)
+	}
+
+	h.cleanupExpiredSessionsOnce()
+
+	if _, err := os.Stat(chunkDir); !os.IsNotExist(err) {
+		t.Errorf("chunk dir still exists after cleanup (err=%v)", err)
+	}
+	if _, err := database.GetUploadSession(session.ID); err == nil {
+		t.Error("expired session row still present after cleanup")
 	}
 }

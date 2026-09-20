@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
@@ -386,5 +387,61 @@ func TestUploadSessionFileChecksum(t *testing.T) {
 	retrieved2, _ := db.GetUploadSession(session2.ID)
 	if retrieved2.FileChecksum.Valid {
 		t.Error("FileChecksum should not be valid for session without checksum")
+	}
+}
+
+func TestExpireUploadSessionsAndListExpiredIDs(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "db_test_*.db")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	tmpFile.Close()
+	defer os.Remove(tmpFile.Name())
+
+	db, err := New(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	// A live session (not yet expired) and one whose expires_at is backdated.
+	live, err := db.CreateUploadSession("live.mp4", 1024, 512, 2, nil)
+	if err != nil {
+		t.Fatalf("CreateUploadSession live: %v", err)
+	}
+	expired, err := db.CreateUploadSession("expired.mp4", 1024, 512, 2, nil)
+	if err != nil {
+		t.Fatalf("CreateUploadSession expired: %v", err)
+	}
+
+	_, err = db.db.Exec(`UPDATE upload_sessions SET expires_at = ? WHERE id = ?`,
+		time.Now().Add(-time.Hour), expired.ID)
+	if err != nil {
+		t.Fatalf("backdate expires_at: %v", err)
+	}
+
+	affected, err := db.ExpireUploadSessions()
+	if err != nil {
+		t.Fatalf("ExpireUploadSessions: %v", err)
+	}
+	if affected != 1 {
+		t.Errorf("ExpireUploadSessions affected %d rows, want 1", affected)
+	}
+
+	ids, err := db.GetExpiredUploadSessionIDs()
+	if err != nil {
+		t.Fatalf("GetExpiredUploadSessionIDs: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != expired.ID {
+		t.Errorf("expired IDs = %v, want [%s]", ids, expired.ID)
+	}
+
+	// The live session must not be expired or listed.
+	retrieved, err := db.GetUploadSession(live.ID)
+	if err != nil {
+		t.Fatalf("GetUploadSession live: %v", err)
+	}
+	if retrieved.Status != protocol.UploadSessionStatusInProgress {
+		t.Errorf("live status = %s, want in_progress", retrieved.Status)
 	}
 }
