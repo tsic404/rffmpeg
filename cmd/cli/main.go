@@ -427,6 +427,15 @@ func run() (code int) {
 	}
 	cli := client.New(cfg.ServerURL, cfg.Token, client.WithMaxRetries(maxRetries), client.WithSubmitRetries(submitRetries))
 
+	// Print the identity banner before the health check so a pre-submit
+	// failure (an empty or malformed server URL surfaces as "unsupported
+	// protocol scheme") still shows which URL and configuration source were
+	// used. --quiet suppresses it.
+	if !opts.Quiet {
+		fmt.Fprintf(os.Stderr, "rffmpeg %s - Remote FFmpeg Client\n", version)
+		fmt.Fprintf(os.Stderr, "Server: %s (%s)\n", cfg.ServerURL, cfg.ServerURLSource)
+	}
+
 	// Check server health
 	if err := cli.HealthCheck(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: server health check failed: %v\n", err)
@@ -486,8 +495,6 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 
 	if !quiet {
-		fmt.Fprintf(os.Stderr, "rffmpeg %s - Remote FFmpeg Client\n", version)
-		fmt.Fprintf(os.Stderr, "Server: %s (%s)\n", cfg.ServerURL, cfg.ServerURLSource)
 		fmt.Fprintf(os.Stderr, "Input files: %v\n", result.InputFiles)
 		fmt.Fprintf(os.Stderr, "Output file: %s\n", result.OutputFile)
 		if sharedFS {
