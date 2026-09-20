@@ -296,3 +296,78 @@ func TestLoadSharedFS_FromConfigFile(t *testing.T) {
 		t.Errorf("Load() SharedFS = false, want true (from config file)")
 	}
 }
+
+func TestLoadServerURLSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	os.Unsetenv("RFFMPEG_SERVER_URL")
+
+	dir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer os.Chdir(oldDir)
+
+	// No config file, no env -> default.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ServerURLSource != ServerURLSourceDefault {
+		t.Errorf("ServerURLSource = %q, want %q", cfg.ServerURLSource, ServerURLSourceDefault)
+	}
+
+	// Config file sets server_url. The source must read "config file" even
+	// when the value equals the default, or the banner would mislabel it.
+	configContent := `{"server_url": "` + DefaultServerURL + `"}`
+	if err := os.WriteFile(filepath.Join(dir, "rffmpeg.json"), []byte(configContent), 0600); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ServerURLSource != ServerURLSourceConfig {
+		t.Errorf("ServerURLSource = %q, want %q", cfg.ServerURLSource, ServerURLSourceConfig)
+	}
+
+	// An explicit empty server_url must still read as "config file", never
+	// "default". "" overwrites the default with an empty URL; null is a
+	// JSON no-op for a string field and leaves the default value in place, but
+	// both are key-present and so share the "config file" label.
+	for _, tc := range []struct {
+		content string
+		wantURL string
+	}{
+		{`{"server_url": ""}`, ""},
+		{`{"server_url": null}`, DefaultServerURL},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, "rffmpeg.json"), []byte(tc.content), 0600); err != nil {
+			t.Fatalf("Failed to write config file: %v", err)
+		}
+		cfg, err = Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.ServerURL != tc.wantURL {
+			t.Errorf("ServerURL = %q, want %q for %s", cfg.ServerURL, tc.wantURL, tc.content)
+		}
+		if cfg.ServerURLSource != ServerURLSourceConfig {
+			t.Errorf("ServerURLSource = %q, want %q for %s", cfg.ServerURLSource, ServerURLSourceConfig, tc.content)
+		}
+	}
+
+	// Env overrides config file -> env.
+	os.Setenv("RFFMPEG_SERVER_URL", "http://env.example.com")
+	defer os.Unsetenv("RFFMPEG_SERVER_URL")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ServerURLSource != ServerURLSourceEnv {
+		t.Errorf("ServerURLSource = %q, want %q", cfg.ServerURLSource, ServerURLSourceEnv)
+	}
+}
