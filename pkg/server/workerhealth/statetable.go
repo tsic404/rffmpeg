@@ -165,13 +165,11 @@ type workerInfo struct {
 	hasJobs bool
 }
 
-func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	// Collect EWMA throughput values from active, non-offline workers
-	var activeWorkers []workerInfo
-
+// eligibleSlowNodeWorkersLocked collects the workers eligible for slow-node
+// evaluation: non-offline and past the warmup threshold. Caller must hold the
+// lock (read or write).
+func (t *WorkerStateTable) eligibleSlowNodeWorkersLocked() []workerInfo {
+	var workers []workerInfo
 	for id, state := range t.states {
 		// Skip offline workers
 		if state.Status == string(protocol.WorkerStatusOffline) {
@@ -181,25 +179,39 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 		if state.CompletedJobs < MinJobsForEviction {
 			continue
 		}
-		hasJobs := len(state.ActiveJobs) > 0
-		activeWorkers = append(activeWorkers, workerInfo{
+		workers = append(workers, workerInfo{
 			id:      id,
 			ewmaFPS: state.EWMAThroughput,
-			hasJobs: hasJobs,
+			hasJobs: len(state.ActiveJobs) > 0,
 		})
 	}
+	return workers
+}
 
-	// Need at least 2 workers with throughput to compute a meaningful median
-	var throughputs []float64
-	var eligibleWorkers []workerInfo
-	for _, w := range activeWorkers {
+// medianSample reduces the eligible worker pool to the median sample pool:
+// idle workers (zero throughput and no active jobs) are excluded. Returns the
+// surviving workers alongside their EWMA throughput values so DetectSlowWorkers
+// and ClusterMedian share a single idle-filter definition.
+func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
+	sampled := make([]workerInfo, 0, len(workers))
+	throughputs := make([]float64, 0, len(workers))
+	for _, w := range workers {
 		// Skip idle workers: zero throughput AND no active jobs
 		if w.ewmaFPS == 0 && !w.hasJobs {
 			continue
 		}
+		sampled = append(sampled, w)
 		throughputs = append(throughputs, w.ewmaFPS)
-		eligibleWorkers = append(eligibleWorkers, w)
 	}
+	return sampled, throughputs
+}
+
+func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	activeWorkers := t.eligibleSlowNodeWorkersLocked()
+	eligibleWorkers, throughputs := medianSample(activeWorkers)
 
 	if len(throughputs) < 2 {
 		// Not enough data to compute a meaningful median; clear eviction on all
@@ -254,6 +266,23 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 		Recovered:    recovered,
 		Median:       median,
 	}
+}
+
+// ClusterMedian returns the current cluster median of EWMA throughput, computed
+// from the same sample pool DetectSlowWorkers evaluates (offline, warmup, and
+// idle workers excluded). Read-only; returns 0 when fewer than two eligible
+// samples exist. Exposed so the workers API can report the raw median that E2E
+// assertions compare worker EWMA against.
+func (t *WorkerStateTable) ClusterMedian() float64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	_, throughputs := medianSample(t.eligibleSlowNodeWorkersLocked())
+	if len(throughputs) < 2 {
+		return 0
+	}
+	sort.Float64s(throughputs)
+	return computeMedian(throughputs)
 }
 
 // busyExpiry bounds how long a busy worker with zero EWMA throughput is

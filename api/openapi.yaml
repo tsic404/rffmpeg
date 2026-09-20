@@ -982,6 +982,14 @@ components:
             Worker throughput in jobs per second since the last heartbeat.
             The field name is historical; the unit is jobs/second, not frames
             per second. Always present (0 when no job completed in the window).
+        ewma_throughput:
+          type: number
+          format: double
+          description: >-
+            EWMA-smoothed worker throughput in jobs per second (see
+            throughput_fps). The raw value slow-node detection compares against
+            the cluster median. Always present (0 until the first heartbeat
+            sample).
         last_seen:
           type: string
           format: date-time
@@ -1031,6 +1039,13 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WorkerInfo'
+        cluster_median_throughput:
+          type: number
+          format: double
+          description: >-
+            Cluster median of EWMA throughput across eligible workers (offline,
+            warmup, and idle workers excluded), matching the median slow-node
+            detection uses. 0 when fewer than two eligible samples exist.
 
     WorkerGetResponse:
       type: object
