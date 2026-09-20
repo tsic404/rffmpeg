@@ -199,6 +199,35 @@ func (d *Database) ExpireUploadSessions() (int64, error) {
 	return result.RowsAffected()
 }
 
+// GetExpiredUploadSessionIDs returns the IDs of every upload session whose
+// status is expired. Callers use these to remove the matching on-disk chunk
+// directories and DB rows for abandoned or failed uploads.
+func (d *Database) GetExpiredUploadSessionIDs() ([]string, error) {
+	rows, err := d.db.Query(`
+		SELECT id FROM upload_sessions WHERE status = ?
+	`, protocol.UploadSessionStatusExpired)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to query expired upload sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan expired upload session: %w", err)
+		}
+		ids = append(ids, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating expired upload sessions: %w", err)
+	}
+
+	return ids, nil
+}
+
 // DeleteUploadSession removes an upload session and its chunks
 func (d *Database) DeleteUploadSession(id string) error {
 	_, err := d.db.Exec(`DELETE FROM upload_sessions WHERE id = ?`, id)

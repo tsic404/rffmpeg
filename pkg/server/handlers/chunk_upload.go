@@ -659,15 +659,36 @@ func (h *ChunkUploadHandler) cleanupExpiredSessions() {
 		case <-h.done:
 			return
 		case <-ticker.C:
-			// Expire sessions in database
-			_, err := h.db.ExpireUploadSessions()
-			if err != nil {
-				log.Printf("Warning: failed to expire upload sessions: %v", err)
-			}
+			h.cleanupExpiredSessionsOnce()
+		}
+	}
+}
 
-			// Clean up chunk files for expired sessions
-			// This is a simplified cleanup - in production, you'd query for expired sessions
-			// and clean up their chunks specifically
+// cleanupExpiredSessionsOnce expires overdue upload sessions and removes their
+// on-disk chunk directories and DB rows. Deleting the chunk directory is the
+// load-bearing part: expiring a session only flips its status, so an abandoned
+// or failed upload would otherwise leave chunks/<uuid>/ on disk until the
+// data-dir fills up. Removing the session row (which cascades to its chunk
+// records) keeps the next sweep from re-visiting already-cleaned sessions.
+func (h *ChunkUploadHandler) cleanupExpiredSessionsOnce() {
+	if _, err := h.db.ExpireUploadSessions(); err != nil {
+		log.Printf("Warning: failed to expire upload sessions: %v", err)
+		return
+	}
+
+	uploadIDs, err := h.db.GetExpiredUploadSessionIDs()
+	if err != nil {
+		log.Printf("Warning: failed to list expired upload sessions: %v", err)
+		return
+	}
+
+	for _, uploadID := range uploadIDs {
+		if err := h.storage.DeleteChunkDirectory(uploadID); err != nil {
+			log.Printf("Warning: failed to clean up chunks for upload %s: %v", uploadID, err)
+			continue
+		}
+		if err := h.db.DeleteUploadSession(uploadID); err != nil {
+			log.Printf("Warning: failed to delete expired upload session %s: %v", uploadID, err)
 		}
 	}
 }
