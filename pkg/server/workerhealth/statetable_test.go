@@ -565,3 +565,40 @@ func TestDetectSlowWorkers_ZeroMedian(t *testing.T) {
 		t.Errorf("expected 0 evicted (median=0), got %d: %v", len(result.NewlyEvicted), result.NewlyEvicted)
 	}
 }
+
+func TestWorkerStateTableClusterMedian(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	// Fewer than two eligible samples → 0.
+	if got := table.ClusterMedian(); got != 0 {
+		t.Fatalf("empty table median = %f, want 0", got)
+	}
+
+	// Two past-warmup, non-idle workers: median of EWMA throughput.
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-fast", Status: "online", ThroughputFPS: 3, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+	})
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-slow", Status: "online", ThroughputFPS: 1, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+	})
+	if got := table.ClusterMedian(); got != 2 {
+		t.Errorf("median of [1 3] = %f, want 2", got)
+	}
+
+	// Warmup worker (CompletedJobs < MinJobsForEviction) is excluded from the
+	// sample pool, so its extreme value must not move the median.
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-warmup", Status: "online", ThroughputFPS: 1000, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction - 1,
+	})
+	if got := table.ClusterMedian(); got != 2 {
+		t.Errorf("median with warmup worker = %f, want 2", got)
+	}
+
+	// Idle worker (zero throughput, no active jobs) is excluded too.
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-idle", Status: "online", ThroughputFPS: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+	})
+	if got := table.ClusterMedian(); got != 2 {
+		t.Errorf("median with idle worker = %f, want 2", got)
+	}
+}

@@ -1376,3 +1376,62 @@ func TestWorkerFailoverRetryLimit(t *testing.T) {
 		t.Errorf("Expected 0 migration events for worker-A (job failed, not migrated), got %d", len(events))
 	}
 }
+
+// TestCheckWorkersMarksStaleStateOffline verifies checkWorkers marks
+// state-table entries offline when their heartbeat goes stale, so a dead
+// node's stale EWMA stops polluting the cluster median during the window
+// before RemoveOfflineWorkers deletes the row (heartbeat timeout < offline
+// threshold). The state table's offline flag was previously only set by the
+// worker's own heartbeat status, which a crashed worker never sends.
+func TestCheckWorkersMarksStaleStateOffline(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Fresh DB rows so the DB offline sweep leaves them alone.
+	for _, w := range []struct{ id, name string }{
+		{"w1", "worker-1"},
+		{"w2", "worker-2"},
+	} {
+		if _, err := database.CreateWorker(w.id, w.name, protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "6.0",
+		}); err != nil {
+			t.Fatalf("Failed to create worker %s: %v", w.id, err)
+		}
+	}
+
+	stateTable := NewWorkerStateTable(30 * time.Second)
+	// Two fresh workers: median of [100, 50] is 75.
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w1", Status: "online", ThroughputFPS: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w2", Status: "online", ThroughputFPS: 50, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+	// Stale worker: its throughput would drag the median from 75 to 50 if
+	// still sampled, but its heartbeat stopped an hour ago.
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w3", Status: "online", ThroughputFPS: 1, CompletedJobs: MinJobsForEviction, Timestamp: time.Now().Add(-time.Hour),
+	})
+
+	monitor := New(database, Config{
+		HeartbeatTimeout:    30 * time.Second,
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 1 * time.Second,
+		MaxRetryCount:       3,
+	})
+	monitor.SetScheduler(&mockScheduler{})
+	monitor.SetStateTable(stateTable)
+	monitor.checkWorkers()
+
+	stale, ok := stateTable.Get("w3")
+	if !ok {
+		t.Fatal("w3 missing from state table")
+	}
+	if stale.Status != string(protocol.WorkerStatusOffline) {
+		t.Fatalf("expected w3 marked offline after stale heartbeat, got status %q", stale.Status)
+	}
+	if got := stateTable.ClusterMedian(); got != 75 {
+		t.Errorf("ClusterMedian = %f, want 75 (stale w3 excluded)", got)
+	}
+}

@@ -1891,6 +1891,79 @@ func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
 	}
 }
 
+// TestWorkerListExposesEWMAAndMedian verifies /api/v1/workers reports both the
+// per-worker EWMA throughput and the cluster median raw value, so E2E can
+// assert slow-node determination directly (worker EWMA vs cluster median)
+// without waiting for a real eviction event.
+func TestWorkerListExposesEWMAAndMedian(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorkerWithID(t, router, "worker-fast", "fast-worker", []string{"libx264"})
+	registerTestWorkerWithID(t, router, "worker-slow", "slow-worker", []string{"libx264"})
+
+	heartbeat := func(workerID string, throughput float64) {
+		req := protocol.WorkerHeartbeatRequest{
+			WorkerID:      workerID,
+			Status:        protocol.WorkerStatusBusy,
+			ThroughputFPS: throughput,
+			CompletedJobs: 5,
+		}
+		body, _ := json.Marshal(req)
+		httpReq := httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(body))
+		httpReq.Header.Set("Authorization", "Bearer test-token")
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Heartbeat for %s failed with status %d: %s", workerID, rec.Code, rec.Body.String())
+		}
+	}
+	heartbeat("worker-fast", 3.0)
+	heartbeat("worker-slow", 1.0)
+
+	req := httptest.NewRequest("GET", "/api/v1/workers", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("List workers failed with status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var listResp struct {
+		ClusterMedianThroughput float64 `json:"cluster_median_throughput"`
+		Workers                 []struct {
+			ID     string `json:"id"`
+			Health *struct {
+				EWMAThroughput float64 `json:"ewma_throughput"`
+			} `json:"health"`
+		} `json:"workers"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatalf("Failed to decode list workers response: %v", err)
+	}
+
+	// Median of EWMA throughputs [1, 3] (first heartbeat seeds EWMA with the
+	// raw value; both workers past MinJobsForEviction).
+	if listResp.ClusterMedianThroughput != 2.0 {
+		t.Errorf("cluster_median_throughput = %f, want 2.0", listResp.ClusterMedianThroughput)
+	}
+
+	ewmaByID := make(map[string]float64)
+	for _, w := range listResp.Workers {
+		if w.Health == nil {
+			t.Fatalf("worker %s has nil health", w.ID)
+		}
+		ewmaByID[w.ID] = w.Health.EWMAThroughput
+	}
+	if ewmaByID["worker-fast"] != 3.0 {
+		t.Errorf("worker-fast ewma_throughput = %f, want 3.0", ewmaByID["worker-fast"])
+	}
+	if ewmaByID["worker-slow"] != 1.0 {
+		t.Errorf("worker-slow ewma_throughput = %f, want 1.0", ewmaByID["worker-slow"])
+	}
+}
+
 // TestListWorkersActiveOnlyFilter verifies GET /api/v1/workers
 // returns every registered worker by default, and that ?active_only=true
 // excludes offline rows retained within the --worker-offline-threshold window.

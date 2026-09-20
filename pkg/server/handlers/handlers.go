@@ -1906,7 +1906,15 @@ func (h *Handler) ListWorkers(w http.ResponseWriter, r *http.Request) {
 		response[i] = dbWorkerToWorkerInfo(worker, states)
 	}
 
-	writeJSON(w, http.StatusOK, ListWorkersResponse{Workers: response})
+	var clusterMedian float64
+	if h.stateTable != nil {
+		clusterMedian = h.stateTable.ClusterMedian()
+	}
+
+	writeJSON(w, http.StatusOK, ListWorkersResponse{
+		Workers:                 response,
+		ClusterMedianThroughput: clusterMedian,
+	})
 }
 
 // GetWorker retrieves a single worker by ID
@@ -2143,6 +2151,7 @@ type WorkerHealth struct {
 	GPUMetricsValid bool     `json:"gpu_metrics_valid"` // True when the GPU fields carry a fresh sample; false means stale/no sample (any GPU source)
 	ActiveJobs      []string `json:"active_jobs,omitempty"`
 	ThroughputFPS   float64  `json:"throughput_fps"`
+	EWMAThroughput  float64  `json:"ewma_throughput"` // EWMA-smoothed throughput (jobs/sec); 0 until the first heartbeat sample
 	LastSeen        string   `json:"last_seen"`
 }
 
@@ -2170,6 +2179,10 @@ type WorkerInfo struct {
 // ListWorkersResponse is the response for listing workers
 type ListWorkersResponse struct {
 	Workers []WorkerInfo `json:"workers"`
+	// ClusterMedianThroughput is the cluster median of EWMA throughput across
+	// eligible workers (workerhealth.WorkerStateTable.ClusterMedian); 0 when
+	// fewer than two eligible samples exist.
+	ClusterMedianThroughput float64 `json:"cluster_median_throughput"`
 }
 
 // GetWorkerResponse is the response for getting a single worker
@@ -2354,6 +2367,7 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 		health.GPUMemUsedMB = state.GPUMemUsedMB
 		health.GPUMetricsValid = state.GPUMetricsValid
 		health.ThroughputFPS = state.ThroughputFPS
+		health.EWMAThroughput = state.EWMAThroughput
 		health.ActiveJobs = state.ActiveJobs
 		// !Before (not After): when the two timestamps are equal, prefer the
 		// fresher state-table sample instead of falling back to the DB record.

@@ -151,6 +151,14 @@ func (m *Monitor) checkWorkers() {
 		log.Printf("Removed %d offline worker(s) exceeding offline threshold", len(removedIDs))
 	}
 
+	// Mark state-table entries offline once their heartbeat goes stale, before
+	// slow-node detection. RemoveOfflineWorkers above only deletes rows past
+	// OfflineThreshold; within the heartbeat-timeout -> offline-threshold
+	// window a dead node's stale EWMA must not pollute the median sample pool.
+	if m.stateTable != nil {
+		m.stateTable.ScanOffline()
+	}
+
 	// Slow node detection
 	m.detectSlowWorkers()
 }

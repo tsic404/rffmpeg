@@ -795,6 +795,7 @@ POST /api/v1/workers/heartbeat
 GET /api/v1/workers
 GET /api/v1/workers?active_only=true
 {
+  "cluster_median_throughput": 0.4,
   "workers": [
     {
       "id": "uuid",
@@ -806,6 +807,7 @@ GET /api/v1/workers?active_only=true
         "gpu_mem_used_mb": 4096,
         "active_jobs": ["job_id_1"],
         "throughput_fps": 0.4,
+        "ewma_throughput": 0.35,
         "last_seen": "2024-01-01T00:00:00Z"
       }
     }
@@ -817,6 +819,14 @@ GET /api/v1/workers/{workerId}/jobs
 ```
 
 默认返回全部记录（含 `--worker-offline-threshold` 窗口内尚未回收的 offline 行）；加 `?active_only=true` 只返回非 offline 的记录。
+
+字段说明：
+
+- `health.ewma_throughput`：该 worker 吞吐的 EWMA 平滑值（jobs/sec），慢节点检测直接用它与
+  集群中位数比较；首次心跳样本前为 0。
+- `cluster_median_throughput`：参与慢节点判定的集群 EWMA 中位数原值（offline / 预热中 / 空闲
+  worker 排除在外，与驱逐判定同口径）；不足两个有效样本时为 0。E2E 断言慢节点判定可直接比较
+  `health.ewma_throughput` 与该值，无需等待真实驱逐事件。
 
 ### 迁移与淘汰审计事件
 
