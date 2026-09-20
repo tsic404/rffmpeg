@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -648,5 +649,57 @@ func TestRewriteAdapter_AutoHWPresetCompatibility(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRewriteAdapter_PassThroughNotification pins the default-path
+// transparency contract: an explicit software encoder without --auto-hw is
+// left unchanged, but the user still gets a [rffmpeg] line confirming rffmpeg
+// inspected the request ("no silent rewrite").
+func TestRewriteAdapter_PassThroughNotification(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+			{Name: "libx264", Type: "video", IsHW: false},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+		},
+	})
+
+	rewritten, result, err := adapter.RewriteArgs(
+		context.Background(),
+		[]string{"-i", "input.mp4", "-c:v", "libx264", "output.mp4"},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Performed {
+		t.Errorf("default path must not rewrite: performed=%v", result.Performed)
+	}
+	if result.TargetEncoder != "libx264" {
+		t.Errorf("target encoder = %q, want libx264", result.TargetEncoder)
+	}
+
+	const want = "[rffmpeg] libx264 -> libx264 (Pass through unchanged)"
+	var found bool
+	for _, n := range result.Notifications {
+		if n == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected pass-through notification %q in %v", want, result.Notifications)
+	}
+
+	// The user's args must survive verbatim: the default path must not
+	// delete, reorder, append, or substitute any argument.
+	wantArgs := []string{"-i", "input.mp4", "-c:v", "libx264", "output.mp4"}
+	if !slices.Equal(rewritten, wantArgs) {
+		t.Errorf("default path args changed: got %v, want %v", rewritten, wantArgs)
 	}
 }
