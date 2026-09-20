@@ -56,7 +56,7 @@ type ProgressParser struct {
 	// WSProgressPayload) but is no longer used for ETA computation.
 	ewmaSpeed float64
 	// speedSamples counts speed observations seen since Reset. The first
-	// etaWarmupSeconds of wall-clock time suppress ETA: not enough data has
+	// etaMinWallSeconds of wall-clock time suppress ETA: not enough data has
 	// accumulated for a stable wall-clock rate.
 	speedSamples int
 }
@@ -67,9 +67,18 @@ const etaSpeedAlpha = 0.3
 
 // etaMinWallSeconds is the minimum wall-clock seconds that must elapse
 // before the parser emits an ETA. Before this, the wall-clock rate is
-// unstable (dominated by warm-up) and reporting nothing is better than
-// reporting a number known to be wrong.
-const etaMinWallSeconds = 3.0
+// dominated by encoder warm-up: libx264 lookahead does not settle until
+// roughly the first GOP (~10s at -preset veryslow), so an early rate
+// systematically underestimates long-job ETA by ~25%. Reporting nothing is
+// better than reporting a number known to be wrong.
+//
+// Trade-off: one fixed window serves every encoder. Jobs that finish in
+// under 10s never emit an ETA, and hardware encoders (NVENC/QSV) without
+// lookahead warm-up are needlessly suppressed for the first 10s. Both are
+// accepted because a sub-10s job ends before a wrong estimate matters, and
+// an encoder-aware threshold is not worth its complexity for a progress
+// hint.
+const etaMinWallSeconds = 10.0
 
 func NewProgressParser() *ProgressParser {
 	return &ProgressParser{

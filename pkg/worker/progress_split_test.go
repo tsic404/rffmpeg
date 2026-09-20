@@ -75,8 +75,8 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 	parser := NewProgressParser()
 	parser.SetDuration(10 * 1_000_000) // what probeInputDurationUs seeds
 
-	// Inject wall-clock time: each stats line arrives 1.5s apart so the
-	// 3rd line (wallElapsed=3s) passes the etaMinWallSeconds threshold.
+	// Inject wall-clock time: each stats line arrives 4s apart so the
+	// 4th line (wallElapsed=12s) passes the etaMinWallSeconds threshold.
 	wallSec := 0.0
 	parser.nowFunc = func() time.Time {
 		return time.Unix(0, int64(wallSec*1e9))
@@ -89,7 +89,7 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 			return
 		}
 		f := parser.ParseLine(line)
-		wallSec += 1.5
+		wallSec += 4.0
 		if f == nil || f.Percent < 0 {
 			return
 		}

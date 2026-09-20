@@ -363,8 +363,8 @@ func TestProgressParser_WarmupETASuppressed(t *testing.T) {
 	p := NewProgressParser()
 	p.SetDuration(100 * 1_000_000)
 
-	// Inject wall-clock time: first sample at t=0, second at t=1s, third at
-	// t=2s — all within the etaMinWallSeconds (3s) suppression window.
+	// Inject wall-clock time: samples arrive at t=0, 3s and 7s — all within
+	// the etaMinWallSeconds (10s) suppression window.
 	wallSec := 0.0
 	p.nowFunc = func() time.Time {
 		return time.Unix(int64(wallSec), 0)
@@ -376,7 +376,7 @@ func TestProgressParser_WarmupETASuppressed(t *testing.T) {
 		speed string
 		wallS float64
 	}{
-		{1, "0.50", 0.5}, {2, "1.00", 1.0}, {3, "1.50", 2.0},
+		{1, "0.50", 0.0}, {2, "1.00", 3.0}, {3, "1.50", 7.0},
 	}
 	for i, w := range warmup {
 		wallSec = w.wallS
@@ -392,15 +392,15 @@ func TestProgressParser_WarmupETASuppressed(t *testing.T) {
 		}
 	}
 
-	// After the 3s suppression window the ETA appears, computed from the
-	// wall-clock rate (4s media in 3s wall → rate 1.33x → 96s remaining
-	// / 1.33 ≈ 72s).
-	wallSec = 3.0
-	frame := p.ParseLine("frame=120 fps=30 q=28.0 size=1024kB time=00:00:04.00 bitrate=2045.0kbits/s speed=2.00x")
+	// After the 10s suppression window the ETA appears, computed from the
+	// wall-clock rate (20s media in 10s wall → rate 2.0x → 80s remaining
+	// / 2.0 = 40s).
+	wallSec = 10.0
+	frame := p.ParseLine("frame=600 fps=30 q=28.0 size=1024kB time=00:00:20.00 bitrate=2045.0kbits/s speed=2.00x")
 	if frame == nil || frame.EtaSeconds <= 0 {
 		t.Fatalf("post-warm-up frame must carry an ETA, got %+v", frame)
 	}
-	wantMin, wantMax := 68, 76
+	wantMin, wantMax := 38, 42
 	if frame.EtaSeconds < wantMin || frame.EtaSeconds > wantMax {
 		t.Errorf("ETA = %ds, want wall-clock estimate in [%d,%d]s", frame.EtaSeconds, wantMin, wantMax)
 	}
@@ -420,11 +420,11 @@ func TestProgressParser_ResetClearsWallClock(t *testing.T) {
 
 	p.Reset()
 	p.SetDuration(100 * 1_000_000)
-	for i := int64(1); i <= 6; i++ {
-		wallSec = float64(i - 1) // 0s, 1s, 2s, 3s, 4s, 5s
+	for i := int64(1); i <= 12; i++ {
+		wallSec = float64(i - 1) // 0s … 11s
 		line := fmt.Sprintf("frame=%d fps=30 q=28.0 size=1024kB time=00:00:%02d.00 bitrate=2045.0kbits/s speed=2.00x", i*30, i)
 		f := p.ParseLine(line)
-		if i <= 3 {
+		if i <= 10 {
 			if f == nil || f.EtaSeconds != 0 {
 				t.Fatalf("frame %d: ETA must be suppressed in warm-up window, got %+v", i, f)
 			}
@@ -569,9 +569,9 @@ func TestProgressParser_WallClockETA_WarmupOverhead(t *testing.T) {
 		if frame == nil {
 			t.Fatalf("sample %d: nil frame", i)
 		}
-		// After warmup (wallSec >= 3s), ETA should appear and be
-		// progressively more accurate. We only assert for samples
-		// past 28% (the QA failure point).
+		// After the etaMinWallSeconds (10s) suppression window, ETA should
+		// appear and be progressively more accurate. We only assert for
+		// samples past 28% (the QA failure point).
 		pct := frame.Percent
 		if pct >= 28 && frame.EtaSeconds > 0 {
 			// Total wall time = 5 + (120-2.5)/2.0 = 63.75s
