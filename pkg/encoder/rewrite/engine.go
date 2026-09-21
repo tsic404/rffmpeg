@@ -482,14 +482,27 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 			continue
 		}
 
-		// Handle encoder specification (-c:v, -codec:v, -vcodec)
-		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
-			// Skip both the flag and its value
-			skipNext = true
+		// Handle encoder specification (-c:v, -codec:v, -vcodec), both the
+		// separate ("-c:v libx264") and inline ("-c:v=libx264") forms. The
+		// inline form carries its own value, so only the separate form
+		// consumes the next argument.
+		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" ||
+			strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
+			if !strings.Contains(arg, "=") {
+				// Separate form: skip both the flag and its value.
+				skipNext = true
+			}
 			if !encoderAdded {
 				result = append(result, "-c:v", string(targetEncoder))
 				encoderAdded = true
 			}
+			// The encoder is fully handled here; never re-emit a video
+			// codec param from the params map at the tail (a leaked
+			// "c:v"/"codec:v"/"vcodec" key would silently re-add the
+			// original encoder after the rewritten one).
+			seenParams["c:v"] = true
+			seenParams["codec:v"] = true
+			seenParams["vcodec"] = true
 			continue
 		}
 
@@ -701,6 +714,15 @@ func (e *EngineCoordinator) parseEncoderFromArgs(args []string) encoder.EncoderF
 				return encoder.EncoderFamily(args[i+1])
 			}
 		}
+		// Inline forms: -c:v=libx264, -codec:v=copy, -vcodec=h264_qsv.
+		switch {
+		case strings.HasPrefix(arg, "-c:v="):
+			return encoder.EncoderFamily(arg[5:])
+		case strings.HasPrefix(arg, "-codec:v="):
+			return encoder.EncoderFamily(arg[9:])
+		case strings.HasPrefix(arg, "-vcodec="):
+			return encoder.EncoderFamily(arg[8:])
+		}
 	}
 	return ""
 }
@@ -712,9 +734,14 @@ func (e *EngineCoordinator) parseEncoderParamsFromArgs(args []string) map[string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 
-		// Skip encoder specification
+		// Skip encoder specification (separate form consumes its value)
 		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
 			i++ // Skip value too
+			continue
+		}
+
+		// Skip inline encoder forms (-c:v=, -codec:v=, -vcodec=).
+		if strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
 			continue
 		}
 

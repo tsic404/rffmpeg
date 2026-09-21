@@ -104,6 +104,11 @@ func TestExtractEncoderFromArgs(t *testing.T) {
 			args:     []string{"-i", "input.mp4", "-codec:v", "vp9_vaapi", "output.mp4"},
 			expected: "vp9_vaapi",
 		},
+		{
+			name:     "codec:v with equals value",
+			args:     []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
+			expected: "h264_nvenc",
+		},
 	}
 
 	for _, tt := range tests {
