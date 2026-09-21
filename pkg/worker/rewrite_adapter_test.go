@@ -189,6 +189,61 @@ func TestRewriteAdapter_ParseEncoderFromArgs(t *testing.T) {
 			expectedResult: encoder.EncoderLibX265,
 		},
 		{
+			name:           "-codec:v= inline syntax",
+			args:           []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
+			expectedResult: encoder.EncoderH264NVENC,
+		},
+		{
+			name:           "-vcodec= inline syntax",
+			args:           []string{"-i", "input.mp4", "-vcodec=hevc_nvenc", "output.mp4"},
+			expectedResult: encoder.EncoderHEVCNVENC,
+		},
+		{
+			name:           "bare -c copy",
+			args:           []string{"-i", "input.mp4", "-c", "copy", "output.mp4"},
+			expectedResult: encoder.EncoderFamily("copy"),
+		},
+		{
+			name:           "bare -codec copy",
+			args:           []string{"-i", "input.mp4", "-codec", "copy", "output.mp4"},
+			expectedResult: encoder.EncoderFamily("copy"),
+		},
+		{
+			name:           "bare -c=copy inline",
+			args:           []string{"-i", "input.mp4", "-c=copy", "output.mp4"},
+			expectedResult: encoder.EncoderFamily("copy"),
+		},
+		{
+			name:           "bare -codec=copy inline",
+			args:           []string{"-i", "input.mp4", "-codec=copy", "output.mp4"},
+			expectedResult: encoder.EncoderFamily("copy"),
+		},
+		{
+			name:           "video-specific overrides general -c copy",
+			args:           []string{"-i", "input.mp4", "-c", "copy", "-c:v", "h264_qsv", "output.mp4"},
+			expectedResult: encoder.EncoderH264QSV,
+		},
+		{
+			name:           "inline -codec:v= overrides general -c copy",
+			args:           []string{"-i", "input.mp4", "-c", "copy", "-codec:v=h264_qsv", "output.mp4"},
+			expectedResult: encoder.EncoderH264QSV,
+		},
+		{
+			name:           "inline -vcodec= overrides general -c copy",
+			args:           []string{"-i", "input.mp4", "-c", "copy", "-vcodec=h264_qsv", "output.mp4"},
+			expectedResult: encoder.EncoderH264QSV,
+		},
+		{
+			name:           "bare -c non-copy codec left to auto-selection",
+			args:           []string{"-i", "input.mp4", "-c", "h264", "output.mp4"},
+			expectedResult: "",
+		},
+		{
+			name:           "audio-only -c:a not treated as video",
+			args:           []string{"-i", "input.mp4", "-c:a", "aac", "output.mp4"},
+			expectedResult: "",
+		},
+		{
 			name:           "no encoder",
 			args:           []string{"-i", "input.mp4", "output.mp4"},
 			expectedResult: "",
@@ -200,6 +255,44 @@ func TestRewriteAdapter_ParseEncoderFromArgs(t *testing.T) {
 			result := adapter.parseEncoderFromArgs(tt.args)
 			if result != tt.expectedResult {
 				t.Errorf("expected %s, got %s", tt.expectedResult, result)
+			}
+		})
+	}
+}
+
+// TestRewriteAdapter_BareCCopyPassthrough is a regression test for the bug
+// where bare "-c copy" was silently rewritten to a lossy hardware re-encode.
+// The adapter must leave such args verbatim and resolve no target encoder.
+func TestRewriteAdapter_BareCCopyPassthrough(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+		},
+	})
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"bare -c copy", []string{"-i", "input.mp4", "-c", "copy", "output.mp4"}},
+		{"bare -c copy with audio re-encode", []string{"-i", "video.mp4", "-i", "audio.mp3", "-c", "copy", "-c:a", "aac", "merged.mp4"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rewritten, result, err := adapter.RewriteArgs(context.Background(), tt.args, true)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Performed {
+				t.Errorf("expected no rewrite, got target encoder %q", result.TargetEncoder)
+			}
+			if !slices.Equal(rewritten, tt.args) {
+				t.Errorf("args must pass through verbatim, got %v", rewritten)
+			}
+			if target := adapter.ResolveTargetEncoder(tt.args, true); target != "" {
+				t.Errorf("ResolveTargetEncoder = %q, want empty", target)
 			}
 		})
 	}
