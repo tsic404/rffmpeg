@@ -23,9 +23,14 @@ func TestConsensusWithNativeFFmpeg(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("requires ffmpeg binary")
 	}
+	// "-report" (a boolean entry under test) writes ffmpeg-<timestamp>.log to
+	// the cwd; probe from a temp dir so it never lands in the repo.
+	workDir := t.TempDir()
 	for name, isBool := range booleanFlags {
 		args := []string{"-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=0.05:size=64x64:rate=5", "-" + name, "/dev/null"}
-		out, err := exec.Command("ffmpeg", args...).CombinedOutput()
+		cmd := exec.Command("ffmpeg", args...)
+		cmd.Dir = workDir
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			msg := string(out)
 			switch {
