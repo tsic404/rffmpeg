@@ -670,7 +670,7 @@ func (h *Handler) GetJob(w http.ResponseWriter, r *http.Request) {
 	if job.Status == protocol.JobStatusPending {
 		noLiveWorker = h.hasNoLiveSchedulableWorker()
 	}
-	jobInfo := h.dbJobToJobInfo(job, noLiveWorker, nil)
+	jobInfo := h.dbJobToJobInfo(job, noLiveWorker, h.jobRetryCounts([]string{job.ID}))
 	writeJSON(w, http.StatusOK, protocol.JobStatusResponse{Job: jobInfo})
 }
 
@@ -690,9 +690,14 @@ func (h *Handler) ListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	noLiveWorker := h.hasNoLiveSchedulableWorker()
+	jobIDs := make([]string, len(jobs))
+	for i, job := range jobs {
+		jobIDs[i] = job.ID
+	}
+	retryCounts := h.jobRetryCounts(jobIDs)
 	jobInfos := make([]protocol.JobInfo, len(jobs))
 	for i, job := range jobs {
-		jobInfos[i] = h.dbJobToJobInfo(job, noLiveWorker, nil)
+		jobInfos[i] = h.dbJobToJobInfo(job, noLiveWorker, retryCounts)
 	}
 
 	writeJSON(w, http.StatusOK, protocol.JobListResponse{Jobs: jobInfos})
@@ -1268,18 +1273,7 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 	// A migrated job (retry_count > 0) must signal its re-dispatch so the
 	// worker can remove the stale partial output left by the previous worker
 	// before re-running ffmpeg. One batched query, not N+1.
-	retryCounts, err := h.db.GetJobRetryCounts(jobIDs)
-	if err != nil {
-		log.Printf("Failed to get job retry counts for worker pull (attempt 1): %v", err)
-		// Retry once before degrading: a transient DB error must not silently
-		// turn every migrated job in this batch into a "fresh" job and disable
-		// its stale-output cleanup.
-		retryCounts, err = h.db.GetJobRetryCounts(jobIDs)
-		if err != nil {
-			log.Printf("Failed to get job retry counts for worker pull after retry; serving %d job(s) without retry_count: %v", len(jobIDs), err)
-			retryCounts = nil // degrade: workers treat nil as fresh jobs, not re-dispatches
-		}
-	}
+	retryCounts := h.jobRetryCounts(jobIDs)
 	for i, job := range jobs {
 		jobInfos[i] = h.dbJobToJobInfo(job, false, retryCounts)
 	}
@@ -1786,9 +1780,30 @@ func (h *Handler) hasNoLiveSchedulableWorker() bool {
 	return len(liveWorkers) == 0
 }
 
-// dbJobToJobInfo converts database Job to protocol JobInfo. retryCounts is an
-// optional precomputed map of worker-failure migration counts keyed by job ID;
-// when nil it defaults to 0 (used by paths that never hand a job to a worker).
+// jobRetryCounts returns the worker-failure migration counts for the given
+// jobs in one batched query, retrying once on a transient DB error before
+// degrading to nil. A nil result is treated by callers as "no count
+// available", so a degraded read never silently rewrites a migrated job's
+// retry_count back to 0.
+func (h *Handler) jobRetryCounts(jobIDs []string) map[string]int {
+	retryCounts, err := h.db.GetJobRetryCounts(jobIDs)
+	if err != nil {
+		log.Printf("Failed to get job retry counts (attempt 1): %v", err)
+		// Retry once before degrading: a transient DB error must not silently
+		// turn every migrated job into a "fresh" job and hide its re-dispatch
+		// count from the client (or disable the worker's stale-output cleanup).
+		retryCounts, err = h.db.GetJobRetryCounts(jobIDs)
+		if err != nil {
+			log.Printf("Failed to get job retry counts after retry; serving %d job(s) without retry_count: %v", len(jobIDs), err)
+			return nil
+		}
+	}
+	return retryCounts
+}
+
+// dbJobToJobInfo converts database Job to protocol JobInfo. retryCounts is a
+// precomputed map of worker-failure migration counts keyed by job ID; a nil
+// map (lookup failure) leaves the count at its zero value.
 func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map[string]int) protocol.JobInfo {
 	var inputFiles, args, outputFiles, directPaths []string
 	if err := json.Unmarshal([]byte(job.InputFiles), &inputFiles); err != nil {

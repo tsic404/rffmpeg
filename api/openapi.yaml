@@ -713,6 +713,9 @@ components:
         retryable:
           type: boolean
           description: Whether the failure type is worth retrying (TSI-2958).
+        retry_count:
+          type: integer
+          description: Times the job was migrated off a failed worker; >0 marks a re-dispatch. Omitted for fresh jobs.
         cached:
           type: boolean
           description: Whether the result was served from the worker cache (TSI-2519).
