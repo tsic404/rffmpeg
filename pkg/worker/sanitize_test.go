@@ -14,6 +14,13 @@ func TestSanitizeInputBaseName(t *testing.T) {
 	}{
 		{"video.mp4", "video.mp4"},
 		{"my file (1).mkv", "my file (1).mkv"},
+		// Non-ASCII URL basenames must not survive into the local filename:
+		// CJK runes collapse to '_' while the ASCII space is preserved, so a
+		// raw UTF-8/space name and its percent-encoded spelling both yield a
+		// safe path ffmpeg can read.
+		{"电影 4K.mkv", "__ 4K.mkv"},
+		{"movie%204K.mkv", "movie_204K.mkv"},
+		{"%E7%94%B5%E5%BD%B1.mkv", "_E7_94_B5_E5_BD_B1.mkv"},
 		{"", ""},
 		{".", ""},  // falls back to UUID
 		{"..", ""}, // falls back to UUID

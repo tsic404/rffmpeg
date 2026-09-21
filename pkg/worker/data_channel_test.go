@@ -124,6 +124,65 @@ func TestClient_HTTPInput_WithTokenAuth(t *testing.T) {
 	}
 }
 
+// TestClient_DownloadInput_RemoteURL_NonASCIIFilename locks the HTTP remote
+// input normalization contract: a raw (unencoded) URL whose path carries a
+// space or CJK filename must download intact — Go's HTTP client percent-encodes
+// the path at send time — and a pre-encoded URL must reach the server in the
+// same decoded form, so both spellings address the same remote object. Without
+// this, a non-ASCII input name has no E2E coverage and a regression to a
+// non-escaping request path would only surface in production.
+func TestClient_DownloadInput_RemoteURL_NonASCIIFilename(t *testing.T) {
+	content := []byte("fake-video-content-utf8")
+
+	tests := []struct {
+		name        string
+		urlPath     string // appended to the server URL; raw or percent-encoded
+		wantPath    string // decoded path the server must observe
+		wantEscaped string // escaped path the server must observe
+	}{
+		{"ascii", "/movie-4k.mkv", "/movie-4k.mkv", "/movie-4k.mkv"},
+		{"raw space", "/movie 4K.mkv", "/movie 4K.mkv", "/movie%204K.mkv"},
+		{"raw cjk and space", "/电影 4K.mkv", "/电影 4K.mkv", "/%E7%94%B5%E5%BD%B1%204K.mkv"},
+		{"encoded space", "/movie%204K.mkv", "/movie 4K.mkv", "/movie%204K.mkv"},
+		{"encoded cjk and space", "/%E7%94%B5%E5%BD%B1%204K.mkv", "/电影 4K.mkv", "/%E7%94%B5%E5%BD%B1%204K.mkv"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath, gotEscaped string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotEscaped = r.URL.EscapedPath()
+				w.Write(content)
+			}))
+			defer ts.Close()
+
+			remoteURL := ts.URL + tt.urlPath
+			// Mirror the worker's destination-name derivation (last path
+			// segment, sanitized) so the test exercises the same local path
+			// shape ffmpeg later reads.
+			destPath := filepath.Join(t.TempDir(), "input-"+sanitizeInputBaseName(filepath.Base(remoteURL)))
+
+			if err := NewClient(ts.URL, "test-worker", "").DownloadInput(remoteURL, destPath); err != nil {
+				t.Fatalf("DownloadInput(%q): %v", remoteURL, err)
+			}
+			if gotPath != tt.wantPath {
+				t.Errorf("server observed URL.Path = %q, want %q", gotPath, tt.wantPath)
+			}
+			if gotEscaped != tt.wantEscaped {
+				t.Errorf("server observed URL.EscapedPath() = %q, want %q", gotEscaped, tt.wantEscaped)
+			}
+			data, err := os.ReadFile(destPath)
+			if err != nil {
+				t.Fatalf("read downloaded file: %v", err)
+			}
+			if string(data) != string(content) {
+				t.Errorf("downloaded content = %q, want %q", string(data), string(content))
+			}
+		})
+	}
+}
+
 // TestClient_StreamingOutputMode verifies the SendStdoutChunk function works
 // for streaming output mode (S8.2 RTMP/streaming scenario).
 func TestClient_StreamingOutputMode(t *testing.T) {
