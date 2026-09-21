@@ -254,6 +254,65 @@ func TestEngineCoordinator_RewriteSync(t *testing.T) {
 	}
 }
 
+// TestEngineCoordinator_ParseInlineEncoderArgs verifies the RewriteSync
+// parser helpers handle the inline encoder forms (-c:v=/-codec:v=/-vcodec=):
+// the encoder must be detected and the codec key must NOT leak into the
+// extracted params (which would later be re-emitted at the tail).
+func TestEngineCoordinator_ParseInlineEncoderArgs(t *testing.T) {
+	engine := NewEngineCoordinator()
+
+	tests := []struct {
+		name          string
+		args          []string
+		expectEncoder encoder.EncoderFamily
+		expectParams  map[string]string
+	}{
+		{
+			name:          "inline -codec:v= detected, no codec:v leak",
+			args:          []string{"-codec:v=h264_nvenc", "-crf", "23", "output.mp4"},
+			expectEncoder: encoder.EncoderH264NVENC,
+			expectParams:  map[string]string{"crf": "23"},
+		},
+		{
+			name:          "inline -vcodec= detected, no vcodec leak",
+			args:          []string{"-vcodec=libx264", "output.mp4"},
+			expectEncoder: encoder.EncoderLibX264,
+			expectParams:  map[string]string{},
+		},
+		{
+			name:          "inline -c:v= detected, no c:v leak",
+			args:          []string{"-c:v=libx264", "output.mp4"},
+			expectEncoder: encoder.EncoderLibX264,
+			expectParams:  map[string]string{},
+		},
+		{
+			name:          "separate -codec:v still detected",
+			args:          []string{"-codec:v", "h264_nvenc", "output.mp4"},
+			expectEncoder: encoder.EncoderH264NVENC,
+			expectParams:  map[string]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := engine.parseEncoderFromArgs(tt.args); got != tt.expectEncoder {
+				t.Errorf("parseEncoderFromArgs = %q, want %q", got, tt.expectEncoder)
+			}
+
+			got := engine.parseEncoderParamsFromArgs(tt.args)
+			if len(got) != len(tt.expectParams) {
+				t.Errorf("parseEncoderParamsFromArgs = %v, want %v", got, tt.expectParams)
+				return
+			}
+			for k, v := range tt.expectParams {
+				if got[k] != v {
+					t.Errorf("parseEncoderParamsFromArgs[%q] = %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
 func TestEngineCoordinator_BuildRewrittenArgs(t *testing.T) {
 	engine := NewEngineCoordinator()
 
@@ -286,6 +345,42 @@ func TestEngineCoordinator_BuildRewrittenArgs(t *testing.T) {
 			targetEncoder:  encoder.EncoderH264QSV,
 			params:         map[string]string{},
 			expectContains: []string{"-c:v", "h264_qsv"},
+		},
+		{
+			name:              "replace inline -codec:v= encoder",
+			originalArgs:      []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264QSV,
+			params:            map[string]string{},
+			expectContains:    []string{"-c:v", "h264_qsv"},
+			expectNotContains: []string{"-codec:v=h264_nvenc"},
+		},
+		{
+			name:              "replace inline -vcodec= encoder",
+			originalArgs:      []string{"-i", "input.mp4", "-vcodec=libx264", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264NVENC,
+			params:            map[string]string{},
+			expectContains:    []string{"-c:v", "h264_nvenc"},
+			expectNotContains: []string{"-vcodec=libx264"},
+		},
+		{
+			name:              "replace inline -c:v= encoder",
+			originalArgs:      []string{"-i", "input.mp4", "-c:v=libx264", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264NVENC,
+			params:            map[string]string{},
+			expectContains:    []string{"-c:v", "h264_nvenc"},
+			expectNotContains: []string{"-c:v=libx264"},
+		},
+		{
+			// Regression: a leaked video-codec key in params (e.g. from the
+			// RewriteSync parser on an inline form) must not be re-emitted at
+			// the tail as a separate "-codec:v <value>" pair, which would
+			// silently override the rewritten encoder.
+			name:              "leaked codec:v param is not re-emitted after inline encoder",
+			originalArgs:      []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
+			targetEncoder:     encoder.EncoderH264QSV,
+			params:            map[string]string{"codec:v": "h264_nvenc"},
+			expectContains:    []string{"-c:v", "h264_qsv"},
+			expectNotContains: []string{"-codec:v", "h264_nvenc"},
 		},
 	}
 

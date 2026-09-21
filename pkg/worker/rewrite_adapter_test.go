@@ -101,6 +101,79 @@ func TestRewriteAdapter_RewriteArgs(t *testing.T) {
 	}
 }
 
+// TestRewriteAdapter_RewriteArgs_InlineCodecForm is a regression for the
+// inline encoder form: a `-c:v=`/`-codec:v=`/`-vcodec=` token must be
+// stripped during rewrite, not left behind to collide with the inserted
+// `-c:v <target>` (ffmpeg then fails with rc=234/8). Asserting the absence
+// of any residual codec flag — not just the inline token — also catches the
+// failure mode where the original encoder leaks back as a separate
+// "-codec:v <value>" pair, silently overriding the rewrite. Exact full-args
+// equality is not used because hardware-injected params have map-ordering
+// that is non-deterministic across runs.
+func TestRewriteAdapter_RewriteArgs_InlineCodecForm(t *testing.T) {
+	adapter := NewRewriteAdapter()
+
+	caps := &protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+			{Name: "libx264", Type: "video", IsHW: false},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+		},
+	}
+	adapter.SetHardwareCapabilities(caps)
+
+	tests := []struct {
+		name            string
+		args            []string
+		originalEncoder string
+	}{
+		{
+			name:            "inline -vcodec=libx264 is stripped on HW upgrade",
+			args:            []string{"-i", "input.mp4", "-vcodec=libx264", "output.mp4"},
+			originalEncoder: "libx264",
+		},
+		{
+			name:            "inline -codec:v=libx264 is stripped on HW upgrade",
+			args:            []string{"-i", "input.mp4", "-codec:v=libx264", "output.mp4"},
+			originalEncoder: "libx264",
+		},
+		{
+			name:            "inline -c:v=libx264 is stripped on HW upgrade",
+			args:            []string{"-i", "input.mp4", "-c:v=libx264", "output.mp4"},
+			originalEncoder: "libx264",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rewritten, _, err := adapter.RewriteArgs(context.Background(), tt.args, true)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if !slices.Contains(rewritten, "-c:v") || !slices.Contains(rewritten, "h264_nvenc") {
+				t.Fatalf("expected target -c:v h264_nvenc in %v", rewritten)
+			}
+
+			for _, arg := range rewritten {
+				if arg == tt.originalEncoder {
+					t.Errorf("original encoder value %q leaked into args: %v", arg, rewritten)
+				}
+				switch {
+				case strings.HasPrefix(arg, "-codec:v"):
+					t.Errorf("residual -codec:v flag %q in args: %v", arg, rewritten)
+				case strings.HasPrefix(arg, "-vcodec"):
+					t.Errorf("residual -vcodec flag %q in args: %v", arg, rewritten)
+				case strings.HasPrefix(arg, "-c:v="):
+					t.Errorf("residual inline -c:v= flag %q in args: %v", arg, rewritten)
+				}
+			}
+		})
+	}
+}
+
 func TestRewriteAdapter_ShouldRewrite(t *testing.T) {
 	adapter := NewRewriteAdapter()
 
@@ -411,6 +484,59 @@ func TestRewriteAdapter_FallbackToSoftware(t *testing.T) {
 	}
 }
 
+// TestRewriteAdapter_FallbackToSoftware_InlineCodecForm is a regression for
+// the inline encoder form in the fallback path: a `-c:v=`/`-codec:v=`/
+// `-vcodec=` token must be replaced by the software encoder, not left behind
+// (which would leave ffmpeg with the residual token plus the appended sw
+// encoder, i.e. rc=234/8). extractEncoderFromArgs re-parses the result so
+// the original encoder leaking through is detected as a non-`libx264` value.
+func TestRewriteAdapter_FallbackToSoftware_InlineCodecForm(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	hwCaps := &rewrite.HardwareCapabilities{
+		SoftwareEncoders: []encoder.EncoderFamily{encoder.EncoderLibX264},
+	}
+
+	tests := []struct {
+		name            string
+		args            []string
+		originalEncoder string
+	}{
+		{
+			name:            "inline -codec:v= replaced on fallback",
+			args:            []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
+			originalEncoder: "h264_nvenc",
+		},
+		{
+			name:            "inline -vcodec= replaced on fallback",
+			args:            []string{"-i", "input.mp4", "-vcodec=h264_nvenc", "output.mp4"},
+			originalEncoder: "h264_nvenc",
+		},
+		{
+			name:            "inline -c:v= replaced on fallback",
+			args:            []string{"-i", "input.mp4", "-c:v=h264_nvenc", "output.mp4"},
+			originalEncoder: "h264_nvenc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := adapter.fallbackToSoftware(context.Background(), tt.args, hwCaps)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := extractEncoderFromArgs(result); got != string(encoder.EncoderLibX264) {
+				t.Errorf("fallback encoder = %q, want %q (args: %v)", got, encoder.EncoderLibX264, result)
+			}
+			for _, arg := range result {
+				if strings.Contains(arg, tt.originalEncoder) {
+					t.Errorf("original encoder %q leaked into fallback args: %q (args: %v)",
+						tt.originalEncoder, arg, result)
+				}
+			}
+		})
+	}
+}
+
 func TestRewriteAdapter_ConfigMethods(t *testing.T) {
 	adapter := NewRewriteAdapter()
 
@@ -539,6 +665,16 @@ func TestRewriteAdapter_ParseEncoderParamsFromArgs(t *testing.T) {
 		{
 			name:           "skip encoder spec with c:v= syntax",
 			args:           []string{"-i", "input.mp4", "-c:v=libx264", "-crf", "23", "output.mp4"},
+			expectedParams: map[string]string{"crf": "23"},
+		},
+		{
+			name:           "skip encoder spec with codec:v= syntax",
+			args:           []string{"-i", "input.mp4", "-codec:v=libx264", "-crf", "23", "output.mp4"},
+			expectedParams: map[string]string{"crf": "23"},
+		},
+		{
+			name:           "skip encoder spec with vcodec= syntax",
+			args:           []string{"-i", "input.mp4", "-vcodec=libx264", "-crf", "23", "output.mp4"},
 			expectedParams: map[string]string{"crf": "23"},
 		},
 		{

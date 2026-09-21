@@ -682,6 +682,9 @@ func extractEncoderFromArgs(args []string) string {
 		if strings.HasPrefix(arg, "-c:v=") {
 			return strings.TrimPrefix(arg, "-c:v=")
 		}
+		if strings.HasPrefix(arg, "-codec:v=") {
+			return strings.TrimPrefix(arg, "-codec:v=")
+		}
 		if strings.HasPrefix(arg, "-vcodec=") {
 			return strings.TrimPrefix(arg, "-vcodec=")
 		}

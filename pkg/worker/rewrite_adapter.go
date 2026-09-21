@@ -425,10 +425,12 @@ func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]st
 		"o":         true, // output file (rare)
 		"f":         true, // format
 		"c":         true, // codec (general)
+		"c:v":       true, // video codec (handled separately)
 		"c:a":       true, // audio codec
 		"c:s":       true, // subtitle codec
 		"c:d":       true, // data codec
 		"codec":     true,
+		"codec:v":   true, // video codec (handled separately)
 		"codec:a":   true,
 		"codec:s":   true,
 		"codec:d":   true,
@@ -461,8 +463,8 @@ func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]st
 			continue
 		}
 
-		// Handle -c:v=encoder syntax
-		if len(arg) > 4 && arg[:4] == "-c:v" && arg[4] == '=' {
+		// Handle inline encoder syntax (-c:v=, -codec:v=, -vcodec=).
+		if strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
 			continue
 		}
 
@@ -581,8 +583,8 @@ func (a *RewriteAdapter) fallbackToSoftware(ctx context.Context, originalArgs []
 			continue
 		}
 
-		// Handle -c:v=encoder syntax
-		if len(arg) > 4 && arg[:4] == "-c:v" && arg[4] == '=' {
+		// Handle inline encoder syntax (-c:v=, -codec:v=, -vcodec=).
+		if strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
 			if !encoderReplaced {
 				result = append(result, fmt.Sprintf("-c:v=%s", swEncoder))
 				encoderReplaced = true

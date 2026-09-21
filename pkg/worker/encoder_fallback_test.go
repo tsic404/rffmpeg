@@ -192,6 +192,27 @@ func TestEncoderFallback_buildFallbackArgs_OutputPathPreservation(t *testing.T) 
 			outputPath: "output.mp4",
 			wantOutput: true,
 		},
+		{
+			name:       "inline -codec:v= replaced",
+			args:       []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
+			swEncoder:  "libx264",
+			outputPath: "output.mp4",
+			wantOutput: true,
+		},
+		{
+			name:       "inline -vcodec= replaced",
+			args:       []string{"-i", "input.mp4", "-vcodec=h264_nvenc", "output.mp4"},
+			swEncoder:  "libx264",
+			outputPath: "output.mp4",
+			wantOutput: true,
+		},
+		{
+			name:       "inline -c:v= replaced",
+			args:       []string{"-i", "input.mp4", "-c:v=h264_nvenc", "output.mp4"},
+			swEncoder:  "libx264",
+			outputPath: "output.mp4",
+			wantOutput: true,
+		},
 	}
 
 	for _, tt := range tests {

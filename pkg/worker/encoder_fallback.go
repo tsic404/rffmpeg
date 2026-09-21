@@ -300,6 +300,10 @@ func (f *EncoderFallback) buildFallbackArgs(args []string, swEncoder string, out
 			result = append(result, "-c:v="+swEncoder)
 			continue
 		}
+		if strings.HasPrefix(arg, "-codec:v=") {
+			result = append(result, "-codec:v="+swEncoder)
+			continue
+		}
 		if strings.HasPrefix(arg, "-vcodec=") {
 			result = append(result, "-vcodec="+swEncoder)
 			continue
