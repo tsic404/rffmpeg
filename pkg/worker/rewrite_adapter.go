@@ -364,6 +364,13 @@ func (a *RewriteAdapter) buildDecisionReason(response *rewrite.EncoderRewriteRes
 }
 
 // parseEncoderFromArgs extracts the video encoder from FFmpeg arguments.
+//
+// An explicit video codec flag (-c:v/-codec:v/-vcodec, separate or inline)
+// takes precedence over the general -c/-codec flag, which also sets the video
+// codec. Only "copy" is lifted from the general flag (a stream-copy directive
+// that must pass through unchanged); other general values are codec names the
+// auto-selection path already handles. ffmpeg resolves these flags
+// positionally (later wins); this parser prefers the explicit video flag.
 func (a *RewriteAdapter) parseEncoderFromArgs(args []string) encoder.EncoderFamily {
 	for i, arg := range args {
 		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
@@ -371,11 +378,28 @@ func (a *RewriteAdapter) parseEncoderFromArgs(args []string) encoder.EncoderFami
 				return encoder.EncoderFamily(args[i+1])
 			}
 		}
-		// Handle -c:v=encoder syntax
-		if len(arg) > 4 && arg[:4] == "-c:v" {
-			if arg[4] == '=' {
-				return encoder.EncoderFamily(arg[5:])
+		// Inline forms: -c:v=libx264, -codec:v=copy, -vcodec=h264_qsv.
+		switch {
+		case strings.HasPrefix(arg, "-c:v="):
+			return encoder.EncoderFamily(arg[5:])
+		case strings.HasPrefix(arg, "-codec:v="):
+			return encoder.EncoderFamily(arg[9:])
+		case strings.HasPrefix(arg, "-vcodec="):
+			return encoder.EncoderFamily(arg[8:])
+		}
+	}
+
+	// General codec flag: bare "-c copy" sets every stream (video included)
+	// to stream-copy. Treat it as the "copy" passthrough encoder so the
+	// rewrite engine never injects a lossy re-encode.
+	for i, arg := range args {
+		if arg == "-c" || arg == "-codec" {
+			if i+1 < len(args) && args[i+1] == "copy" {
+				return encoder.EncoderFamily("copy")
 			}
+		}
+		if arg == "-c=copy" || arg == "-codec=copy" {
+			return encoder.EncoderFamily("copy")
 		}
 	}
 	return ""
