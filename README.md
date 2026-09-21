@@ -857,6 +857,90 @@ SIGTERM/SIGINT 后仅 `cancel()` 并退出主循环（不调用 `w.Stop()`），
 事件。因此迁移事件并非发生在退出瞬间，而是发生在随后的心跳超时；要让优雅退出后的作业尽快触发
 迁移，应停发心跳超过 `worker_heartbeat_timeout`（或直接 `kill -9`）。
 
+**验收短窗口需同步调低 worker 心跳周期。** 心跳超时迁移的观测窗由服务端 `--worker-heartbeat-timeout`
+（默认 90s）决定，而 worker 心跳周期（配置文件 `heartbeat_interval` / 环境变量
+`RFFMPEG_HEARTBEAT_INTERVAL`，默认 30s）必须低于该阈值——只调一端都不行：周期大于阈值时活 worker
+会被反复误判 offline，阈值大于周期时观测窗仍受阈值约束。要把迁移观测压进约 2 分钟的验收窗，需把两端
+一起降到 15–20s（如 `--worker-heartbeat-timeout 15s` + `RFFMPEG_HEARTBEAT_INTERVAL=15s`）。
+
+### 慢节点驱逐单机复现
+
+慢节点驱逐（EWMA 吞吐低于集群中位数 / `SlowNodeThreshold=3.0`，即低于中位数 1/3）纯由吞吐驱动，不需要
+GPU——两个软件编码（libx264）worker 即可单机复现。慢 worker 的 ffmpeg 用一段 `sleep` 包装，使每个作业
+耗时远高于快 worker、吞吐拉开 3× 以上；两个 worker 各自完成 ≥ `MinJobsForEviction=5` 个作业后，健康监控
+在下一个巡检周期（`--worker-health-check-interval`）把慢 worker 标记为驱逐。驱逐判定不依赖心跳超时，
+无需调 `--worker-heartbeat-timeout`。
+
+**前置**：编译三个二进制，并生成一个极小的测试输入（1s 即可，让快 worker 的吞吐尽量高）：
+
+```bash
+go build -o bin/server ./cmd/server
+go build -o bin/worker ./cmd/worker
+go build -o bin/rffmpeg ./cmd/cli
+ffmpeg -y -f lavfi -i testsrc=duration=1:size=320x240:rate=25 -c:v libx264 -pix_fmt yuv420p test.mp4
+```
+
+**1. 启动 server**（缩短 `--worker-health-check-interval` 让驱逐判定尽快发生）：
+
+```bash
+./bin/server --auth-token dev --worker-health-check-interval 5s
+```
+
+**2. 编写慢 worker 的 ffmpeg 包装**（只对真正转码的 `-i` 调用注入延迟，避免拖慢 worker 启动时的编码器探测）：
+
+```bash
+cat > slow-ffmpeg <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [[ "$a" == "-i" ]]; then sleep 10; break; fi
+done
+exec ffmpeg "$@"
+EOF
+chmod +x slow-ffmpeg
+```
+
+**3. 启动两个 worker**（禁用缓存避免快 worker 缓存命中后绕过编码；`heartbeat_interval=2s` 加快 EWMA 收敛）：
+
+```bash
+RFFMPEG_CACHE_ENABLED=false RFFMPEG_HEARTBEAT_INTERVAL=2s RFFMPEG_WORKER_NAME=fast \
+  ./bin/worker --server-url http://localhost:8080 --token dev
+
+RFFMPEG_CACHE_ENABLED=false RFFMPEG_HEARTBEAT_INTERVAL=2s RFFMPEG_WORKER_NAME=slow \
+  RFFMPEG_FFMPEG_PATH="$PWD/slow-ffmpeg" \
+  ./bin/worker --server-url http://localhost:8080 --token dev
+```
+
+**4. 持续提交作业**，让两个 worker 保持忙碌、各自完成 ≥5 个作业（快 worker 每秒完成多个小作业，慢 worker
+因 `max_concurrent=1` 串行执行、每个作业被 `sleep 10` 拉到 ≥10s，吞吐上限即 1/10s ≈ 0.1 jobs/s，吞吐差
+一个数量级以上，远超 3× 阈值）。整批约需 1–2 分钟：
+
+```bash
+export RFFMPEG_TOKEN=dev
+seq 1 100 | xargs -P 8 -I{} ./bin/rffmpeg --server http://localhost:8080 -y -i test.mp4 -c:v libx264 out-{}.mp4
+```
+
+**5. 观察驱逐**（日志、worker 列表、审计表三处一致）：
+
+```bash
+# 日志：健康监控巡检输出 evicted 与 median
+grep -E 'evicted|Slow node check' data/rffmpeg-server.log
+
+# worker 列表：slow 的 evicted=true，health.ewma_throughput 低于 cluster_median_throughput/3
+curl -s -H 'Authorization: Bearer dev' http://localhost:8080/api/v1/workers \
+  | jq '{median: .cluster_median_throughput, workers: [.workers[] | {name, status, evicted, ewma: .health.ewma_throughput}]}'
+
+# 审计事件：worker_eviction_events 无 HTTP 端点，直接读 SQLite
+sqlite3 data/rffmpeg.db "SELECT timestamp, worker_id, event_type, round(current_throughput,3), round(cluster_median,3), decision_reason FROM worker_eviction_events ORDER BY timestamp DESC;"
+```
+
+预期：slow 的 `evicted=true`，`worker_eviction_events` 新增一条 `event_type=evicted` 且
+`current_throughput < cluster_median`。驱逐后 slow 从可调度池（`GetSchedulableWorkers`，过滤 `evicted=1`）
+移除，调度与提交时的可用性检查不再选中它、其 pull 返回 409 `worker_evicted`，因此不再收到新作业；`GET
+/api/v1/workers` 仍列出该行（`active_only` 只过滤 offline、不过滤 evicted，slow 仍在列表中，只是带
+`evicted=true`）。正在执行的作业仍会正常跑完——驱逐不强制迁移运行中作业（那是心跳超时迁移的职责）。恢复：
+去掉慢 worker 的 `sleep` 包装后，其 EWMA 恢复到中位数 / `RecoveryThreshold=1.5` 以上，健康监控写
+`event_type=recovered` 并清除驱逐标记，slow 重新入池。
+
 ### 健康检查
 
 ```
