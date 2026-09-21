@@ -765,3 +765,32 @@ func TestBuildRewrittenArgs_ParamsToFilter(t *testing.T) {
 		})
 	}
 }
+
+// TestTranslatorAdapter_CanTranslate_CrossFormatRejected verifies that a
+// cross-format translation is refused: rewriting AV1 parameters to any H.264
+// encoder would silently change the requested output codec, so the mapping
+// must not advertise AV1 -> H.264 translation rules for any target in the
+// family. The same-family AV1 case is asserted as the positive control,
+// proving the false result is the family boundary rather than a translator
+// that always reports false.
+func TestTranslatorAdapter_CanTranslate_CrossFormatRejected(t *testing.T) {
+	adapter := NewTranslatorAdapter()
+
+	h264Targets := []encoder.EncoderFamily{
+		encoder.EncoderLibX264,
+		encoder.EncoderH264NVENC,
+		encoder.EncoderH264QSV,
+		encoder.EncoderH264VAAPI,
+		encoder.EncoderH264AMF,
+		encoder.EncoderH264VT,
+	}
+	for _, target := range h264Targets {
+		if adapter.CanTranslate(encoder.EncoderLibSVTAV1, target) {
+			t.Errorf("CanTranslate(AV1, %s) should be false: cross-format translation is rejected", target)
+		}
+	}
+
+	if !adapter.CanTranslate(encoder.EncoderLibSVTAV1, encoder.EncoderAV1NVENC) {
+		t.Error("CanTranslate(AV1, AV1) should be true: same-family translation rules exist")
+	}
+}
