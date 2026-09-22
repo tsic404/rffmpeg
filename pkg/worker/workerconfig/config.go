@@ -21,6 +21,7 @@ const (
 	envWorkerID                = "RFFMPEG_WORKER_ID"
 	envWorkerName              = "RFFMPEG_WORKER_NAME"
 	envToken                   = "RFFMPEG_TOKEN"
+	envInputAuthHeader         = "RFFMPEG_INPUT_AUTH_HEADER"
 	envTempDir                 = "RFFMPEG_TEMP_DIR"
 	envFFmpegPath              = "RFFMPEG_FFMPEG_PATH"
 	envTimeout                 = "RFFMPEG_TIMEOUT"
@@ -93,6 +94,11 @@ type Config struct {
 	WorkerID  string `json:"worker_id" yaml:"worker_id"`
 	Name      string `json:"name" yaml:"name"`
 	Token     string `json:"token" yaml:"token"`
+	// InputAuthHeader is the raw Authorization value the worker sends when
+	// downloading a user-provided remote input URL. It is deliberately
+	// separate from Token: Token is the rffmpeg API-channel PSK and is never
+	// sent to an external URL.
+	InputAuthHeader string `json:"input_auth_header" yaml:"input_auth_header"`
 
 	// Paths
 	TempDir    string `json:"temp_dir" yaml:"temp_dir"`
@@ -355,6 +361,10 @@ func LoadFromEnv() *Config {
 		config.Token = token
 		config.setKeys[envToken] = true
 	}
+	if header := os.Getenv(envInputAuthHeader); header != "" {
+		config.InputAuthHeader = header
+		config.setKeys[envInputAuthHeader] = true
+	}
 	if tempDir := os.Getenv(envTempDir); tempDir != "" {
 		config.TempDir = tempDir
 		config.setKeys[envTempDir] = true
@@ -503,6 +513,9 @@ func Merge(fileConfig, envConfig *Config) *Config {
 		}
 		if envConfig.setKeys[envToken] {
 			result.Token = envConfig.Token
+		}
+		if envConfig.setKeys[envInputAuthHeader] {
+			result.InputAuthHeader = envConfig.InputAuthHeader
 		}
 		if envConfig.setKeys[envTempDir] {
 			result.TempDir = envConfig.TempDir

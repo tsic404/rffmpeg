@@ -124,6 +124,47 @@ func TestClient_HTTPInput_WithTokenAuth(t *testing.T) {
 	}
 }
 
+// TestClient_DownloadInput_RemoteURL_InputAuthHeader locks the acceptance
+// contract for authenticated remote inputs: a configured input_auth_header is
+// injected verbatim into the remote-URL download's Authorization header, the
+// API PSK (token) is never sent to an external URL, and an unconfigured
+// remote download carries no Authorization header.
+func TestClient_DownloadInput_RemoteURL_InputAuthHeader(t *testing.T) {
+	tests := []struct {
+		name        string
+		token       string
+		inputHeader string
+		wantAuth    string // expected Authorization header; "" = none
+	}{
+		{"unconfigured", "", "", ""},
+		{"header only", "", "Bearer remote-token", "Bearer remote-token"},
+		{"header plus api token, no psk leak", "api-psk", "Basic dXNlcjpwYXNz", "Basic dXNlcjpwYXNz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotAuth string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				w.Write([]byte("content"))
+			}))
+			defer ts.Close()
+
+			client := NewClient(ts.URL, "test-worker", tt.token)
+			client.SetInputAuthHeader(tt.inputHeader)
+
+			remoteURL := ts.URL + "/input.mkv"
+			dest := filepath.Join(t.TempDir(), "input.mkv")
+			if err := client.DownloadInput(remoteURL, dest); err != nil {
+				t.Fatalf("DownloadInput(%q): %v", remoteURL, err)
+			}
+			if gotAuth != tt.wantAuth {
+				t.Errorf("Authorization header = %q, want %q", gotAuth, tt.wantAuth)
+			}
+		})
+	}
+}
+
 // TestClient_DownloadInput_RemoteURL_NonASCIIFilename locks the HTTP remote
 // input normalization contract: a raw (unencoded) URL whose path carries a
 // space or CJK filename must download intact — Go's HTTP client percent-encodes

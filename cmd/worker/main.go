@@ -24,6 +24,7 @@ const (
 func main() {
 	configPath := flag.String("config", getEnv("RFFMPEG_CONFIG", defaultConfigPath), "Path to worker config file (JSON)")
 	token := flag.String("token", "", "Worker authentication token (overrides config file and RFFMPEG_TOKEN env)")
+	inputAuthHeader := flag.String("input-auth-header", "", "Authorization header for remote input URLs (overrides config file and RFFMPEG_INPUT_AUTH_HEADER env)")
 	serverURL := flag.String("server-url", "", "Server URL (overrides config file and RFFMPEG_SERVER_URL env)")
 	cacheEnabled, cacheTTL, cacheMaxSizeMB := registerCacheFlags(flag.CommandLine)
 	flag.Parse()
@@ -51,6 +52,9 @@ func main() {
 	if *token != "" {
 		cfg.Token = *token
 	}
+	if *inputAuthHeader != "" {
+		cfg.InputAuthHeader = *inputAuthHeader
+	}
 	if *serverURL != "" {
 		cfg.ServerURL = *serverURL
 	}
@@ -67,6 +71,7 @@ func main() {
 		WorkerID:              cfg.WorkerID,
 		Name:                  cfg.Name,
 		Token:                 cfg.Token,
+		InputAuthHeader:       cfg.InputAuthHeader,
 		TempDir:               cfg.TempDir,
 		FFmpegPath:            cfg.FFmpegPath,
 		Timeout:               cfg.Timeout.ToDuration(),
