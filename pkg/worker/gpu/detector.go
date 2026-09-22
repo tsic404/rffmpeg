@@ -139,15 +139,12 @@ func (d *Detector) detectVAAPI() []Device {
 
 // identifyDRIDevice identifies the vendor and name of a DRI device.
 func (d *Detector) identifyDRIDevice(devPath string) (vendor, name, driver string) {
-	// Try to read from sysfs to identify the device
-	// /sys/class/drm/renderD128/device/vendor
 	baseName := filepath.Base(devPath)
-	sysPath := filepath.Join("/sys/class/drm", baseName, "device")
+	sysPath := filepath.Join(d.sysfsRoot, "class/drm", baseName, "device")
 
-	// Read vendor ID
-	vendorFile := filepath.Join(sysPath, "vendor")
-	if data, err := os.ReadFile(vendorFile); err == nil {
-		vendorID := strings.TrimSpace(string(data))
+	vendorID := ""
+	if data, err := os.ReadFile(filepath.Join(sysPath, "vendor")); err == nil {
+		vendorID = strings.TrimSpace(string(data))
 		switch vendorID {
 		case "0x10de":
 			vendor = "NVIDIA"
@@ -158,10 +155,15 @@ func (d *Detector) identifyDRIDevice(devPath string) (vendor, name, driver strin
 		}
 	}
 
-	// Read device name
-	deviceFile := filepath.Join(sysPath, "device")
-	if data, err := os.ReadFile(deviceFile); err == nil {
-		name = strings.TrimSpace(string(data))
+	deviceID := ""
+	if data, err := os.ReadFile(filepath.Join(sysPath, "device")); err == nil {
+		deviceID = strings.TrimSpace(string(data))
+		// Raw device id is the fallback so an unmapped device still reports a
+		// stable, unique value instead of an empty string.
+		name = deviceID
+	}
+	if model := resolveModelName(vendorID, deviceID); model != "" {
+		name = model
 	}
 
 	// Read driver version from sysfs
@@ -182,7 +184,7 @@ func (d *Detector) identifyDRIDevice(devPath string) (vendor, name, driver strin
 func (d *Detector) getDRMDriverVersion(devPath string) string {
 	// Try to read from /sys/kernel/debug/dri/*/name
 	// This requires root or appropriate permissions
-	debugPath := "/sys/kernel/debug/dri"
+	debugPath := filepath.Join(d.sysfsRoot, "kernel/debug/dri")
 	if dirs, err := os.ReadDir(debugPath); err == nil {
 		for _, dir := range dirs {
 			nameFile := filepath.Join(debugPath, dir.Name(), "name")
