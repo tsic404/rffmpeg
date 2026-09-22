@@ -866,6 +866,14 @@ SIGTERM/SIGINT 后仅 `cancel()` 并退出主循环（不调用 `w.Stop()`），
 事件。因此迁移事件并非发生在退出瞬间，而是发生在随后的心跳超时；要让优雅退出后的作业尽快触发
 迁移，应停发心跳超过 `worker_heartbeat_timeout`（或直接 `kill -9`）。
 
+**kill → `migration_events` 可观测时延上限 ≈ `heartbeat_timeout` + `heartbeat_interval` +
+`health_check_interval`。** 三个分量依次为：worker 被杀时距其最后一次心跳的时间（最坏为一个完整心跳
+周期 `heartbeat_interval`，默认 30s）、服务端判定该心跳过期所需的 `worker_heartbeat_timeout`
+（默认 90s）、以及健康监控的巡检周期 `worker_health_check_interval`（默认 30s）——offline 标记与迁移
+事件只在巡检的 `checkWorkers` 中写入（`pkg/server/workerhealth/monitor.go`），心跳过期后还须等最多
+一个巡检周期才落库。默认参数下该上限约 150s，轮询 `migration_events` 的脚本至少要等满该窗口再判定
+事件缺失，短于此的轮询会把「尚未写入」误判为「不会写入」。
+
 **验收短窗口需同步调低 worker 心跳周期。** 心跳超时迁移的观测窗由服务端 `--worker-heartbeat-timeout`
 （默认 90s）决定，而 worker 心跳周期（配置文件 `heartbeat_interval` / 环境变量
 `RFFMPEG_HEARTBEAT_INTERVAL`，默认 30s）必须低于该阈值——只调一端都不行：周期大于阈值时活 worker
