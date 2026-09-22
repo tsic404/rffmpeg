@@ -215,6 +215,139 @@ func TestRejectOverwriteIfNeeded(t *testing.T) {
 	}
 }
 
+// TestRemoveStaleOutputs pins the stale-output cleanup: a failed job must not
+// leave a stale output file that looks like this run's product, but only -y
+// authorizes touching the output path — without it the user's existing file is
+// preserved with a hint. Streaming, shared-FS, and remote-URL outputs have no
+// local download path and are left alone.
+func TestRemoveStaleOutputs(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("-y removes stale output", func(t *testing.T) {
+		outPath := filepath.Join(dir, "to.mp4")
+		if err := os.WriteFile(outPath, []byte("stale product"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		removeStaleOutputs(outPath, false, false, []string{"-y", "-i", "in.mp4", "to.mp4"})
+		if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+			t.Errorf("stale output %s still exists after cleanup", outPath)
+		}
+	})
+
+	t.Run("-y removes multi-output variants", func(t *testing.T) {
+		outPath := filepath.Join(dir, "multi.mp4")
+		for _, p := range []string{outPath, filepath.Join(dir, "multi_1.mp4"), filepath.Join(dir, "multi_2.mp4")} {
+			if err := os.WriteFile(p, []byte("stale"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// A non-numeric sibling is a user file, not a download-stage product.
+		userFile := filepath.Join(dir, "multi_notes.mp4")
+		if err := os.WriteFile(userFile, []byte("keep me"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		removeStaleOutputs(outPath, false, false, []string{"-y", "-i", "in.mp4", "multi.mp4"})
+		for _, p := range []string{outPath, filepath.Join(dir, "multi_1.mp4"), filepath.Join(dir, "multi_2.mp4")} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Errorf("stale output %s still exists after cleanup", p)
+			}
+		}
+		if _, err := os.Stat(userFile); err != nil {
+			t.Errorf("user file %s should be preserved, got %v", userFile, err)
+		}
+	})
+
+	t.Run("default policy preserves existing file", func(t *testing.T) {
+		outPath := filepath.Join(dir, "ask.mp4")
+		if err := os.WriteFile(outPath, []byte("user data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		stderr := captureStderr(func() {
+			removeStaleOutputs(outPath, false, false, []string{"-i", "in.mp4", "ask.mp4"})
+		})
+		if _, err := os.Stat(outPath); err != nil {
+			t.Errorf("existing file without -y should be preserved, got %v", err)
+		}
+		if !strings.Contains(stderr, "left in place") {
+			t.Errorf("stderr = %q, want a preserve hint", stderr)
+		}
+	})
+
+	t.Run("-n preserves existing file", func(t *testing.T) {
+		outPath := filepath.Join(dir, "never.mp4")
+		if err := os.WriteFile(outPath, []byte("user data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		stderr := captureStderr(func() {
+			removeStaleOutputs(outPath, false, false, []string{"-n", "-i", "in.mp4", "never.mp4"})
+		})
+		if _, err := os.Stat(outPath); err != nil {
+			t.Errorf("existing file with -n should be preserved, got %v", err)
+		}
+		if !strings.Contains(stderr, "left in place") {
+			t.Errorf("stderr = %q, want a preserve hint", stderr)
+		}
+	})
+
+	t.Run("absent output is a no-op", func(t *testing.T) {
+		outPath := filepath.Join(dir, "absent.mp4")
+		removeStaleOutputs(outPath, false, false, []string{"-y", "-i", "in.mp4", "absent.mp4"})
+		if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+			t.Errorf("absent output should stay absent, got %v", err)
+		}
+	})
+
+	t.Run("streaming output preserved", func(t *testing.T) {
+		outPath := filepath.Join(dir, "stream.mp4")
+		if err := os.WriteFile(outPath, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		removeStaleOutputs(outPath, true, false, []string{"-y", "-i", "in.mp4", "stream.mp4"})
+		if _, err := os.Stat(outPath); err != nil {
+			t.Errorf("streaming output should not be removed: %v", err)
+		}
+	})
+
+	t.Run("shared FS output preserved", func(t *testing.T) {
+		outPath := filepath.Join(dir, "shared.mp4")
+		if err := os.WriteFile(outPath, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		removeStaleOutputs(outPath, false, true, []string{"-y", "-i", "in.mp4", "shared.mp4"})
+		if _, err := os.Stat(outPath); err != nil {
+			t.Errorf("shared-FS output should not be removed: %v", err)
+		}
+	})
+
+	t.Run("remote URL output preserved", func(t *testing.T) {
+		removeStaleOutputs("rtmp://example.com/live/stream", false, false, []string{"-y"})
+	})
+}
+
+// TestMultiOutputPath pins the "_N" suffix expansion shared by the download
+// stage and the stale-output cleanup.
+func TestMultiOutputPath(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		i    int
+		want string
+	}{
+		{"primary", "out.mp4", 0, "out.mp4"},
+		{"first variant", "out.mp4", 1, "out_1.mp4"},
+		{"second variant", "out.mp4", 2, "out_2.mp4"},
+		{"multi-dot extension", "out.tar.gz", 1, "out.tar_1.gz"},
+		{"no extension", "out", 1, "out_1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := multiOutputPath(tc.out, tc.i); got != tc.want {
+				t.Errorf("multiOutputPath(%q, %d) = %q, want %q", tc.out, tc.i, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDefaultModeDownloadOverwriteGuard verifies the end-to-end default-mode
 // path: an existing output with no -y is refused (file preserved), while -y
 // downloads and overwrites it — the original scenario.

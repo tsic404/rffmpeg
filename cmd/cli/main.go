@@ -757,6 +757,13 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	// verdict instead of giving up before the server can emit it.
 	job, code := waitForJobLoop(cli, jobID, timeout, pollTimeout, result.StreamingOutput, quiet)
 	if code != ExitSuccess {
+		// ExitDisconnected leaves the job running server-side, so its output
+		// may still land and must not be touched. A give-up (ExitError) cancels
+		// the job, so no output is produced and a stale file must be removed
+		// exactly like a terminal failure.
+		if code != ExitDisconnected {
+			removeStaleOutputs(result.OutputFile, result.StreamingOutput, sharedFS, ffmpegArgs)
+		}
 		return code
 	}
 
@@ -767,6 +774,10 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	// cancellation; it returns ExitSuccess only for a completed job, which
 	// then falls through to the output download below.
 	if code := reportTerminalJob(job); code != ExitSuccess {
+		// A non-completed terminal job (failed/timeout/cancelled) produced no
+		// output this run, so a stale file at the output path must not
+		// masquerade as a fresh product.
+		removeStaleOutputs(result.OutputFile, result.StreamingOutput, sharedFS, ffmpegArgs)
 		return code
 	}
 
@@ -780,18 +791,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		// No file download needed
 	} else if len(job.OutputFiles) > 0 {
 		for i, outputFileID := range job.OutputFiles {
-			outputPath := result.OutputFile
-			if i > 0 {
-				// Multiple outputs - append index
-				ext := ""
-				for j := len(outputPath) - 1; j >= 0; j-- {
-					if outputPath[j] == '.' {
-						ext = outputPath[j:]
-						break
-					}
-				}
-				outputPath = outputPath[:len(outputPath)-len(ext)] + fmt.Sprintf("_%d", i) + ext
-			}
+			outputPath := multiOutputPath(result.OutputFile, i)
 
 			// Enforce ffmpeg's overwrite semantics before writing the local
 			// output: in the default upload/download mode the CLI is the sole
@@ -850,6 +850,62 @@ func rejectOverwriteIfNeeded(outputPath string, ffmpegArgs []string) int {
 			return ExitError
 		}
 		return ExitSuccess
+	}
+}
+
+// multiOutputPath returns the local path the download stage writes for the
+// i-th output file: the primary path for i == 0, and a "_N"-suffixed variant
+// (index inserted before the extension) for i > 0. The cleanup path enumerates
+// the same expansion so it removes exactly what the download stage writes.
+func multiOutputPath(outputFile string, i int) string {
+	if i == 0 {
+		return outputFile
+	}
+	ext := ""
+	for j := len(outputFile) - 1; j >= 0; j-- {
+		if outputFile[j] == '.' {
+			ext = outputFile[j:]
+			break
+		}
+	}
+	return outputFile[:len(outputFile)-len(ext)] + "_" + strconv.Itoa(i) + ext
+}
+
+// removeStaleOutputs removes stale local output files after a job fails
+// without producing output — a terminal failure/timeout/cancellation or a
+// client-side give-up. In the default upload/download mode the CLI is the sole
+// writer of the user's output files, so files left at the output path(s) are
+// stale products from an earlier run and must not masquerade as this run's
+// result.
+//
+// Overwrite semantics mirror the download guard (rejectOverwriteIfNeeded):
+// only -y authorizes touching the output path, so a failed job removes the
+// stale file only under -y; -n and the default (ask) preserve the user's
+// existing file and print a hint. Streaming, shared-FS, and remote-URL outputs
+// have no local download path and are left alone.
+func removeStaleOutputs(outputFile string, streamingOutput, sharedFS bool, ffmpegArgs []string) {
+	if streamingOutput || sharedFS || outputFile == "" || pathutil.IsRemoteURL(outputFile) {
+		return
+	}
+	force := ffmpegopts.OverwritePolicy(ffmpegArgs) == ffmpegopts.OverwriteForce
+	// Enumerate the primary path and every "_N" variant a previous successful
+	// run would have written. The download stage writes consecutive indices,
+	// so stop at the first absent file (a gap means no later index exists).
+	for i := 0; ; i++ {
+		path := multiOutputPath(outputFile, i)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if i == 0 {
+				continue
+			}
+			break
+		}
+		if !force {
+			fmt.Fprintf(os.Stderr, "Output file '%s' left in place (pass -y to overwrite).\n", path)
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to remove stale output %s: %v\n", path, err)
+		}
 	}
 }
 

@@ -121,6 +121,8 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
 
 `-preset veryslow` 使软件编码耗时远超 5s，作业才会被 Worker 终止并返回 `timeout`。
 
+作业超时（或失败/取消、客户端放弃等待）后，CLI 在默认上传/下载模式下会清理输出路径上残留的陈旧产物，避免上一次运行留下的同名文件被误认为本次转码成功。清理遵循覆盖语义：仅当传了 `-y` 时才删除陈旧产物；未传 `-y`（或传 `-n`）时保留既有文件并提示。多输出（`_N` 后缀展开的副本）同样按下载阶段同一套展开逻辑清理。流式输出（`-`）、共享文件系统直写、以及网络 URL 输出没有本地下载路径，不受此清理影响。
+
 > **兼容性说明（破坏性变更）**：本版本的 `--timeout` 语义与线上格式均有变更——job 的 `timeout` 字段由 RFC3339 绝对截止时间改为整数纳秒的执行预算。server、worker、CLI 三个二进制**必须同步升级**，不支持滚动混合部署：旧版 worker/CLI 读取新版 server 下发的整数字段（或新版 server 读取旧版 CLI 上报的 RFC3339 字符串）会在 JSON 解码处直接失败。
 
 **轮询超时（`--poll-timeout`）**：`--poll-timeout`（Go duration 格式）限制 CLI 对「等待 Worker」阶段（作业 `pending`、尚未被任何 Worker 认领）的最长轮询时长，默认 `10m`。当集群 Worker **在线但全部忙碌**时，服务端的无 Worker 判定（NO_WORKER_AVAILABLE）不会触发（饿死扫描的活 Worker 守卫会短路），且用户未设置 `--timeout` 时，旧版 CLI 会无限轮询挂起；现在达到该上限后 CLI 会显式取消作业并以退出码 `1` 报错（stderr 提示「still waiting for a worker」）。`--poll-timeout` 只约束 pending 阶段——作业一旦被认领（`queued`/`running`），改由 Worker 自身超时（及 `--timeout`，若设置）约束，不受该轮询上限影响。三个配置通道（命令行 `--poll-timeout` / 环境变量 `RFFMPEG_POLL_TIMEOUT` / 配置文件 `"poll_timeout"`）优先级：命令行 > 环境变量 > 配置文件 > 默认值；三者均支持 `0` 表示**不设上限**（显式关闭轮询超时，长队列场景按需启用，需自行承担无限挂起风险）。
