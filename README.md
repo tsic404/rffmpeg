@@ -739,6 +739,9 @@ POST /api/v1/workers/register
   "name": "worker-1",
   "capabilities": {
     "gpu_model": "NVIDIA RTX 3080",
+    "gpu_devices": [
+      {"type": "nvenc", "name": "NVIDIA RTX 3080", "vendor": "NVIDIA", "accessible": true}
+    ],
     "encoders": ["libx264", "h264_nvenc"],
     "decoders": ["h264"],
     "ffmpeg_version": "ffmpeg version 5.1",
@@ -756,6 +759,13 @@ worker 列表响应都只使用它。`video_encoders` 是**可选的请求侧增
 只在 `GET /api/v1/encoders` 聚合端点为每个编码器提供 `description`/`is_hw`；
 客户端只发 `encoders` 时，服务端会按名字自动派生 `video_encoders`。上例中的
 `video_encoders` 为可选字段（仅展示富元数据形态），可整体省略。
+
+`gpu_devices` 是 worker 探测到的全部 GPU 明细（`type`/`name`/`vendor`/`accessible`，
+另有 `path`/`driver_version`/`qsv_healthy`/`qsv_error`），由服务端持久化并在
+`GET /api/v1/workers` 响应中返回。`gpu_model` 是兼容旧客户端的单值字段，自动探测时默认等于
+`gpu_devices[0].name`（首张卡）；但配置 `manual_gpu_model`（或 `auto_detect_gpu=false`）时
+由 worker 独立设置，此时可能没有对应的 `gpu_devices`。多卡宿主机要看第二张及以后卡的
+存在/型号/可用性，以 `gpu_devices` 为准。
 
 #### 多 Worker 同名部署（清理路径与新鲜窗口语义）
 
@@ -802,7 +812,11 @@ GET /api/v1/workers?active_only=true
     {
       "id": "uuid",
       "status": "busy",
-      "gpu_model": "NVIDIA RTX 3080",
+      "gpu_model": "Intel UHD Graphics 630",
+      "gpu_devices": [
+        {"type": "qsv", "name": "Intel UHD Graphics 630", "vendor": "Intel", "accessible": true},
+        {"type": "vaapi", "name": "AMD Radeon HD 8570", "vendor": "AMD", "accessible": false}
+      ],
       "health": {
         "status": "busy",
         "gpu_util_percent": 87,

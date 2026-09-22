@@ -2172,23 +2172,24 @@ type WorkerHealth struct {
 
 // WorkerInfo represents worker information for API responses
 type WorkerInfo struct {
-	ID            string        `json:"id"`
-	Name          string        `json:"name,omitempty"`
-	Status        string        `json:"status"`
-	Evicted       bool          `json:"evicted"`
-	GPUModel      string        `json:"gpu_model,omitempty"`
-	Encoders      []string      `json:"encoders"`
-	Decoders      []string      `json:"decoders,omitempty"`
-	FFmpegVersion string        `json:"ffmpeg_version"`
-	MaxConcurrent int           `json:"max_concurrent"`
-	LastHeartbeat string        `json:"last_heartbeat"`
-	CreatedAt     string        `json:"created_at"`
-	Hwaccels      string        `json:"hwaccels,omitempty"`
-	Codecs        string        `json:"codecs,omitempty"`
-	Filters       string        `json:"filters,omitempty"`
-	PixFmts       string        `json:"pix_fmts,omitempty"`
-	Formats       string        `json:"formats,omitempty"`
-	Health        *WorkerHealth `json:"health"`
+	ID            string                   `json:"id"`
+	Name          string                   `json:"name,omitempty"`
+	Status        string                   `json:"status"`
+	Evicted       bool                     `json:"evicted"`
+	GPUModel      string                   `json:"gpu_model,omitempty"`
+	GPUDevices    []protocol.GPUDeviceInfo `json:"gpu_devices,omitempty"`
+	Encoders      []string                 `json:"encoders"`
+	Decoders      []string                 `json:"decoders,omitempty"`
+	FFmpegVersion string                   `json:"ffmpeg_version"`
+	MaxConcurrent int                      `json:"max_concurrent"`
+	LastHeartbeat string                   `json:"last_heartbeat"`
+	CreatedAt     string                   `json:"created_at"`
+	Hwaccels      string                   `json:"hwaccels,omitempty"`
+	Codecs        string                   `json:"codecs,omitempty"`
+	Filters       string                   `json:"filters,omitempty"`
+	PixFmts       string                   `json:"pix_fmts,omitempty"`
+	Formats       string                   `json:"formats,omitempty"`
+	Health        *WorkerHealth            `json:"health"`
 }
 
 // ListWorkersResponse is the response for listing workers
@@ -2338,6 +2339,10 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 	if err := json.Unmarshal([]byte(worker.Decoders), &decoders); err != nil {
 		log.Printf("Failed to unmarshal decoders for worker %s: %v", worker.ID, err)
 	}
+	var gpuDevices []protocol.GPUDeviceInfo
+	if err := json.Unmarshal([]byte(worker.GPUDevices), &gpuDevices); err != nil {
+		log.Printf("Failed to unmarshal gpu_devices for worker %s: %v", worker.ID, err)
+	}
 
 	info := WorkerInfo{
 		ID:            worker.ID,
@@ -2346,6 +2351,7 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 		Evicted:       worker.Evicted,
 		Encoders:      encoders,
 		Decoders:      decoders,
+		GPUDevices:    gpuDevices,
 		FFmpegVersion: worker.FFmpegVersion,
 		MaxConcurrent: worker.MaxConcurrent,
 		LastHeartbeat: worker.LastHeartbeat.Format(time.RFC3339),

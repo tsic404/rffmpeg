@@ -842,12 +842,47 @@ components:
           type: boolean
           description: True when hardware-accelerated
 
+    GPUDevice:
+      type: object
+      required: [type, accessible]
+      properties:
+        type:
+          type: string
+          description: '"nvenc", "qsv", "vaapi", "amf", "videotoolbox", or "d3d11"'
+        path:
+          type: string
+          description: Device path (e.g. /dev/dri/renderD128)
+        name:
+          type: string
+          description: Device name/model
+        driver_version:
+          type: string
+        vendor:
+          type: string
+        accessible:
+          type: boolean
+        qsv_healthy:
+          type: boolean
+          description: Whether the QSV MFX runtime is functional (Intel only)
+        qsv_error:
+          type: string
+          description: Error message when the QSV health check failed
+
     WorkerCapabilities:
       type: object
       required: [encoders, ffmpeg_version]
       properties:
         gpu_model:
           type: string
+          description: >-
+            Legacy single-value GPU model. Defaults to gpu_devices[0].name when
+            auto-detected, but is set independently (manual_gpu_model) when
+            auto-detection is disabled.
+        gpu_devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/GPUDevice'
+          description: All detected GPU devices; persisted and returned by GET /api/v1/workers
         encoders:
           type: array
           description: Video-only flat encoder name list (canonical field)
@@ -1011,6 +1046,15 @@ components:
           description: Whether the worker is currently evicted from scheduling as a slow node
         gpu_model:
           type: string
+          description: >-
+            Legacy single-value GPU model. Defaults to the first device name
+            when auto-detected; may be set independently (manual_gpu_model)
+            with no corresponding gpu_devices.
+        gpu_devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/GPUDevice'
+          description: All detected GPU devices (multi-card hosts include every card)
         encoders:
           type: array
           items:
