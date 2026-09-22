@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -49,6 +50,24 @@ func NewExecutor(ffmpegPath string, timeout time.Duration) *Executor {
 		ffmpegPath: ffmpegPath,
 		timeout:    timeout,
 	}
+}
+
+// ffmpegNice is the scheduling priority applied to every ffmpeg subprocess and
+// its process group. Lowering ffmpeg below the worker keeps a CPU-saturating
+// transcode (e.g. -preset veryslow above 700% CPU) from starving the worker's
+// heartbeat goroutine: a stalled heartbeat is read by the server as "worker
+// offline", which migrates the still-running job, and repeated false migrations
+// exhaust the job's retry budget. CFS applies the difference only under CPU
+// contention, so an uncontended dedicated node sees no throughput change.
+const ffmpegNice = 10
+
+// setFFmpegPriority lowers the CPU priority of an already-started ffmpeg
+// process group. The group (not just the process) is targeted so helper
+// subprocesses spawned by ffmpeg filters inherit the same priority. Positive
+// nice values are always permitted for unprivileged processes.
+func setFFmpegPriority(pid int) error {
+	// Setpgid in the caller makes the child's process group ID equal its PID.
+	return syscall.Setpriority(syscall.PRIO_PGRP, pid, ffmpegNice)
 }
 
 // Execute runs an ffmpeg command with the given arguments
@@ -130,6 +149,13 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 			Error:    fmt.Errorf("failed to start ffmpeg: %w", err),
 			ExitCode: -1,
 		}
+	}
+
+	// Lower the transcode's CPU priority so it can never starve the worker's
+	// own threads (see ffmpegNice). Non-fatal: a priority failure must not fail
+	// the job.
+	if err := setFFmpegPriority(cmd.Process.Pid); err != nil {
+		log.Printf("Failed to lower ffmpeg priority: %v", err)
 	}
 
 	// Collect stdout and stderr with optional streaming

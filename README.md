@@ -865,6 +865,11 @@ SIGTERM/SIGINT 后仅 `cancel()` 并退出主循环（不调用 `w.Stop()`），
 会被反复误判 offline，阈值大于周期时观测窗仍受阈值约束。要把迁移观测压进约 2 分钟的验收窗，需把两端
 一起降到 15–20s（如 `--worker-heartbeat-timeout 15s` + `RFFMPEG_HEARTBEAT_INTERVAL=15s`）。
 
+**worker 会降低 ffmpeg 子进程的 CPU 调度优先级（nice 10）。** 高 CPU 编码（如 `-preset veryslow` 逼近
+主机全部核心）时，ffmpeg 不再抢占 worker 自己的线程——心跳 goroutine 与 server 的控制面因此始终能拿到
+CPU，避免「活 worker 因心跳延迟被误判 offline、其运行中作业被反复迁移直至重试预算耗尽」。nice 只在 CPU
+争用时生效，独占节点上转码吞吐不受影响。
+
 ### 慢节点驱逐单机复现
 
 慢节点驱逐（EWMA 吞吐低于集群中位数 / `SlowNodeThreshold=3.0`，即低于中位数 1/3）纯由吞吐驱动，不需要
