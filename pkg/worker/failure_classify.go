@@ -1,8 +1,10 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 
 	"github.com/google/uuid"
 	"github.com/tsic404/rffmpeg/pkg/pathutil"
@@ -111,29 +113,52 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 }
 
 // ClassifyInputDownloadFailure classifies a failed input-file download by
-// input kind. A remote URL (see pathutil.IsRemoteURL) is fetched directly from the
-// user-supplied source — if the worker cannot reach it, the job's input is
-// unreachable → INPUT_UNREACHABLE. A server file ID is fetched over the
-// worker↔server channel; failing there is infrastructure, not an input
-// problem → INFRA (previously misreported as FFMPEG_ERROR).
-func ClassifyInputDownloadFailure(fileID string) protocol.FailureType {
+// input kind and failure cause. A worker disk-full while writing the
+// downloaded input is always DISK_FULL, regardless of input kind: it is a
+// local out-of-space condition, not a channel or input problem. Otherwise, a
+// remote URL (see pathutil.IsRemoteURL) fetched directly from the
+// user-supplied source that cannot be reached is INPUT_UNREACHABLE, and a
+// server file ID failing over the worker↔server channel is INFRA (previously
+// misreported as FFMPEG_ERROR).
+func ClassifyInputDownloadFailure(fileID string, downloadErr error) protocol.FailureType {
+	if isDiskFullError(downloadErr) {
+		return protocol.FailureDiskFull
+	}
 	if pathutil.IsRemoteURL(fileID) {
 		return protocol.FailureInputUnreachable
 	}
 	return protocol.FailureInfra
 }
 
+// isDiskFullError reports whether err is an out-of-disk-space failure. The
+// syscall check handles errors wrapped with %w from os.Create/MkdirAll/io.Copy;
+// the text fallback catches OS error strings that do not unwrap to ENOSPC.
+func isDiskFullError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	return isDiskFull(err.Error())
+}
+
+// diskFullPatterns are the text indicators of an out-of-disk-space failure,
+// shared by ffmpeg stderr and worker-side download errors. Compared
+// case-insensitively: Go error strings are lowercase while ffmpeg stderr is
+// sentence-cased.
+var diskFullPatterns = []string{
+	"no space left on device",
+	"enospc",
+	"disk full",
+	"not enough space",
+}
+
 // isDiskFull checks stderr for disk-full patterns.
 func isDiskFull(stderr string) bool {
-	patterns := []string{
-		"No space left on device",
-		"ENOSPC",
-		"Disk full",
-		"disk full",
-		"not enough space",
-	}
-	for _, p := range patterns {
-		if strings.Contains(stderr, p) {
+	lower := strings.ToLower(stderr)
+	for _, p := range diskFullPatterns {
+		if strings.Contains(lower, p) {
 			return true
 		}
 	}

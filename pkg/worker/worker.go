@@ -1368,11 +1368,12 @@ func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
 }
 
 // reportInputDownloadFailure reports a failure to fetch a job input file.
-// Classification depends on the input kind: a remote URL that cannot be
-// fetched is INPUT_UNREACHABLE; a server file ID failing over the
-// worker↔server channel is infrastructure → FFMPEG_ERROR.
+// Classification depends on the input kind and cause: a worker disk-full while
+// writing the input is DISK_FULL; a remote URL that cannot be fetched is
+// INPUT_UNREACHABLE; a server file ID failing over the worker↔server channel
+// is infrastructure → INFRA.
 func (w *Worker) reportInputDownloadFailure(jobID string, fileID string, downloadErr error) {
-	failureType := ClassifyInputDownloadFailure(fileID)
+	failureType := ClassifyInputDownloadFailure(fileID, downloadErr)
 	errMsg := fmt.Sprintf("Failed to download input file %s: %v", fileID, downloadErr)
 	// Only a transport-layer failure (dataClient.Do error) means the input URL
 	// is genuinely unreachable. Its raw error ("dial tcp: lookup … : no such

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
@@ -84,6 +85,43 @@ func TestReportInputDownloadFailureServerFileKeepsRawMessage(t *testing.T) {
 	}
 	if want := "Failed to download input file server-file-001: connection reset by peer"; update.Error != want {
 		t.Errorf("Error = %q, want %q", update.Error, want)
+	}
+}
+
+// TestReportInputDownloadFailureDiskFull locks the fix: a worker disk-full
+// while writing a downloaded server-file input is reported as DISK_FULL, not
+// INFRA — the user must see a local out-of-space condition, not a server
+// channel fault — and the actionable error text passes through unchanged.
+func TestReportInputDownloadFailureDiskFull(t *testing.T) {
+	var update protocol.JobUpdateRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"message":"ok"}`))
+	}))
+	defer srv.Close()
+
+	w := &Worker{client: NewClient(srv.URL, "worker-1", "")}
+
+	downloadErr := fmt.Errorf("failed to write file: %w", syscall.ENOSPC)
+
+	w.reportInputDownloadFailure("job-diskfull", "server-file-001", downloadErr)
+
+	if update.FailureType != string(protocol.FailureDiskFull) {
+		t.Fatalf("FailureType = %q, want %q", update.FailureType, protocol.FailureDiskFull)
+	}
+	if !strings.Contains(update.Error, "no space left on device") {
+		t.Errorf("Error = %q, want the out-of-space cause preserved", update.Error)
+	}
+	if strings.Contains(update.Error, "cannot be reached") {
+		t.Errorf("Error = %q, must not apply the INPUT_UNREACHABLE friendly mapping", update.Error)
 	}
 }
 
