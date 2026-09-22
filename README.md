@@ -51,8 +51,8 @@ git clone https://github.com/tsic404/rffmpeg.git
 cd rffmpeg
 
 # 编译所有组件
-go build -o bin/server ./cmd/server
-go build -o bin/worker ./cmd/worker
+go build -o bin/rffmpeg-server ./cmd/server
+go build -o bin/rffmpeg-worker ./cmd/worker
 go build -o bin/rffmpeg ./cmd/cli
 ```
 
@@ -60,13 +60,13 @@ go build -o bin/rffmpeg ./cmd/cli
 
 ```bash
 # 使用默认配置启动
-./bin/server
+./bin/rffmpeg-server
 
 # 指定端口和数据目录
-./bin/server --port 8080 --data-dir ./data
+./bin/rffmpeg-server --port 8080 --data-dir ./data
 
 # 使用配置文件
-./bin/server --config server.json
+./bin/rffmpeg-server --config server.json
 ```
 
 **启动时序与就绪探测**：Server 在完成配置校验后立即 `bind` 监听端口（日志 `Listening on :<port> (socket bound; initialization in progress)`），随后才初始化数据库、存储、健康监控与调度器，最后开始 `accept` 请求（日志 `Starting HTTP server on :<port>`）。因此端口在进程启动后几毫秒内即进入 LISTEN，不再出现"进程已启动但端口拒绝连接"的数秒窗口。两种探测信号含义不同：
@@ -84,13 +84,13 @@ go build -o bin/rffmpeg ./cmd/cli
 
 ```bash
 # 连接到本地 Server
-./bin/worker --server-url http://localhost:8080
+./bin/rffmpeg-worker --server-url http://localhost:8080
 
 # 通过 JSON 配置文件指定完整配置（名称、编码器、GPU 等）
-./bin/worker --config worker.json
+./bin/rffmpeg-worker --config worker.json
 
 # 通过环境变量覆盖配置项（如名称、最大并发）
-RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/worker
+RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
 ```
 
 ### 使用 CLI 提交任务
@@ -209,7 +209,7 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 #### 命令行参数
 
 ```bash
-./bin/server --help
+./bin/rffmpeg-server --help
   --port string                        Server port (default: 8080)
   --data-dir string                    Data directory (default: ./data)
   --config string                      Path to configuration file (JSON)
@@ -250,8 +250,8 @@ Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提
 Worker 仅定义以下 7 个 flag（见 `cmd/worker/main.go`）：
 
 ```bash
-./bin/worker --help
-Usage of ./bin/worker:
+./bin/rffmpeg-worker --help
+Usage of ./bin/rffmpeg-worker:
   -cache-enabled
     Enable job output cache (default true)
   -cache-max-size-mb int
@@ -268,7 +268,7 @@ Usage of ./bin/worker:
     Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
 ```
 
-缓存 flag 语义与对应环境变量一致（`RFFMPEG_CACHE_ENABLED`/`RFFMPEG_CACHE_TTL`/`RFFMPEG_CACHE_MAX_SIZE_MB`），命令行优先级最高：例如 `./bin/worker -cache-enabled=false` 可直接关闭缓存，无需编辑配置文件或设置环境变量。
+缓存 flag 语义与对应环境变量一致（`RFFMPEG_CACHE_ENABLED`/`RFFMPEG_CACHE_TTL`/`RFFMPEG_CACHE_MAX_SIZE_MB`），命令行优先级最高：例如 `./bin/rffmpeg-worker -cache-enabled=false` 可直接关闭缓存，无需编辑配置文件或设置环境变量。
 
 #### 配置文件 (JSON)
 
@@ -420,7 +420,7 @@ export RFFMPEG_SHARED_FS=1
 
 # 启动 Worker（同一台机器）
 export RFFMPEG_WORKER_NAME=local-worker
-./bin/worker --server-url http://localhost:8080
+./bin/rffmpeg-worker --server-url http://localhost:8080
 
 # CLI 提交任务，输入/输出均为本地路径
 ./bin/rffmpeg -i /data/videos/input.mp4 -c:v libx264 /data/videos/output.mp4
@@ -447,7 +447,7 @@ export RFFMPEG_SHARED_FS=1
 export RFFMPEG_SHARED_FS=1
 export RFFMPEG_SHARED_FS_ALLOWED_PREFIX="/mnt/media"
 export RFFMPEG_WORKER_NAME=nfs-worker
-./bin/worker --server-url http://localhost:8080
+./bin/rffmpeg-worker --server-url http://localhost:8080
 ```
 
 ##### 场景 3：Kubernetes 共享 PV
@@ -916,8 +916,8 @@ GPU——两个软件编码（libx264）worker 即可单机复现。慢 worker �
 **前置**：编译三个二进制，并生成一个极小的测试输入（1s 即可，让快 worker 的吞吐尽量高）：
 
 ```bash
-go build -o bin/server ./cmd/server
-go build -o bin/worker ./cmd/worker
+go build -o bin/rffmpeg-server ./cmd/server
+go build -o bin/rffmpeg-worker ./cmd/worker
 go build -o bin/rffmpeg ./cmd/cli
 ffmpeg -y -f lavfi -i testsrc=duration=1:size=320x240:rate=25 -c:v libx264 -pix_fmt yuv420p test.mp4
 ```
@@ -925,7 +925,7 @@ ffmpeg -y -f lavfi -i testsrc=duration=1:size=320x240:rate=25 -c:v libx264 -pix_
 **1. 启动 server**（缩短 `--worker-health-check-interval` 让驱逐判定尽快发生）：
 
 ```bash
-./bin/server --auth-token dev --worker-health-check-interval 5s
+./bin/rffmpeg-server --auth-token dev --worker-health-check-interval 5s
 ```
 
 **2. 编写慢 worker 的 ffmpeg 包装**（只对真正转码的 `-i` 调用注入延迟，避免拖慢 worker 启动时的编码器探测）：
@@ -945,11 +945,11 @@ chmod +x slow-ffmpeg
 
 ```bash
 RFFMPEG_CACHE_ENABLED=false RFFMPEG_HEARTBEAT_INTERVAL=2s RFFMPEG_WORKER_NAME=fast \
-  ./bin/worker --server-url http://localhost:8080 --token dev
+  ./bin/rffmpeg-worker --server-url http://localhost:8080 --token dev
 
 RFFMPEG_CACHE_ENABLED=false RFFMPEG_HEARTBEAT_INTERVAL=2s RFFMPEG_WORKER_NAME=slow \
   RFFMPEG_FFMPEG_PATH="$PWD/slow-ffmpeg" \
-  ./bin/worker --server-url http://localhost:8080 --token dev
+  ./bin/rffmpeg-worker --server-url http://localhost:8080 --token dev
 ```
 
 **4. 持续提交作业**，让两个 worker 保持忙碌、各自完成 ≥5 个作业（快 worker 每秒完成多个小作业，慢 worker
@@ -1002,7 +1002,7 @@ Response:
 
 ```bash
 # 1. 启动 Server
-./bin/server --port 8080 --data-dir ./data
+./bin/rffmpeg-server --port 8080 --data-dir ./data
 
 # 2. 启动 Worker（另一个终端）
 cat > worker.json << EOF
@@ -1016,7 +1016,7 @@ cat > worker.json << EOF
   "max_concurrent": 2
 }
 EOF
-./bin/worker --config worker.json
+./bin/rffmpeg-worker --config worker.json
 
 # 3. 提交转码任务（客户端）
 ./bin/rffmpeg -i my_video.mp4 \
@@ -1058,13 +1058,13 @@ EOF
 
 ```bash
 # Server 端启用 HTTPS
-./bin/server \
+./bin/rffmpeg-server \
   --tls \
   --tls-cert /path/to/cert.pem \
   --tls-key /path/to/key.pem
 
 # 启用 mTLS（双向认证）
-./bin/server \
+./bin/rffmpeg-server \
   --tls \
   --tls-cert /path/to/server-cert.pem \
   --tls-key /path/to/server-key.pem \
@@ -1072,7 +1072,7 @@ EOF
   --mtls
 
 # Worker 连接 HTTPS Server
-./bin/worker --server-url https://localhost:8080
+./bin/rffmpeg-worker --server-url https://localhost:8080
 ```
 
 ## 许可证
