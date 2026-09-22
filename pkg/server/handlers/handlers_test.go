@@ -1670,7 +1670,7 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 		WorkerID:      regResp.WorkerID,
 		Status:        protocol.WorkerStatusBusy,
 		ActiveJobs:    []string{"job-1", "job-2"},
-		ThroughputFPS: 1.5,
+		JobsPerSec:    1.5,
 		CompletedJobs: 7,
 	}
 	heartbeatBody, _ := json.Marshal(heartbeatReq)
@@ -1699,8 +1699,8 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 		state, ok := h.GetStateTable().Get(regResp.WorkerID)
 		if !ok {
 			t.Errorf("Expected worker state to be in state table")
-		} else if state.ThroughputFPS != 1.5 {
-			t.Errorf("Expected throughput 1.5 in state table, got %f", state.ThroughputFPS)
+		} else if state.JobsPerSec != 1.5 {
+			t.Errorf("Expected throughput 1.5 in state table, got %f", state.JobsPerSec)
 		} else if len(state.ActiveJobs) != 2 {
 			t.Errorf("Expected 2 active jobs in state table, got %d", len(state.ActiveJobs))
 		} else if state.CompletedJobs != 7 {
@@ -1714,12 +1714,12 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 // heartbeat flow into the response.
 // workerHealth mirrors the handler's health object for JSON decoding in tests.
 type WorkerHealth struct {
-	Status        string   `json:"status"`
-	GPUUtilPct    float64  `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB  int      `json:"gpu_mem_used_mb,omitempty"`
-	ActiveJobs    []string `json:"active_jobs,omitempty"`
-	ThroughputFPS float64  `json:"throughput_fps,omitempty"`
-	LastSeen      string   `json:"last_seen"`
+	Status       string   `json:"status"`
+	GPUUtilPct   float64  `json:"gpu_util_percent,omitempty"`
+	GPUMemUsedMB int      `json:"gpu_mem_used_mb,omitempty"`
+	ActiveJobs   []string `json:"active_jobs,omitempty"`
+	JobsPerSec   float64  `json:"jobs_per_sec,omitempty"`
+	LastSeen     string   `json:"last_seen"`
 }
 
 func TestWorkerHealthInListResponse(t *testing.T) {
@@ -1771,7 +1771,7 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 		WorkerID:        regResp.WorkerID,
 		Status:          protocol.WorkerStatusBusy,
 		ActiveJobs:      []string{"job-1"},
-		ThroughputFPS:   42.5,
+		JobsPerSec:      42.5,
 		GPUUtilPct:      87,
 		GPUMemUsedMB:    4096,
 		GPUMetricsValid: true,
@@ -1830,19 +1830,19 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 	if len(health.ActiveJobs) != 1 || health.ActiveJobs[0] != "job-1" {
 		t.Errorf("Expected active_jobs [job-1], got %v", health.ActiveJobs)
 	}
-	if health.ThroughputFPS != 42.5 {
-		t.Errorf("Expected throughput_fps 42.5, got %f", health.ThroughputFPS)
+	if health.JobsPerSec != 42.5 {
+		t.Errorf("Expected jobs_per_sec 42.5, got %f", health.JobsPerSec)
 	}
 
 	_ = h // handler kept for state table wiring via setupTest
 }
 
-// TestWorkerHealthThroughputAlwaysPresent verifies the health response always
-// carries throughput_fps, even for an idle worker reporting zero throughput
+// TestWorkerHealthJobsPerSecAlwaysPresent verifies the health response always
+// carries jobs_per_sec, even for an idle worker reporting zero throughput
 // (or no heartbeat yet). omitempty previously dropped the field at 0, leaving
 // an idle worker's health as {status, gpu_metrics_valid, last_seen} and
-// breaking the QA assertion that throughput_fps is present.
-func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
+// breaking the QA assertion that jobs_per_sec is present.
+func TestWorkerHealthJobsPerSecAlwaysPresent(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
@@ -1863,7 +1863,7 @@ func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
 	var regResp protocol.WorkerRegisterResponse
 	json.NewDecoder(rec.Body).Decode(&regResp)
 
-	// No heartbeat yet: idle worker, zero throughput. throughput_fps must
+	// No heartbeat yet: idle worker, zero throughput. jobs_per_sec must
 	// still be present (as 0) rather than omitted.
 	req = httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -1871,8 +1871,8 @@ func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	body := rec.Body.String()
-	if !strings.Contains(body, `"throughput_fps"`) {
-		t.Fatalf("Expected health response to contain throughput_fps, got: %s", body)
+	if !strings.Contains(body, `"jobs_per_sec"`) {
+		t.Fatalf("Expected health response to contain jobs_per_sec, got: %s", body)
 	}
 
 	var getResp struct {
@@ -1886,8 +1886,8 @@ func TestWorkerHealthThroughputAlwaysPresent(t *testing.T) {
 	if getResp.Worker.Health == nil {
 		t.Fatalf("Expected non-null health for idle worker")
 	}
-	if getResp.Worker.Health.ThroughputFPS != 0 {
-		t.Errorf("Expected throughput_fps 0 for idle worker, got %f", getResp.Worker.Health.ThroughputFPS)
+	if getResp.Worker.Health.JobsPerSec != 0 {
+		t.Errorf("Expected jobs_per_sec 0 for idle worker, got %f", getResp.Worker.Health.JobsPerSec)
 	}
 }
 
@@ -1906,7 +1906,7 @@ func TestWorkerListExposesEWMAAndMedian(t *testing.T) {
 		req := protocol.WorkerHeartbeatRequest{
 			WorkerID:      workerID,
 			Status:        protocol.WorkerStatusBusy,
-			ThroughputFPS: throughput,
+			JobsPerSec:    throughput,
 			CompletedJobs: 5,
 		}
 		body, _ := json.Marshal(req)
@@ -1935,7 +1935,7 @@ func TestWorkerListExposesEWMAAndMedian(t *testing.T) {
 		Workers                 []struct {
 			ID     string `json:"id"`
 			Health *struct {
-				EWMAThroughput float64 `json:"ewma_throughput"`
+				EWMAJobsPerSec float64 `json:"ewma_jobs_per_sec"`
 			} `json:"health"`
 		} `json:"workers"`
 	}
@@ -1954,13 +1954,13 @@ func TestWorkerListExposesEWMAAndMedian(t *testing.T) {
 		if w.Health == nil {
 			t.Fatalf("worker %s has nil health", w.ID)
 		}
-		ewmaByID[w.ID] = w.Health.EWMAThroughput
+		ewmaByID[w.ID] = w.Health.EWMAJobsPerSec
 	}
 	if ewmaByID["worker-fast"] != 3.0 {
-		t.Errorf("worker-fast ewma_throughput = %f, want 3.0", ewmaByID["worker-fast"])
+		t.Errorf("worker-fast ewma_jobs_per_sec = %f, want 3.0", ewmaByID["worker-fast"])
 	}
 	if ewmaByID["worker-slow"] != 1.0 {
-		t.Errorf("worker-slow ewma_throughput = %f, want 1.0", ewmaByID["worker-slow"])
+		t.Errorf("worker-slow ewma_jobs_per_sec = %f, want 1.0", ewmaByID["worker-slow"])
 	}
 }
 

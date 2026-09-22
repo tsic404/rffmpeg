@@ -56,14 +56,14 @@ func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatP
 		state.GPUMetricsValid = false
 	}
 	state.ActiveJobs = payload.ActiveJobs
-	state.ThroughputFPS = payload.ThroughputFPS
+	state.JobsPerSec = payload.JobsPerSec
 	state.CompletedJobs = payload.CompletedJobs
 	state.QueueDepth = payload.QueueDepth
 	state.LastSeen = payload.Timestamp
 
 	// Compute EWMA-smoothed throughput
 	if exists {
-		if payload.ThroughputFPS > 0 {
+		if payload.JobsPerSec > 0 {
 			// Track when the worker last produced a real throughput sample:
 			// the busy-with-zero-EWMA eviction exemption is time-boxed by this,
 			// so a hung ffmpeg (jobs active, throughput dead) cannot hide behind
@@ -72,10 +72,10 @@ func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatP
 		}
 		// Apply EWMA smoothing: EWMA = α * current + (1-α) * previous
 		alpha := t.ewmaAlpha
-		state.EWMAThroughput = alpha*payload.ThroughputFPS + (1-alpha)*state.EWMAThroughput
+		state.EWMAJobsPerSec = alpha*payload.JobsPerSec + (1-alpha)*state.EWMAJobsPerSec
 	} else {
 		// First data point: initialize EWMA directly
-		state.EWMAThroughput = payload.ThroughputFPS
+		state.EWMAJobsPerSec = payload.JobsPerSec
 		state.LastThroughputAt = payload.Timestamp
 	}
 }
@@ -160,9 +160,9 @@ type SlowNodeDetectionResult struct {
 
 // workerInfo is the per-worker view DetectSlowWorkers evaluates.
 type workerInfo struct {
-	id      string
-	ewmaFPS float64
-	hasJobs bool
+	id             string
+	ewmaJobsPerSec float64
+	hasJobs        bool
 }
 
 // eligibleSlowNodeWorkersLocked collects the workers eligible for slow-node
@@ -180,9 +180,9 @@ func (t *WorkerStateTable) eligibleSlowNodeWorkersLocked() []workerInfo {
 			continue
 		}
 		workers = append(workers, workerInfo{
-			id:      id,
-			ewmaFPS: state.EWMAThroughput,
-			hasJobs: len(state.ActiveJobs) > 0,
+			id:             id,
+			ewmaJobsPerSec: state.EWMAJobsPerSec,
+			hasJobs:        len(state.ActiveJobs) > 0,
 		})
 	}
 	return workers
@@ -197,11 +197,11 @@ func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 	throughputs := make([]float64, 0, len(workers))
 	for _, w := range workers {
 		// Skip idle workers: zero throughput AND no active jobs
-		if w.ewmaFPS == 0 && !w.hasJobs {
+		if w.ewmaJobsPerSec == 0 && !w.hasJobs {
 			continue
 		}
 		sampled = append(sampled, w)
-		throughputs = append(throughputs, w.ewmaFPS)
+		throughputs = append(throughputs, w.ewmaJobsPerSec)
 	}
 	return sampled, throughputs
 }
@@ -240,11 +240,11 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 
 		if state.Evicted {
 			// Recovery check: if throughput is within RecoveryThreshold of median
-			if median > 0 && w.ewmaFPS >= median/RecoveryThreshold {
+			if median > 0 && w.ewmaJobsPerSec >= median/RecoveryThreshold {
 				state.Evicted = false
 				recovered = append(recovered, w.id)
 			}
-		} else if w.hasJobs && w.ewmaFPS == 0 && t.busyExempt(w) {
+		} else if w.hasJobs && w.ewmaJobsPerSec == 0 && t.busyExempt(w) {
 			// Busy worker with no throughput samples yet (job just started):
 			// EWMA decay is measurement absence, not slowness — exempt from
 			// eviction until real samples arrive, but only for a bounded
@@ -254,7 +254,7 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 			continue
 		} else {
 			// Slow node detection: if throughput is below median/SlowNodeThreshold
-			if median > 0 && w.ewmaFPS < median/SlowNodeThreshold {
+			if median > 0 && w.ewmaJobsPerSec < median/SlowNodeThreshold {
 				state.Evicted = true
 				newlyEvicted = append(newlyEvicted, w.id)
 			}

@@ -773,7 +773,7 @@ POST /api/v1/workers/heartbeat
   "worker_id": "uuid",
   "status": "busy",
   "active_jobs": ["job_id_1"],
-  "throughput_fps": 1.2,
+  "jobs_per_sec": 1.2,
   "gpu_metrics_valid": true,
   "gpu_util_percent": 87,
   "gpu_mem_used_mb": 4096
@@ -782,7 +782,7 @@ POST /api/v1/workers/heartbeat
 
 字段说明：
 
-- `throughput_fps`：历史命名，实际单位是**每秒完成的作业数**（jobs/sec），不是帧率。
+- `jobs_per_sec`：自上次心跳以来的**每秒完成作业数**（jobs/sec）。
 - `gpu_util_percent`：多卡机器上是所有 GPU 利用率的**求和**（两块卡各 50% 上报 100），
   因此多卡主机上超过 100 属于正常。
 - `gpu_metrics_valid=false` 时 `gpu_util_percent` / `gpu_mem_used_mb` 为 0，
@@ -806,8 +806,8 @@ GET /api/v1/workers?active_only=true
         "gpu_util_percent": 87,
         "gpu_mem_used_mb": 4096,
         "active_jobs": ["job_id_1"],
-        "throughput_fps": 0.4,
-        "ewma_throughput": 0.35,
+        "jobs_per_sec": 0.4,
+        "ewma_jobs_per_sec": 0.35,
         "last_seen": "2024-01-01T00:00:00Z"
       }
     }
@@ -822,11 +822,11 @@ GET /api/v1/workers/{workerId}/jobs
 
 字段说明：
 
-- `health.ewma_throughput`：该 worker 吞吐的 EWMA 平滑值（jobs/sec），慢节点检测直接用它与
+- `health.ewma_jobs_per_sec`：该 worker 吞吐的 EWMA 平滑值（jobs/sec），慢节点检测直接用它与
   集群中位数比较；首次心跳样本前为 0。
 - `cluster_median_throughput`：参与慢节点判定的集群 EWMA 中位数原值（offline / 预热中 / 空闲
   worker 排除在外，与驱逐判定同口径）；不足两个有效样本时为 0。E2E 断言慢节点判定可直接比较
-  `health.ewma_throughput` 与该值，无需等待真实驱逐事件。
+  `health.ewma_jobs_per_sec` 与该值，无需等待真实驱逐事件。
 
 ### 迁移与淘汰审计事件
 
@@ -925,9 +925,9 @@ seq 1 100 | xargs -P 8 -I{} ./bin/rffmpeg --server http://localhost:8080 -y -i t
 # 日志：健康监控巡检输出 evicted 与 median
 grep -E 'evicted|Slow node check' data/rffmpeg-server.log
 
-# worker 列表：slow 的 evicted=true，health.ewma_throughput 低于 cluster_median_throughput/3
+# worker 列表：slow 的 evicted=true，health.ewma_jobs_per_sec 低于 cluster_median_throughput/3
 curl -s -H 'Authorization: Bearer dev' http://localhost:8080/api/v1/workers \
-  | jq '{median: .cluster_median_throughput, workers: [.workers[] | {name, status, evicted, ewma: .health.ewma_throughput}]}'
+  | jq '{median: .cluster_median_throughput, workers: [.workers[] | {name, status, evicted, ewma: .health.ewma_jobs_per_sec}]}'
 
 # 审计事件：worker_eviction_events 无 HTTP 端点，直接读 SQLite
 sqlite3 data/rffmpeg.db "SELECT timestamp, worker_id, event_type, round(current_throughput,3), round(cluster_median,3), decision_reason FROM worker_eviction_events ORDER BY timestamp DESC;"

@@ -49,14 +49,14 @@ func TestSlowWorkerEvictionE2E_ThroughputDriven(t *testing.T) {
 		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 			WorkerID:      "worker-fast",
 			Status:        string(protocol.WorkerStatusBusy),
-			ThroughputFPS: 1.5,
+			JobsPerSec:    1.5,
 			CompletedJobs: i,
 			Timestamp:     now,
 		})
 		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 			WorkerID:      "worker-slow",
 			Status:        string(protocol.WorkerStatusBusy),
-			ThroughputFPS: 0.1,
+			JobsPerSec:    0.1,
 			CompletedJobs: i,
 			Timestamp:     now,
 		})
@@ -156,11 +156,11 @@ func TestSlowWorkerEvictionE2E_RecoveryAfterSpeedup(t *testing.T) {
 		now := time.Now()
 		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 			WorkerID: "worker-fast", Status: string(protocol.WorkerStatusBusy),
-			ThroughputFPS: 1.5, CompletedJobs: i, Timestamp: now,
+			JobsPerSec: 1.5, CompletedJobs: i, Timestamp: now,
 		})
 		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 			WorkerID: "worker-slow", Status: string(protocol.WorkerStatusBusy),
-			ThroughputFPS: 0.1, CompletedJobs: i, Timestamp: now,
+			JobsPerSec: 0.1, CompletedJobs: i, Timestamp: now,
 		})
 	}
 
@@ -184,7 +184,7 @@ func TestSlowWorkerEvictionE2E_RecoveryAfterSpeedup(t *testing.T) {
 	for range 15 {
 		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 			WorkerID: "worker-slow", Status: string(protocol.WorkerStatusBusy),
-			ThroughputFPS: 1.4, CompletedJobs: MinJobsForEviction + 20, Timestamp: time.Now(),
+			JobsPerSec: 1.4, CompletedJobs: MinJobsForEviction + 20, Timestamp: time.Now(),
 		})
 	}
 

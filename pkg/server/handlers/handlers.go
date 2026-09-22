@@ -1173,7 +1173,7 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 			WorkerID:        req.WorkerID,
 			Status:          string(req.Status),
 			ActiveJobs:      req.ActiveJobs,
-			ThroughputFPS:   req.ThroughputFPS,
+			JobsPerSec:      req.JobsPerSec,
 			CompletedJobs:   req.CompletedJobs,
 			GPUUtilPct:      req.GPUUtilPct,
 			GPUMemUsedMB:    req.GPUMemUsedMB,
@@ -2165,8 +2165,8 @@ type WorkerHealth struct {
 	GPUMemUsedMB    int      `json:"gpu_mem_used_mb,omitempty"`
 	GPUMetricsValid bool     `json:"gpu_metrics_valid"` // True when the GPU fields carry a fresh sample; false means stale/no sample (any GPU source)
 	ActiveJobs      []string `json:"active_jobs,omitempty"`
-	ThroughputFPS   float64  `json:"throughput_fps"`
-	EWMAThroughput  float64  `json:"ewma_throughput"` // EWMA-smoothed throughput (jobs/sec); 0 until the first heartbeat sample
+	JobsPerSec      float64  `json:"jobs_per_sec"`
+	EWMAJobsPerSec  float64  `json:"ewma_jobs_per_sec"` // EWMA-smoothed throughput (jobs/sec); 0 until the first heartbeat sample
 	LastSeen        string   `json:"last_seen"`
 }
 
@@ -2381,8 +2381,8 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 		health.GPUUtilPct = state.GPUUtilPct
 		health.GPUMemUsedMB = state.GPUMemUsedMB
 		health.GPUMetricsValid = state.GPUMetricsValid
-		health.ThroughputFPS = state.ThroughputFPS
-		health.EWMAThroughput = state.EWMAThroughput
+		health.JobsPerSec = state.JobsPerSec
+		health.EWMAJobsPerSec = state.EWMAJobsPerSec
 		health.ActiveJobs = state.ActiveJobs
 		// !Before (not After): when the two timestamps are equal, prefer the
 		// fresher state-table sample instead of falling back to the DB record.

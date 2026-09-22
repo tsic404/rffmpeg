@@ -18,7 +18,7 @@ func TestWorkerStateTable_UpdateAndGet(t *testing.T) {
 		GPUMemUsedMB:    4096,
 		GPUMetricsValid: true,
 		ActiveJobs:      []string{"job-1", "job-2"},
-		ThroughputFPS:   120.0,
+		JobsPerSec:      120.0,
 		QueueDepth:      3,
 		Timestamp:       time.Now(),
 	}
@@ -39,12 +39,12 @@ func TestWorkerStateTable_UpdateAndGet(t *testing.T) {
 	if len(state.ActiveJobs) != 2 {
 		t.Errorf("expected 2 active jobs, got %d", len(state.ActiveJobs))
 	}
-	if state.ThroughputFPS != 120.0 {
-		t.Errorf("expected ThroughputFPS 120.0, got %f", state.ThroughputFPS)
+	if state.JobsPerSec != 120.0 {
+		t.Errorf("expected JobsPerSec 120.0, got %f", state.JobsPerSec)
 	}
 	// First heartbeat should initialize EWMA to the raw value
-	if state.EWMAThroughput != 120.0 {
-		t.Errorf("expected EWMAThroughput 120.0 on first heartbeat, got %f", state.EWMAThroughput)
+	if state.EWMAJobsPerSec != 120.0 {
+		t.Errorf("expected EWMAJobsPerSec 120.0 on first heartbeat, got %f", state.EWMAJobsPerSec)
 	}
 }
 
@@ -54,39 +54,39 @@ func TestWorkerStateTable_EWMAConvergence(t *testing.T) {
 	// Simulate a series of heartbeats with varying throughput
 	// First heartbeat: raw=100, EWMA=100
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(),
 	})
 
 	state, _ := table.Get("w1")
-	if state.EWMAThroughput != 100.0 {
-		t.Fatalf("expected initial EWMA 100, got %f", state.EWMAThroughput)
+	if state.EWMAJobsPerSec != 100.0 {
+		t.Fatalf("expected initial EWMA 100, got %f", state.EWMAJobsPerSec)
 	}
 
 	// Second heartbeat: raw=50, EWMA = 0.4*50 + 0.6*100 = 20 + 60 = 80
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 50, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 50, Timestamp: time.Now(),
 	})
 
 	state, _ = table.Get("w1")
 	expected := 0.4*50 + 0.6*100 // = 80
-	if math.Abs(state.EWMAThroughput-expected) > 0.001 {
-		t.Errorf("expected EWMA %f, got %f", expected, state.EWMAThroughput)
+	if math.Abs(state.EWMAJobsPerSec-expected) > 0.001 {
+		t.Errorf("expected EWMA %f, got %f", expected, state.EWMAJobsPerSec)
 	}
 
 	// Third heartbeat: raw=50, EWMA = 0.4*50 + 0.6*80 = 20 + 48 = 68
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 50, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 50, Timestamp: time.Now(),
 	})
 
 	state, _ = table.Get("w1")
 	expected2 := 0.4*50 + 0.6*80 // = 68
-	if math.Abs(state.EWMAThroughput-expected2) > 0.001 {
-		t.Errorf("expected EWMA %f, got %f", expected2, state.EWMAThroughput)
+	if math.Abs(state.EWMAJobsPerSec-expected2) > 0.001 {
+		t.Errorf("expected EWMA %f, got %f", expected2, state.EWMAJobsPerSec)
 	}
 
-	// Verify raw ThroughputFPS is not smoothed
-	if state.ThroughputFPS != 50.0 {
-		t.Errorf("expected raw ThroughputFPS 50, got %f", state.ThroughputFPS)
+	// Verify raw JobsPerSec is not smoothed
+	if state.JobsPerSec != 50.0 {
+		t.Errorf("expected raw JobsPerSec 50, got %f", state.JobsPerSec)
 	}
 }
 
@@ -95,24 +95,24 @@ func TestWorkerStateTable_EWMAZeroToNonZero(t *testing.T) {
 
 	// First heartbeat with zero throughput
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 0, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 0, Timestamp: time.Now(),
 	})
 
 	state, _ := table.Get("w1")
-	if state.EWMAThroughput != 0.0 {
-		t.Errorf("expected EWMA 0, got %f", state.EWMAThroughput)
+	if state.EWMAJobsPerSec != 0.0 {
+		t.Errorf("expected EWMA 0, got %f", state.EWMAJobsPerSec)
 	}
 
 	// Second heartbeat with non-zero throughput
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(),
 	})
 
 	state, _ = table.Get("w1")
 	// Since initial EWMA was 0, 0.4*100 + 0.6*0 = 40
 	expected := 0.4 * 100.0 // 40
-	if math.Abs(state.EWMAThroughput-expected) > 0.001 {
-		t.Errorf("expected EWMA %f, got %f", expected, state.EWMAThroughput)
+	if math.Abs(state.EWMAJobsPerSec-expected) > 0.001 {
+		t.Errorf("expected EWMA %f, got %f", expected, state.EWMAJobsPerSec)
 	}
 }
 
@@ -170,13 +170,13 @@ func TestDetectSlowWorkers_NormalCluster(t *testing.T) {
 
 	// 3 workers with similar throughput
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 90, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 90, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	result := table.DetectSlowWorkers()
@@ -198,13 +198,13 @@ func TestDetectSlowWorkers_SlowNodeDetected(t *testing.T) {
 
 	// 3 workers: w3 is significantly slower (throughput 10 vs median 100)
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	result := table.DetectSlowWorkers()
@@ -231,15 +231,15 @@ func TestDetectSlowWorkers_IdleWorkersSkipped(t *testing.T) {
 
 	// w1: active with normal throughput
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, ActiveJobs: []string{"job-1"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, ActiveJobs: []string{"job-1"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	// w2: idle - zero throughput and no active jobs
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 0, ActiveJobs: nil, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 0, ActiveJobs: nil, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	// w3: active with normal throughput
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 110, ActiveJobs: []string{"job-2"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 110, ActiveJobs: []string{"job-2"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	result := table.DetectSlowWorkers()
@@ -259,17 +259,17 @@ func TestDetectSlowWorkers_IdleWorkerWithActiveJobs(t *testing.T) {
 
 	// w1: active with normal throughput
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, ActiveJobs: []string{"job-1"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, ActiveJobs: []string{"job-1"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	// w2: busy worker whose job just started — throughput sample is still 0.
 	// EWMA decay here is measurement absence, not slowness, so w2 is exempt
 	// from eviction evaluation until real throughput samples arrive.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 0, ActiveJobs: []string{"job-2"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 0, ActiveJobs: []string{"job-2"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	// w3: active with normal throughput
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 110, ActiveJobs: []string{"job-3"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 110, ActiveJobs: []string{"job-3"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	// Median of [100, 110] → median=105. w2 (busy, zero throughput) is
@@ -291,14 +291,14 @@ func TestDetectSlowWorkers_NewWorkerWarmup(t *testing.T) {
 
 	// Two established workers with healthy throughput.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w2", Status: "online", JobsPerSec: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	// New worker still in its warmup phase (below MinJobsForEviction) with very low throughput.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 5, ActiveJobs: []string{"job-1"}, CompletedJobs: MinJobsForEviction - 1, Timestamp: time.Now(),
+		WorkerID: "w3", Status: "online", JobsPerSec: 5, ActiveJobs: []string{"job-1"}, CompletedJobs: MinJobsForEviction - 1, Timestamp: time.Now(),
 	})
 
 	result := table.DetectSlowWorkers()
@@ -312,7 +312,7 @@ func TestDetectSlowWorkers_NewWorkerWarmup(t *testing.T) {
 
 	// Once w3 crosses the warmup threshold, it becomes eligible for eviction.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 5, ActiveJobs: []string{"job-2"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w3", Status: "online", JobsPerSec: 5, ActiveJobs: []string{"job-2"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 
 	result = table.DetectSlowWorkers()
@@ -325,7 +325,7 @@ func TestDetectSlowWorkers_SingleWorker(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	result := table.DetectSlowWorkers()
@@ -344,10 +344,10 @@ func TestDetectSlowWorkers_SingleWorkerClearsEviction(t *testing.T) {
 
 	// Two workers: w2 is slow and gets evicted.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	result := table.DetectSlowWorkers()
@@ -376,13 +376,13 @@ func TestDetectSlowWorkers_Recovery(t *testing.T) {
 
 	// Mark w3 as slow, then improve its throughput to trigger recovery
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	// First detection: w3 should be evicted
@@ -393,7 +393,7 @@ func TestDetectSlowWorkers_Recovery(t *testing.T) {
 
 	// Now simulate w3 recovering: throughput improves to 80
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 80, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 80, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	// After EWMA smoothing: 0.4*80 + 0.6*10 = 32 + 6 = 38 (not enough for recovery yet)
@@ -407,7 +407,7 @@ func TestDetectSlowWorkers_Recovery(t *testing.T) {
 	// Simulate several more heartbeats at 80 to bring EWMA up
 	for i := 0; i < 10; i++ {
 		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-			WorkerID: "w3", Status: "online", ThroughputFPS: 80, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+			WorkerID: "w3", Status: "online", JobsPerSec: 80, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 		})
 	}
 
@@ -431,15 +431,15 @@ func TestDetectSlowWorkers_OfflineWorkersSkipped(t *testing.T) {
 
 	// w1: online, normal
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	// w2: offline, very slow
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: string(protocol.WorkerStatusOffline), ThroughputFPS: 5, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: string(protocol.WorkerStatusOffline), JobsPerSec: 5, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	// w3: online, normal
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 110, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	result := table.DetectSlowWorkers()
@@ -459,16 +459,16 @@ func TestDetectSlowWorkers_MedianWithEvenCount(t *testing.T) {
 
 	// 4 workers: median should be average of 2nd and 3rd
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 200, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 200, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 300, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 300, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w4", Status: "online", ThroughputFPS: 400, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w4", Status: "online", JobsPerSec: 400, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	// Sorted: [100, 200, 300, 400] → median = (200+300)/2 = 250
@@ -481,7 +481,7 @@ func TestDetectSlowWorkers_MedianWithEvenCount(t *testing.T) {
 
 	// Now make w1 very slow
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 10, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	// EWMA after one update: 0.4*10 + 0.6*100 = 4 + 60 = 64
 	// Median of [64, 200, 300, 400] = 250
@@ -533,13 +533,13 @@ func TestDetectSlowWorkers_AllIdle(t *testing.T) {
 
 	// All workers are idle (zero throughput, no jobs)
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w3", Status: "online", JobsPerSec: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	result := table.DetectSlowWorkers()
@@ -553,10 +553,10 @@ func TestDetectSlowWorkers_ZeroMedian(t *testing.T) {
 
 	// All workers have zero throughput but have active jobs (not idle)
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 0, ActiveJobs: []string{"job-1"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w1", Status: "online", JobsPerSec: 0, ActiveJobs: []string{"job-1"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 0, ActiveJobs: []string{"job-2"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w2", Status: "online", JobsPerSec: 0, ActiveJobs: []string{"job-2"}, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
 	// Median is 0 → no eviction (median > 0 guard)
@@ -576,10 +576,10 @@ func TestWorkerStateTableClusterMedian(t *testing.T) {
 
 	// Two past-warmup, non-idle workers: median of EWMA throughput.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w-fast", Status: "online", ThroughputFPS: 3, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w-fast", Status: "online", JobsPerSec: 3, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w-slow", Status: "online", ThroughputFPS: 1, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w-slow", Status: "online", JobsPerSec: 1, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	if got := table.ClusterMedian(); got != 2 {
 		t.Errorf("median of [1 3] = %f, want 2", got)
@@ -588,7 +588,7 @@ func TestWorkerStateTableClusterMedian(t *testing.T) {
 	// Warmup worker (CompletedJobs < MinJobsForEviction) is excluded from the
 	// sample pool, so its extreme value must not move the median.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w-warmup", Status: "online", ThroughputFPS: 1000, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction - 1,
+		WorkerID: "w-warmup", Status: "online", JobsPerSec: 1000, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction - 1,
 	})
 	if got := table.ClusterMedian(); got != 2 {
 		t.Errorf("median with warmup worker = %f, want 2", got)
@@ -596,7 +596,7 @@ func TestWorkerStateTableClusterMedian(t *testing.T) {
 
 	// Idle worker (zero throughput, no active jobs) is excluded too.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w-idle", Status: "online", ThroughputFPS: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
+		WorkerID: "w-idle", Status: "online", JobsPerSec: 0, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 	if got := table.ClusterMedian(); got != 2 {
 		t.Errorf("median with idle worker = %f, want 2", got)

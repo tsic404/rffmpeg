@@ -217,7 +217,7 @@ type WorkerHeartbeatRequest struct {
 	WorkerID        string       `json:"worker_id"`
 	Status          WorkerStatus `json:"status"`
 	ActiveJobs      []string     `json:"active_jobs,omitempty"`
-	ThroughputFPS   float64      `json:"throughput_fps"` // Jobs completed per second since the last heartbeat (despite the legacy name)
+	JobsPerSec      float64      `json:"jobs_per_sec"` // Jobs completed per second since the last heartbeat
 	CompletedJobs   int          `json:"completed_jobs"`
 	GPUUtilPct      float64      `json:"gpu_util_percent"` // Aggregated across all GPUs (0-100*N on multi-GPU hosts); 0 is a valid reading
 	GPUMemUsedMB    int          `json:"gpu_mem_used_mb"`
@@ -388,9 +388,9 @@ type WorkerState struct {
 	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPU metrics reflect a fresh sample from any source
 	GPUUtilPct      float64   `json:"gpu_util_percent,omitempty"`
 	ActiveJobs      []string  `json:"active_jobs,omitempty"`
-	ThroughputFPS   float64   `json:"throughput_fps,omitempty"`
-	EWMAThroughput  float64   `json:"ewma_throughput,omitempty"` // EWMA-smoothed throughput
-	Evicted         bool      `json:"evicted"`                   // Whether worker is a slow node (evicted from scheduling)
+	JobsPerSec      float64   `json:"jobs_per_sec,omitempty"`
+	EWMAJobsPerSec  float64   `json:"ewma_jobs_per_sec,omitempty"` // EWMA-smoothed jobs/sec
+	Evicted         bool      `json:"evicted"`                     // Whether worker is a slow node (evicted from scheduling)
 	QueueDepth      int       `json:"queue_depth,omitempty"`
 	CompletedJobs   int       `json:"completed_jobs,omitempty"` // Cumulative jobs completed since the current registration
 	LastSeen        time.Time `json:"last_seen"`

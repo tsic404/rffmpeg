@@ -168,12 +168,12 @@ func (c *Client) Register(name string, caps protocol.WorkerCapabilities) (string
 // a valid sample with UtilPct == 0 is a real 0% reading and must survive the
 // wire. Valid samples may come from nvidia-smi, intel_gpu_top, or
 // amdgpu sysfs.
-func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, throughputFPS float64, completedJobs int, gpuMetrics gpu.Metrics) ([]string, error) {
+func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, jobsPerSec float64, completedJobs int, gpuMetrics gpu.Metrics) ([]string, error) {
 	req := protocol.WorkerHeartbeatRequest{
 		WorkerID:        c.getWorkerID(),
 		Status:          status,
 		ActiveJobs:      activeJobs,
-		ThroughputFPS:   throughputFPS,
+		JobsPerSec:      jobsPerSec,
 		CompletedJobs:   completedJobs,
 		GPUUtilPct:      gpuMetrics.UtilPct,
 		GPUMemUsedMB:    gpuMetrics.MemUsedMB,
