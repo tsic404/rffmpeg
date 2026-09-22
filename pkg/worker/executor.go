@@ -9,8 +9,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -34,8 +36,9 @@ type ExecResult struct {
 
 // Executor runs ffmpeg commands
 type Executor struct {
-	ffmpegPath string
-	timeout    time.Duration
+	ffmpegPath  string
+	timeout     time.Duration
+	idleTimeout time.Duration
 }
 
 // NewExecutor creates a new ffmpeg executor
@@ -50,6 +53,61 @@ func NewExecutor(ffmpegPath string, timeout time.Duration) *Executor {
 		ffmpegPath: ffmpegPath,
 		timeout:    timeout,
 	}
+}
+
+// SetIdleTimeout sets the stall timeout: ffmpeg is killed when it produces no
+// stdout/stderr output for this long. It is the safety net for a transcode that
+// hangs without ever reaching its total execution budget (the hang this guards
+// against produces no output at all, while a healthy transcode emits a -stats
+// line roughly twice a second). Zero disables the check.
+func (e *Executor) SetIdleTimeout(d time.Duration) {
+	e.idleTimeout = d
+}
+
+// idleWatchPollInterval is how often the stall watchdog samples the last-output
+// timestamp. It bounds how far past the idle timeout a stall is detected.
+const idleWatchPollInterval = 500 * time.Millisecond
+
+// ffmpegSuppressesProgressOutput reports whether the args disable ffmpeg's
+// periodic -stats output, which is the stall watchdog's liveness signal. A job
+// that suppresses it (e.g. -nostats, or a loglevel at or below warning) emits
+// no output while transcoding normally, so the watchdog must not run for it.
+func ffmpegSuppressesProgressOutput(args []string) bool {
+	suppressed := false
+	for i := range args {
+		switch arg := args[i]; {
+		case arg == "-nostats":
+			suppressed = true
+		case arg == "-loglevel" || arg == "-v":
+			if i+1 < len(args) && isQuietLogLevel(args[i+1]) {
+				suppressed = true
+			}
+		case strings.HasPrefix(arg, "-loglevel="):
+			if isQuietLogLevel(strings.TrimPrefix(arg, "-loglevel=")) {
+				suppressed = true
+			}
+		case strings.HasPrefix(arg, "-v="):
+			if isQuietLogLevel(strings.TrimPrefix(arg, "-v=")) {
+				suppressed = true
+			}
+		}
+	}
+	return suppressed
+}
+
+// isQuietLogLevel reports whether an ffmpeg loglevel is quiet enough to
+// suppress -stats output. Stats are emitted at INFO (AV_LOG_INFO, numeric 32),
+// so named levels below info and numeric levels at or below WARNING (24) hide
+// them.
+func isQuietLogLevel(level string) bool {
+	switch strings.ToLower(level) {
+	case "quiet", "panic", "fatal", "error", "warning":
+		return true
+	}
+	if n, err := strconv.Atoi(level); err == nil && n <= 24 {
+		return true
+	}
+	return false
 }
 
 // ffmpegNice is the scheduling priority applied to every ffmpeg subprocess and
@@ -162,6 +220,44 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	var stdout, stderr bytes.Buffer
 	var wg sync.WaitGroup
 
+	// Stall watchdog: kill ffmpeg when it produces no output at all for
+	// e.idleTimeout. A hung transcode goes silent, while a healthy one emits a
+	// -stats line on stderr roughly twice a second, so silence is the stall
+	// signal. Jobs that suppress stats output (-nostats / a quiet loglevel)
+	// never emit that signal, so they are excluded to avoid false positives.
+	idleEnabled := e.idleTimeout > 0 && !ffmpegSuppressesProgressOutput(args)
+	var lastActivity atomic.Int64
+	var idleTriggered atomic.Bool
+	var idleWatchStop, idleWatchDone chan struct{}
+	if idleEnabled {
+		lastActivity.Store(time.Now().UnixNano())
+		idleWatchStop = make(chan struct{})
+		idleWatchDone = make(chan struct{})
+		go func() {
+			defer close(idleWatchDone)
+			ticker := time.NewTicker(idleWatchPollInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-idleWatchStop:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if time.Since(time.Unix(0, lastActivity.Load())) <= e.idleTimeout {
+						continue
+					}
+					idleTriggered.Store(true)
+					// Kill the whole process group so filter helpers die too.
+					if cmd.Process != nil {
+						_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+					}
+					return
+				}
+			}
+		}()
+	}
+
 	// Read stdout with optional chunk streaming
 	wg.Add(1)
 	go func() {
@@ -175,6 +271,9 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 					chunk := buf[:n]
 					stdout.Write(chunk)
 					stdoutHandler(chunk)
+					if idleEnabled {
+						lastActivity.Store(time.Now().UnixNano())
+					}
 				}
 				if readErr != nil {
 					break
@@ -197,6 +296,9 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 			if line == "" {
 				continue
 			}
+			if idleEnabled {
+				lastActivity.Store(time.Now().UnixNano())
+			}
 			stderr.WriteString(line)
 			stderr.WriteString("\n")
 
@@ -216,6 +318,21 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	result := ExecResult{
 		Stdout: stdout.String(),
 		Stderr: stderr.String(),
+	}
+
+	if idleEnabled {
+		// Stop the watchdog (it may still be ticking) and wait for it to exit so
+		// the triggered flag is settled before it is read.
+		close(idleWatchStop)
+		<-idleWatchDone
+	}
+	if idleTriggered.Load() {
+		// The stall kill masks any signal-death exit code: report it as the
+		// timeout it is (a stalled process is a hung execution, not a crash).
+		result.Error = fmt.Errorf("ffmpeg stalled: no output for %v", e.idleTimeout)
+		result.ExitCode = -1
+		result.IsTimeout = true
+		return result
 	}
 
 	if err != nil {
