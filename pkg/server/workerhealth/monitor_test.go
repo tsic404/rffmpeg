@@ -520,13 +520,13 @@ func TestSlowNodeEvictionViaMonitor(t *testing.T) {
 	// Create state table with 3 workers: w3 is slow (throughput 10 vs median 100)
 	stateTable := NewWorkerStateTable(30 * time.Second)
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w2", Status: "online", JobsPerSec: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 10, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w3", Status: "online", JobsPerSec: 10, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 
 	// Create monitor and set state table
@@ -595,13 +595,13 @@ func TestSlowNodeRecoveryViaMonitor(t *testing.T) {
 	// Create state table: w3 is slow
 	stateTable := NewWorkerStateTable(30 * time.Second)
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w2", Status: "online", JobsPerSec: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 10, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w3", Status: "online", JobsPerSec: 10, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 
 	monitor := New(database, Config{
@@ -624,7 +624,7 @@ func TestSlowNodeRecoveryViaMonitor(t *testing.T) {
 	// Now simulate w3 recovering: many heartbeats with high throughput
 	for i := 0; i < 15; i++ {
 		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-			WorkerID: "w3", Status: "online", ThroughputFPS: 90, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+			WorkerID: "w3", Status: "online", JobsPerSec: 90, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 		})
 	}
 
@@ -681,9 +681,9 @@ func TestSlowNodeEvictionClearedWhenClusterShrinks(t *testing.T) {
 	}
 
 	stateTable := NewWorkerStateTable(30 * time.Second)
-	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w1", Status: "online", ThroughputFPS: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now()})
-	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w2", Status: "online", ThroughputFPS: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now()})
-	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w3", Status: "online", ThroughputFPS: 10, CompletedJobs: MinJobsForEviction, Timestamp: time.Now()})
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w1", Status: "online", JobsPerSec: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now()})
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w2", Status: "online", JobsPerSec: 110, CompletedJobs: MinJobsForEviction, Timestamp: time.Now()})
+	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{WorkerID: "w3", Status: "online", JobsPerSec: 10, CompletedJobs: MinJobsForEviction, Timestamp: time.Now()})
 
 	monitor := New(database, Config{
 		HeartbeatTimeout:    30 * time.Second,
@@ -1403,15 +1403,15 @@ func TestCheckWorkersMarksStaleStateOffline(t *testing.T) {
 	stateTable := NewWorkerStateTable(30 * time.Second)
 	// Two fresh workers: median of [100, 50] is 75.
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w1", Status: "online", ThroughputFPS: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w1", Status: "online", JobsPerSec: 100, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w2", Status: "online", ThroughputFPS: 50, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		WorkerID: "w2", Status: "online", JobsPerSec: 50, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
 	})
 	// Stale worker: its throughput would drag the median from 75 to 50 if
 	// still sampled, but its heartbeat stopped an hour ago.
 	stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
-		WorkerID: "w3", Status: "online", ThroughputFPS: 1, CompletedJobs: MinJobsForEviction, Timestamp: time.Now().Add(-time.Hour),
+		WorkerID: "w3", Status: "online", JobsPerSec: 1, CompletedJobs: MinJobsForEviction, Timestamp: time.Now().Add(-time.Hour),
 	})
 
 	monitor := New(database, Config{

@@ -56,7 +56,7 @@ type WorkerHeartbeatPayload struct {
 	GPUMemUsedMB    int       `json:"gpu_mem_used_mb"`
 	GPUMetricsValid bool      `json:"gpu_metrics_valid"` // True when GPUUtilPct/GPUMemUsedMB carry a fresh sample (any GPU source)
 	ActiveJobs      []string  `json:"active_jobs,omitempty"`
-	ThroughputFPS   float64   `json:"throughput_fps"` // Jobs completed per second since the last heartbeat (legacy name kept for wire compatibility)
+	JobsPerSec      float64   `json:"jobs_per_sec"` // Jobs completed per second since the last heartbeat
 	QueueDepth      int       `json:"queue_depth"`
 	CompletedJobs   int       `json:"completed_jobs"`
 	Timestamp       time.Time `json:"timestamp"`

@@ -1557,9 +1557,9 @@ func (w *Worker) sendHeartbeat() {
 	// Calculate throughput (jobs completed per second since last heartbeat)
 	now := time.Now()
 	elapsed := now.Sub(w.lastHeartbeatTime).Seconds()
-	var throughputFPS float64
+	var jobsPerSec float64
 	if elapsed > 0 && w.jobsCompleted > 0 {
-		throughputFPS = float64(w.jobsCompleted) / elapsed
+		jobsPerSec = float64(w.jobsCompleted) / elapsed
 	}
 	completedJobs := w.totalJobsCompleted
 	w.jobsCompleted = 0
@@ -1567,7 +1567,7 @@ func (w *Worker) sendHeartbeat() {
 	w.mu.Unlock()
 
 	gpuMetrics := w.gpuDetector.SampleMetrics()
-	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, throughputFPS, completedJobs, gpuMetrics)
+	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, jobsPerSec, completedJobs, gpuMetrics)
 	if err != nil {
 		log.Printf("Failed to send heartbeat: %v", err)
 		// An evicted worker must not re-register: re-registration clears the

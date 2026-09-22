@@ -203,13 +203,13 @@ func (m *Monitor) detectSlowWorkers() {
 		if _, err := m.db.CreateEvictionEvent(
 			workerID,
 			db.EvictionEventEvicted,
-			state.EWMAThroughput,
+			state.EWMAJobsPerSec,
 			result.Median,
 			reason,
 		); err != nil {
 			log.Printf("Failed to create eviction audit event for worker %s: %v", workerID, err)
 		}
-		log.Printf("Worker %s evicted: EWMA=%.2f, median=%.2f", workerID, state.EWMAThroughput, result.Median)
+		log.Printf("Worker %s evicted: EWMA=%.2f, median=%.2f", workerID, state.EWMAJobsPerSec, result.Median)
 	}
 
 	// Sync recovery to DB and record audit events
@@ -225,13 +225,13 @@ func (m *Monitor) detectSlowWorkers() {
 		if _, err := m.db.CreateEvictionEvent(
 			workerID,
 			db.EvictionEventRecovered,
-			state.EWMAThroughput,
+			state.EWMAJobsPerSec,
 			result.Median,
 			reason,
 		); err != nil {
 			log.Printf("Failed to create recovery audit event for worker %s: %v", workerID, err)
 		}
-		log.Printf("Worker %s recovered: EWMA=%.2f, median=%.2f", workerID, state.EWMAThroughput, result.Median)
+		log.Printf("Worker %s recovered: EWMA=%.2f, median=%.2f", workerID, state.EWMAJobsPerSec, result.Median)
 	}
 
 	if len(result.NewlyEvicted) > 0 || len(result.Recovered) > 0 {

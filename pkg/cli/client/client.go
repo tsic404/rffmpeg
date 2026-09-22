@@ -1175,12 +1175,13 @@ func (c *Client) setAuthHeader(req *http.Request) {
 
 // WorkerHealth carries live runtime metrics for a worker.
 type WorkerHealth struct {
-	Status        string   `json:"status"`
-	GPUUtilPct    float64  `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB  int      `json:"gpu_mem_used_mb,omitempty"`
-	ActiveJobs    []string `json:"active_jobs,omitempty"`
-	ThroughputFPS float64  `json:"throughput_fps"`
-	LastSeen      string   `json:"last_seen"`
+	Status         string   `json:"status"`
+	GPUUtilPct     float64  `json:"gpu_util_percent,omitempty"`
+	GPUMemUsedMB   int      `json:"gpu_mem_used_mb,omitempty"`
+	ActiveJobs     []string `json:"active_jobs,omitempty"`
+	JobsPerSec     float64  `json:"jobs_per_sec"`
+	EWMAJobsPerSec float64  `json:"ewma_jobs_per_sec,omitempty"`
+	LastSeen       string   `json:"last_seen"`
 }
 
 // WorkerInfo represents worker information from the API
