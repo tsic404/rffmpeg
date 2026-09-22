@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -72,6 +73,67 @@ func TestCreateAndGetWorker(t *testing.T) {
 
 	if retrieved.ID != worker.ID {
 		t.Errorf("Expected ID '%s', got '%s'", worker.ID, retrieved.ID)
+	}
+}
+
+// TestWorkerGPUDevicesRoundTrip verifies the multi-GPU device list survives
+// persistence: CreateWorker writes gpu_devices, GetWorker reads them back, and
+// CreateOrUpdateWorker (re-registration) replaces the list rather than
+// appending or losing it.
+func TestWorkerGPUDevicesRoundTrip(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	caps := protocol.WorkerCapabilities{
+		GPUModel:      "Intel UHD Graphics 630",
+		Encoders:      []string{"libx264", "h264_qsv"},
+		FFmpegVersion: "5.1.2",
+		MaxConcurrent: 2,
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "qsv", Name: "Intel UHD Graphics 630", Vendor: "Intel", Accessible: true},
+			{Type: "vaapi", Name: "AMD Radeon HD 8570", Vendor: "AMD", Accessible: false},
+		},
+	}
+
+	worker, err := database.CreateWorker("", "multi-gpu-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+
+	var got []protocol.GPUDeviceInfo
+	if err := json.Unmarshal([]byte(worker.GPUDevices), &got); err != nil {
+		t.Fatalf("Failed to unmarshal persisted gpu_devices: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("gpu_devices length = %d, want 2", len(got))
+	}
+	if got[0].Name != "Intel UHD Graphics 630" || got[0].Vendor != "Intel" || !got[0].Accessible {
+		t.Errorf("first device = %+v, want Intel/qsv accessible", got[0])
+	}
+	if got[1].Name != "AMD Radeon HD 8570" || got[1].Vendor != "AMD" || got[1].Accessible {
+		t.Errorf("second device = %+v, want AMD/vaapi inaccessible", got[1])
+	}
+
+	// Re-registration replaces the device list.
+	updated := caps
+	updated.GPUModel = "NVIDIA RTX 3080"
+	updated.GPUDevices = []protocol.GPUDeviceInfo{
+		{Type: "nvenc", Name: "NVIDIA RTX 3080", Vendor: "NVIDIA", Accessible: true},
+	}
+	reregistered, err := database.CreateOrUpdateWorker(worker.ID, "multi-gpu-worker", updated, 90*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to re-register worker: %v", err)
+	}
+
+	var reGot []protocol.GPUDeviceInfo
+	if err := json.Unmarshal([]byte(reregistered.GPUDevices), &reGot); err != nil {
+		t.Fatalf("Failed to unmarshal re-registered gpu_devices: %v", err)
+	}
+	if len(reGot) != 1 || reGot[0].Name != "NVIDIA RTX 3080" {
+		t.Errorf("re-registered gpu_devices = %+v, want single NVIDIA RTX 3080", reGot)
+	}
+	if !reregistered.GPUModel.Valid || reregistered.GPUModel.String != "NVIDIA RTX 3080" {
+		t.Errorf("re-registered gpu_model = %v, want NVIDIA RTX 3080", reregistered.GPUModel)
 	}
 }
 

@@ -1837,6 +1837,89 @@ func TestWorkerHealthInListResponse(t *testing.T) {
 	_ = h // handler kept for state table wiring via setupTest
 }
 
+// TestWorkersResponseIncludesGPUDevices verifies the workers endpoints surface
+// every detected GPU, not just the aggregated gpu_model first-card value: a
+// multi-card host's second card must be visible with its vendor and
+// accessibility.
+func TestWorkersResponseIncludesGPUDevices(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "multi-gpu-worker",
+		Capabilities: protocol.WorkerCapabilities{
+			GPUModel:      "Intel UHD Graphics 630",
+			Encoders:      []string{"libx264", "h264_qsv"},
+			FFmpegVersion: "5.1.2",
+			GPUDevices: []protocol.GPUDeviceInfo{
+				{Type: "qsv", Name: "Intel UHD Graphics 630", Vendor: "Intel", Accessible: true},
+				{Type: "vaapi", Name: "AMD Radeon HD 8570", Vendor: "AMD", Accessible: false},
+			},
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("registration failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var regResp protocol.WorkerRegisterResponse
+	json.NewDecoder(rec.Body).Decode(&regResp)
+
+	assertDevices := func(label string, devices []protocol.GPUDeviceInfo) {
+		t.Helper()
+		if len(devices) != 2 {
+			t.Fatalf("%s gpu_devices length = %d, want 2", label, len(devices))
+		}
+		if devices[0].Name != "Intel UHD Graphics 630" || devices[0].Vendor != "Intel" || !devices[0].Accessible {
+			t.Errorf("%s first device = %+v, want Intel/qsv accessible", label, devices[0])
+		}
+		if devices[1].Name != "AMD Radeon HD 8570" || devices[1].Vendor != "AMD" || devices[1].Accessible {
+			t.Errorf("%s second device = %+v, want AMD/vaapi inaccessible", label, devices[1])
+		}
+	}
+
+	// Single-worker endpoint.
+	req = httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get worker failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var getResp handlers.GetWorkerResponse
+	if err := json.NewDecoder(rec.Body).Decode(&getResp); err != nil {
+		t.Fatalf("decode get worker: %v", err)
+	}
+	assertDevices("get", getResp.Worker.GPUDevices)
+
+	// List endpoint.
+	req = httptest.NewRequest("GET", "/api/v1/workers", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list workers failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var listResp handlers.ListWorkersResponse
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatalf("decode list workers: %v", err)
+	}
+	var found *handlers.WorkerInfo
+	for i := range listResp.Workers {
+		if listResp.Workers[i].ID == regResp.WorkerID {
+			found = &listResp.Workers[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("registered worker missing from list response")
+	}
+	assertDevices("list", found.GPUDevices)
+}
+
 // TestWorkerHealthJobsPerSecAlwaysPresent verifies the health response always
 // carries jobs_per_sec, even for an idle worker reporting zero throughput
 // (or no heartbeat yet). omitempty previously dropped the field at 0, leaving

@@ -61,6 +61,7 @@ type Worker struct {
 	Decoders      string // JSON array
 	VideoEncoders string // JSON array of EncoderInfo
 	VideoDecoders string // JSON array of DecoderInfo
+	GPUDevices    string // JSON array of GPUDeviceInfo
 	FFmpegVersion string
 	MaxConcurrent int
 	Evicted       bool
@@ -194,7 +195,7 @@ var requiredTables = []tableSpec{
 	}},
 	{name: "workers", pk: "id", core: true, columns: []string{
 		"id", "name", "status", "gpu_model", "encoders", "decoders",
-		"video_encoders", "video_decoders", "ffmpeg_version", "max_concurrent",
+		"video_encoders", "video_decoders", "gpu_devices", "ffmpeg_version", "max_concurrent",
 		"evicted", "evicted_at", "hwaccels", "codecs", "filters", "pix_fmts",
 		"formats", "last_heartbeat", "created_at",
 	}},
@@ -410,6 +411,7 @@ func (d *Database) initTables() error {
 			decoders TEXT DEFAULT '[]',
 			video_encoders TEXT DEFAULT '[]',
 			video_decoders TEXT DEFAULT '[]',
+			gpu_devices TEXT DEFAULT '[]',
 			ffmpeg_version TEXT,
 			max_concurrent INTEGER DEFAULT 1,
 			evicted INTEGER DEFAULT 0,
@@ -542,6 +544,7 @@ func (d *Database) initTables() error {
 		`ALTER TABLE jobs ADD COLUMN worker_name TEXT`,
 		`ALTER TABLE workers ADD COLUMN video_encoders TEXT DEFAULT '[]'`,
 		`ALTER TABLE workers ADD COLUMN video_decoders TEXT DEFAULT '[]'`,
+		`ALTER TABLE workers ADD COLUMN gpu_devices TEXT DEFAULT '[]'`,
 		`ALTER TABLE workers ADD COLUMN hwaccels TEXT DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN codecs TEXT DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN filters TEXT DEFAULT ''`,
@@ -1147,6 +1150,10 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal video decoders: %w", err)
 	}
+	gpuDevicesJSON, err := json.Marshal(caps.GPUDevices)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal gpu devices: %w", err)
+	}
 
 	var gpuModel interface{}
 	if caps.GPUModel != "" {
@@ -1154,10 +1161,10 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 	}
 
 	_, err = d.db.Exec(`
-		INSERT INTO workers (id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workers (id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, name, protocol.WorkerStatusIdle, gpuModel, string(encodersJSON), string(decodersJSON),
-		string(videoEncodersJSON), string(videoDecodersJSON),
+		string(videoEncodersJSON), string(videoDecodersJSON), string(gpuDevicesJSON),
 		caps.FFmpegVersion, caps.MaxConcurrent, false, nil,
 		caps.Hwaccels, caps.Codecs, caps.Filters, caps.PixFmts, caps.Formats,
 		now, now)
@@ -1203,6 +1210,10 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal video decoders: %w", err)
 	}
+	gpuDevicesJSON, err := json.Marshal(caps.GPUDevices)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal gpu devices: %w", err)
+	}
 
 	var gpuModel interface{}
 	if caps.GPUModel != "" {
@@ -1212,12 +1223,12 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 	// Try UPDATE first (handles re-registration after server restart)
 	result, err := d.db.Exec(`
 		UPDATE workers SET name=?, status=?, gpu_model=?, encoders=?, decoders=?,
-		video_encoders=?, video_decoders=?, ffmpeg_version=?, max_concurrent=?,
+		video_encoders=?, video_decoders=?, gpu_devices=?, ffmpeg_version=?, max_concurrent=?,
 		evicted=0, evicted_at=NULL, hwaccels=?, codecs=?, filters=?, pix_fmts=?, formats=?,
 		last_heartbeat=? WHERE id=?
 	`, name, protocol.WorkerStatusIdle, gpuModel,
 		string(encodersJSON), string(decodersJSON),
-		string(videoEncodersJSON), string(videoDecodersJSON),
+		string(videoEncodersJSON), string(videoDecodersJSON), string(gpuDevicesJSON),
 		caps.FFmpegVersion, caps.MaxConcurrent,
 		caps.Hwaccels, caps.Codecs, caps.Filters, caps.PixFmts, caps.Formats,
 		now, id)
@@ -1263,12 +1274,12 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 		// Fallback: INSERT new worker
 		_, err = tx.Exec(`
 			INSERT INTO workers (id, name, status, gpu_model, encoders, decoders,
-			video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted,
+			video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted,
 			evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		`, id, name, protocol.WorkerStatusIdle, gpuModel,
 			string(encodersJSON), string(decodersJSON),
-			string(videoEncodersJSON), string(videoDecodersJSON),
+			string(videoEncodersJSON), string(videoDecodersJSON), string(gpuDevicesJSON),
 			caps.FFmpegVersion, caps.MaxConcurrent, false, nil,
 			caps.Hwaccels, caps.Codecs, caps.Filters, caps.PixFmts, caps.Formats,
 			now, now)
@@ -1300,11 +1311,11 @@ func (d *Database) GetWorker(id string) (*Worker, error) {
 	id = NormalizeWorkerID(id)
 	worker := &Worker{}
 	err := d.db.QueryRow(`
-		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
 		FROM workers WHERE id = ?
 	`, id).Scan(
 		&worker.ID, &worker.Name, &worker.Status, &worker.GPUModel,
-		&worker.Encoders, &worker.Decoders, &worker.VideoEncoders, &worker.VideoDecoders, &worker.FFmpegVersion,
+		&worker.Encoders, &worker.Decoders, &worker.VideoEncoders, &worker.VideoDecoders, &worker.GPUDevices, &worker.FFmpegVersion,
 		&worker.MaxConcurrent, &worker.Evicted, &worker.EvictedAt,
 		&worker.Hwaccels, &worker.Codecs, &worker.Filters, &worker.PixFmts, &worker.Formats,
 		&worker.LastHeartbeat, &worker.CreatedAt,
@@ -1620,7 +1631,7 @@ func (d *Database) RemoveOfflineWorkers(offlineThreshold time.Duration) ([]strin
 // GetActiveWorkers retrieves all workers that are not offline
 func (d *Database) GetActiveWorkers() ([]*Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
 		FROM workers WHERE status != ?
 		ORDER BY created_at ASC
 	`, protocol.WorkerStatusOffline)
@@ -1636,7 +1647,7 @@ func (d *Database) GetActiveWorkers() ([]*Worker, error) {
 // Evicted workers are excluded.
 func (d *Database) GetIdleWorkers() ([]*Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
 		FROM workers WHERE status = ? AND evicted = 0
 		ORDER BY last_heartbeat DESC
 	`, protocol.WorkerStatusIdle)
@@ -1658,7 +1669,7 @@ func (d *Database) GetIdleWorkers() ([]*Worker, error) {
 // sweeps) must use GetLiveSchedulableWorkers instead.
 func (d *Database) GetSchedulableWorkers() ([]*Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
 		FROM workers WHERE status != ? AND evicted = 0
 		ORDER BY last_heartbeat DESC
 	`, protocol.WorkerStatusOffline)
@@ -1679,7 +1690,7 @@ func (d *Database) GetSchedulableWorkers() ([]*Worker, error) {
 func (d *Database) GetLiveSchedulableWorkers(freshness time.Duration) ([]*Worker, error) {
 	freshnessClause, freshnessArgs := heartbeatFreshnessSQL(freshness)
 	rows, err := d.querySchedulable(`
-		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
 		FROM workers WHERE status != ? AND evicted = 0`+freshnessClause+`
 		ORDER BY last_heartbeat DESC
 	`, append([]any{protocol.WorkerStatusOffline}, freshnessArgs...)...)
@@ -2011,7 +2022,7 @@ func (d *Database) scanWorkers(rows *sql.Rows) ([]*Worker, error) {
 		worker := &Worker{}
 		err := rows.Scan(
 			&worker.ID, &worker.Name, &worker.Status, &worker.GPUModel,
-			&worker.Encoders, &worker.Decoders, &worker.VideoEncoders, &worker.VideoDecoders, &worker.FFmpegVersion,
+			&worker.Encoders, &worker.Decoders, &worker.VideoEncoders, &worker.VideoDecoders, &worker.GPUDevices, &worker.FFmpegVersion,
 			&worker.MaxConcurrent, &worker.Evicted, &worker.EvictedAt,
 			&worker.Hwaccels, &worker.Codecs, &worker.Filters, &worker.PixFmts, &worker.Formats,
 			&worker.LastHeartbeat, &worker.CreatedAt,
@@ -2133,7 +2144,7 @@ func (d *Database) ListJobs(limit int, offset int) ([]*Job, error) {
 // GetAllWorkers retrieves all workers from the database
 func (d *Database) GetAllWorkers() ([]*Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
 		FROM workers
 		ORDER BY created_at ASC
 	`)
@@ -2151,7 +2162,7 @@ func (d *Database) GetWorkersByEncoder(encoderName string) ([]*Worker, error) {
 	// Query workers where the encoder is in their encoders JSON array
 	// SQLite JSON functions: json_each extracts elements from JSON array
 	rows, err := d.db.Query(`
-		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
+		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.gpu_devices, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
 		FROM workers w, json_each(w.encoders) AS enc
 		WHERE w.status != ? AND enc.value = ?
 		ORDER BY w.last_heartbeat DESC
@@ -2168,7 +2179,7 @@ func (d *Database) GetWorkersByEncoder(encoderName string) ([]*Worker, error) {
 // Evicted workers are excluded.
 func (d *Database) GetIdleWorkersByEncoder(encoderName string) ([]*Worker, error) {
 	rows, err := d.db.Query(`
-		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
+		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.gpu_devices, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
 		FROM workers w, json_each(w.encoders) AS enc
 		WHERE w.status = ? AND w.evicted = 0 AND enc.value = ?
 		ORDER BY w.last_heartbeat DESC
@@ -2234,7 +2245,7 @@ func (d *Database) querySchedulable(query string, args ...any) ([]*Worker, error
 func (d *Database) querySchedulableByEncoder(encoderName string, freshness time.Duration) ([]*Worker, error) {
 	freshnessClause, freshnessArgs := heartbeatFreshnessSQL(freshness)
 	return d.querySchedulable(`
-		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
+		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.gpu_devices, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
 		FROM workers w, json_each(w.encoders) AS enc
 		WHERE w.status != ? AND w.evicted = 0 AND enc.value = ?`+freshnessClause+`
 		ORDER BY w.last_heartbeat DESC
@@ -2262,6 +2273,10 @@ func (d *Database) UpdateWorkerCapabilities(id string, caps protocol.WorkerCapab
 	if err != nil {
 		return fmt.Errorf("failed to marshal video decoders: %w", err)
 	}
+	gpuDevicesJSON, err := json.Marshal(caps.GPUDevices)
+	if err != nil {
+		return fmt.Errorf("failed to marshal gpu devices: %w", err)
+	}
 
 	var gpuModel interface{}
 	if caps.GPUModel != "" {
@@ -2275,6 +2290,7 @@ func (d *Database) UpdateWorkerCapabilities(id string, caps protocol.WorkerCapab
 			decoders = ?,
 			video_encoders = ?,
 			video_decoders = ?,
+			gpu_devices = ?,
 			ffmpeg_version = ?, 
 			max_concurrent = ?,
 			hwaccels = ?,
@@ -2285,7 +2301,7 @@ func (d *Database) UpdateWorkerCapabilities(id string, caps protocol.WorkerCapab
 			last_heartbeat = ?
 		WHERE id = ?
 	`, gpuModel, string(encodersJSON), string(decodersJSON),
-		string(videoEncodersJSON), string(videoDecodersJSON),
+		string(videoEncodersJSON), string(videoDecodersJSON), string(gpuDevicesJSON),
 		caps.FFmpegVersion, caps.MaxConcurrent,
 		caps.Hwaccels, caps.Codecs, caps.Filters, caps.PixFmts, caps.Formats,
 		now, id)
