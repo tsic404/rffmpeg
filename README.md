@@ -80,6 +80,8 @@ go build -o bin/rffmpeg ./cmd/cli
 
 **认证前置**：Server 采用 fail-closed 设计，未配置 `--auth-token` 时拒绝全部 API 请求。启动 Worker 前请先 `export RFFMPEG_TOKEN=<T>`（或为命令追加 `--token <T>`），令牌须与 Server 的 `--auth-token <T>` 一致。
 
+**鉴权作用范围**：`--auth-token` / Worker 的 `--token`（`RFFMPEG_TOKEN`）仅保护 rffmpeg API 通道（worker↔server：注册、心跳、任务拉取、状态上报、文件上传/下载）。用户通过 CLI 提交的**远程输入 URL** 不属于该通道——Worker 直接向该 URL 下载输入时不会携带 rffmpeg PSK，避免把内部令牌泄露给任意外部服务器。需要鉴权的远程输入 URL（私有 CDN、带签名 URL 的对象存储等）请为 Worker 配置 `--input-auth-header`（配置文件 `"input_auth_header"`、环境变量 `RFFMPEG_INPUT_AUTH_HEADER` 或命令行 `--input-auth-header`），其值会**原样**注入下载请求的 `Authorization` 头（可填 `Bearer xxx`、`Basic xxx` 等任意格式，不做格式校验）。
+
 ```bash
 # 连接到本地 Server
 ./bin/worker --server-url http://localhost:8080
@@ -245,7 +247,7 @@ Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提
 
 #### 命令行参数
 
-Worker 仅定义以下 6 个 flag（见 `cmd/worker/main.go`）：
+Worker 仅定义以下 7 个 flag（见 `cmd/worker/main.go`）：
 
 ```bash
 ./bin/worker --help
@@ -258,6 +260,8 @@ Usage of ./bin/worker:
     Cache entry TTL (default 24h0m0s)
   -config string
     Path to worker config file (JSON)
+  -input-auth-header string
+    Authorization header for remote input URLs (overrides config file and RFFMPEG_INPUT_AUTH_HEADER env)
   -server-url string
     Server URL (overrides config file and RFFMPEG_SERVER_URL env)
   -token string
@@ -275,6 +279,7 @@ Usage of ./bin/worker:
   "server_url": "http://localhost:8080",
   "name": "worker-1",
   "token": "<与 Server --auth-token 一致的令牌>",
+  "input_auth_header": "",
   "temp_dir": "",
   "ffmpeg_path": "ffmpeg",
   "timeout": "2h",
@@ -310,6 +315,7 @@ Usage of ./bin/worker:
 | `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
 | `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |
 | `RFFMPEG_TOKEN` | API 认证令牌（须与 Server 一致） | - |
+| `RFFMPEG_INPUT_AUTH_HEADER` | 下载远程输入 URL 时注入的 `Authorization` 头原始值（可填 `Bearer xxx`/`Basic xxx`，不做格式校验） | - |
 | `RFFMPEG_TEMP_DIR` | 临时文件目录 | `/var/tmp/rffmpeg-worker/<workerID>`（root 部署 FHS 主路径）<br>`~/.cache/rffmpeg-worker/<workerID>`（XDG 私有）<br>`$TMPDIR/rffmpeg-worker-<uid>/<workerID>`（XDG 不可用时的 fallback） |
 | `RFFMPEG_FFMPEG_PATH` | FFmpeg 可执行文件路径 | `ffmpeg` |
 | `RFFMPEG_TIMEOUT` | 任务执行超时时间 | `2h` |

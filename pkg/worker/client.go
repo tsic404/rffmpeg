@@ -82,6 +82,10 @@ type Client struct {
 	workerID   string
 	workerMu   sync.RWMutex
 	token      string
+	// inputAuthHeader is the raw Authorization value for user-provided remote
+	// input URLs. Kept apart from token so the API-channel PSK can never leak
+	// to an external server.
+	inputAuthHeader string
 }
 
 // NewClient creates a new client for server communication.
@@ -121,6 +125,15 @@ func (c *Client) setAuthHeader(req *http.Request) {
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+}
+
+// SetInputAuthHeader sets the raw Authorization value injected when
+// DownloadInput fetches a user-provided remote URL. The value is sent verbatim
+// (no format validation), so operators can supply any scheme ("Bearer ...",
+// "Basic ...", ...). It never falls back to the API token: that PSK protects
+// the rffmpeg API channel only and must not reach an external server.
+func (c *Client) SetInputAuthHeader(header string) {
+	c.inputAuthHeader = header
 }
 
 // SetWorkerID updates the worker identity used in API paths and payloads.
@@ -257,7 +270,13 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create request for URL %s: %w", fileID, err)
 		}
-		// No auth header for external URLs
+		// The API PSK (c.token) is never sent to an external URL — that would
+		// leak the rffmpeg channel credential to an arbitrary third party.
+		// Operators that need authenticated remote input configure
+		// input_auth_header instead; it is injected verbatim.
+		if c.inputAuthHeader != "" {
+			req.Header.Set("Authorization", c.inputAuthHeader)
+		}
 	} else {
 		// Server file ID — fetch from server
 		downloadURL = fmt.Sprintf("%s%s/files/%s", c.baseURL, apiSuffix, fileID)

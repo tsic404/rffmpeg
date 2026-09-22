@@ -88,6 +88,7 @@ type Config struct {
 	WorkerID              string
 	Name                  string
 	Token                 string // Auth token for server communication
+	InputAuthHeader       string // Raw Authorization header for remote input URL downloads
 	TempDir               string
 	FFmpegPath            string
 	Timeout               time.Duration
@@ -145,6 +146,7 @@ func New(cfg Config) (*Worker, error) {
 	}
 
 	client := NewClient(cfg.ServerURL, cfg.WorkerID, cfg.Token)
+	client.SetInputAuthHeader(cfg.InputAuthHeader)
 	executor := NewExecutor(cfg.FFmpegPath, cfg.Timeout)
 	rewriteAdapter := NewRewriteAdapter()
 

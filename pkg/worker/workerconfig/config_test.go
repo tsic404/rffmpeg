@@ -198,6 +198,7 @@ func TestLoadFromFile(t *testing.T) {
 		"server_url": "http://example.com:8080/api/v1",
 		"worker_id": "test-worker-123",
 		"name": "test-worker",
+		"input_auth_header": "Bearer file-token",
 		"ffmpeg_path": "/usr/bin/ffmpeg",
 		"timeout": "1h",
 		"max_concurrent": 4,
@@ -223,6 +224,9 @@ func TestLoadFromFile(t *testing.T) {
 	}
 	if config.Name != "test-worker" {
 		t.Errorf("Name = %q, want %q", config.Name, "test-worker")
+	}
+	if config.InputAuthHeader != "Bearer file-token" {
+		t.Errorf("InputAuthHeader = %q, want %q", config.InputAuthHeader, "Bearer file-token")
 	}
 	if config.MaxConcurrent != 4 {
 		t.Errorf("MaxConcurrent = %d, want 4", config.MaxConcurrent)
@@ -344,6 +348,35 @@ func TestMerge(t *testing.T) {
 	// File values should be preserved if not overridden
 	if len(merged.EncoderPriority) != 2 {
 		t.Errorf("EncoderPriority length = %d, want 2", len(merged.EncoderPriority))
+	}
+}
+
+// TestInputAuthHeaderEnvAndMerge locks the input_auth_header plumbing: the env
+// var is read verbatim (no format validation), recorded as an explicit
+// override, and Merge applies env-over-file precedence while preserving a file
+// value when the env var is unset.
+func TestInputAuthHeaderEnvAndMerge(t *testing.T) {
+	os.Setenv("RFFMPEG_INPUT_AUTH_HEADER", "Bearer env-token")
+	defer os.Unsetenv("RFFMPEG_INPUT_AUTH_HEADER")
+
+	envCfg := LoadFromEnv()
+	if envCfg.InputAuthHeader != "Bearer env-token" {
+		t.Errorf("InputAuthHeader = %q, want %q", envCfg.InputAuthHeader, "Bearer env-token")
+	}
+	if !envCfg.setKeys[envInputAuthHeader] {
+		t.Error("RFFMPEG_INPUT_AUTH_HEADER should be recorded as an explicit override")
+	}
+
+	fileCfg := &Config{InputAuthHeader: "Basic file-value"}
+
+	merged := Merge(fileCfg, envCfg)
+	if merged.InputAuthHeader != "Bearer env-token" {
+		t.Errorf("merged InputAuthHeader = %q, want %q (env override)", merged.InputAuthHeader, "Bearer env-token")
+	}
+
+	mergedFile := Merge(fileCfg, &Config{setKeys: map[string]bool{}})
+	if mergedFile.InputAuthHeader != "Basic file-value" {
+		t.Errorf("merged InputAuthHeader = %q, want %q (file preserved)", mergedFile.InputAuthHeader, "Basic file-value")
 	}
 }
 
