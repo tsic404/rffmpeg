@@ -2,12 +2,14 @@ package db_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mattn/go-sqlite3"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 )
@@ -1910,4 +1912,29 @@ func TestFailureTypeRetryablePersisted(t *testing.T) {
 		}
 		assertRetryable(t, job.ID, 0)
 	})
+}
+
+// TestIsConcurrentWriteError pins the transient write-conflict classifier:
+// the SQLITE_BUSY / SQLITE_LOCKED family (including wrapped forms) is a
+// retryable conflict, while unrelated SQLite errors are not.
+func TestIsConcurrentWriteError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"busy", sqlite3.Error{Code: sqlite3.ErrBusy}, true},
+		{"locked", sqlite3.Error{Code: sqlite3.ErrLocked}, true},
+		{"wrapped busy", fmt.Errorf("failed to create job: %w", sqlite3.Error{Code: sqlite3.ErrBusy}), true},
+		{"constraint", sqlite3.Error{Code: sqlite3.ErrConstraint}, false},
+		{"unrelated", errors.New("no such table: jobs"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := db.IsConcurrentWriteError(tc.err); got != tc.want {
+				t.Errorf("IsConcurrentWriteError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }

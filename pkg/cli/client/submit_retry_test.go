@@ -44,6 +44,34 @@ func submitRetryServer(t *testing.T, failCount int32) (*httptest.Server, *int32)
 	return srv, &attempts
 }
 
+// submitConflictServer is submitRetryServer's submit_conflict counterpart:
+// the first failCount POST /api/v1/jobs requests are rejected with HTTP 429
+// (submit_conflict, an ErrorResponse body with no retry_in — matching the
+// server's writeCreateJobError response), then subsequent requests succeed.
+func submitConflictServer(t *testing.T, failCount int32) (*httptest.Server, *int32) {
+	t.Helper()
+
+	var attempts int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/jobs", func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&attempts, 1)
+		if n <= failCount {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(protocol.ErrorResponse{
+				Code:    protocol.ErrCodeSubmitConflict,
+				Message: "Concurrent job submission conflict; retry shortly",
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protocol.JobSubmitResponse{JobID: "job-1"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, &attempts
+}
+
 // stubSubmitSleep makes the rate-limit backoff run instantly for the duration
 // of a test, and returns a restore func.
 func stubSubmitSleep(t *testing.T) func() {
@@ -71,6 +99,47 @@ func TestSubmitJobWithOptions_RetriesRateLimit(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(attempts); got != 3 {
 		t.Errorf("attempts = %d, want 3 (2 rate-limited + 1 success)", got)
+	}
+}
+
+// TestSubmitJobWithOptions_RetriesSubmitConflict pins the submit_conflict
+// retry path: a transient 429 submit_conflict (the concurrent-insert race) is
+// retried under a submit-retry budget and the job eventually submits.
+func TestSubmitJobWithOptions_RetriesSubmitConflict(t *testing.T) {
+	defer stubSubmitSleep(t)()
+
+	srv, attempts := submitConflictServer(t, 2)
+	c := New(srv.URL, "", WithSubmitRetries(3))
+
+	jobID, err := c.SubmitJob(nil, nil, "out.mp4", false)
+	if err != nil {
+		t.Fatalf("SubmitJob returned error after retry: %v", err)
+	}
+	if jobID != "job-1" {
+		t.Errorf("jobID = %q, want %q", jobID, "job-1")
+	}
+	if got := atomic.LoadInt32(attempts); got != 3 {
+		t.Errorf("attempts = %d, want 3 (2 conflicted + 1 success)", got)
+	}
+}
+
+// TestSubmitJobWithOptions_NoRetryOnSubmitConflict pins the default for the
+// new code: without WithSubmitRetries a 429 submit_conflict fails on the
+// first attempt (rc≠0) with the conflict-specific message.
+func TestSubmitJobWithOptions_NoRetryOnSubmitConflict(t *testing.T) {
+	srv, attempts := submitConflictServer(t, 100)
+	c := New(srv.URL, "")
+
+	_, err := c.SubmitJob(nil, nil, "out.mp4", false)
+	var rl *RateLimitError
+	if !errors.As(err, &rl) {
+		t.Fatalf("error = %v (%T), want *RateLimitError", err, err)
+	}
+	if got, want := err.Error(), "concurrent submission conflict"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+	if got := atomic.LoadInt32(attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1 (no retry by default)", got)
 	}
 }
 
@@ -218,6 +287,33 @@ func TestDecodeRateLimitError(t *testing.T) {
 	}
 	if got, want := rl.Error(), "rate limit exceeded (HTTP 429)"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
+	}
+}
+
+// TestRateLimitErrorSubmitConflictMessage pins the submit_conflict rendering:
+// the server's 429 body is an ErrorResponse with no retry_in, so the
+// exhausted-budget message must report the backoff the client actually starts
+// from (rateLimitBackoff's 1s floor), never the raw RetryIn=0.
+func TestRateLimitErrorSubmitConflictMessage(t *testing.T) {
+	err := decodeRateLimitError(strings.NewReader(
+		`{"code":"submit_conflict","message":"Concurrent job submission conflict; retry shortly"}`))
+	var rl *RateLimitError
+	if !errors.As(err, &rl) {
+		t.Fatalf("error = %v (%T), want *RateLimitError", err, err)
+	}
+	if rl.Code != protocol.ErrCodeSubmitConflict {
+		t.Errorf("Code = %q, want %q", rl.Code, protocol.ErrCodeSubmitConflict)
+	}
+	if rl.RetryIn != 0 {
+		t.Errorf("RetryIn = %d, want 0 (submit_conflict body carries no retry_in)", rl.RetryIn)
+	}
+	if got, want := rl.Error(), "concurrent submission conflict"; got != want {
+		t.Errorf("Error() = %q, want %q", got, want)
+	}
+
+	rl.retried = true
+	if got, want := rl.Error(), "concurrent submission conflict; retry after 1 seconds"; got != want {
+		t.Errorf("Error() after budget spent = %q, want %q", got, want)
 	}
 }
 
