@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -168,9 +169,13 @@ func TestRun_QuietSuppressesBannerOnRateLimit(t *testing.T) {
 	if code != ExitError {
 		t.Errorf("run() --quiet rate-limit = %d, want %d", code, ExitError)
 	}
-	const want = "Error submitting job: rate limit exceeded: 10/10 concurrent jobs\n"
-	if stderr != want {
-		t.Errorf("run() --quiet rate-limit stderr = %q, want exactly %q", stderr, want)
+	// The reported current count is not stable: a slot can be released between
+	// the server's limit check and its response, so the same rejection may read
+	// 9/10 or 10/10. Only the message shape is fixed, so match that and not the
+	// count — the anchored pattern still pins the single-line --quiet contract.
+	wantPattern := regexp.MustCompile(`^Error submitting job: rate limit exceeded: \d+/10 concurrent jobs\n$`)
+	if !wantPattern.MatchString(stderr) {
+		t.Errorf("run() --quiet rate-limit stderr = %q, want exactly one %q line", stderr, wantPattern)
 	}
 }
 
