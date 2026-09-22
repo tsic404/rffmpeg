@@ -5,6 +5,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -358,6 +361,56 @@ func TestFindSeparatorIndex(t *testing.T) {
 				t.Errorf("findSeparatorIndex(%v) = %v, want %v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestExecutor_LowersFFmpegPriority verifies the ffmpeg subprocess runs at the
+// lowered scheduling priority while the worker process keeps its own priority.
+// The lowered priority is what stops a CPU-saturating transcode from starving
+// the worker's heartbeat goroutine: when that goroutine stalls the server reads
+// the stale heartbeat as "worker offline" and migrates the still-running job,
+// so repeated false migrations exhaust the job's retry budget even though every
+// worker was alive.
+func TestExecutor_LowersFFmpegPriority(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not installed")
+	}
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps not installed")
+	}
+
+	selfBefore, err := syscall.Getpriority(syscall.PRIO_PROCESS, 0)
+	if err != nil {
+		t.Fatalf("Getpriority(self) failed: %v", err)
+	}
+
+	ex := NewExecutor(sh, 10*time.Second)
+	// The child polls its own nice value instead of sampling it once: the
+	// executor lowers the priority in the parent *after* Start() returns, so an
+	// immediate sample can win the race on a loaded machine and read the
+	// inherited nice. The poll is bounded so a missing setpriority still fails
+	// the assertion below rather than hanging past the executor timeout.
+	pollNice := `i=0; while [ "$(ps -o ni= -p $$ | tr -d ' ')" != ` + strconv.Itoa(ffmpegNice) +
+		` ] && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done; ps -o ni= -p $$`
+	result := ex.Execute(context.Background(), []string{"-c", pollNice})
+	if result.Error != nil {
+		t.Fatalf("Execute() failed: %v (stderr=%q)", result.Error, result.Stderr)
+	}
+	got, err := strconv.Atoi(strings.TrimSpace(result.Stdout))
+	if err != nil {
+		t.Fatalf("parsing child nice %q: %v", result.Stdout, err)
+	}
+	if got != ffmpegNice {
+		t.Errorf("ffmpeg child nice = %d, want %d", got, ffmpegNice)
+	}
+
+	selfAfter, err := syscall.Getpriority(syscall.PRIO_PROCESS, 0)
+	if err != nil {
+		t.Fatalf("Getpriority(self) failed: %v", err)
+	}
+	if selfAfter != selfBefore {
+		t.Errorf("worker priority changed %d -> %d; only the ffmpeg child may be lowered", selfBefore, selfAfter)
 	}
 }
 
