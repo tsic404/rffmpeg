@@ -63,6 +63,7 @@ type Worker struct {
 	totalJobsCompleted int
 	ffprobeExecutor    *FFprobeExecutor
 	pixelFormatChecker *PixelFormatChecker
+	hwCodecChecker     *HardwareCodecChecker
 	auditRecorder      audit.AuditRecorder
 	auditNotifier      audit.Notifier
 	gpuDetector        *gpu.Detector
@@ -91,6 +92,7 @@ type Config struct {
 	TempDir               string
 	FFmpegPath            string
 	Timeout               time.Duration
+	IdleTimeout           time.Duration // Kill ffmpeg after this long with no output; 0 disables
 	HeartbeatInterval     time.Duration // Interval between heartbeats
 	PollInterval          time.Duration // Interval for polling jobs
 	CacheConfig           CacheConfig   // Cache configuration
@@ -146,6 +148,7 @@ func New(cfg Config) (*Worker, error) {
 
 	client := NewClient(cfg.ServerURL, cfg.WorkerID, cfg.Token)
 	executor := NewExecutor(cfg.FFmpegPath, cfg.Timeout)
+	executor.SetIdleTimeout(cfg.IdleTimeout)
 	rewriteAdapter := NewRewriteAdapter()
 
 	// Initialize retry executor
@@ -169,6 +172,7 @@ func New(cfg Config) (*Worker, error) {
 	// disabled yuv444p-style fallback for VAAPI encoders).
 	ffprobeExecutor := NewFFprobeExecutor("")
 	pixelFormatChecker := NewPixelFormatChecker(ffprobeExecutor)
+	hwCodecChecker := NewHardwareCodecChecker(cfg.FFmpegPath)
 	// Parse the pass-through path allow-list once. Empty entries and
 	// surrounding whitespace are dropped so an env value like
 	// "/data/media, /mnt/nfs" behaves as the two intended prefixes.
@@ -190,6 +194,7 @@ func New(cfg Config) (*Worker, error) {
 		lastHeartbeatTime:  time.Now(),
 		ffprobeExecutor:    ffprobeExecutor,
 		pixelFormatChecker: pixelFormatChecker,
+		hwCodecChecker:     hwCodecChecker,
 		auditRecorder:      auditRecorder,
 		auditNotifier:      auditNotifier,
 		gpuDetector:        gpu.NewDetector(),
@@ -1040,6 +1045,21 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				log.Printf("[PixelFormat] Using software encoder: %s", encoder)
 				stderrHandler(fmt.Sprintf("[rffmpeg] fallback to software encoder %s\n", encoder))
 			}
+		}
+	}
+
+	// Pre-flight hardware codec capability check. A worker can advertise a
+	// hardware encoder ffmpeg is compiled with (av1_qsv) whose codec the local
+	// runtime cannot actually encode (AV1 on a Comet Lake iGPU). Fail fast with
+	// ENCODER_UNSUPPORTED instead of degrading to a software fallback
+	// (libaom-av1) so slow it looks like a silent hang.
+	if w.hwCodecChecker != nil && isHardwareEncoderByName(encoder) {
+		if unsupported, reason := w.hwCodecChecker.Check(jobCtx, encoder); unsupported {
+			log.Printf("Job %s: hardware encoder %s unsupported on this worker: %s", job.ID, encoder, reason)
+			progressRouter.Handler()(fmt.Sprintf("[rffmpeg] %s\n", reason))
+			jobFailed = true
+			w.reportFailureWithType(job.ID, 1, reason, string(protocol.FailureEncoderUnsupported), reason, batcher.FlushAndWait)
+			return
 		}
 	}
 

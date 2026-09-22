@@ -21,6 +21,9 @@ func TestDefaultConfig(t *testing.T) {
 	if config.Timeout == 0 {
 		t.Error("DefaultConfig() Timeout should not be zero")
 	}
+	if config.IdleTimeout == 0 {
+		t.Error("DefaultConfig() IdleTimeout should not be zero")
+	}
 	if config.HeartbeatInterval == 0 {
 		t.Error("DefaultConfig() HeartbeatInterval should not be zero")
 	}
@@ -638,6 +641,27 @@ func TestTimingEnvOverrides(t *testing.T) {
 		}
 	})
 
+	t.Run("idle timeout env override", func(t *testing.T) {
+		t.Setenv("RFFMPEG_IDLE_TIMEOUT", "90s")
+		fileCfg := &Config{IdleTimeout: Duration(10 * time.Minute)}
+
+		merged := Merge(fileCfg, LoadFromEnv())
+
+		if merged.IdleTimeout.ToDuration() != 90*time.Second {
+			t.Errorf("IdleTimeout = %v, want %v (env override)", merged.IdleTimeout.ToDuration(), 90*time.Second)
+		}
+	})
+
+	t.Run("idle timeout file value kept when env unset", func(t *testing.T) {
+		fileCfg := &Config{IdleTimeout: Duration(10 * time.Minute)}
+
+		merged := Merge(fileCfg, LoadFromEnv())
+
+		if merged.IdleTimeout.ToDuration() != 10*time.Minute {
+			t.Errorf("IdleTimeout = %v, want %v (file value)", merged.IdleTimeout.ToDuration(), 10*time.Minute)
+		}
+	})
+
 	t.Run("config only", func(t *testing.T) {
 		fileCfg := &Config{
 			HeartbeatInterval: Duration(60 * time.Second),
@@ -736,6 +760,7 @@ func TestConfig_DurationParsing(t *testing.T) {
 
 	configContent := `{
 		"timeout": "30m",
+		"idle_timeout": "3m",
 		"heartbeat_interval": "10s",
 		"poll_interval": "2s"
 	}`
@@ -751,6 +776,9 @@ func TestConfig_DurationParsing(t *testing.T) {
 
 	if config.Timeout.ToDuration() != 30*time.Minute {
 		t.Errorf("Timeout = %v, want %v", config.Timeout.ToDuration(), 30*time.Minute)
+	}
+	if config.IdleTimeout.ToDuration() != 3*time.Minute {
+		t.Errorf("IdleTimeout = %v, want %v", config.IdleTimeout.ToDuration(), 3*time.Minute)
 	}
 	if config.HeartbeatInterval.ToDuration() != 10*time.Second {
 		t.Errorf("HeartbeatInterval = %v, want %v", config.HeartbeatInterval.ToDuration(), 10*time.Second)
@@ -780,6 +808,16 @@ func TestConfigValidate(t *testing.T) {
 			name:    "negative timeout",
 			mutate:  func(c *Config) { c.Timeout = -1 },
 			wantErr: true,
+		},
+		{
+			name:    "negative idle timeout",
+			mutate:  func(c *Config) { c.IdleTimeout = -1 },
+			wantErr: true,
+		},
+		{
+			name:    "zero idle timeout disables the stall watchdog",
+			mutate:  func(c *Config) { c.IdleTimeout = 0 },
+			wantErr: false,
 		},
 		{
 			name:    "zero poll interval",

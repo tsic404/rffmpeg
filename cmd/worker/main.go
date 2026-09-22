@@ -70,6 +70,7 @@ func main() {
 		TempDir:               cfg.TempDir,
 		FFmpegPath:            cfg.FFmpegPath,
 		Timeout:               cfg.Timeout.ToDuration(),
+		IdleTimeout:           cfg.IdleTimeout.ToDuration(),
 		HeartbeatInterval:     cfg.HeartbeatInterval.ToDuration(),
 		PollInterval:          cfg.PollInterval.ToDuration(),
 		CacheConfig: worker.CacheConfig{

@@ -24,6 +24,7 @@ const (
 	envTempDir                 = "RFFMPEG_TEMP_DIR"
 	envFFmpegPath              = "RFFMPEG_FFMPEG_PATH"
 	envTimeout                 = "RFFMPEG_TIMEOUT"
+	envIdleTimeout             = "RFFMPEG_IDLE_TIMEOUT"
 	envHeartbeatInterval       = "RFFMPEG_HEARTBEAT_INTERVAL"
 	envPollInterval            = "RFFMPEG_POLL_INTERVAL"
 	envMaxConcurrent           = "RFFMPEG_MAX_CONCURRENT"
@@ -40,6 +41,14 @@ const (
 	envRetryMaxInterval        = "RFFMPEG_RETRY_MAX_INTERVAL"
 	envRetrySoftwareFallback   = "RFFMPEG_RETRY_ENABLE_SOFTWARE_FALLBACK"
 )
+
+// defaultIdleTimeout is the stall safety net applied to every ffmpeg run: the
+// process is killed if it produces no output for this long. A healthy transcode
+// emits a -stats line roughly twice a second, so five minutes of total silence
+// means the process hung without hitting its total execution budget. Zero
+// (RFFMPEG_IDLE_TIMEOUT=0) disables the check for jobs that legitimately run
+// silent.
+const defaultIdleTimeout = 5 * time.Minute
 
 // Duration is a custom type that can parse duration strings from JSON
 type Duration time.Duration
@@ -91,6 +100,7 @@ type Config struct {
 
 	// Timing
 	Timeout           Duration `json:"timeout" yaml:"timeout"`
+	IdleTimeout       Duration `json:"idle_timeout" yaml:"idle_timeout"`
 	HeartbeatInterval Duration `json:"heartbeat_interval" yaml:"heartbeat_interval"`
 	PollInterval      Duration `json:"poll_interval" yaml:"poll_interval"`
 
@@ -228,6 +238,7 @@ func DefaultConfig() *Config {
 		ServerURL:         "http://localhost:8080",
 		FFmpegPath:        "ffmpeg",
 		Timeout:           Duration(2 * time.Hour),
+		IdleTimeout:       Duration(defaultIdleTimeout),
 		HeartbeatInterval: Duration(30 * time.Second),
 		PollInterval:      Duration(1 * time.Second),
 		MaxConcurrent:     1,
@@ -258,6 +269,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Timeout <= 0 {
 		return fmt.Errorf("timeout must be positive")
+	}
+	if c.IdleTimeout < 0 {
+		return fmt.Errorf("idle_timeout must not be negative")
 	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll_interval must be positive")
@@ -353,6 +367,12 @@ func LoadFromEnv() *Config {
 		if d, err := time.ParseDuration(timeout); err == nil {
 			config.Timeout = Duration(d)
 			config.setKeys[envTimeout] = true
+		}
+	}
+	if idleTimeout := os.Getenv(envIdleTimeout); idleTimeout != "" {
+		if d, err := time.ParseDuration(idleTimeout); err == nil {
+			config.IdleTimeout = Duration(d)
+			config.setKeys[envIdleTimeout] = true
 		}
 	}
 	if heartbeatInterval := os.Getenv(envHeartbeatInterval); heartbeatInterval != "" {
@@ -495,6 +515,9 @@ func Merge(fileConfig, envConfig *Config) *Config {
 		}
 		if envConfig.setKeys[envTimeout] {
 			result.Timeout = envConfig.Timeout
+		}
+		if envConfig.setKeys[envIdleTimeout] {
+			result.IdleTimeout = envConfig.IdleTimeout
 		}
 		if envConfig.setKeys[envHeartbeatInterval] {
 			result.HeartbeatInterval = envConfig.HeartbeatInterval
