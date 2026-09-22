@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"syscall"
 	"testing"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
@@ -322,7 +324,7 @@ func TestClassifyInputDownloadFailure(t *testing.T) {
 		"http://10.0.0.1:8080/stream",
 	}
 	for _, url := range remoteURLs {
-		if got := ClassifyInputDownloadFailure(url); got != protocol.FailureInputUnreachable {
+		if got := ClassifyInputDownloadFailure(url, nil); got != protocol.FailureInputUnreachable {
 			t.Errorf("remote URL %q classified as %q, want INPUT_UNREACHABLE", url, got)
 		}
 	}
@@ -334,8 +336,28 @@ func TestClassifyInputDownloadFailure(t *testing.T) {
 	}
 	for _, id := range serverFileIDs {
 		// server-channel failures are infrastructure, not ffmpeg errors.
-		if got := ClassifyInputDownloadFailure(id); got != protocol.FailureInfra {
+		if got := ClassifyInputDownloadFailure(id, nil); got != protocol.FailureInfra {
 			t.Errorf("server file ID %q classified as %q, want INFRA", id, got)
+		}
+	}
+}
+
+// TestClassifyInputDownloadFailureDiskFull locks the fix: an out-of-disk-space
+// error while writing a downloaded input is DISK_FULL, taking priority over the
+// input-kind buckets — a full worker disk must not read as a server-channel
+// INFRA fault or a remote INPUT_UNREACHABLE fault.
+func TestClassifyInputDownloadFailureDiskFull(t *testing.T) {
+	diskFullErrs := []error{
+		fmt.Errorf("failed to create file: %w", syscall.ENOSPC),
+		fmt.Errorf("failed to write file: %w", &os.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}),
+		fmt.Errorf("failed to create directory: no space left on device"),
+		fmt.Errorf("io: copy: not enough space"),
+	}
+	for _, downloadErr := range diskFullErrs {
+		for _, fileID := range []string{"server-file-001", "http://example.com/video.mp4"} {
+			if got := ClassifyInputDownloadFailure(fileID, downloadErr); got != protocol.FailureDiskFull {
+				t.Errorf("download error %q for input %q classified as %q, want DISK_FULL", downloadErr, fileID, got)
+			}
 		}
 	}
 }
