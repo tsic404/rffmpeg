@@ -69,6 +69,13 @@ go build -o bin/rffmpeg ./cmd/cli
 ./bin/server --config server.json
 ```
 
+**启动时序与就绪探测**：Server 在完成配置校验后立即 `bind` 监听端口（日志 `Listening on :<port> (socket bound; initialization in progress)`），随后才初始化数据库、存储、健康监控与调度器，最后开始 `accept` 请求（日志 `Starting HTTP server on :<port>`）。因此端口在进程启动后几毫秒内即进入 LISTEN，不再出现"进程已启动但端口拒绝连接"的数秒窗口。两种探测信号含义不同：
+
+- **端口可达**（TCP connect / `nc -z` / 编排端口检查）= 进程已启动、socket 已 `bind`；
+- **`GET /health`（或 `/api/v1/health`）返回 200** = 处理栈初始化完成、真正可服务。
+
+部署脚本（docker healthcheck、编排探活）若只做端口探测，将在 `bind` 瞬间即通过；若需要"可服务"语义，应探测 `/health` 的 200 响应。
+
 ### 启动 Worker
 
 **认证前置**：Server 采用 fail-closed 设计，未配置 `--auth-token` 时拒绝全部 API 请求。启动 Worker 前请先 `export RFFMPEG_TOKEN=<T>`（或为命令追加 `--token <T>`），令牌须与 Server 的 `--auth-token <T>` 一致。

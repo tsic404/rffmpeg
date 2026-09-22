@@ -23,7 +23,6 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/handlers"
-	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 	"github.com/tsic404/rffmpeg/pkg/server/scheduler"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
@@ -65,6 +64,15 @@ func main() {
 	}
 
 	log.Printf("Configuration: %s", cfg)
+
+	// Bind before the expensive initialization so the port is in LISTEN within
+	// milliseconds of process start; see bindListener for the probe contract.
+	addr := fmt.Sprintf(":%s", cfg.Port)
+	ln, err := bindListener(addr)
+	if err != nil {
+		log.Fatalf("Failed to listen on %s: %v", addr, err)
+	}
+
 	// Create the data directory if it does not exist: sqlite
 	// refuses to open a database whose parent directory is missing, and the
 	// resulting "unable to open database file" error gives no actionable
@@ -354,7 +362,6 @@ func main() {
 	r.NotFound(handlers.NotFound)
 
 	// Create HTTP server
-	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      r,
@@ -389,19 +396,12 @@ func main() {
 	}
 
 	// Start server in goroutine
-	go panicguard.Guard("http server", func() {
-		if cfg.TLS.Enabled {
-			log.Printf("Starting HTTPS server on %s (version %s, mTLS: %v)", addr, cfg.Version, cfg.TLS.MTLS)
-			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("Server failed: %v", err)
-			}
-		} else {
-			log.Printf("Starting HTTP server on %s (version %s)", addr, cfg.Version)
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("Server failed: %v", err)
-			}
-		}
-	})
+	if cfg.TLS.Enabled {
+		log.Printf("Starting HTTPS server on %s (version %s, mTLS: %v)", addr, cfg.Version, cfg.TLS.MTLS)
+	} else {
+		log.Printf("Starting HTTP server on %s (version %s)", addr, cfg.Version)
+	}
+	serveListener(srv, ln)
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
