@@ -268,6 +268,8 @@ Usage of ./bin/rffmpeg-worker:
     Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
 ```
 
+> **Usage 头部**：`Usage of` 头部由 Go `flag` 包按 `os.Args[0]` 生成，随调用路径变化——`./bin/rffmpeg-worker --help` 显示 `Usage of ./bin/rffmpeg-worker:`，经 PATH 调用显示 `Usage of rffmpeg-worker:`，绝对路径调用则显示该绝对路径。仅头部文本不同，flag 行为不受影响。
+
 缓存 flag 语义与对应环境变量一致（`RFFMPEG_CACHE_ENABLED`/`RFFMPEG_CACHE_TTL`/`RFFMPEG_CACHE_MAX_SIZE_MB`），命令行优先级最高：例如 `./bin/rffmpeg-worker -cache-enabled=false` 可直接关闭缓存，无需编辑配置文件或设置环境变量。
 
 #### 配置文件 (JSON)
