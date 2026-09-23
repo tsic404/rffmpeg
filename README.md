@@ -210,26 +210,61 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 
 ```bash
 ./bin/rffmpeg-server --help
-  --port string                        Server port (default: 8080)
-  --data-dir string                    Data directory (default: ./data)
-  --config string                      Path to configuration file (JSON)
-  --worker-heartbeat-timeout string    Timeout before marking worker offline (default: 90s)
-  --worker-offline-threshold string    Duration after which offline workers are removed (default: 10m)
-  --worker-health-check-interval string Interval for checking worker health (default: 30s)
-  --input-file-ttl string              Evict uploaded input blobs unused for this long; 0 disables cleanup (default: 24h)
-  --input-file-cleanup-interval string Interval for sweeping expired input blobs (default: 10m)
-  --job-timeout string                 Timeout for running jobs (default: 30m)
-  --schedule-interval string           Interval for job scheduling (default: 5s)
-  --timeout-check-interval string      Interval for checking job timeouts (default: 30s)
-  --no-worker-job-timeout string       Fail pending jobs waiting longer than this with no schedulable worker; 0 disables (default: 2m)
-  --max-timeout-retries int           Maximum times a timed-out job is requeued before failing; 0 disables retries (default: 2)
-  --max-retry-count int               Maximum times a job is migrated after worker failure before failing; 0 disables migration (default: 3)
-  --tls                                Enable TLS (HTTPS)
-  --tls-cert string                    Path to TLS certificate file
-  --tls-key string                     Path to TLS private key file
-  --tls-client-ca string               Path to client CA certificate file (for mTLS)
-  --auth-token string                  Authentication token (PSK) for API requests
-  --mtls                               Enable mTLS (mutual TLS authentication)
+Usage of ./bin/rffmpeg-server:
+  -auth-token string
+    Authentication token (PSK) for API requests
+  -config string
+    Path to configuration file (JSON)
+  -data-dir string
+    Data directory (default: ./data)
+  -input-file-cleanup-interval string
+    Interval for sweeping expired input blobs (default: 10m)
+  -input-file-ttl string
+    Evict uploaded input blobs unused for this long; 0 disables cleanup (default: 24h)
+  -job-timeout string
+    Timeout for running jobs before rescheduling (default: 30m)
+  -max-concurrent-jobs-per-client int
+    Maximum concurrent jobs per client (default: 10)
+  -max-retry-count value
+    Maximum times a job is migrated after worker failure before failing; 0 disables migration (default: 3)
+  -max-timeout-retries value
+    Maximum times a timed-out job is requeued before failing; 0 disables retries (default: 2)
+  -mtls
+    Enable mTLS (mutual TLS authentication)
+  -multipart-tmp-dir string
+    Directory for multipart upload temp files (default: --data-dir)
+  -no-worker-job-timeout string
+    Fail pending jobs waiting longer than this with no schedulable worker; 0 disables (default: 2m)
+  -port string
+    Server port (default: 8080)
+  -rate-limit-enabled
+    Enable per-client rate limiting (default true)
+  -redis-addr string
+    Redis address for distributed rate limiting (optional)
+  -schedule-interval string
+    Interval for job scheduling (default: 5s)
+  -timeout-check-interval string
+    Interval for checking job timeouts (default: 30s)
+  -tls
+    Enable TLS (HTTPS)
+  -tls-cert string
+    Path to TLS certificate file
+  -tls-client-ca string
+    Path to client CA certificate file (for mTLS)
+  -tls-expiration-warning int
+    Days before expiration to warn (default: 30)
+  -tls-key string
+    Path to TLS private key file
+  -tls-min-version string
+    Minimum TLS version (TLS1.0, TLS1.1, TLS1.2, TLS1.3)
+  -version string
+    Server version
+  -worker-health-check-interval string
+    Interval for checking worker health (default: 30s)
+  -worker-heartbeat-timeout string
+    Timeout before marking worker offline (default: 90s)
+  -worker-offline-threshold string
+    Duration after which offline workers are removed (default: 10m)
 ```
 
 #### 认证（重要）
