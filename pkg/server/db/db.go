@@ -84,14 +84,20 @@ type Database struct {
 	notifier *JobNotifier
 }
 
+// DefaultBusyTimeoutMS is how long a SQLite writer waits for a held write lock
+// before failing with SQLITE_BUSY. It is long enough for a submission burst to
+// queue behind the lock instead of surfacing as a retryable conflict.
+const DefaultBusyTimeoutMS = 5000
+
 // sqliteDSN builds a SQLite DSN with the pragmas required for safe concurrent
 // use: WAL journaling so readers never block the writer, a busy
 // timeout so concurrent writes queue instead of failing with SQLITE_BUSY,
 // foreign-key enforcement so ON DELETE CASCADE fires (upload_chunks cleanup),
 // and immediate transactions so lock acquisition happens at BEGIN rather than
 // at first write (avoids deadlock-prone deferred-to-write upgrades).
-func sqliteDSN(dbPath string) string {
-	const params = "_busy_timeout=5000&_journal_mode=WAL&_fk=1&_txlock=immediate"
+// busyTimeoutMS is applied to every pooled connection, not just one.
+func sqliteDSN(dbPath string, busyTimeoutMS int) string {
+	params := fmt.Sprintf("_busy_timeout=%d&_journal_mode=WAL&_fk=1&_txlock=immediate", busyTimeoutMS)
 	switch {
 	case strings.HasPrefix(dbPath, "file:"):
 		if strings.Contains(dbPath, "?") {
@@ -124,15 +130,30 @@ func IsConcurrentWriteError(err error) bool {
 	return false
 }
 
-// New creates a new database connection and initializes tables.
+// New creates a new database connection and initializes tables, using the
+// default busy timeout (DefaultBusyTimeoutMS).
 func New(dbPath string) (*Database, error) {
+	return NewWithBusyTimeout(dbPath, DefaultBusyTimeoutMS)
+}
+
+// NewWithBusyTimeout creates a new database connection and initializes tables
+// with an explicit SQLite busy timeout in milliseconds — how long a writer
+// waits for a held write lock before SQLITE_BUSY. 0 disables the wait, so any
+// concurrent write fails immediately; that is what makes the API's retryable
+// 429 (submit_conflict) path reachable from an E2E burst, since a burst of
+// sub-millisecond INSERTs otherwise never outlasts even a 1ms wait. Negative
+// values fall back to DefaultBusyTimeoutMS.
+func NewWithBusyTimeout(dbPath string, busyTimeoutMS int) (*Database, error) {
 	if dbPath == "" {
 		// An empty path would silently become an in-memory database that
 		// "works" but loses everything on restart — reject it loudly instead.
 		return nil, fmt.Errorf("database path must not be empty (use \":memory:\" explicitly for a test database)")
 	}
+	if busyTimeoutMS < 0 {
+		busyTimeoutMS = DefaultBusyTimeoutMS
+	}
 
-	db, err := sql.Open("sqlite3", sqliteDSN(dbPath))
+	db, err := sql.Open("sqlite3", sqliteDSN(dbPath, busyTimeoutMS))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

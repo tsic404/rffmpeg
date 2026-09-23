@@ -1,9 +1,12 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tlspkg "github.com/tsic404/rffmpeg/pkg/tls"
@@ -570,5 +573,107 @@ func TestRetryBudgetMerge(t *testing.T) {
 	}
 	if cfg.MaxRetryCount != 11 {
 		t.Errorf("MaxRetryCount should be 11, got %d", cfg.MaxRetryCount)
+	}
+}
+
+func TestBusyTimeoutMerge(t *testing.T) {
+	intPtr := func(n int) *int { return &n }
+
+	if got := DefaultServerConfig().BusyTimeoutMS; got != 5000 {
+		t.Errorf("BusyTimeoutMS default should be 5000, got %d", got)
+	}
+
+	// nil (flag unset) keeps the default.
+	cfg := DefaultServerConfig()
+	cfg.Merge(&Flags{})
+	if cfg.BusyTimeoutMS != 5000 {
+		t.Errorf("BusyTimeoutMS should keep default 5000 when flag unset, got %d", cfg.BusyTimeoutMS)
+	}
+
+	// A positive value overrides it.
+	cfg = DefaultServerConfig()
+	cfg.Merge(&Flags{BusyTimeoutMS: intPtr(25)})
+	if cfg.BusyTimeoutMS != 25 {
+		t.Errorf("BusyTimeoutMS should be 25, got %d", cfg.BusyTimeoutMS)
+	}
+
+	// Explicit 0 is expressible: it disables the wait, the setting that makes
+	// the submit_conflict path reachable from an E2E burst.
+	cfg = DefaultServerConfig()
+	cfg.Merge(&Flags{BusyTimeoutMS: intPtr(0)})
+	if cfg.BusyTimeoutMS != 0 {
+		t.Errorf("BusyTimeoutMS should be 0 when flag set to 0, got %d", cfg.BusyTimeoutMS)
+	}
+}
+
+func TestBusyTimeoutFromEnv(t *testing.T) {
+	os.Setenv("BUSY_TIMEOUT_MS", "250")
+	defer os.Unsetenv("BUSY_TIMEOUT_MS")
+
+	if got := LoadFromEnv().BusyTimeoutMS; got != 250 {
+		t.Errorf("BusyTimeoutMS should be 250, got %d", got)
+	}
+}
+
+// TestBusyTimeoutFromEnvInvalidKeepsDefault pins that an unparsable or negative
+// BUSY_TIMEOUT_MS keeps the default (5s) rather than being silently coerced to
+// a value that changes SQLite's locking behavior.
+func TestBusyTimeoutFromEnvInvalidKeepsDefault(t *testing.T) {
+	for _, value := range []string{"abc", "-5", "1.5"} {
+		os.Setenv("BUSY_TIMEOUT_MS", value)
+		if got := LoadFromEnv().BusyTimeoutMS; got != 5000 {
+			t.Errorf("BUSY_TIMEOUT_MS=%q should keep default 5000, got %d", value, got)
+		}
+	}
+	os.Unsetenv("BUSY_TIMEOUT_MS")
+
+	// 0 stays expressible: it disables the wait, the E2E trigger setting.
+	os.Setenv("BUSY_TIMEOUT_MS", "0")
+	defer os.Unsetenv("BUSY_TIMEOUT_MS")
+	if got := LoadFromEnv().BusyTimeoutMS; got != 0 {
+		t.Errorf("BUSY_TIMEOUT_MS=0 should be honored, got %d", got)
+	}
+}
+
+// TestParseIntOrLog pins the helper's fallback and that the rejected value is
+// reported to the operator rather than dropped silently.
+func TestParseIntOrLog(t *testing.T) {
+	fallback := 7
+
+	if got := parseIntOrLog("X", "12", fallback); got != 12 {
+		t.Errorf("valid integer should parse, got %d", got)
+	}
+
+	for _, value := range []string{"abc", "-3", ""} {
+		var logged bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&logged)
+		got := parseIntOrLog("BUSY_TIMEOUT_MS", value, fallback)
+		log.SetOutput(old)
+
+		if got != fallback {
+			t.Errorf("parseIntOrLog(%q) = %d, want fallback %d", value, got, fallback)
+		}
+		if !strings.Contains(logged.String(), "BUSY_TIMEOUT_MS") {
+			t.Errorf("rejected %q must be reported naming the setting, got log %q", value, logged.String())
+		}
+	}
+}
+
+// TestValidateRejectsNegativeBusyTimeout pins the config-file channel: a
+// negative busy_timeout_ms fails startup instead of silently becoming the
+// default.
+func TestValidateRejectsNegativeBusyTimeout(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.BusyTimeoutMS = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("negative BusyTimeoutMS should fail validation")
+	}
+
+	// 0 (disable the wait) is valid.
+	cfg = DefaultServerConfig()
+	cfg.BusyTimeoutMS = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("BusyTimeoutMS=0 should pass validation: %v", err)
 	}
 }

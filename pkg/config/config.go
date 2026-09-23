@@ -25,6 +25,13 @@ type ServerConfig struct {
 	MultipartTmpDir string `json:"multipart_tmp_dir" yaml:"multipart_tmp_dir"`
 	Version         string `json:"version" yaml:"version"`
 
+	// BusyTimeoutMS is how long a SQLite writer waits for a held write lock
+	// before failing with SQLITE_BUSY. The default absorbs a concurrent
+	// submission burst; 0 disables the wait, which surfaces that contention as
+	// a retryable 429 (submit_conflict) — the setting E2E tests use to reach
+	// the path without the 5s lock queue.
+	BusyTimeoutMS int `json:"busy_timeout_ms" yaml:"busy_timeout_ms"`
+
 	// Authentication settings
 	AuthToken string `json:"auth_token" yaml:"auth_token"` // PSK token for authentication
 
@@ -73,10 +80,13 @@ type ServerConfig struct {
 
 // Flags holds command-line flag values for merging into ServerConfig
 type Flags struct {
-	Port                      string
-	DataDir                   string
-	MultipartTmpDir           string
-	Version                   string
+	Port            string
+	DataDir         string
+	MultipartTmpDir string
+	Version         string
+	// BusyTimeoutMS is a *int like the retry budgets below: nil means "flag
+	// not set", so 0 (disable the SQLite busy wait) stays expressible.
+	BusyTimeoutMS             *int
 	Config                    string
 	AuthToken                 string
 	WorkerHeartbeatTimeout    string
@@ -113,6 +123,7 @@ func DefaultServerConfig() *ServerConfig {
 		Port:                       "8080",
 		DataDir:                    "./data",
 		Version:                    "1.0.0",
+		BusyTimeoutMS:              5000,             // SQLite busy timeout: 5s absorbs a submission burst
 		WorkerHeartbeatTimeout:     90 * time.Second, // Mark offline after 90s without heartbeat
 		WorkerOfflineThreshold:     10 * time.Minute, // Remove from pool after 10 min offline
 		WorkerHealthCheckInterval:  30 * time.Second, // Check worker health every 30s
@@ -169,6 +180,22 @@ func parseDurationOrLog(name, value string, fallback time.Duration) time.Duratio
 	return d
 }
 
+// parseIntOrLog parses a non-negative integer env var. On failure it logs and
+// returns fallback instead of silently ignoring the setting: a typo like
+// BUSY_TIMEOUT_MS=abc must be visible to the operator.
+func parseIntOrLog(name, value string, fallback int) int {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("Config: invalid integer for %s=%q (%v); keeping default %d", name, value, err, fallback)
+		return fallback
+	}
+	if n < 0 {
+		log.Printf("Config: negative integer for %s=%q is not supported; keeping default %d", name, value, fallback)
+		return fallback
+	}
+	return n
+}
+
 // parseBoolEnv reads a symmetric boolean env var: accepts 1/true/yes/on and
 // 0/false/no/off (case-insensitive). Unrecognized values are logged and the
 // current value kept.
@@ -198,6 +225,9 @@ func LoadFromEnv() *ServerConfig {
 	}
 	if version := os.Getenv("VERSION"); version != "" {
 		config.Version = version
+	}
+	if busyTimeout := os.Getenv("BUSY_TIMEOUT_MS"); busyTimeout != "" {
+		config.BusyTimeoutMS = parseIntOrLog("BUSY_TIMEOUT_MS", busyTimeout, config.BusyTimeoutMS)
 	}
 
 	// Authentication token
@@ -313,6 +343,9 @@ func (c *ServerConfig) Merge(flags *Flags) {
 	if flags.Version != "" {
 		c.Version = flags.Version
 	}
+	if flags.BusyTimeoutMS != nil {
+		c.BusyTimeoutMS = *flags.BusyTimeoutMS
+	}
 	if flags.AuthToken != "" {
 		c.AuthToken = flags.AuthToken
 	}
@@ -405,6 +438,12 @@ func (c *ServerConfig) Validate() error {
 	}
 	if c.DataDir == "" {
 		return fmt.Errorf("data directory is required")
+	}
+	// 0 is meaningful (disable the SQLite busy wait) but a negative value
+	// cannot be honored; reject it loudly rather than let it fall back to the
+	// default silently, the way a mistyped env var would.
+	if c.BusyTimeoutMS < 0 {
+		return fmt.Errorf("busy_timeout_ms must not be negative (got %d)", c.BusyTimeoutMS)
 	}
 
 	// Validate TLS config if enabled
@@ -502,8 +541,8 @@ func (c *ServerConfig) String() string {
 	if c.AuthToken != "" {
 		authStatus = "enabled"
 	}
-	return fmt.Sprintf("ServerConfig{port=%s, dataDir=%s, tls=%s, auth=%s, workerHeartbeatTimeout=%s, workerOfflineThreshold=%s, workerHealthCheckInterval=%s, inputFileTTL=%s, inputFileCleanupInterval=%s, jobTimeout=%s, scheduleInterval=%s, timeoutCheckInterval=%s, maxJobsPerWorker=%d, maxTimeoutRetries=%d, maxRetryCount=%d, rateLimitEnabled=%v, maxConcurrentJobsPerClient=%d}",
-		c.Port, c.DataDir, tlsStatus, authStatus, c.WorkerHeartbeatTimeout, c.WorkerOfflineThreshold, c.WorkerHealthCheckInterval,
+	return fmt.Sprintf("ServerConfig{port=%s, dataDir=%s, tls=%s, auth=%s, busyTimeoutMS=%d, workerHeartbeatTimeout=%s, workerOfflineThreshold=%s, workerHealthCheckInterval=%s, inputFileTTL=%s, inputFileCleanupInterval=%s, jobTimeout=%s, scheduleInterval=%s, timeoutCheckInterval=%s, maxJobsPerWorker=%d, maxTimeoutRetries=%d, maxRetryCount=%d, rateLimitEnabled=%v, maxConcurrentJobsPerClient=%d}",
+		c.Port, c.DataDir, tlsStatus, authStatus, c.BusyTimeoutMS, c.WorkerHeartbeatTimeout, c.WorkerOfflineThreshold, c.WorkerHealthCheckInterval,
 		c.InputFileTTL, c.InputFileCleanupInterval,
 		c.JobTimeout, c.ScheduleInterval, c.TimeoutCheckInterval, c.MaxJobsPerWorker, c.MaxTimeoutRetries, c.MaxRetryCount, c.RateLimitEnabled, c.MaxConcurrentJobsPerClient)
 }

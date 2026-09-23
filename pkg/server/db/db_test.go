@@ -1,11 +1,14 @@
 package db_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1936,5 +1939,139 @@ func TestIsConcurrentWriteError(t *testing.T) {
 				t.Errorf("IsConcurrentWriteError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// holdWriteLock opens a second connection and takes SQLite's write lock, so a
+// write on the database contends for it the way a concurrent submission burst
+// does. The returned func releases the lock.
+func holdWriteLock(t *testing.T, dbPath string) func() {
+	t.Helper()
+
+	raw, err := sql.Open("sqlite3", "file:"+dbPath+"?_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open lock holder: %v", err)
+	}
+	tx, err := raw.Begin()
+	if err != nil {
+		raw.Close()
+		t.Fatalf("begin lock transaction: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE workers SET status = status`); err != nil {
+		tx.Rollback()
+		raw.Close()
+		t.Fatalf("hold write lock: %v", err)
+	}
+	return func() {
+		tx.Rollback()
+		raw.Close()
+	}
+}
+
+// TestNewWithBusyTimeoutApplied pins the --busy-timeout-ms switch at the layer
+// that implements it: the value reaches SQLite's busy handler on every pooled
+// connection (observable via PRAGMA busy_timeout), and a negative value falls
+// back to the default instead of disabling the wait entirely.
+func TestNewWithBusyTimeoutApplied(t *testing.T) {
+	cases := []struct {
+		name          string
+		busyTimeoutMS int
+		want          int
+	}{
+		{"explicit value", 25, 25},
+		{"zero disables the wait", 0, 0},
+		{"negative falls back to default", -1, db.DefaultBusyTimeoutMS},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database, err := db.NewWithBusyTimeout(filepath.Join(t.TempDir(), "test.db"), tc.busyTimeoutMS)
+			if err != nil {
+				t.Fatalf("NewWithBusyTimeout: %v", err)
+			}
+			defer database.Close()
+
+			var got int
+			if err := database.GetDB().QueryRow(`PRAGMA busy_timeout`).Scan(&got); err != nil {
+				t.Fatalf("read busy timeout: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("busy_timeout = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewWithBusyTimeoutShortensWriteWait pins the E2E capability the switch
+// exists for: with a short timeout a write contending on a held lock fails in
+// milliseconds with the SQLITE_BUSY family the server classifies as a
+// retryable submit_conflict, instead of queueing for the default 5s.
+func TestNewWithBusyTimeoutShortensWriteWait(t *testing.T) {
+	database, err := db.NewWithBusyTimeout(filepath.Join(t.TempDir(), "test.db"), 10)
+	if err != nil {
+		t.Fatalf("NewWithBusyTimeout: %v", err)
+	}
+	defer database.Close()
+
+	// The lock holder must target the same file as the database, not a second
+	// throwaway database.
+	var seq int
+	var name, dbPath string
+	if err := database.GetDB().QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &dbPath); err != nil {
+		t.Fatalf("resolve db path: %v", err)
+	}
+	release := holdWriteLock(t, dbPath)
+	defer release()
+
+	start := time.Now()
+	_, err = database.CreateWorker("", "contended-worker", protocol.WorkerCapabilities{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("write should fail while another connection holds the write lock")
+	}
+	if !db.IsConcurrentWriteError(err) {
+		t.Fatalf("error = %v, want SQLITE_BUSY-family conflict", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("write waited %s; a 10ms busy timeout must fail in milliseconds", elapsed)
+	}
+}
+
+// TestZeroBusyTimeoutSurfacesBurstConflicts pins the mechanism the E2E relies
+// on: with the busy wait disabled, a concurrent write burst produces
+// SQLITE_BUSY-family conflicts instead of every write queueing to success.
+// Sub-millisecond INSERTs never outlast a positive wait, so this is the only
+// setting that makes the retryable 429 (submit_conflict) path reachable; a
+// regression to a floored timeout would silently make it unreachable again.
+func TestZeroBusyTimeoutSurfacesBurstConflicts(t *testing.T) {
+	database, err := db.NewWithBusyTimeout(filepath.Join(t.TempDir(), "test.db"), 0)
+	if err != nil {
+		t.Fatalf("NewWithBusyTimeout: %v", err)
+	}
+	defer database.Close()
+
+	const writers = 100
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		conflicts int
+	)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := database.CreateWorker("", fmt.Sprintf("worker-%d", i), protocol.WorkerCapabilities{}); err != nil {
+				if db.IsConcurrentWriteError(err) {
+					mu.Lock()
+					conflicts++
+					mu.Unlock()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if conflicts == 0 {
+		t.Fatal("busy timeout 0 produced no write conflict in a 100-writer burst; submit_conflict would be unreachable from an E2E")
 	}
 }
