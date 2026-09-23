@@ -201,6 +201,24 @@ func writeError(w http.ResponseWriter, status int, err *protocol.ProtocolError) 
 	writeJSON(w, status, err.ToResponse())
 }
 
+// writeCreateJobError classifies a job-INSERT failure: a transient SQLite
+// write conflict (a concurrent submission burst exhausting the busy timeout)
+// is a retryable 429 (submit_conflict), not a 500 — the job was not
+// persisted, so this aligns with the rate-limit semantics.
+func writeCreateJobError(w http.ResponseWriter, err error) {
+	if db.IsConcurrentWriteError(err) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, protocol.NewProtocolError(
+			protocol.ErrCodeSubmitConflict,
+			"Concurrent job submission conflict; retry shortly", err,
+		))
+		return
+	}
+	writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+		protocol.ErrCodeInternalError, "Failed to create job", err,
+	))
+}
+
 // NotFound responds with the protocol-consistent JSON 404 used across the API.
 // It is wired into the chi router as r.NotFound so unmatched paths (e.g. a
 // trailing empty segment like /api/v1/migrations/) return the same
@@ -528,9 +546,7 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 			if createErr != nil {
 				// The rate-limit middleware auto-rolls-back the submit increment
 				// on non-2xx, so no explicit decrement is needed on this path.
-				writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-					protocol.ErrCodeInternalError, "Failed to create job", createErr,
-				))
+				writeCreateJobError(w, createErr)
 				return
 			}
 			// The job is terminal at creation; release the submit-time
@@ -572,9 +588,7 @@ jobCreate:
 		// Note: the rate limit middleware's rateLimitResponseWriter will
 		// automatically decrement the counter on non-2xx responses, so we
 		// do NOT need an explicit Decrement here.
-		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-			protocol.ErrCodeInternalError, "Failed to create job", err,
-		))
+		writeCreateJobError(w, err)
 		return
 	}
 
@@ -1404,9 +1418,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	timeout := 60 * time.Second
 	job, err := h.db.CreateJobWithStreaming(string(inputFilesJSON), string(argsJSON), "probe_result.json", false, false, &timeout, directPathsJSON)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-			protocol.ErrCodeInternalError, "Failed to create probe job", err,
-		))
+		writeCreateJobError(w, err)
 		return
 	}
 

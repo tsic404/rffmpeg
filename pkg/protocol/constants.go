@@ -28,10 +28,12 @@ const (
 type ErrorCode string
 
 const (
-	ErrCodeInvalidRequest      ErrorCode = "invalid_request"
-	ErrCodeUnauthorized        ErrorCode = "unauthorized"
-	ErrCodeNotFound            ErrorCode = "not_found"
-	ErrCodeConflict            ErrorCode = "conflict"
+	ErrCodeInvalidRequest ErrorCode = "invalid_request"
+	ErrCodeUnauthorized   ErrorCode = "unauthorized"
+	ErrCodeNotFound       ErrorCode = "not_found"
+	ErrCodeConflict       ErrorCode = "conflict"
+	// SubmitConflict: a concurrent insert race left the job unpersisted.
+	ErrCodeSubmitConflict      ErrorCode = "submit_conflict"
 	ErrCodeWorkerEvicted       ErrorCode = "worker_evicted"
 	ErrCodeInternalError       ErrorCode = "internal_error"
 	ErrCodeWorkerUnavailable   ErrorCode = "worker_unavailable"

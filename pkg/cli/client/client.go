@@ -188,28 +188,40 @@ func (e *RetriesExhaustedError) Unwrap() error {
 	return e.Cause
 }
 
-// RateLimitError reports an HTTP 429 rate-limit rejection from job
-// submission. It carries the server's suggested backoff so a caller with a
-// retry budget can honor it instead of re-submitting immediately. Error
-// renders the rate-limit fact without a retry promise; the retry hint is
-// added only once a retry budget was spent, so the default (no --retry) path
-// never tells the user a retry is coming.
+// RateLimitError reports an HTTP 429 rejection from job submission — either
+// a rate-limit (rate_limit_exceeded) or a concurrent-submission conflict
+// (submit_conflict). It carries the server's suggested backoff so a caller
+// with a retry budget can honor it instead of re-submitting immediately.
+// Error renders the rejection fact without a retry promise; the retry hint
+// is added only once a retry budget was spent, so the default (no --retry)
+// path never tells the user a retry is coming.
 type RateLimitError struct {
 	Current int
 	Limit   int
 	RetryIn int // suggested backoff in seconds; 0 when the server gave none
+	Code    protocol.ErrorCode
 	// decoded reports whether the body parsed as a structured
 	// RateLimitResponse (vs. an undecodable or empty body).
 	decoded bool
 	// rawBody holds an undecodable response body (diagnostic only).
 	rawBody string
 	// retried reports that the client exhausted its submit-retry budget on
-	// this rate limit; only then does Error() carry the retry hint.
+	// this rejection; only then does Error() carry the retry hint.
 	retried bool
 }
 
 func (e *RateLimitError) Error() string {
 	if e.decoded {
+		if e.Code == protocol.ErrCodeSubmitConflict {
+			if e.retried {
+				// The submit_conflict body carries no retry_in, so report the
+				// backoff the client actually starts from (rateLimitBackoff's
+				// 1s floor) instead of the raw RetryIn=0.
+				return fmt.Sprintf("concurrent submission conflict; retry after %d seconds",
+					int(rateLimitBackoff(e.RetryIn, 0).Seconds()))
+			}
+			return "concurrent submission conflict"
+		}
 		if e.retried {
 			return fmt.Sprintf(
 				"rate limit exceeded: %d/%d concurrent jobs. Retry after %d seconds",
@@ -523,6 +535,7 @@ func decodeRateLimitError(body io.Reader) error {
 				Current: rlResp.Current,
 				Limit:   rlResp.Limit,
 				RetryIn: rlResp.RetryIn,
+				Code:    rlResp.Code,
 				decoded: true,
 			}
 		}

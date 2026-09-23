@@ -3,6 +3,7 @@ package handlers_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2740,6 +2741,116 @@ func TestSubmitJobCreateFailedJobErrorReturns500(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("Expected 500 on failed-job INSERT error, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// holdWriteLock takes the SQLite write lock on the handler's database from a
+// second connection, so a handler INSERT contends and fails with SQLITE_BUSY
+// (the same contention a concurrent submit burst produces). It shortens the
+// handler connection's busy timeout so the contention fails in milliseconds
+// rather than the default 5s. The returned func releases the lock.
+func holdWriteLock(t *testing.T, h *handlers.Handler) func() {
+	t.Helper()
+
+	var seq int
+	var name, dbPath string
+	if err := h.GetDB().GetDB().QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &dbPath); err != nil {
+		t.Fatalf("failed to resolve db path: %v", err)
+	}
+	h.GetDB().GetDB().SetMaxOpenConns(1)
+	if _, err := h.GetDB().GetDB().Exec(`PRAGMA busy_timeout = 50`); err != nil {
+		t.Fatalf("failed to shorten busy timeout: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite3", "file:"+dbPath+"?_txlock=immediate")
+	if err != nil {
+		t.Fatalf("failed to open lock holder: %v", err)
+	}
+	tx, err := raw.Begin()
+	if err != nil {
+		raw.Close()
+		t.Fatalf("failed to begin lock transaction: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE workers SET status = status`); err != nil {
+		tx.Rollback()
+		raw.Close()
+		t.Fatalf("failed to hold write lock: %v", err)
+	}
+	return func() {
+		tx.Rollback()
+		raw.Close()
+	}
+}
+
+// TestSubmitJobConcurrentWriteConflictReturns429 locks the fix: a transient
+// SQLite write conflict during the job INSERT (the concurrent-submission
+// race) must be classified as a retryable 429 (submit_conflict), not a 500
+// internal_error — nothing was persisted, so the client may safely retry.
+func TestSubmitJobConcurrentWriteConflictReturns429(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorker(t, router, []string{"libx264"})
+	fileID := uploadTestFile(t, router)
+
+	release := holdWriteLock(t, h)
+	defer release()
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles: []string{fileID},
+		Args:       []string{"-i", "input.mp4"},
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("Expected 429 on concurrent-write conflict, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want %q", got, "1")
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeSubmitConflict {
+		t.Errorf("Expected code 'submit_conflict', got %q", errResp.Code)
+	}
+}
+
+// TestProbeConcurrentWriteConflictReturns429 locks the same classification for
+// the probe path: a transient SQLite write conflict creating the probe job
+// must be a retryable 429 (submit_conflict), not a 500 internal_error.
+func TestProbeConcurrentWriteConflictReturns429(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorker(t, router, []string{"libx264"})
+	fileID := uploadTestFile(t, router)
+
+	release := holdWriteLock(t, h)
+	defer release()
+
+	probeBody, _ := json.Marshal(protocol.ProbeRequest{Input: fileID})
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(probeBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("Expected 429 on concurrent-write conflict, got %d: %s", w.Code, w.Body.String())
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeSubmitConflict {
+		t.Errorf("Expected code 'submit_conflict', got %q", errResp.Code)
 	}
 }
 

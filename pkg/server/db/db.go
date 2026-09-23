@@ -3,13 +3,14 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
@@ -102,6 +103,25 @@ func sqliteDSN(dbPath string) string {
 	default:
 		return "file:" + dbPath + "?" + params
 	}
+}
+
+// IsConcurrentWriteError reports whether err is a transient SQLite write
+// conflict (SQLITE_BUSY / SQLITE_LOCKED family) — a database file/table lock
+// that concurrent writers surface when the busy timeout is exhausted, not a
+// hard fault. Callers classify this as a retryable conflict rather than an
+// internal server error.
+func IsConcurrentWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code {
+		case sqlite3.ErrBusy, sqlite3.ErrLocked:
+			return true
+		}
+	}
+	return false
 }
 
 // New creates a new database connection and initializes tables.

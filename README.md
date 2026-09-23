@@ -138,7 +138,7 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
 
 **连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。重试次数达到上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / 配置文件 `"max_retries"`，默认 14 次、约 5 分钟）后 CLI 以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。三个通道均支持 `0`：显式设为 `0` 表示**不重试、首次失败即退出**，不会被静默回落为默认值。
 
-**限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。
+**限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。并发提交突发时，作业写入还可能因数据库写冲突（SQLITE_BUSY）未落库，此时提交接口返回 HTTP 429（`submit_conflict`，同样不创建作业、同样可被 `--retry` 退避重投；该响应不带 `retry_in`，CLI 以默认 1s 起步）。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。
 
 流式输出到 stdout（`-f <fmt> -`、`-o -`、`-`，或 `pipe:1`——CLI 会将其归一化为 `-`）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）或 `-o <本地路径>`。
 
