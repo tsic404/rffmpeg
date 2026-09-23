@@ -117,7 +117,7 @@ func main() {
 
 	// Initialize database
 	dbPath := fmt.Sprintf("%s/rffmpeg.db", cfg.DataDir)
-	database, err := db.New(dbPath)
+	database, err := db.NewWithBusyTimeout(dbPath, cfg.BusyTimeoutMS)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
@@ -481,6 +481,16 @@ func parseFlags() *config.Flags {
 	flag.StringVar(&flags.Port, "port", "", "Server port (default: 8080)")
 	flag.StringVar(&flags.DataDir, "data-dir", "", "Data directory (default: ./data)")
 	flag.StringVar(&flags.MultipartTmpDir, "multipart-tmp-dir", "", "Directory for multipart upload temp files (default: --data-dir)")
+	// A pointer keeps 0 expressible (disable the busy wait entirely) — the
+	// zero value would otherwise read as "unset" and keep the 5s default.
+	flag.Func("busy-timeout-ms", "SQLite busy timeout in ms before a concurrent write fails with SQLITE_BUSY; 0 disables the wait (default: 5000)", func(s string) error {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid busy-timeout-ms %q: must be a non-negative integer", s)
+		}
+		flags.BusyTimeoutMS = &n
+		return nil
+	})
 	flag.StringVar(&flags.Version, "version", "", "Server version")
 	flag.StringVar(&flags.Config, "config", "", "Path to configuration file (JSON)")
 

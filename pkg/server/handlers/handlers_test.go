@@ -25,6 +25,14 @@ import (
 )
 
 func setupTest(t *testing.T) (*handlers.Handler, *chi.Mux, func()) {
+	return setupTestWithBusyTimeout(t, db.DefaultBusyTimeoutMS)
+}
+
+// setupTestWithBusyTimeout is setupTest with an explicit SQLite busy timeout
+// in milliseconds — the same knob --busy-timeout-ms exposes — so the
+// write-conflict classification tests drive the real switch instead of poking
+// PRAGMA on a single pooled connection. 0 disables the wait entirely.
+func setupTestWithBusyTimeout(t *testing.T, busyTimeoutMS int) (*handlers.Handler, *chi.Mux, func()) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "rffmpeg-test-*")
 	if err != nil {
@@ -32,7 +40,7 @@ func setupTest(t *testing.T) (*handlers.Handler, *chi.Mux, func()) {
 	}
 
 	// Initialize database
-	database, err := db.New(fmt.Sprintf("%s/test.db", tmpDir))
+	database, err := db.NewWithBusyTimeout(fmt.Sprintf("%s/test.db", tmpDir), busyTimeoutMS)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("Failed to create database: %v", err)
@@ -2746,9 +2754,10 @@ func TestSubmitJobCreateFailedJobErrorReturns500(t *testing.T) {
 
 // holdWriteLock takes the SQLite write lock on the handler's database from a
 // second connection, so a handler INSERT contends and fails with SQLITE_BUSY
-// (the same contention a concurrent submit burst produces). It shortens the
-// handler connection's busy timeout so the contention fails in milliseconds
-// rather than the default 5s. The returned func releases the lock.
+// (the same contention a concurrent submit burst produces). The handler's
+// database must already carry a short busy timeout — see
+// setupTestWithBusyTimeout — so the contention fails in milliseconds rather
+// than the default 5s. The returned func releases the lock.
 func holdWriteLock(t *testing.T, h *handlers.Handler) func() {
 	t.Helper()
 
@@ -2756,10 +2765,6 @@ func holdWriteLock(t *testing.T, h *handlers.Handler) func() {
 	var name, dbPath string
 	if err := h.GetDB().GetDB().QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &dbPath); err != nil {
 		t.Fatalf("failed to resolve db path: %v", err)
-	}
-	h.GetDB().GetDB().SetMaxOpenConns(1)
-	if _, err := h.GetDB().GetDB().Exec(`PRAGMA busy_timeout = 50`); err != nil {
-		t.Fatalf("failed to shorten busy timeout: %v", err)
 	}
 
 	raw, err := sql.Open("sqlite3", "file:"+dbPath+"?_txlock=immediate")
@@ -2787,7 +2792,7 @@ func holdWriteLock(t *testing.T, h *handlers.Handler) func() {
 // race) must be classified as a retryable 429 (submit_conflict), not a 500
 // internal_error — nothing was persisted, so the client may safely retry.
 func TestSubmitJobConcurrentWriteConflictReturns429(t *testing.T) {
-	h, router, cleanup := setupTest(t)
+	h, router, cleanup := setupTestWithBusyTimeout(t, 50)
 	defer cleanup()
 
 	registerTestWorker(t, router, []string{"libx264"})
@@ -2826,7 +2831,7 @@ func TestSubmitJobConcurrentWriteConflictReturns429(t *testing.T) {
 // the probe path: a transient SQLite write conflict creating the probe job
 // must be a retryable 429 (submit_conflict), not a 500 internal_error.
 func TestProbeConcurrentWriteConflictReturns429(t *testing.T) {
-	h, router, cleanup := setupTest(t)
+	h, router, cleanup := setupTestWithBusyTimeout(t, 50)
 	defer cleanup()
 
 	registerTestWorker(t, router, []string{"libx264"})
