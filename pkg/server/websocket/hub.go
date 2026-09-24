@@ -20,6 +20,9 @@ type Client struct {
 	hub    *Hub
 	mu     sync.Mutex
 	closed bool
+	// pending holds a message taken from send that did not fit the frame
+	// being written. Only WritePump touches it.
+	pending []byte
 }
 
 // hubBroadcastBuffer is the capacity of the hub's broadcast queue.
@@ -413,28 +416,26 @@ func (c *Client) WritePump() {
 	}()
 
 	for {
+		// A message that did not fit the previous frame goes out first: it was
+		// already taken off send, so holding it back stalls the stream.
+		if c.pending != nil {
+			message := c.pending
+			c.pending = nil
+			if !c.writeFrame(message) {
+				return
+			}
+			continue
+		}
+
 		select {
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if !ok {
+				c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-
-			// Batch queued messages
-			n := len(c.send)
-			for i := 0; i < n; i++ {
-				w.Write([]byte{'\n'})
-				w.Write(<-c.send)
-			}
-
-			if err := w.Close(); err != nil {
+			if !c.writeFrame(message) {
 				return
 			}
 
@@ -444,6 +445,55 @@ func (c *Client) WritePump() {
 				return
 			}
 		}
+	}
+}
+
+// writeFrame writes message plus the queued messages that fit within
+// protocol.WSFrameByteBudget as one newline-delimited text frame, and reports
+// whether the connection is still usable. The first message is always written
+// whole: a message must never be split across frames, and the client's read
+// limit leaves room for one over-budget message. Draining the queue without a
+// byte cap used to build frames larger than that limit, which the client
+// discarded wholesale — surfacing as a sequence gap and, for streaming
+// output, as lost transcoded data.
+func (c *Client) writeFrame(message []byte) bool {
+	c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	w, err := c.conn.NextWriter(websocket.TextMessage)
+	if err != nil {
+		return false
+	}
+	w.Write(message)
+	total := len(message)
+
+	for total < protocol.WSFrameByteBudget {
+		next, ok := c.nextQueued()
+		if !ok {
+			break
+		}
+		if total+len(next) > protocol.WSFrameByteBudget {
+			c.pending = next
+			break
+		}
+		w.Write([]byte{'\n'})
+		w.Write(next)
+		total += 1 + len(next)
+	}
+
+	return w.Close() == nil
+}
+
+// nextQueued takes one already-queued message off send, reporting false when
+// none is waiting. The channel being closed also reports false: the frame ends
+// and the next WritePump iteration observes the close and shuts down.
+func (c *Client) nextQueued() ([]byte, bool) {
+	select {
+	case next, ok := <-c.send:
+		if !ok {
+			return nil, false
+		}
+		return next, true
+	default:
+		return nil, false
 	}
 }
 

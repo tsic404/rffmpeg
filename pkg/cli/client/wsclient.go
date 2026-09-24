@@ -45,12 +45,11 @@ const (
 	// side's deadline.
 	WSPingInterval = 25 * time.Second
 
-	// wsMaxFrameLineBytes is the maximum size of a single JSON WSMessage
-	// line inside a batched text frame. It must exceed the largest possible
-	// stdout message: StdoutBatcher concatenates up to 10 executor chunks of
-	// 32KB each and base64-encodes the result (~427KB), plus JSON overhead.
-	// 1MB matches the connection's SetReadLimit in connect().
-	wsMaxFrameLineBytes = 1 << 20
+	// wsMaxFrameLineBytes is the largest single JSON message line inside a
+	// frame. It equals the connection's read limit on purpose: a frame the
+	// read limit admits must also survive the line scanner, or the scanner
+	// would abort mid-frame and drop every remaining line of an accepted frame.
+	wsMaxFrameLineBytes = protocol.WSClientReadLimit
 )
 
 // Overridable keepalive timings for regression tests; production values
@@ -245,8 +244,10 @@ func (c *WSClient) connect(ctx context.Context) error {
 		return nil
 	})
 
-	// Set read limit
-	conn.SetReadLimit(1 << 20) // 1MB max message size
+	// Set read limit: the server caps each frame it packs at
+	// protocol.WSFrameByteBudget, and the margin above it absorbs the single
+	// over-budget message a frame is allowed to carry whole.
+	conn.SetReadLimit(protocol.WSClientReadLimit)
 	return nil
 }
 
@@ -440,11 +441,12 @@ func (c *WSClient) Listen(ctx context.Context) error {
 
 		// Handle multiple messages (batched). The buffer MUST be grown beyond
 		// bufio's default 64KB token limit: a single WSMsgStdout carries up to
-		// 10×32KB of base64 data (~430KB JSON) when StdoutBatcher flushes, and
-		// WritePump may batch several messages into one frame. At the default
-		// limit Scanner aborts with ErrTooLong — silently, since it was never
-		// checked — dropping every remaining line, so the next message trips the
-		// gap detector ("expected seq N, got N+1") even though nothing was lost.
+		// WSMaxStdoutMessageBytes of base64 data (~430KB JSON) when
+		// StdoutBatcher flushes, and WritePump batches several messages into
+		// one frame. At the default limit Scanner aborts with ErrTooLong —
+		// silently, since it was never checked — dropping every remaining line,
+		// so the next message trips the gap detector ("expected seq N, got
+		// N+1") even though nothing was lost.
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
 		scanner.Buffer(make([]byte, 64*1024), wsMaxFrameLineBytes)
 		for scanner.Scan() {

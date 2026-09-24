@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // StdoutBatcher collects stdout chunks and sends them in batches
@@ -19,6 +21,12 @@ type StdoutBatcher struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup // Track pending goroutines
+	// prevSend is closed when the batch queued before the current one has
+	// finished sending. Each flush chains onto it so batches reach the server
+	// in flush order: two are routinely in flight at once (the 50ms timer
+	// flush races a batch-full flush), and a reordered pair splices 320KB of
+	// transcoded bytes into the wrong place. Guarded by mu.
+	prevSend chan struct{}
 	// sendErr records the first SendStdoutChunk failure so FlushAndWait can
 	// surface it: a terminal status must not be reported when a stdout chunk
 	// failed to reach the server. Guarded by mu.
@@ -34,7 +42,10 @@ type StdoutBatcherConfig struct {
 // DefaultStdoutBatcherConfig returns default configuration for stdout streaming
 func DefaultStdoutBatcherConfig() StdoutBatcherConfig {
 	return StdoutBatcherConfig{
-		BatchSize:  10,
+		// Part of the wire sizing contract: the CLI's WebSocket read limit and
+		// the server's frame budget are sized from this many chunks per
+		// message.
+		BatchSize:  protocol.WSStdoutBatchChunks,
 		BatchDelay: 50 * time.Millisecond, // Faster than stderr for lower latency
 	}
 }
@@ -42,6 +53,11 @@ func DefaultStdoutBatcherConfig() StdoutBatcherConfig {
 // NewStdoutBatcher creates a new stdout batcher
 func NewStdoutBatcher(jobID string, client *Client, cfg StdoutBatcherConfig) *StdoutBatcher {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// The first batch has nothing to wait for: start the chain from a closed
+	// gate so its send is not blocked.
+	first := make(chan struct{})
+	close(first)
 
 	b := &StdoutBatcher{
 		jobID:      jobID,
@@ -51,6 +67,7 @@ func NewStdoutBatcher(jobID string, client *Client, cfg StdoutBatcherConfig) *St
 		batchDelay: cfg.BatchDelay,
 		ctx:        ctx,
 		cancel:     cancel,
+		prevSend:   first,
 	}
 
 	// Arm the flush timer while holding b.mu. time.AfterFunc schedules the
@@ -125,10 +142,18 @@ func (b *StdoutBatcher) flushLocked() {
 		combined = append(combined, chunk...)
 	}
 
+	// Chain this batch behind the previous one: unordered PATCHes are served
+	// in arrival order, which reorders the streamed bytes.
+	prev := b.prevSend
+	next := make(chan struct{})
+	b.prevSend = next
+
 	// Track the goroutine so Close() can wait for it
 	b.wg.Add(1)
 	go func(chunk []byte) {
 		defer b.wg.Done()
+		defer close(next)
+		<-prev
 		if err := b.client.SendStdoutChunk(b.jobID, chunk); err != nil {
 			// Record the first failure (under mu) so FlushAndWait can report
 			// it; the terminal status report carries the log line instead of

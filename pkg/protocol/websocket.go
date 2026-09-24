@@ -14,6 +14,42 @@ const (
 	WSMsgHeartbeat WSMessageType = "heartbeat"
 )
 
+// WebSocket frame sizing contract, shared by the server's WritePump and the
+// CLI's WSClient so the two sides cannot drift apart.
+//
+// The server packs queued messages into one newline-delimited text frame and
+// the CLI caps what it accepts with SetReadLimit. gorilla discards an
+// over-limit frame WHOLE — every message in it — and the CLI can only report
+// that as a reconnected sequence gap: for streaming output, silent data loss.
+// So WSFrameByteBudget caps the server's packing, and WSClientReadLimit, well
+// above it, is what the client accepts.
+const (
+	// WSStdoutChunkBytes is the raw size of one executor stdout read and
+	// WSStdoutBatchChunks how many of them the worker's StdoutBatcher
+	// concatenates into a single WSMsgStdout. Their product bounds the payload
+	// of the largest message any producer emits, which is what the frame
+	// budget and the client read limit have to accommodate.
+	WSStdoutChunkBytes  = 32 * 1024
+	WSStdoutBatchChunks = 10
+
+	// WSMaxStdoutMessageBytes bounds the on-wire size of that largest message:
+	// base64 inflates the batched payload by 4/3 (base64.StdEncoding.EncodedLen
+	// is not a constant expression, so the formula is inlined), and the JSON
+	// envelope adds its own fields.
+	WSMaxStdoutMessageBytes = (WSStdoutChunkBytes*WSStdoutBatchChunks+2)/3*4 + 1024
+
+	// WSFrameByteBudget caps the message bytes the server packs into one
+	// frame. A single message is never split across frames — the client parses
+	// one JSON message per line — so a message larger than the budget is still
+	// written whole, as its own frame.
+	WSFrameByteBudget = 1 << 20
+
+	// WSClientReadLimit is what the CLI passes to SetReadLimit. It exceeds
+	// WSFrameByteBudget by a wide margin so that the one frame allowed to
+	// overshoot the budget (a single over-budget message) is still accepted.
+	WSClientReadLimit = 4 << 20
+)
+
 type WSMessage struct {
 	Type      WSMessageType `json:"type"`
 	Timestamp time.Time     `json:"timestamp"`
