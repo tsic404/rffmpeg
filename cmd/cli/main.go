@@ -534,6 +534,14 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		}
 	}
 
+	// Consume -y / -n on the local output target before any work is submitted:
+	// ffmpeg decides before encoding, so a refusal must not cost an input
+	// upload and a worker run. The download-stage guard stays as the last line
+	// of defense for a target that appears while the job runs.
+	if code := enforceOverwritePolicy(result.OutputFile, result.StreamingOutput, ffmpegArgs); code != ExitSuccess {
+		return code
+	}
+
 	// Setup signal handling for graceful cancellation. jobID/cancelled/submitting
 	// are guarded by sigMu; the mutex is never held across a network round-trip
 	// or rate-limit backoff, so SIGINT/SIGTERM is serviced immediately even
@@ -860,6 +868,64 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	return ExitSuccess
 }
 
+// overwriteRefusal returns the ffmpeg-compatible refusal message for a
+// pre-existing output file under the given policy, or "" when the policy
+// authorizes overwriting it.
+func overwriteRefusal(path string, policy ffmpegopts.OverwriteMode) string {
+	switch policy {
+	case ffmpegopts.OverwriteForce:
+		return ""
+	case ffmpegopts.OverwriteNever:
+		return fmt.Sprintf("File '%s' already exists. Exiting.\n", path)
+	default: // OverwriteAsk
+		return fmt.Sprintf("File '%s' already exists. Overwrite? [y/N] Not overwriting - exiting\n", path)
+	}
+}
+
+// enforceOverwritePolicy consumes ffmpeg's -y / -n on the local output target
+// before anything is uploaded or submitted. -y proceeds (the download stage
+// truncates the target, a shared-FS worker's ffmpeg overwrites natively), -n
+// fails immediately, and the default refuses like non-interactive ffmpeg.
+// Streaming (-) and remote-URL outputs have no local file to guard.
+func enforceOverwritePolicy(outputFile string, streamingOutput bool, ffmpegArgs []string) int {
+	if streamingOutput || outputFile == "" || pathutil.IsRemoteURL(outputFile) {
+		return ExitSuccess
+	}
+	policy := ffmpegopts.OverwritePolicy(ffmpegArgs)
+	if policy == ffmpegopts.OverwriteForce {
+		return ExitSuccess
+	}
+	targets := existingOutputTargets(outputFile)
+	if len(targets) == 0 {
+		return ExitSuccess
+	}
+	fmt.Fprint(os.Stderr, overwriteRefusal(targets[0], policy))
+	return ExitError
+}
+
+// existingOutputTargets returns the local paths the download stage would write
+// that already exist: the primary output path plus every consecutive "_N"
+// multi-output variant. The download stage writes consecutive indices, so the
+// first gap ends the enumeration. Any other stat failure ends it too: an
+// unreadable target (EACCES, ELOOP, ENOTDIR, ...) is not a confirmed collision,
+// so the download stage reports the real error instead of the CLI guessing here.
+func existingOutputTargets(outputFile string) []string {
+	var targets []string
+	for i := 0; ; i++ {
+		path := multiOutputPath(outputFile, i)
+		_, err := os.Stat(path)
+		if err != nil {
+			if i == 0 && os.IsNotExist(err) {
+				// The primary path is free; a leftover "_N" variant from an
+				// earlier multi-output run can still collide with this one.
+				continue
+			}
+			return targets
+		}
+		targets = append(targets, path)
+	}
+}
+
 // rejectOverwriteIfNeeded enforces ffmpeg's overwrite semantics on a local
 // output path before the CLI downloads and writes it. In the default
 // upload/download mode the CLI is the only writer of the user's output file, so
@@ -867,22 +933,15 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 // exists and the caller did not pass -y (or passed -n), it refuses with ffmpeg's
 // message and returns a non-zero exit, without touching the file.
 func rejectOverwriteIfNeeded(outputPath string, ffmpegArgs []string) int {
-	switch ffmpegopts.OverwritePolicy(ffmpegArgs) {
-	case ffmpegopts.OverwriteForce:
-		return ExitSuccess
-	case ffmpegopts.OverwriteNever:
-		if _, err := os.Stat(outputPath); err == nil {
-			fmt.Fprintf(os.Stderr, "File '%s' already exists. Exiting.\n", outputPath)
-			return ExitError
-		}
-		return ExitSuccess
-	default: // OverwriteAsk
-		if _, err := os.Stat(outputPath); err == nil {
-			fmt.Fprintf(os.Stderr, "File '%s' already exists. Overwrite? [y/N] Not overwriting - exiting\n", outputPath)
-			return ExitError
-		}
+	policy := ffmpegopts.OverwritePolicy(ffmpegArgs)
+	if policy == ffmpegopts.OverwriteForce {
 		return ExitSuccess
 	}
+	if _, err := os.Stat(outputPath); err != nil {
+		return ExitSuccess
+	}
+	fmt.Fprint(os.Stderr, overwriteRefusal(outputPath, policy))
+	return ExitError
 }
 
 // multiOutputPath returns the local path the download stage writes for the
@@ -920,17 +979,7 @@ func removeStaleOutputs(outputFile string, streamingOutput, sharedFS bool, ffmpe
 		return
 	}
 	force := ffmpegopts.OverwritePolicy(ffmpegArgs) == ffmpegopts.OverwriteForce
-	// Enumerate the primary path and every "_N" variant a previous successful
-	// run would have written. The download stage writes consecutive indices,
-	// so stop at the first absent file (a gap means no later index exists).
-	for i := 0; ; i++ {
-		path := multiOutputPath(outputFile, i)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if i == 0 {
-				continue
-			}
-			break
-		}
+	for _, path := range existingOutputTargets(outputFile) {
 		if !force {
 			fmt.Fprintf(os.Stderr, "Output file '%s' left in place (pass -y to overwrite).\n", path)
 			continue
@@ -2040,6 +2089,12 @@ rffmpeg options:
 ffmpeg options:
   All standard ffmpeg options are supported and passed through to the server.
   rffmpeg options and ffmpeg options can be mixed freely.
+
+  -y / -n are additionally enforced by rffmpeg on the local output path before
+  the job is submitted (default and shared-FS modes alike): -y overwrites the
+  existing file without prompting, -n fails immediately with "already exists",
+  and the default refuses with ffmpeg's "Not overwriting - exiting" message.
+  Streaming (-) and remote-URL outputs are unaffected.
 
 Examples:
   # Probe a media file
