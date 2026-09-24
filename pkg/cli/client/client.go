@@ -1239,10 +1239,12 @@ func (c *Client) setAuthHeader(req *http.Request) {
 }
 
 // WorkerHealth carries live runtime metrics for a worker.
+// The gpu_* fields are always present in the server response; gpu_metrics_valid
+// distinguishes a real 0% reading from "no sample taken".
 type WorkerHealth struct {
 	Status         string   `json:"status"`
-	GPUUtilPct     float64  `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB   int      `json:"gpu_mem_used_mb,omitempty"`
+	GPUUtilPct     float64  `json:"gpu_util_percent"`
+	GPUMemUsedMB   int      `json:"gpu_mem_used_mb"`
 	ActiveJobs     []string `json:"active_jobs,omitempty"`
 	JobsPerSec     float64  `json:"jobs_per_sec"`
 	EWMAJobsPerSec float64  `json:"ewma_jobs_per_sec,omitempty"`

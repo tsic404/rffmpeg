@@ -991,21 +991,33 @@ components:
 
     WorkerHealth:
       type: object
-      required: [status, last_seen]
+      required: [status, gpu_metrics_valid, gpu_util_percent, gpu_mem_used_mb, last_seen]
       properties:
         status:
           $ref: '#/components/schemas/WorkerStatus'
+        gpu_metrics_valid:
+          type: boolean
+          description: >-
+            True when gpu_util_percent / gpu_mem_used_mb carry a fresh
+            sample from any GPU source (nvidia-smi, intel_gpu_top, or
+            amdgpu sysfs). Always present, and the field that separates a
+            GPU genuinely idle at 0% from a host that took no sample.
         gpu_util_percent:
           type: number
           format: double
           description: >-
             Aggregated GPU utilization across all GPUs (sum; values above 100
-            are valid on multi-GPU hosts). Reflects the last valid sample;
-            stale until the next heartbeat with gpu_metrics_valid=true.
+            are valid on multi-GPU hosts). Always present: 0 before the first
+            valid sample, and a real 0% reading stays 0 with
+            gpu_metrics_valid=true. Reflects the last valid sample; stale
+            until the next heartbeat with gpu_metrics_valid=true.
         gpu_mem_used_mb:
           type: integer
           format: int64
-          description: Total GPU memory in use across all GPUs, megabytes (last valid sample).
+          description: >-
+            Total GPU memory in use across all GPUs, megabytes. Always
+            present: 0 before the first valid sample (last valid sample
+            thereafter).
         active_jobs:
           type: array
           items:

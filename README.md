@@ -878,6 +878,7 @@ GET /api/v1/workers?active_only=true
       ],
       "health": {
         "status": "busy",
+        "gpu_metrics_valid": true,
         "gpu_util_percent": 87,
         "gpu_mem_used_mb": 4096,
         "active_jobs": ["job_id_1"],
@@ -897,6 +898,9 @@ GET /api/v1/workers/{workerId}/jobs
 
 字段说明：
 
+- `health.gpu_metrics_valid` / `health.gpu_util_percent` / `health.gpu_mem_used_mb`：三者**始终输出**
+  （CPU-only 或无采样时为 0），由 `gpu_metrics_valid` 区分"GPU 空闲（合法 0%）"与"本次无采样"，
+  面板无需靠字段缺失来判断；无采样时数值保留上一次有效采样。
 - `health.ewma_jobs_per_sec`：该 worker 吞吐的 EWMA 平滑值（jobs/sec），慢节点检测直接用它与
   集群中位数比较；首次心跳样本前为 0。
 - `cluster_median_throughput`：参与慢节点判定的集群 EWMA 中位数原值（offline / 预热中 / 空闲
