@@ -16,6 +16,7 @@ func TestLoadDefault(t *testing.T) {
 	os.Unsetenv("RFFMPEG_TOKEN")
 	os.Unsetenv("RFFMPEG_SHARED_FS")
 	os.Unsetenv("RFFMPEG_MAX_RETRIES")
+	os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
 
 	cfg, err := Load()
 	if err != nil {
@@ -82,6 +83,37 @@ func TestLoadMaxRetriesEnv(t *testing.T) {
 	}
 }
 
+func TestLoadServerLossTimeoutEnv(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
+
+	// Unset -> nil (the caller falls back to DefaultServerLossTimeout).
+	if cfg, _ := Load(); cfg.ServerLossTimeout != nil {
+		t.Errorf("Load() ServerLossTimeout = %v, want nil when unset", cfg.ServerLossTimeout)
+	}
+
+	// Valid duration overrides.
+	os.Setenv("RFFMPEG_SERVER_LOSS_TIMEOUT", "30s")
+	defer os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
+	if cfg, _ := Load(); cfg.ServerLossTimeout == nil || time.Duration(*cfg.ServerLossTimeout) != 30*time.Second {
+		t.Errorf("Load() ServerLossTimeout = %v, want 30s", cfg.ServerLossTimeout)
+	}
+
+	// 0 = cap disabled: it must be honored, not ignored.
+	os.Setenv("RFFMPEG_SERVER_LOSS_TIMEOUT", "0s")
+	if cfg, _ := Load(); cfg.ServerLossTimeout == nil || *cfg.ServerLossTimeout != 0 {
+		t.Errorf("Load() ServerLossTimeout = %v, want 0 (cap disabled) for zero env", cfg.ServerLossTimeout)
+	}
+
+	// Invalid or negative durations are ignored, leaving the field unset.
+	for _, v := range []string{"abc", "-5s"} {
+		os.Setenv("RFFMPEG_SERVER_LOSS_TIMEOUT", v)
+		if cfg, _ := Load(); cfg.ServerLossTimeout != nil {
+			t.Errorf("Load() ServerLossTimeout = %v for env %q, want nil", cfg.ServerLossTimeout, v)
+		}
+	}
+}
+
 func TestLoadPollTimeoutEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
@@ -131,6 +163,7 @@ func TestLoadConfigFile(t *testing.T) {
 	os.Unsetenv("RFFMPEG_TOKEN")
 	os.Unsetenv("RFFMPEG_SHARED_FS")
 	os.Unsetenv("RFFMPEG_MAX_RETRIES")
+	os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
 
 	cfg, err := Load()
 	if err != nil {

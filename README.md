@@ -116,6 +116,9 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
 # 调整连接中断后的重试次数（默认 14 次，约 5 分钟；也可用环境变量 RFFMPEG_MAX_RETRIES）
 ./bin/rffmpeg --max-retries 5 -i input.mp4 -c:v libx264 output.mp4
 
+# 调整「已提交任务等待期间」Server 断连的快速失败预算（默认 5s；0 = 关闭该预算）
+./bin/rffmpeg --server-loss-timeout 15s -i input.mp4 -c:v libx264 output.mp4
+
 # 提交被限流（429）时自动退避重投（指数退避，默认关闭）
 ./bin/rffmpeg --retry -i input.mp4 -c:v libx264 output.mp4
 ```
@@ -136,7 +139,7 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
 
 **轮询超时（`--poll-timeout`）**：`--poll-timeout`（Go duration 格式）限制 CLI 对「等待 Worker」阶段（作业 `pending`、尚未被任何 Worker 认领）的最长轮询时长，默认 `10m`。当集群 Worker **在线但全部忙碌**时，服务端的无 Worker 判定（NO_WORKER_AVAILABLE）不会触发（饿死扫描的活 Worker 守卫会短路），且用户未设置 `--timeout` 时，旧版 CLI 会无限轮询挂起；现在达到该上限后 CLI 会显式取消作业并以退出码 `1` 报错（stderr 提示「still waiting for a worker」）。`--poll-timeout` 只约束 pending 阶段——作业一旦被认领（`queued`/`running`），改由 Worker 自身超时（及 `--timeout`，若设置）约束，不受该轮询上限影响。三个配置通道（命令行 `--poll-timeout` / 环境变量 `RFFMPEG_POLL_TIMEOUT` / 配置文件 `"poll_timeout"`）优先级：命令行 > 环境变量 > 配置文件 > 默认值；三者均支持 `0` 表示**不设上限**（显式关闭轮询超时，长队列场景按需启用，需自行承担无限挂起风险）。
 
-**连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。重试次数达到上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / 配置文件 `"max_retries"`，默认 14 次、约 5 分钟）后 CLI 以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。三个通道均支持 `0`：显式设为 `0` 表示**不重试、首次失败即退出**，不会被静默回落为默认值。
+**连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。**Server 断连检测预算**（`--server-loss-timeout` / `RFFMPEG_SERVER_LOSS_TIMEOUT` / 配置文件 `"server_loss_timeout"`，默认 `5s`）约束「已提交任务等待期间」**连续失去联系**的最长时间：只有「服务器完全没有响应」的失败（拨号失败、连接被拒、握手无响应）才计入该预算——任何 HTTP 响应（含 4xx/5xx）都说明服务器可达，会重置该预算，这类失败仍由 `--max-retries` 约束。预算耗尽即快速失败，以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。默认 5s 覆盖两轮重连退避（1s→2s），Server 在预算内恢复即自动重连、继续等待，短暂重启不会中断等待；重启较慢的 Server 可调大该值，设为 `0` 则关闭该预算，退回由重试次数上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / `"max_retries"`，默认 14 次、约 5 分钟）决定何时放弃。两个上限都支持 `0` 且不会被静默回落为默认值：`--max-retries 0` 表示**不重试、首次失败即退出**。
 
 **限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。并发提交突发时，作业写入还可能因数据库写冲突（SQLITE_BUSY）未落库，此时提交接口返回 HTTP 429（`submit_conflict`，同样不创建作业、同样可被 `--retry` 退避重投；该响应不带 `retry_in`，CLI 以默认 1s 起步）。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。`submit_conflict` 依赖真实的写锁竞争：默认 5s busy timeout 下并发提交多数会排队成功，该路径难以稳定复现。需要确定性验证它（如 E2E）时用 `--busy-timeout-ms <ms>`（环境变量 `BUSY_TIMEOUT_MS`，配置文件 `"busy_timeout_ms"`）缩短写锁等待窗口——设为 `0` 表示完全不等待，任何写锁竞争立即以 429 `submit_conflict` 失败，而非排队 5s 后成功。
 
@@ -391,6 +394,7 @@ CLI 配置文件搜索顺序（优先级从高到低）：
   "server_url": "http://localhost:8080", // /api/v1 suffix is optional
   "token": "your-auth-token",
   "max_retries": 14,
+  "server_loss_timeout": "5s",
   "poll_timeout": "10m"
 }
 ```
@@ -402,6 +406,7 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 | `RFFMPEG_SERVER_URL` | Server URL | `http://localhost:8080` |
 | `RFFMPEG_TOKEN` | 认证令牌（server 启用认证时必填） | - |
 | `RFFMPEG_MAX_RETRIES` | WS/HTTP 重试次数上限（连接中断后） | `14`（约 5 分钟） |
+| `RFFMPEG_SERVER_LOSS_TIMEOUT` | 已提交任务等待期间 Server 断连的快速失败预算（`0` = 关闭该预算） | `5s` |
 | `RFFMPEG_POLL_TIMEOUT` | 等待 Worker（pending）阶段的最长轮询时长（`0` = 不设上限） | `10m` |
 | `RFFMPEG_LOG_FILE` | 提交前失败诊断日志路径（追加写入，未设置则禁用） | - |
 

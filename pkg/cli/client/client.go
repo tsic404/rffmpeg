@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,11 +75,23 @@ const (
 	RetryDelay   = 1 * time.Second
 
 	// DefaultMaxRetries bounds the CLI's retry loops when contact with the
-	// server is lost mid-job. 14 retries on the WebSocket exponential-backoff
-	// schedule (1s, 2s, 4s, 8s, 16s, then 30s) span about 5 minutes of total
-	// retry time before the CLI gives up with a distinct "job submitted"
-	// exit code.
+	// server is lost mid-job: 14 attempts on the WebSocket exponential-backoff
+	// schedule (1s, 2s, 4s, 8s, 16s, then 30s) span about 5 minutes of retry
+	// time. It is the attempt budget for every mid-job failure; the tighter
+	// DefaultServerLossTimeout ends a wait on a silent server well before it.
 	DefaultMaxRetries = 14
+
+	// DefaultServerLossTimeout caps how long the CLI keeps waiting for an
+	// already-submitted job once the server stops answering at all
+	// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT): only transport-level
+	// failures count, so an answered request — an error status included — resets
+	// the clock. A silent server therefore surfaces as the distinct
+	// "gave up waiting" exit code within seconds instead of leaving the CLI in
+	// backoff until the retry budget (~5 min) or an external timeout ends the
+	// run. Two reconnect rounds fit inside it, absorbing a brief server restart;
+	// raise it for a server that restarts slowly, or set it to 0 to let
+	// --max-retries alone decide.
+	DefaultServerLossTimeout = 5 * time.Second
 
 	// DefaultSubmitRetries bounds the CLI's rate-limit (HTTP 429) resubmission
 	// loop when --retry is enabled. Backoff starts at the server's retry_in
@@ -136,6 +149,11 @@ type Client struct {
 	http          *http.Client
 	maxRetries    int
 	submitRetries int
+	// serverLossTimeout caps one continuous silence — requests the server never
+	// answered — while waiting for an already-submitted job
+	// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT). 0 disables the cap:
+	// --max-retries alone decides when to give up.
+	serverLossTimeout time.Duration
 }
 
 // ClientOption configures a Client.
@@ -164,14 +182,29 @@ func WithSubmitRetries(n int) ClientOption {
 	}
 }
 
-// ErrRetriesExhausted marks the point where the client's retry budget is spent.
-// It is wrapped by RetriesExhaustedError, which carries the submitted job ID.
+// WithServerLossTimeout caps how long the client keeps waiting for an
+// already-submitted job once the server stops answering
+// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT). 0 disables the cap and
+// leaves --max-retries in charge.
+func WithServerLossTimeout(d time.Duration) ClientOption {
+	return func(c *Client) {
+		if d >= 0 {
+			c.serverLossTimeout = d
+		}
+	}
+}
+
+// ErrRetriesExhausted marks the point where the client stops waiting for the
+// server — its retry budget or its server-loss timeout was spent. It is wrapped
+// by RetriesExhaustedError, which carries the submitted job ID.
 var ErrRetriesExhausted = errors.New("retries exhausted")
 
 // RetriesExhaustedError reports that a job was submitted successfully but the
-// client lost contact with the server after spending its retry budget. It must
-// be surfaced as a distinct exit code — never a generic failure — so callers
-// can tell "submitted, then disconnected" apart from "submission failed".
+// client gave up waiting for it: either the server went silent for longer than
+// the server-loss timeout (--server-loss-timeout), or the retry budget was
+// spent. It must be surfaced as a distinct exit code — never a generic failure
+// — so callers can tell "submitted, then gave up" apart from "submission
+// failed". The cause carries which bound fired and why.
 type RetriesExhaustedError struct {
 	JobID string
 	Cause error
@@ -179,7 +212,7 @@ type RetriesExhaustedError struct {
 
 func (e *RetriesExhaustedError) Error() string {
 	return fmt.Sprintf(
-		"lost contact with server after retries exhausted; job %s was submitted — query final status via GET /api/v1/jobs/%s (last error: %v)",
+		"gave up waiting for job %s; the job keeps running server-side — query final status via GET /api/v1/jobs/%s (last error: %v)",
 		e.JobID, e.JobID, e.Cause,
 	)
 }
@@ -250,10 +283,11 @@ func normalizeServerURL(serverURL string) string {
 // New creates a new client.
 func New(serverURL, token string, opts ...ClientOption) *Client {
 	c := &Client{
-		serverURL:  normalizeServerURL(serverURL),
-		token:      token,
-		http:       &http.Client{Timeout: DefaultTimeout},
-		maxRetries: DefaultMaxRetries,
+		serverURL:         normalizeServerURL(serverURL),
+		token:             token,
+		http:              &http.Client{Timeout: DefaultTimeout},
+		maxRetries:        DefaultMaxRetries,
+		serverLossTimeout: DefaultServerLossTimeout,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -606,6 +640,65 @@ func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
 	return &statusResp.Job, nil
 }
 
+// isServerSilence reports whether a GetJob failure means the server never
+// answered at all. Only transport-level failures (dial, TLS, timeout, dropped
+// connection) count as contact loss — http.Client.Do wraps exactly those in
+// *url.Error. Any HTTP response, an error status or an unparsable body
+// included, proves the server is reachable.
+func isServerSilence(err error) bool {
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}
+
+// backupPoll polls GetJob as a backup to the WebSocket stream, reporting the
+// terminal job on pollDone or the give-up verdict on pollErr. Two failure runs
+// are bounded separately: continuous silence — requests the server never
+// answered — by silenceBudget, and any run of failures by failBudget, so a
+// server that answers with errors still gives up eventually instead of polling
+// forever. A zero failBudget means "no retries": the first failure is final.
+func (c *Client) backupPoll(ctx context.Context, jobID string, silenceBudget, failBudget time.Duration, pollDone chan<- *protocol.JobInfo, pollErr chan<- error) {
+	var failStart time.Time    // first failure of the current run, any cause
+	var silenceStart time.Time // first unanswered failure of the current run
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(pollInterval):
+			job, err := c.GetJob(jobID)
+			if err != nil {
+				now := time.Now()
+				if failStart.IsZero() {
+					failStart = now
+				}
+				if isServerSilence(err) {
+					if silenceStart.IsZero() {
+						silenceStart = now
+					}
+				} else {
+					// The server answered: it is reachable, so this failure
+					// cannot count as contact loss.
+					silenceStart = time.Time{}
+				}
+				if !silenceStart.IsZero() && now.Sub(silenceStart) >= silenceBudget {
+					pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling lost contact with server for %s: %w", now.Sub(silenceStart).Round(time.Second), err)}
+					return
+				}
+				if now.Sub(failStart) >= failBudget {
+					pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling failed for %s: %w", now.Sub(failStart).Round(time.Second), err)}
+					return
+				}
+				continue
+			}
+			failStart = time.Time{}
+			silenceStart = time.Time{}
+			if protocol.IsTerminalStatus(job.Status) {
+				pollDone <- job
+				return
+			}
+		}
+	}
+}
+
 // WaitForJob waits for job completion and returns exit code.
 // It polls until the job reaches a terminal status or ctx is cancelled.
 func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool) (*protocol.JobInfo, error) {
@@ -677,12 +770,13 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 			fmt.Fprintln(os.Stderr, renderProgressLine(p))
 		}),
 		WithWSMaxRetries(c.maxRetries),
+		WithWSServerLossTimeout(c.serverLossTimeout),
 	)
 	defer wsClient.Close()
 
 	// Connect to WebSocket
 	if err := wsClient.ConnectWithReconnect(ctx); err != nil {
-		// A spent retry budget means the job was submitted but the server is
+		// A spent contact budget means the job was submitted but the server is
 		// unreachable; surface it with the distinct "submitted" exit code
 		// rather than falling back to a poll that will fail the same way.
 		if errors.Is(err, ErrRetriesExhausted) {
@@ -699,38 +793,16 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 		listenDone <- wsClient.Listen(ctx)
 	}()
 
-	// Also poll for job completion as a backup. Consecutive GetJob failures
-	// are bounded by the same retry budget as the WS reconnect loop, so a
-	// server outage cannot wedge the CLI in a silent poll loop.
+	// Also poll for job completion as a backup, bounded on both failure modes:
+	// continuous silence by the server-loss budget, any run of failures by the
+	// retry budget. A server outage therefore cannot wedge the CLI in a silent
+	// poll loop, and a server that keeps answering with errors cannot be
+	// misreported as lost contact.
 	pollDone := make(chan *protocol.JobInfo, 1)
 	pollErr := make(chan error, 1)
-	budget := retryBudget(c.maxRetries)
-	go func() {
-		var failStart time.Time
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(pollInterval):
-				job, err := c.GetJob(jobID)
-				if err != nil {
-					if failStart.IsZero() {
-						failStart = time.Now()
-					}
-					if time.Since(failStart) >= budget {
-						pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling lost contact with server for %s: %w", time.Since(failStart).Round(time.Second), err)}
-						return
-					}
-					continue
-				}
-				failStart = time.Time{}
-				if protocol.IsTerminalStatus(job.Status) {
-					pollDone <- job
-					return
-				}
-			}
-		}
-	}()
+	go c.backupPoll(ctx, jobID,
+		serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
+		pollDone, pollErr)
 
 	// Wait for completion, error, or context cancellation. In non-streaming
 	// mode (file output), stderr is display-only: a detected sequence gap
@@ -774,8 +846,9 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 			return nil, err
 		case err := <-listenDone:
 			if err != nil {
-				// A spent retry budget means "submitted, then disconnected":
-				// surface the distinct exit code instead of a poll fallback.
+				// A spent contact budget means the job was submitted but the
+				// client had to stop waiting: surface the distinct exit code
+				// instead of a poll fallback.
 				if errors.Is(err, ErrRetriesExhausted) {
 					return nil, &RetriesExhaustedError{JobID: jobID, Cause: err}
 				}
@@ -880,6 +953,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		}),
 		WithOnComplete(func(exitCode int) { markTerminal() }),
 		WithWSMaxRetries(c.maxRetries),
+		WithWSServerLossTimeout(c.serverLossTimeout),
 	)
 	defer wsClient.Close()
 
@@ -919,7 +993,7 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 
 	// Connect to WebSocket
 	if err := wsClient.ConnectWithReconnect(ctx); err != nil {
-		// A spent retry budget means the job was submitted but the server is
+		// A spent contact budget means the job was submitted but the server is
 		// unreachable; surface the distinct "submitted" exit code rather than
 		// falling back to a poll that will fail the same way.
 		if errors.Is(err, ErrRetriesExhausted) {
@@ -936,37 +1010,14 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		listenDone <- wsClient.Listen(ctx)
 	}()
 
-	// Poll for job completion as a backup, bounded by the same retry budget
-	// as the WS reconnect loop.
+	// Poll for job completion as a backup, bounded the same way as the
+	// non-streaming wait: silence by the server-loss budget, any run of
+	// failures by the retry budget.
 	pollDone := make(chan *protocol.JobInfo, 1)
 	pollErr := make(chan error, 1)
-	budget := retryBudget(c.maxRetries)
-	go func() {
-		var failStart time.Time
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(pollInterval):
-				job, err := c.GetJob(jobID)
-				if err != nil {
-					if failStart.IsZero() {
-						failStart = time.Now()
-					}
-					if time.Since(failStart) >= budget {
-						pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling lost contact with server for %s: %w", time.Since(failStart).Round(time.Second), err)}
-						return
-					}
-					continue
-				}
-				failStart = time.Time{}
-				if protocol.IsTerminalStatus(job.Status) {
-					pollDone <- job
-					return
-				}
-			}
-		}
-	}()
+	go c.backupPoll(ctx, jobID,
+		serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
+		pollDone, pollErr)
 
 	// Wait for completion, error, or context cancellation
 	var finalJob *protocol.JobInfo
@@ -989,8 +1040,9 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 		}
 	case err := <-listenDone:
 		if err != nil {
-			// A spent retry budget means "submitted, then disconnected":
-			// surface the distinct exit code instead of a poll fallback.
+			// A spent contact budget means the job was submitted but the
+			// client had to stop waiting: surface the distinct exit code
+			// instead of a poll fallback.
 			if errors.Is(err, ErrRetriesExhausted) {
 				return nil, &RetriesExhaustedError{JobID: jobID, Cause: err}
 			}
