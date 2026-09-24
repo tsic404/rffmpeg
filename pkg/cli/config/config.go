@@ -73,6 +73,14 @@ type Config struct {
 	// means "no retries" — fail fast instead of silently falling back.
 	MaxRetries *int `json:"max_retries,omitempty"`
 
+	// ServerLossTimeout caps how long the CLI keeps waiting for an
+	// already-submitted job once contact with the server is lost
+	// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT / rffmpeg.json
+	// "server_loss_timeout"). nil means "unset" (fall back to
+	// client.DefaultServerLossTimeout); a non-nil 0 disables the cap — the
+	// max_retries budget alone decides when to give up.
+	ServerLossTimeout *Duration `json:"server_loss_timeout,omitempty"`
+
 	// PollTimeout caps how long the CLI polls a pending (waiting-for-worker)
 	// job before giving up (--poll-timeout / RFFMPEG_POLL_TIMEOUT / rffmpeg.json
 	// "poll_timeout"). nil means "unset" (fall back to DefaultPollTimeout); a
@@ -116,6 +124,11 @@ func Load() (*Config, error) {
 	if cfg.MaxRetries != nil && *cfg.MaxRetries < 0 {
 		cfg.MaxRetries = nil
 	}
+	// A negative server_loss_timeout is invalid: treat it as unset (fall back
+	// to DefaultServerLossTimeout). 0 is valid and disables the cap.
+	if cfg.ServerLossTimeout != nil && *cfg.ServerLossTimeout < 0 {
+		cfg.ServerLossTimeout = nil
+	}
 	// A negative poll_timeout is invalid: treat it as unset (fall back to
 	// DefaultPollTimeout). 0 is valid and means "no cap" (opt out).
 	if cfg.PollTimeout != nil && *cfg.PollTimeout < 0 {
@@ -136,6 +149,12 @@ func Load() (*Config, error) {
 	if mr := os.Getenv("RFFMPEG_MAX_RETRIES"); mr != "" {
 		if n, err := strconv.Atoi(mr); err == nil && n >= 0 {
 			cfg.MaxRetries = &n
+		}
+	}
+	if slt := os.Getenv("RFFMPEG_SERVER_LOSS_TIMEOUT"); slt != "" {
+		if d, err := time.ParseDuration(slt); err == nil && d >= 0 {
+			v := Duration(d)
+			cfg.ServerLossTimeout = &v
 		}
 	}
 	if pt := os.Getenv("RFFMPEG_POLL_TIMEOUT"); pt != "" {

@@ -2267,7 +2267,7 @@ func TestGiveUpBudget(t *testing.T) {
 }
 
 // disconnectedJobClient is a jobWaitClient whose wait methods report that the
-// retry budget was spent after the job was submitted.
+// client gave up waiting for the submitted job.
 type disconnectedJobClient struct {
 	jobID string
 }
@@ -2287,8 +2287,9 @@ func (d *disconnectedJobClient) WaitForJobWithStreamingOutput(ctx context.Contex
 func (d *disconnectedJobClient) CancelJob(jobID string) error { return nil }
 
 // TestWaitForJobLoop_RetriesExhausted maps a RetriesExhaustedError to
-// ExitDisconnected — the job was submitted but the client lost contact after
-// its retry budget, which operators must distinguish from ExitError.
+// ExitDisconnected — the job was submitted but the client gave up waiting for
+// it (server silent past the server-loss budget, or retry budget spent), which
+// operators must distinguish from ExitError.
 func TestWaitForJobLoop_RetriesExhausted(t *testing.T) {
 	fake := &disconnectedJobClient{jobID: "job-lost"}
 

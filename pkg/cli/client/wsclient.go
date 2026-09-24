@@ -29,6 +29,9 @@ const (
 	WSMaxReconnectDelay = 30 * time.Second
 	WSReadTimeout       = 60 * time.Second
 	WSWriteTimeout      = 10 * time.Second
+	// WSHandshakeTimeout bounds a single upgrade attempt. A tighter caller
+	// deadline (the contact-loss budget) overrides it per attempt.
+	WSHandshakeTimeout = 10 * time.Second
 
 	// wsNotFoundRetries bounds how many times a 404 WebSocket handshake is
 	// retried before giving up. The 404 right after submit is a transient
@@ -86,6 +89,15 @@ type WSClient struct {
 	// NewWSClient defaults it to DefaultMaxRetries; WithWSMaxRetries(0) means
 	// "no retries" — fail fast after the first failed attempt.
 	maxRetries int
+	// serverLossTimeout caps one continuous silence — attempts that got no HTTP
+	// response at all — in wall-clock time (--server-loss-timeout /
+	// RFFMPEG_SERVER_LOSS_TIMEOUT). It bounds the reconnect loop by elapsed
+	// time, not attempt count: a job that was already submitted must not stay
+	// silent for the full attempt budget while the server is gone. An answered
+	// handshake resets the clock. NewWSClient defaults it to
+	// DefaultServerLossTimeout; 0 disables the cap and leaves maxRetries in
+	// charge.
+	serverLossTimeout time.Duration
 	// lastSeq is the highest sequence number seen. A received Seq greater
 	// than lastSeq+1 means messages were lost during a reconnect — output
 	// has a hole and the stream must not silently continue.
@@ -168,6 +180,17 @@ func WithWSMaxRetries(n int) WSClientOption {
 	}
 }
 
+// WithWSServerLossTimeout sets the wall-clock cap on one continuous silence —
+// attempts the server never answered (--server-loss-timeout). 0 disables the
+// cap — the attempt budget alone decides when to give up.
+func WithWSServerLossTimeout(d time.Duration) WSClientOption {
+	return func(c *WSClient) {
+		if d >= 0 {
+			c.serverLossTimeout = d
+		}
+	}
+}
+
 // NewWSClient creates a new WebSocket client
 func NewWSClient(serverURL, jobID, token string, opts ...WSClientOption) *WSClient {
 	// Convert HTTP URL to WebSocket URL
@@ -175,11 +198,12 @@ func NewWSClient(serverURL, jobID, token string, opts ...WSClientOption) *WSClie
 	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
 
 	client := &WSClient{
-		serverURL:  wsURL,
-		jobID:      jobID,
-		token:      token,
-		done:       make(chan struct{}),
-		maxRetries: DefaultMaxRetries,
+		serverURL:         wsURL,
+		jobID:             jobID,
+		token:             token,
+		done:              make(chan struct{}),
+		maxRetries:        DefaultMaxRetries,
+		serverLossTimeout: DefaultServerLossTimeout,
 	}
 
 	for _, opt := range opts {
@@ -210,12 +234,21 @@ func (c *WSClient) connect(ctx context.Context) error {
 		headers.Set("Authorization", "Bearer "+c.token)
 	}
 
-	// Dial WebSocket
+	// Dial WebSocket. The handshake timeout is capped by the caller's deadline
+	// when that is tighter, so a server that accepts the TCP connection but
+	// never completes the upgrade cannot outlive a spent contact-loss budget
+	// (gorilla bounds the dial by ctx, but the upgrade read only by this value).
+	handshakeTimeout := WSHandshakeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < handshakeTimeout {
+			handshakeTimeout = remaining
+		}
+	}
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout: handshakeTimeout,
 	}
 
-	conn, resp, err := dialer.Dial(u.String(), headers)
+	conn, resp, err := dialer.DialContext(ctx, u.String(), headers)
 	if err != nil {
 		if resp != nil {
 			defer resp.Body.Close()
@@ -272,11 +305,29 @@ func (e *HandshakeError) Error() string {
 // a transient job-visibility race, not a missing job. When that small bound is
 // spent the original HandshakeError is returned so the caller falls back to
 // HTTP polling, whose GetJob reports "job not found" — a persistent 404 is
-// never wrapped as ErrRetriesExhausted ("submitted, then disconnected").
+// never wrapped as ErrRetriesExhausted ("gave up waiting").
+//
+// A contact-loss episode is additionally bounded in wall-clock time by the
+// server-loss timeout (--server-loss-timeout): once the server has been silent
+// for that long — no HTTP response at all — the loop gives up with
+// ErrRetriesExhausted instead of spending the whole attempt budget in backoff.
+// A successful connect returns, and every answered handshake restarts the
+// clock, so only real silence accumulates against the budget.
 func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 	reconnectDelay := WSReconnectDelay
 	maxRetries := c.maxRetries
 
+	// lossBudget caps one continuous silence — no HTTP response at all. It is
+	// armed only when --server-loss-timeout enables the cap: with 0 the attempt
+	// count alone decides when to give up, exactly as it did before the cap
+	// existed.
+	lossBudget := c.serverLossTimeout
+	if lossBudget > 0 {
+		lossBudget = serverLossBudget(maxRetries, lossBudget)
+	}
+
+	var silenceStart time.Time // first unanswered attempt of the current silence
+	var lastErr error
 	retries := 0
 	notFoundRetries := 0
 	for {
@@ -288,13 +339,50 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 		default:
 		}
 
-		err := c.connect(ctx)
+		// Give up once the server has been silent for the whole budget. Any
+		// answer resets silenceStart, so a reachable server never accumulates
+		// against it — its failures are bounded by maxRetries instead.
+		if !silenceStart.IsZero() && time.Since(silenceStart) >= lossBudget {
+			return fmt.Errorf("%w: no contact with the server for %s: %v", ErrRetriesExhausted, lossBudget, lastErr)
+		}
+
+		// Bound the attempt as well: a server that accepts the connection but
+		// never completes the upgrade must not outlive the budget. Inside a
+		// silence run the deadline is the run's own end, so the budget bounds
+		// the episode rather than each attempt.
+		attemptCtx := ctx
+		var cancelAttempt context.CancelFunc
+		if lossBudget > 0 {
+			attemptDeadline := time.Now().Add(lossBudget)
+			if !silenceStart.IsZero() {
+				attemptDeadline = silenceStart.Add(lossBudget)
+			}
+			attemptCtx, cancelAttempt = context.WithDeadline(ctx, attemptDeadline)
+		}
+		err := c.connect(attemptCtx)
+		if cancelAttempt != nil {
+			cancelAttempt()
+		}
 		if err == nil {
 			return nil
 		}
+		lastErr = err
 
+		// Only transport-level failures — attempts that got no HTTP response at
+		// all — count as contact loss: a handshake the server answered (any
+		// status, 4xx/5xx included) proves it is reachable, so it restarts the
+		// silence clock. Without this, a 404 retry window longer than the budget
+		// would end in a bogus "no contact" verdict instead of the bounded 404
+		// retries the caller relies on to fall back to HTTP polling.
 		var hsErr *HandshakeError
-		if errors.As(err, &hsErr) && hsErr.Status >= 400 && hsErr.Status < 500 {
+		gotResponse := errors.As(err, &hsErr)
+		if gotResponse {
+			silenceStart = time.Time{}
+		} else if lossBudget > 0 && silenceStart.IsZero() {
+			silenceStart = time.Now()
+		}
+
+		if gotResponse && hsErr.Status >= 400 && hsErr.Status < 500 {
 			// 404 right after submit is the job-visibility race, not a
 			// missing job: retry a bounded number of times, then return the
 			// handshake error so the caller falls back to HTTP polling
@@ -309,10 +397,19 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 			retries++
 		}
 
-		log.Printf("WebSocket connection failed: %v, retrying in %v...", err, reconnectDelay)
+		// Never sleep past the end of a silence run: the wait must end when the
+		// budget is spent, not after the current backoff interval.
+		wait := reconnectDelay
+		if !silenceStart.IsZero() {
+			if remaining := time.Until(silenceStart.Add(lossBudget)); remaining < wait {
+				wait = remaining
+			}
+		}
+
+		log.Printf("WebSocket connection failed: %v, retrying in %v...", err, wait)
 
 		select {
-		case <-time.After(reconnectDelay):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-c.done:
@@ -337,7 +434,7 @@ func retryBudget(maxRetries int) time.Duration {
 	}
 	delay := WSReconnectDelay
 	var total time.Duration
-	for i := 0; i < maxRetries; i++ {
+	for range maxRetries {
 		total += delay
 		delay *= 2
 		if delay > WSMaxReconnectDelay {
@@ -345,6 +442,23 @@ func retryBudget(maxRetries int) time.Duration {
 		}
 	}
 	return total
+}
+
+// serverLossBudget returns the wall-clock budget one continuous silence — the
+// server never answering — may last while the client waits for an
+// already-submitted job: the tighter of the retry budget (--max-retries) and
+// the server-loss timeout (--server-loss-timeout). A zero loss timeout disables
+// that cap and leaves the retry budget in charge; a zero retry budget means "no
+// retries" and stays the tighter bound (fail fast on the first loss).
+func serverLossBudget(maxRetries int, lossTimeout time.Duration) time.Duration {
+	retry := retryBudget(maxRetries)
+	if lossTimeout <= 0 || retry <= 0 {
+		return retry
+	}
+	if lossTimeout < retry {
+		return lossTimeout
+	}
+	return retry
 }
 
 // Listen starts listening for WebSocket messages

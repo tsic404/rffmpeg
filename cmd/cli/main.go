@@ -28,10 +28,11 @@ const (
 	ExitSuccess = 0
 	ExitError   = 1
 	// ExitDisconnected is returned when a job was submitted successfully but
-	// the client lost contact with the server after its retry budget was
-	// spent. The job keeps running server-side; query its final status via
-	// GET /api/v1/jobs/{id}. Distinct from ExitError, which also covers
-	// submission-phase failures where no job exists to query.
+	// the client gave up waiting for it: the server stayed silent past the
+	// server-loss budget (--server-loss-timeout, default 5s) or the retry
+	// budget was spent. The job keeps running server-side; query its final
+	// status via GET /api/v1/jobs/{id}. Distinct from ExitError, which also
+	// covers submission-phase failures where no job exists to query.
 	ExitDisconnected = 2
 
 	// clientVerdictGrace is the margin past the server's NO_WORKER_AVAILABLE
@@ -65,8 +66,13 @@ type Options struct {
 	PollTimeoutSet bool
 	MaxRetries     int
 	MaxRetriesSet  bool
-	Retry          bool
-	FmpegArgs      []string
+	// ServerLossTimeout is the post-submit contact-loss budget; a zero value
+	// is meaningful (disable the cap), so Set records whether the flag was
+	// actually present.
+	ServerLossTimeout    time.Duration
+	ServerLossTimeoutSet bool
+	Retry                bool
+	FmpegArgs            []string
 
 	// Info flags
 	ShowEncoders   bool
@@ -190,6 +196,22 @@ func parseArgs(argList []string) (*Options, error) {
 			warnDuplicate(arg)
 			opts.MaxRetries = n
 			opts.MaxRetriesSet = true
+			i++
+		case "--server-loss-timeout", "-server-loss-timeout":
+			val, err := needValue(i, arg)
+			if err != nil {
+				return nil, err
+			}
+			parsed, perr := time.ParseDuration(val)
+			if perr != nil {
+				return nil, fmt.Errorf("invalid server-loss-timeout value: %s (use format like 5s, 30s, 2m, or 0 to disable)", val)
+			}
+			if parsed < 0 {
+				return nil, fmt.Errorf("server-loss-timeout must be non-negative: %s", val)
+			}
+			warnDuplicate(arg)
+			opts.ServerLossTimeout = parsed
+			opts.ServerLossTimeoutSet = true
 			i++
 		case "--retry", "-retry":
 			opts.Retry = true
@@ -412,6 +434,13 @@ func run() (code int) {
 	} else if cfg.MaxRetries != nil {
 		maxRetries = *cfg.MaxRetries
 	}
+	serverLossTimeout := client.DefaultServerLossTimeout
+	if cfg.ServerLossTimeout != nil {
+		serverLossTimeout = time.Duration(*cfg.ServerLossTimeout)
+	}
+	if opts.ServerLossTimeoutSet {
+		serverLossTimeout = opts.ServerLossTimeout
+	}
 
 	// Detect shared filesystem mode
 	sharedFS := cfg.IsSharedFS()
@@ -425,7 +454,10 @@ func run() (code int) {
 	if opts.Retry {
 		submitRetries = client.DefaultSubmitRetries
 	}
-	cli := client.New(cfg.ServerURL, cfg.Token, client.WithMaxRetries(maxRetries), client.WithSubmitRetries(submitRetries))
+	cli := client.New(cfg.ServerURL, cfg.Token,
+		client.WithMaxRetries(maxRetries),
+		client.WithServerLossTimeout(serverLossTimeout),
+		client.WithSubmitRetries(submitRetries))
 
 	// Print the identity banner before the health check so a pre-submit
 	// failure (an empty or malformed server URL surfaces as "unsupported
@@ -2010,6 +2042,7 @@ rffmpeg options:
   --timeout DURATION      Job execution timeout (e.g., 30s, 5m, 2h)
   --poll-timeout DURATION Max time to poll a waiting-for-worker (pending) job (default: 10m; 0 = no cap)
   --max-retries N         Max WS reconnect attempts / HTTP poll retry budget (default: 14, ~5 min; 0 = no retries)
+  --server-loss-timeout D Max wait for a submitted job once the server stops responding (default: 5s; 0 = no cap)
   --retry                 Retry job submission on rate-limit (429) with exponential backoff (default: off)
 
 ffmpeg options:
