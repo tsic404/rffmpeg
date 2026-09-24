@@ -86,8 +86,8 @@ go build -o bin/rffmpeg ./cmd/cli
 # 连接到本地 Server
 ./bin/rffmpeg-worker --server-url http://localhost:8080
 
-# 通过 JSON 配置文件指定完整配置（名称、编码器、GPU 等）
-./bin/rffmpeg-worker --config worker.json
+# 通过 JSON 配置文件指定完整配置（名称、编码器、GPU 等）；令牌写在配置文件 "token" 字段或用 --token/RFFMPEG_TOKEN 提供，缺失时注册与心跳均返回 401
+./bin/rffmpeg-worker --config worker.json --token <T>
 
 # 通过环境变量覆盖配置项（如名称、最大并发）
 RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
@@ -1043,15 +1043,17 @@ Response:
 
 ```bash
 # 1. 启动 Server
-./bin/rffmpeg-server --port 8080 --data-dir ./data
+./bin/rffmpeg-server --port 8080 --data-dir ./data --auth-token dev
 
 # 2. 启动 Worker（另一个终端）
 cat > worker.json << EOF
 {
   "server_url": "http://localhost:8080",
   "name": "gpu-worker",
+  "token": "dev",
   "auto_detect_codecs": false,
   "manual_encoders": ["libx264", "h264_nvenc", "hevc_nvenc"],
+  "manual_decoders": ["h264"],
   "auto_detect_gpu": false,
   "manual_gpu_model": "NVIDIA RTX 3080",
   "max_concurrent": 2
@@ -1060,7 +1062,7 @@ EOF
 ./bin/rffmpeg-worker --config worker.json
 
 # 3. 提交转码任务（客户端）
-./bin/rffmpeg -i my_video.mp4 \
+RFFMPEG_TOKEN=dev ./bin/rffmpeg -i my_video.mp4 \
   -c:v h264_nvenc -preset fast -cq 20 \
   -c:a aac -b:a 128k \
   output.mp4
