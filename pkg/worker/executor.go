@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
 // StderrHandler is a callback function for processing stderr output
@@ -263,8 +264,10 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	go func() {
 		defer wg.Done()
 		if stdoutHandler != nil {
-			// Streaming mode: read in chunks and call handler
-			buf := make([]byte, 32*1024) // 32KB chunks for streaming
+			// Streaming mode: read in chunks and call handler. The chunk size
+			// is part of the wire sizing contract — the batcher concatenates
+			// WSStdoutBatchChunks of them per message.
+			buf := make([]byte, protocol.WSStdoutChunkBytes)
 			for {
 				n, readErr := stdoutPipe.Read(buf)
 				if n > 0 {
