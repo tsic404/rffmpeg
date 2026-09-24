@@ -1723,12 +1723,13 @@ func TestWorkerHeartbeatWithThroughput(t *testing.T) {
 // heartbeat flow into the response.
 // workerHealth mirrors the handler's health object for JSON decoding in tests.
 type WorkerHealth struct {
-	Status       string   `json:"status"`
-	GPUUtilPct   float64  `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB int      `json:"gpu_mem_used_mb,omitempty"`
-	ActiveJobs   []string `json:"active_jobs,omitempty"`
-	JobsPerSec   float64  `json:"jobs_per_sec,omitempty"`
-	LastSeen     string   `json:"last_seen"`
+	Status          string   `json:"status"`
+	GPUUtilPct      float64  `json:"gpu_util_percent"`
+	GPUMemUsedMB    int      `json:"gpu_mem_used_mb"`
+	GPUMetricsValid bool     `json:"gpu_metrics_valid"`
+	ActiveJobs      []string `json:"active_jobs,omitempty"`
+	JobsPerSec      float64  `json:"jobs_per_sec,omitempty"`
+	LastSeen        string   `json:"last_seen"`
 }
 
 func TestWorkerHealthInListResponse(t *testing.T) {
@@ -1980,6 +1981,99 @@ func TestWorkerHealthJobsPerSecAlwaysPresent(t *testing.T) {
 	}
 	if getResp.Worker.Health.JobsPerSec != 0 {
 		t.Errorf("Expected jobs_per_sec 0 for idle worker, got %f", getResp.Worker.Health.JobsPerSec)
+	}
+}
+
+// TestWorkerHealthGPUFieldsAlwaysPresent verifies the health object always
+// carries gpu_util_percent / gpu_mem_used_mb, so a client can tell a GPU
+// genuinely idle at 0% (gpu_metrics_valid=true) from a host that took no
+// sample (gpu_metrics_valid=false). omitempty previously dropped both keys at
+// 0, leaving the two states indistinguishable.
+func TestWorkerHealthGPUFieldsAlwaysPresent(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "test-worker-gpu-always",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	var regResp protocol.WorkerRegisterResponse
+	json.NewDecoder(rec.Body).Decode(&regResp)
+
+	getHealth := func() (string, *WorkerHealth) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		var getResp struct {
+			Worker struct {
+				Health *WorkerHealth `json:"health"`
+			} `json:"worker"`
+		}
+		if err := json.Unmarshal([]byte(body), &getResp); err != nil {
+			t.Fatalf("Failed to decode get worker response: %v", err)
+		}
+		if getResp.Worker.Health == nil {
+			t.Fatalf("Expected non-null health, got: %s", body)
+		}
+		return body, getResp.Worker.Health
+	}
+
+	// No heartbeat yet (CPU-only host): both keys must be present as 0 and
+	// flagged as "no sample taken".
+	body, health := getHealth()
+	for _, key := range []string{`"gpu_util_percent"`, `"gpu_mem_used_mb"`, `"gpu_metrics_valid"`} {
+		if !strings.Contains(body, key) {
+			t.Fatalf("Expected health response to contain %s, got: %s", key, body)
+		}
+	}
+	if health.GPUUtilPct != 0 || health.GPUMemUsedMB != 0 {
+		t.Errorf("Expected 0 GPU metrics before any sample, got %v / %v", health.GPUUtilPct, health.GPUMemUsedMB)
+	}
+	if health.GPUMetricsValid {
+		t.Error("Expected gpu_metrics_valid=false before any sample")
+	}
+
+	// A fresh sample reading a real 0% keeps both keys present and flips
+	// gpu_metrics_valid — that flag is what tells the two 0s apart.
+	heartbeatReq := protocol.WorkerHeartbeatRequest{
+		WorkerID:        regResp.WorkerID,
+		Status:          protocol.WorkerStatusIdle,
+		GPUMetricsValid: true,
+	}
+	heartbeatBody, _ := json.Marshal(heartbeatReq)
+	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Heartbeat failed with status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body, health = getHealth()
+	for _, key := range []string{`"gpu_util_percent"`, `"gpu_mem_used_mb"`} {
+		if !strings.Contains(body, key) {
+			t.Fatalf("Expected a real 0%% sample to keep %s present, got: %s", key, body)
+		}
+	}
+	if health.GPUUtilPct != 0 || health.GPUMemUsedMB != 0 {
+		t.Errorf("Expected 0 GPU metrics for an idle GPU, got %v / %v", health.GPUUtilPct, health.GPUMemUsedMB)
+	}
+	if !health.GPUMetricsValid {
+		t.Error("Expected gpu_metrics_valid=true for a fresh 0% sample")
 	}
 }
 

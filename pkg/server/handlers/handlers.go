@@ -2172,9 +2172,11 @@ func (h *Handler) ListAllHwaccels(w http.ResponseWriter, r *http.Request) {
 // Populated from the server's worker state table when at least one heartbeat
 // has been received; otherwise derived from the database record.
 type WorkerHealth struct {
-	Status          string   `json:"status"`
-	GPUUtilPct      float64  `json:"gpu_util_percent,omitempty"`
-	GPUMemUsedMB    int      `json:"gpu_mem_used_mb,omitempty"`
+	Status string `json:"status"`
+	// gpu_* are emitted unconditionally: omitempty hid a legitimate 0% reading
+	// and left clients unable to tell "GPU idle" from "not sampled".
+	GPUUtilPct      float64  `json:"gpu_util_percent"`
+	GPUMemUsedMB    int      `json:"gpu_mem_used_mb"`
 	GPUMetricsValid bool     `json:"gpu_metrics_valid"` // True when the GPU fields carry a fresh sample; false means stale/no sample (any GPU source)
 	ActiveJobs      []string `json:"active_jobs,omitempty"`
 	JobsPerSec      float64  `json:"jobs_per_sec"`
