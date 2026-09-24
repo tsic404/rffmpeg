@@ -64,9 +64,10 @@ func captureStderr(f func()) string {
 	return buf.String()
 }
 
-// TestRun_NoArgsReturnsError pins the fix: invoking rffmpeg with no
-// arguments must exit non-zero (ffmpeg exits 1) and print only the short
-// usage summary, not the full help.
+// TestRun_NoArgsReturnsError pins the contract: invoking rffmpeg with no
+// arguments must exit non-zero so callers can still detect a missing command,
+// and must print the full help — the same text as -h — so the operator sees
+// the option list instead of a bare usage line.
 func TestRun_NoArgsReturnsError(t *testing.T) {
 	orig := os.Args
 	defer func() { os.Args = orig }()
@@ -79,11 +80,17 @@ func TestRun_NoArgsReturnsError(t *testing.T) {
 	if code != ExitError {
 		t.Errorf("run() with no args = %d, want %d", code, ExitError)
 	}
-	if !strings.Contains(stderr, "Usage: rffmpeg") {
-		t.Errorf("run() with no args stderr = %q, want short usage line", stderr)
+
+	os.Args = []string{"rffmpeg", "-h"}
+	helpCode := ExitSuccess
+	help := captureStderr(func() {
+		helpCode = run()
+	})
+	if helpCode != ExitSuccess {
+		t.Fatalf("run() with -h = %d, want %d", helpCode, ExitSuccess)
 	}
-	if strings.Contains(stderr, "Configuration:") {
-		t.Errorf("run() with no args printed full help, want short usage only")
+	if stderr != help {
+		t.Errorf("run() with no args stderr = %q, want the full help printed by -h", stderr)
 	}
 }
 
