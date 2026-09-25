@@ -868,6 +868,11 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	return ExitSuccess
 }
 
+// overwriteConflictMessage is ffmpeg's own wording for a contradictory -y / -n
+// pair. It names no path: the flags contradict each other before any output
+// file is opened, so the target's state is irrelevant.
+const overwriteConflictMessage = "Error, both -y and -n supplied. Exiting.\n"
+
 // overwriteRefusal returns the ffmpeg-compatible refusal message for a
 // pre-existing output file under the given policy, or "" when the policy
 // authorizes overwriting it.
@@ -877,6 +882,8 @@ func overwriteRefusal(path string, policy ffmpegopts.OverwriteMode) string {
 		return ""
 	case ffmpegopts.OverwriteNever:
 		return fmt.Sprintf("File '%s' already exists. Exiting.\n", path)
+	case ffmpegopts.OverwriteConflict:
+		return overwriteConflictMessage
 	default: // OverwriteAsk
 		return fmt.Sprintf("File '%s' already exists. Overwrite? [y/N] Not overwriting - exiting\n", path)
 	}
@@ -886,7 +893,9 @@ func overwriteRefusal(path string, policy ffmpegopts.OverwriteMode) string {
 // before anything is uploaded or submitted. -y proceeds (the download stage
 // truncates the target, a shared-FS worker's ffmpeg overwrites natively), -n
 // fails immediately, and the default refuses like non-interactive ffmpeg.
-// Streaming (-) and remote-URL outputs have no local file to guard.
+// Streaming (-) and remote-URL outputs have no local file to guard — the
+// worker's ffmpeg decides there, as it does for ffmpeg's own per-output check,
+// which exempts fileless (NOFILE) muxers such as "-f null -".
 func enforceOverwritePolicy(outputFile string, streamingOutput bool, ffmpegArgs []string) int {
 	if streamingOutput || outputFile == "" || pathutil.IsRemoteURL(outputFile) {
 		return ExitSuccess
@@ -894,6 +903,13 @@ func enforceOverwritePolicy(outputFile string, streamingOutput bool, ffmpegArgs 
 	policy := ffmpegopts.OverwritePolicy(ffmpegArgs)
 	if policy == ffmpegopts.OverwriteForce {
 		return ExitSuccess
+	}
+	// A -y / -n contradiction is rejected regardless of whether the target
+	// exists: ffmpeg fails the flags before it ever stats the output file, so
+	// a free path must not turn the error into a submitted job.
+	if policy == ffmpegopts.OverwriteConflict {
+		fmt.Fprint(os.Stderr, overwriteConflictMessage)
+		return ExitError
 	}
 	targets := existingOutputTargets(outputFile)
 	if len(targets) == 0 {
@@ -2094,7 +2110,8 @@ ffmpeg options:
   the job is submitted (default and shared-FS modes alike): -y overwrites the
   existing file without prompting, -n fails immediately with "already exists",
   and the default refuses with ffmpeg's "Not overwriting - exiting" message.
-  Streaming (-) and remote-URL outputs are unaffected.
+  Passing both fails with ffmpeg's "both -y and -n supplied" error, whether or
+  not the target exists. Streaming (-) and remote-URL outputs are unaffected.
 
 Examples:
   # Probe a media file

@@ -303,23 +303,37 @@ const (
 	OverwriteForce
 	// OverwriteNever corresponds to -n: never overwrite ("already exists. Exiting.").
 	OverwriteNever
+	// OverwriteConflict means both -y and -n were supplied. ffmpeg rejects the
+	// contradiction outright ("both -y and -n supplied. Exiting.") before it
+	// stats any output file, so neither flag wins.
+	OverwriteConflict
 )
 
 // OverwritePolicy returns the overwrite mode the given args request. -y and -n
 // are standalone boolean flags, so exact-token matching is sufficient; anything
-// after a "--" separator is an output filename, not an option. -n takes
-// precedence over -y (ffmpeg errors on both; refusing is the safe default).
+// after a "--" separator is an output filename, not an option. Supplying both
+// is OverwriteConflict: ffmpeg never lets one win, so neither may here.
 func OverwritePolicy(args []string) OverwriteMode {
-	mode := OverwriteAsk
+	var force, never bool
 	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
 		switch arg {
-		case "--":
-			return mode
 		case "-y":
-			mode = OverwriteForce
+			force = true
 		case "-n":
-			return OverwriteNever
+			never = true
 		}
 	}
-	return mode
+	switch {
+	case force && never:
+		return OverwriteConflict
+	case force:
+		return OverwriteForce
+	case never:
+		return OverwriteNever
+	default:
+		return OverwriteAsk
+	}
 }
