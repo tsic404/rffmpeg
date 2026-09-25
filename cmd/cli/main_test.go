@@ -230,6 +230,10 @@ func TestRejectOverwriteIfNeeded(t *testing.T) {
 // TestEnforceOverwritePolicy pins the pre-submit gate: -y / -n are consumed on
 // the local output target before any upload or submission, so a refusal costs
 // nothing. Streaming and remote-URL outputs have no local file to guard.
+//
+// A -y / -n contradiction is a flag-level error, not an overwrite collision:
+// it must report ffmpeg's "both -y and -n supplied" whether or not the target
+// exists, and must never be attributed to an existing file.
 func TestEnforceOverwritePolicy(t *testing.T) {
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "out.mp4")
@@ -249,15 +253,21 @@ func TestEnforceOverwritePolicy(t *testing.T) {
 		ffmpegArgs []string
 		wantCode   int
 		wantMsg    string
+		notWantMsg string
 	}{
-		{"no flag + existing rejects", outPath, false, []string{"-i", "in.mp4", "out.mp4"}, ExitError, "Not overwriting - exiting"},
-		{"-n + existing rejects", outPath, false, []string{"-n", "-i", "in.mp4", "out.mp4"}, ExitError, "already exists. Exiting."},
-		{"-y + existing allows", outPath, false, []string{"-y", "-i", "in.mp4", "out.mp4"}, ExitSuccess, ""},
-		{"no flag + absent allows", absentPath, false, []string{"-i", "in.mp4", "out.mp4"}, ExitSuccess, ""},
-		{"-n + absent allows", absentPath, false, []string{"-n", "-i", "in.mp4", "out.mp4"}, ExitSuccess, ""},
-		{"multi-output variant rejects", variantPath, false, []string{"-i", "in.mp4", "multi.mp4"}, ExitError, "Not overwriting - exiting"},
-		{"streaming output allows", outPath, true, []string{"-i", "in.mp4", "-f", "mp4", "-"}, ExitSuccess, ""},
-		{"remote URL output allows", "rtmp://example.com/live/stream", false, []string{"-i", "in.mp4", "rtmp://example.com/live/stream"}, ExitSuccess, ""},
+		{"no flag + existing rejects", outPath, false, []string{"-i", "in.mp4", "out.mp4"}, ExitError, "Not overwriting - exiting", ""},
+		{"-n + existing rejects", outPath, false, []string{"-n", "-i", "in.mp4", "out.mp4"}, ExitError, "already exists. Exiting.", ""},
+		{"-y + existing allows", outPath, false, []string{"-y", "-i", "in.mp4", "out.mp4"}, ExitSuccess, "", ""},
+		{"no flag + absent allows", absentPath, false, []string{"-i", "in.mp4", "out.mp4"}, ExitSuccess, "", ""},
+		{"-n + absent allows", absentPath, false, []string{"-n", "-i", "in.mp4", "out.mp4"}, ExitSuccess, "", ""},
+		{"multi-output variant rejects", variantPath, false, []string{"-i", "in.mp4", "multi.mp4"}, ExitError, "Not overwriting - exiting", ""},
+		{"streaming output allows", outPath, true, []string{"-i", "in.mp4", "-f", "mp4", "-"}, ExitSuccess, "", ""},
+		{"remote URL output allows", "rtmp://example.com/live/stream", false, []string{"-i", "in.mp4", "rtmp://example.com/live/stream"}, ExitSuccess, "", ""},
+		{"-y -n + existing target reports the conflict, not a collision", outPath, false, []string{"-y", "-n", "-i", "in.mp4", "out.mp4"}, ExitError, "both -y and -n supplied. Exiting.", "already exists"},
+		{"-y -n + absent target still reports the conflict", absentPath, false, []string{"-y", "-n", "-i", "in.mp4", "out.mp4"}, ExitError, "both -y and -n supplied. Exiting.", ""},
+		{"-n -y order is the same conflict", outPath, false, []string{"-n", "-y", "-i", "in.mp4", "out.mp4"}, ExitError, "both -y and -n supplied. Exiting.", "already exists"},
+		{"-y -n + streaming output defers to the worker's ffmpeg", outPath, true, []string{"-y", "-n", "-i", "in.mp4", "-f", "mp4", "-"}, ExitSuccess, "", ""},
+		{"-y -n + remote URL output defers to the worker's ffmpeg", "rtmp://example.com/live/stream", false, []string{"-y", "-n", "-i", "in.mp4", "rtmp://example.com/live/stream"}, ExitSuccess, "", ""},
 	}
 
 	for _, tc := range tests {
@@ -269,6 +279,9 @@ func TestEnforceOverwritePolicy(t *testing.T) {
 			})
 			if tc.wantMsg != "" && !strings.Contains(stderr, tc.wantMsg) {
 				t.Errorf("stderr = %q, want substring %q", stderr, tc.wantMsg)
+			}
+			if tc.notWantMsg != "" && strings.Contains(stderr, tc.notWantMsg) {
+				t.Errorf("stderr = %q, must not contain %q", stderr, tc.notWantMsg)
 			}
 		})
 	}
@@ -322,6 +335,26 @@ func TestRun_OverwriteRefusalSkipsUploadAndSubmit(t *testing.T) {
 		}
 		if uploads != 0 || submits != 0 {
 			t.Errorf("refusal must not upload or submit: uploads=%d submits=%d", uploads, submits)
+		}
+		if b, _ := os.ReadFile(outPath); string(b) != "existing content" {
+			t.Errorf("existing output modified: %q", string(b))
+		}
+	})
+
+	t.Run("-y -n refuses before upload", func(t *testing.T) {
+		uploadsBefore, submitsBefore := uploads, submits
+		os.Args = []string{"rffmpeg", "-q", "-y", "-n", "--server", srv.URL, "-i", input, "-c:v", "libx264", outPath}
+		code := ExitSuccess
+		stderr := captureStderr(func() { code = run() })
+		if code != ExitError {
+			t.Errorf("run() = %d, want %d", code, ExitError)
+		}
+		if !strings.Contains(stderr, "both -y and -n supplied. Exiting.") {
+			t.Errorf("stderr = %q, want ffmpeg's conflict error", stderr)
+		}
+		if uploads != uploadsBefore || submits != submitsBefore {
+			t.Errorf("conflict must not upload or submit: uploads=%d->%d submits=%d->%d",
+				uploadsBefore, uploads, submitsBefore, submits)
 		}
 		if b, _ := os.ReadFile(outPath); string(b) != "existing content" {
 			t.Errorf("existing output modified: %q", string(b))

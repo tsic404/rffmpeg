@@ -59,9 +59,13 @@ func TestOverwritePolicy(t *testing.T) {
 		{name: "explicit -y forces overwrite", args: []string{"-y", "-i", "in.mp4", "out.mp4"}, want: OverwriteForce},
 		{name: "explicit -n never overwrites", args: []string{"-n", "-i", "in.mp4", "out.mp4"}, want: OverwriteNever},
 		{name: "no flag defaults to ask (refuse)", args: []string{"-i", "in.mp4", "-c:v", "libx264", "out.mp4"}, want: OverwriteAsk},
-		{name: "-n wins over -y", args: []string{"-y", "-n", "-i", "in.mp4", "out.mp4"}, want: OverwriteNever},
+		{name: "-y then -n is a conflict, not a refusal", args: []string{"-y", "-n", "-i", "in.mp4", "out.mp4"}, want: OverwriteConflict},
+		{name: "-n then -y is a conflict too", args: []string{"-n", "-y", "-i", "in.mp4", "out.mp4"}, want: OverwriteConflict},
 		{name: "-y after -- separator ignored", args: []string{"-i", "in.mp4", "--", "-y", "out.mp4"}, want: OverwriteAsk},
 		{name: "-n after -- separator ignored", args: []string{"-i", "in.mp4", "--", "-n", "out.mp4"}, want: OverwriteAsk},
+		{name: "-n before -- stays -n when -y follows the separator", args: []string{"-n", "-i", "in.mp4", "--", "-y", "out.mp4"}, want: OverwriteNever},
+		{name: "repeated -y stays force", args: []string{"-y", "-y", "-i", "in.mp4", "out.mp4"}, want: OverwriteForce},
+		{name: "repeated -n stays never", args: []string{"-n", "-n", "-i", "in.mp4", "out.mp4"}, want: OverwriteNever},
 		{name: "empty args", args: []string{}, want: OverwriteAsk},
 	}
 	for _, tc := range cases {

@@ -877,15 +877,16 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	}
 
 	// Re-dispatch cleanup: a job migrated off a failed worker (retry count > 0)
-	// may point at a shared-FS output path where the previous worker left a
-	// truncated partial file, so ffmpeg refuses with "Not overwriting - exiting"
-	// and the self-heal chain breaks. Remove that stale output before the first
-	// execution — RetryExecutor's between-attempt idempotency never runs for a
-	// migrated job whose initial invocation fails on the stale file. A fresh job
-	// (retry count 0) keeps native overwrite semantics. An explicit -n leaves
-	// the file for ffmpeg to reject; otherwise size/mtime are logged first.
-	if job.RetryCount > 0 && outputPath != "" && outputPath != "-" &&
-		ffmpegopts.OverwritePolicy(job.Args) != ffmpegopts.OverwriteNever {
+	// may point at a shared-FS output where the previous worker left a truncated
+	// partial file, so ffmpeg refuses with "Not overwriting - exiting" and the
+	// self-heal chain breaks (RetryExecutor's between-attempt idempotency never
+	// runs for a migrated job whose first invocation fails on the stale file).
+	// Remove it before the first execution; a fresh job (retry count 0) keeps
+	// native overwrite semantics, and -n or a -y/-n conflict leaves the file for
+	// ffmpeg to reject. Otherwise size/mtime are logged first.
+	policy := ffmpegopts.OverwritePolicy(job.Args)
+	preservesOutput := policy == ffmpegopts.OverwriteNever || policy == ffmpegopts.OverwriteConflict
+	if job.RetryCount > 0 && outputPath != "" && outputPath != "-" && !preservesOutput {
 		if info, err := os.Stat(outputPath); err == nil {
 			log.Printf("Job %s: removing output from previous worker (%d bytes, mtime %s): %s",
 				job.ID, info.Size(), info.ModTime().Format(time.RFC3339), outputPath)

@@ -197,6 +197,58 @@ func TestProcessJob_RedispatchNeverOverwritePreservesOutput(t *testing.T) {
 	}
 }
 
+// TestProcessJob_RedispatchConflictFlagsPreserveOutput extends the same guard
+// to a contradictory -y / -n pair: ffmpeg rejects the flags before it opens the
+// output, so the re-dispatch cleanup has no stale partial to clear and must
+// leave the file at the output path untouched on its way to that failure.
+func TestProcessJob_RedispatchConflictFlagsPreserveOutput(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	dir := t.TempDir()
+	inputPath := genTestInputMP4(t, dir)
+	outputPath := filepath.Join(dir, "out.mp4")
+
+	valid := exec.Command("ffmpeg", "-y", "-i", inputPath,
+		"-c:v", "libx264", "-preset", "ultrafast", outputPath)
+	if out, err := valid.CombinedOutput(); err != nil {
+		t.Fatalf("failed to generate valid output: %v\n%s", err, out)
+	}
+	before, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read valid output: %v", err)
+	}
+
+	mockSrv := newProbeDirectMockServer()
+	defer mockSrv.Close()
+	w := newRedispatchWorker(t, dir, mockSrv.URL)
+
+	job := protocol.JobInfo{
+		ID:             "redispatch-conflict-flags",
+		InputFiles:     []string{inputPath},
+		Args:           []string{"-y", "-n", "-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "ultrafast"},
+		OutputFilename: outputPath,
+		DirectPaths:    []string{inputPath},
+		RetryCount:     1,
+	}
+
+	w.processJob(context.Background(), job, func() {}, false)
+
+	update := terminalUpdate(t, mockSrv)
+	if update.Status == protocol.JobStatusCompleted {
+		t.Fatalf("-y -n re-dispatch was reported completed; ffmpeg must reject the contradictory flags")
+	}
+
+	after, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output after -y -n re-dispatch: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("existing output was deleted or modified by -y -n re-dispatch; ffmpeg never opens it")
+	}
+}
+
 // TestProcessJob_RedispatchRemovalFailureReportsInfraFailure locks the error
 // path: when the stale output cannot be removed, the worker must fail the job as
 // an infrastructure fault with a diagnostic instead of silently proceeding to
