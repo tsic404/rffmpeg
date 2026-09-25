@@ -960,3 +960,73 @@ func TestParseArgs_InvalidTimeout(t *testing.T) {
 		t.Error("parseArgs(--timeout -5m) expected error, got nil")
 	}
 }
+
+// TestParseArgs_Resume verifies the --resume grammar: a job id, an optional
+// output path, and ffmpeg's -y / -n. Everything else is rejected — the flag
+// re-attaches to an existing job and never re-runs ffmpeg.
+func TestParseArgs_Resume(t *testing.T) {
+	jobID := "3f2a9c1e-0000-4000-8000-000000000001"
+
+	t.Run("job id only", func(t *testing.T) {
+		opts, err := parseArgs([]string{"--resume", jobID})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.ResumeJobID != jobID {
+			t.Errorf("ResumeJobID = %q, want %q", opts.ResumeJobID, jobID)
+		}
+		if opts.ResumeOutput != "" {
+			t.Errorf("ResumeOutput = %q, want empty", opts.ResumeOutput)
+		}
+		if len(opts.FmpegArgs) != 0 {
+			t.Errorf("FmpegArgs = %v, want empty", opts.FmpegArgs)
+		}
+	})
+
+	t.Run("output path and overwrite flag", func(t *testing.T) {
+		opts, err := parseArgs([]string{"-resume", jobID, "out.mp4", "-y"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.ResumeJobID != jobID || opts.ResumeOutput != "out.mp4" {
+			t.Errorf("resume = (%q, %q), want (%q, %q)", opts.ResumeJobID, opts.ResumeOutput, jobID, "out.mp4")
+		}
+		if len(opts.FmpegArgs) != 1 || opts.FmpegArgs[0] != "-y" {
+			t.Errorf("FmpegArgs = %v, want [-y]", opts.FmpegArgs)
+		}
+	})
+
+	t.Run("connection flags still apply", func(t *testing.T) {
+		opts, err := parseArgs([]string{"--resume", jobID, "--server", "http://s:8080", "--timeout", "5m"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.ServerURL != "http://s:8080" || opts.Timeout != 5*time.Minute {
+			t.Errorf("server = %q, timeout = %v", opts.ServerURL, opts.Timeout)
+		}
+	})
+
+	rejected := []struct {
+		name string
+		args []string
+	}{
+		{"missing job id", []string{"--resume"}},
+		{"flag as job id", []string{"--resume", "-y"}},
+		{"two output paths", []string{"--resume", jobID, "a.mp4", "b.mp4"}},
+		{"ffmpeg option", []string{"--resume", jobID, "-i", "in.mp4", "out.mp4"}},
+		{"stdout target", []string{"--resume", jobID, "-"}},
+		{"stdout target pipe:1", []string{"--resume", jobID, "pipe:1"}},
+		{"stdout target PIPE:1", []string{"--resume", jobID, "PIPE:1"}},
+		{"remote URL target", []string{"--resume", jobID, "rtmp://host/app/key"}},
+		{"dash-dash separator", []string{"--resume", jobID, "--", "out.mp4"}},
+		{"probe subcommand", []string{"--resume", jobID, "probe", "in.mp4"}},
+		{"capability query", []string{"--resume", jobID, "-encoders"}},
+	}
+	for _, tc := range rejected {
+		t.Run(tc.name, func(t *testing.T) {
+			if opts, err := parseArgs(tc.args); err == nil {
+				t.Errorf("parseArgs(%v) = %+v, want error", tc.args, opts)
+			}
+		})
+	}
+}
