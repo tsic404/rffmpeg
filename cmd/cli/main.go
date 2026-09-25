@@ -284,6 +284,12 @@ func parseArgs(argList []string) (*Options, error) {
 	// Check if first positional argument is "probe" subcommand.
 	// The probe subcommand can appear after rffmpeg options (e.g. -q probe file.mp4).
 	if len(positionalArgs) > 0 && positionalArgs[0] == "probe" {
+		// --resume never runs the subcommand, so refuse the combination before
+		// parsing probe's own flags: otherwise its flags are reported as probe
+		// errors instead of naming the real conflict.
+		if opts.ResumeJobID != "" {
+			return nil, errors.New("--resume cannot be combined with the probe subcommand")
+		}
 		opts.IsProbe = true
 		positionalArgs = positionalArgs[1:]
 
@@ -340,13 +346,11 @@ func parseArgs(argList []string) (*Options, error) {
 		opts.FmpegArgs = append(opts.FmpegArgs, positionalArgs...)
 	}
 
-	// --resume replaces the whole transcode flow: a capability query or a probe
-	// combined with it is a contradiction, not a precedence question, and
-	// honoring one side silently would misreport what ran.
+	// --resume replaces the whole transcode flow: a capability query combined
+	// with it is a contradiction, not a precedence question, and honoring one
+	// side silently would misreport what ran. (The probe subcommand is refused
+	// where it is detected, before its own flags are parsed.)
 	if opts.ResumeJobID != "" {
-		if opts.IsProbe {
-			return nil, errors.New("--resume cannot be combined with the probe subcommand")
-		}
 		if name := opts.infoFlagName(); name != "" {
 			return nil, fmt.Errorf("--resume cannot be combined with %s", name)
 		}
@@ -358,10 +362,15 @@ func parseArgs(argList []string) (*Options, error) {
 // parseResumeArgs collects the arguments that follow --resume: at most one
 // output path plus ffmpeg's -y / -n overwrite flags. Any other argument is
 // rejected rather than dropped — --resume never re-runs ffmpeg, so ignoring an
-// ffmpeg option would misrepresent what the recorded job actually did.
+// ffmpeg option would misrepresent what the recorded job actually did. A bare
+// "probe" is refused too: it names the subcommand, not an output path.
 func parseResumeArgs(opts *Options, args []string) error {
 	for _, arg := range args {
 		switch {
+		case arg == "probe":
+			// The subcommand name is never a download target: accepting it wrote
+			// a file called "probe" that read as if the subcommand had run.
+			return fmt.Errorf("%q is rffmpeg's subcommand; run it without --resume (use ./%s for a file of that name)", arg, arg)
 		case arg == "-y" || arg == "-n":
 			// Kept in FmpegArgs so the overwrite policy helpers read them the
 			// same way they read a transcode invocation.
