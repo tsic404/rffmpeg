@@ -471,6 +471,9 @@ func run() (code int) {
 	// Check server health
 	if err := cli.HealthCheck(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: server health check failed: %v\n", err)
+		if hint := unconfiguredServerURLHint(cfg); hint != "" {
+			fmt.Fprintln(os.Stderr, hint)
+		}
 		return ExitError
 	}
 
@@ -480,6 +483,19 @@ func run() (code int) {
 	}
 
 	return runTranscode(cli, cfg, opts, ffmpegArgs, sharedFS, tee)
+}
+
+// unconfiguredServerURLHint is the one line printed after a failed health check
+// when nothing configured a server URL, so the CLI fell back to the built-in
+// default. That is the first-run case: without the hint the operator only sees
+// a bare "connection refused" and cannot tell which URL was even tried. Any
+// explicit URL (--server, RFFMPEG_SERVER_URL, config file) returns "" — the
+// choice was deliberate and the banner already names its source.
+func unconfiguredServerURLHint(cfg *config.Config) string {
+	if cfg.ServerURLSource != config.ServerURLSourceDefault {
+		return ""
+	}
+	return fmt.Sprintf("Hint: no server URL configured, using the default %s; set RFFMPEG_SERVER_URL or pass --server <url>.", config.DefaultServerURL)
 }
 
 // runTranscode submits the transcoding job described by opts/ffmpegArgs and
