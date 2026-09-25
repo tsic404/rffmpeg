@@ -421,6 +421,8 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 | `RFFMPEG_POLL_TIMEOUT` | 等待 Worker（pending）阶段的最长轮询时长（`0` = 不设上限） | `10m` |
 | `RFFMPEG_LOG_FILE` | 提交前失败诊断日志路径（追加写入，未设置则禁用） | - |
 
+**未配置 Server URL 时的连接失败提示**：`--server`、`RFFMPEG_SERVER_URL` 与配置文件都没有提供 Server URL 时，CLI 使用默认 `http://localhost:8080`；此时若健康检查失败，除错误信息外会额外打印一行提示（说明当前用的是默认 URL，并提示设置 `RFFMPEG_SERVER_URL` 或 `--server`），避免首次使用只看到 `connection refused` 而无从判断。显式指定过 URL（命令行、环境变量、配置文件任一）时不打印该提示。
+
 **提交前失败诊断日志（`RFFMPEG_LOG_FILE`）**：设置该变量指向一个可写文件后，CLI 会在「提交作业之前」以非零退出码退出时，把一条诊断记录追加写入该文件——包含时间戳、进程 PID、退出码、Server URL、命令行（令牌已脱敏）以及本次运行捕获的 stderr 内容。这用于诊断「CLI 在提交前即退出、Server 与 Worker 均无对应 job 记录」的偶发故障：此类故障无服务端线索，仅靠 CLI 侧的 stderr 才能定位。默认不设置（零开销、不改动 stderr 与文件系统），仅当需要诊断时按需开启。日志文件以 `0600` 权限创建，避免令牌（若未来扩展写入）被其他用户读取。
 
 #### 认证

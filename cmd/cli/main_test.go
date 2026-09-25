@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/cli/client"
+	"github.com/tsic404/rffmpeg/pkg/cli/config"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
@@ -116,6 +117,83 @@ func TestRun_HealthCheckFailurePrintsBanner(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "server health check failed") {
 		t.Errorf("run() stderr = %q, want health check failure", stderr)
+	}
+}
+
+// TestRun_HealthCheckFailureHintsDefaultServerURL pins the first-run hint: with
+// no --server, no RFFMPEG_SERVER_URL and no config file, the CLI falls back to
+// the built-in default URL, so a failed health check must name that fallback
+// and the two ways out. Without it the operator only sees a bare
+// "connection refused" and cannot tell where the URL came from.
+func TestRun_HealthCheckFailureHintsDefaultServerURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())      // no ~/.rffmpeg.json to supply a URL
+	t.Setenv("RFFMPEG_SERVER_URL", "") // empty is treated as unset, keeping the default source
+	// The default URL is a fixed address this test cannot relocate, so it can
+	// only assert the default-source path where that address is not already
+	// serving a healthy rffmpeg instance — otherwise run() would pass the health
+	// check and continue into the transcode it was never given inputs for.
+	if healthCheckAnswersOK(config.DefaultServerURL + client.HealthEndpoint) {
+		t.Skipf("a healthy server is already answering on %s", config.DefaultServerURL)
+	}
+
+	orig := os.Args
+	defer func() { os.Args = orig }()
+	os.Args = []string{"rffmpeg", "-i", "in.mp4", "out.mp4"}
+
+	code := ExitSuccess
+	stderr := captureStderr(func() {
+		code = run()
+	})
+	if code != ExitError {
+		t.Errorf("run() without a configured server URL = %d, want %d", code, ExitError)
+	}
+	if !strings.Contains(stderr, "Server: "+config.DefaultServerURL+" (default)") {
+		t.Errorf("run() stderr = %q, want banner Server line reporting the default source", stderr)
+	}
+	if !strings.Contains(stderr, "no server URL configured") || !strings.Contains(stderr, "RFFMPEG_SERVER_URL") {
+		t.Errorf("run() stderr = %q, want the hint naming the default URL and RFFMPEG_SERVER_URL", stderr)
+	}
+}
+
+// healthCheckAnswersOK reports whether a healthy rffmpeg server answers at url.
+// Any other outcome — refused, reset, timeout, an error status — leaves the CLI
+// failing its health check, which is the state the caller needs.
+func healthCheckAnswersOK(url string) bool {
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return false
+	}
+	client.DrainAndClose(resp.Body)
+	return resp.StatusCode == http.StatusOK
+}
+
+// TestRun_HealthCheckFailureOmitsHintForExplicitServerURL pins the other half:
+// an explicit --server URL is a deliberate choice, so its failure must not be
+// second-guessed with the unconfigured-URL hint.
+func TestRun_HealthCheckFailureOmitsHintForExplicitServerURL(t *testing.T) {
+	// A closed httptest server yields a well-formed but refused URL: the same
+	// failure class the hint addresses, minus the default-URL source.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	unreachable := srv.URL
+	srv.Close()
+
+	orig := os.Args
+	defer func() { os.Args = orig }()
+	os.Args = []string{"rffmpeg", "--server", unreachable, "-i", "in.mp4", "out.mp4"}
+
+	code := ExitSuccess
+	stderr := captureStderr(func() {
+		code = run()
+	})
+	if code != ExitError {
+		t.Errorf("run() with unreachable --server = %d, want %d", code, ExitError)
+	}
+	if !strings.Contains(stderr, "server health check failed") {
+		t.Errorf("run() stderr = %q, want health check failure", stderr)
+	}
+	if strings.Contains(stderr, "RFFMPEG_SERVER_URL") {
+		t.Errorf("run() stderr = %q, want no unconfigured-URL hint for an explicit --server", stderr)
 	}
 }
 
