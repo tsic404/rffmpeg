@@ -227,6 +227,151 @@ func TestRejectOverwriteIfNeeded(t *testing.T) {
 	}
 }
 
+// TestEnforceOverwritePolicy pins the pre-submit gate: -y / -n are consumed on
+// the local output target before any upload or submission, so a refusal costs
+// nothing. Streaming and remote-URL outputs have no local file to guard.
+func TestEnforceOverwritePolicy(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "out.mp4")
+	if err := os.WriteFile(outPath, []byte("existing content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	variantPath := filepath.Join(dir, "multi_1.mp4")
+	if err := os.WriteFile(variantPath, []byte("stale variant"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	absentPath := filepath.Join(dir, "absent.mp4")
+
+	tests := []struct {
+		name       string
+		outputFile string
+		streaming  bool
+		ffmpegArgs []string
+		wantCode   int
+		wantMsg    string
+	}{
+		{"no flag + existing rejects", outPath, false, []string{"-i", "in.mp4", "out.mp4"}, ExitError, "Not overwriting - exiting"},
+		{"-n + existing rejects", outPath, false, []string{"-n", "-i", "in.mp4", "out.mp4"}, ExitError, "already exists. Exiting."},
+		{"-y + existing allows", outPath, false, []string{"-y", "-i", "in.mp4", "out.mp4"}, ExitSuccess, ""},
+		{"no flag + absent allows", absentPath, false, []string{"-i", "in.mp4", "out.mp4"}, ExitSuccess, ""},
+		{"-n + absent allows", absentPath, false, []string{"-n", "-i", "in.mp4", "out.mp4"}, ExitSuccess, ""},
+		{"multi-output variant rejects", variantPath, false, []string{"-i", "in.mp4", "multi.mp4"}, ExitError, "Not overwriting - exiting"},
+		{"streaming output allows", outPath, true, []string{"-i", "in.mp4", "-f", "mp4", "-"}, ExitSuccess, ""},
+		{"remote URL output allows", "rtmp://example.com/live/stream", false, []string{"-i", "in.mp4", "rtmp://example.com/live/stream"}, ExitSuccess, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr := captureStderr(func() {
+				if code := enforceOverwritePolicy(tc.outputFile, tc.streaming, tc.ffmpegArgs); code != tc.wantCode {
+					t.Errorf("enforceOverwritePolicy() = %d, want %d", code, tc.wantCode)
+				}
+			})
+			if tc.wantMsg != "" && !strings.Contains(stderr, tc.wantMsg) {
+				t.Errorf("stderr = %q, want substring %q", stderr, tc.wantMsg)
+			}
+		})
+	}
+}
+
+// TestRun_OverwriteRefusalSkipsUploadAndSubmit locks the fail-fast contract of
+// the pre-submit gate: with an existing output and no -y the run exits before
+// touching the server beyond the health check, while -y reaches the upload —
+// so the zero-request assertion cannot pass vacuously.
+func TestRun_OverwriteRefusalSkipsUploadAndSubmit(t *testing.T) {
+	var uploads, submits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case client.HealthEndpoint:
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"status":"ok"}`))
+		case client.UploadEndpoint:
+			uploads++
+			http.Error(w, "upload rejected", http.StatusInternalServerError)
+		case client.JobsEndpoint:
+			submits++
+			http.Error(w, "submit rejected", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "in.mp4")
+	if err := os.WriteFile(input, []byte("input"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(dir, "out.mp4")
+	if err := os.WriteFile(outPath, []byte("existing content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := os.Args
+	defer func() { os.Args = orig }()
+
+	t.Run("no -y refuses before upload", func(t *testing.T) {
+		os.Args = []string{"rffmpeg", "-q", "--server", srv.URL, "-i", input, "-c:v", "libx264", outPath}
+		code := ExitSuccess
+		stderr := captureStderr(func() { code = run() })
+		if code != ExitError {
+			t.Errorf("run() = %d, want %d", code, ExitError)
+		}
+		if !strings.Contains(stderr, "Not overwriting - exiting") {
+			t.Errorf("stderr = %q, want ffmpeg's refusal", stderr)
+		}
+		if uploads != 0 || submits != 0 {
+			t.Errorf("refusal must not upload or submit: uploads=%d submits=%d", uploads, submits)
+		}
+		if b, _ := os.ReadFile(outPath); string(b) != "existing content" {
+			t.Errorf("existing output modified: %q", string(b))
+		}
+	})
+
+	t.Run("-y reaches upload", func(t *testing.T) {
+		os.Args = []string{"rffmpeg", "-q", "-y", "--server", srv.URL, "-i", input, "-c:v", "libx264", outPath}
+		code := ExitSuccess
+		captureStderr(func() { code = run() })
+		if code != ExitError {
+			t.Errorf("run() = %d, want %d (upload is rejected by the mock)", code, ExitError)
+		}
+		if uploads == 0 {
+			t.Error("-y must not be refused by the pre-submit gate: no upload attempted")
+		}
+	})
+}
+
+// TestExistingOutputTargets_NonENOENTErrorTerminates locks the boundary Radian
+// flagged: a stat failure that is not ENOENT — here ENOTDIR, a regular file used
+// as a path component — must end the enumeration instead of looping forever, and
+// must not be reported as an existing target. The timeout guard turns the old
+// hang into a deterministic failure.
+func TestExistingOutputTargets_NonENOENTErrorTerminates(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain.txt")
+	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(plain, "out.mp4")
+
+	done := make(chan []string, 1)
+	go func() { done <- existingOutputTargets(target) }()
+	select {
+	case targets := <-done:
+		if len(targets) != 0 {
+			t.Errorf("existingOutputTargets(%q) = %v, want none: an unreadable target is not a collision", target, targets)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("existingOutputTargets did not terminate on a non-ENOENT stat error")
+	}
+
+	// The gate stays fail-open here: the download stage reports the real stat
+	// error rather than the CLI claiming the file already exists.
+	if code := enforceOverwritePolicy(target, false, []string{"-i", "in.mp4", "out.mp4"}); code != ExitSuccess {
+		t.Errorf("enforceOverwritePolicy() = %d, want %d for an unstattable target", code, ExitSuccess)
+	}
+}
+
 // TestRemoveStaleOutputs pins the stale-output cleanup: a failed job must not
 // leave a stale output file that looks like this run's product, but only -y
 // authorizes touching the output path — without it the user's existing file is
