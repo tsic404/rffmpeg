@@ -2162,7 +2162,7 @@ func TestWaitForJobLoop_ExtendsOnceAfterWorkerRevert(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true, giveUpCancels)
 	})
 
 	if code != ExitSuccess {
@@ -2227,7 +2227,7 @@ func TestWaitForJobLoop_DoesNotExtendTwice(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true, giveUpCancels)
 	})
 
 	if code != ExitError {
@@ -2277,7 +2277,7 @@ func TestWaitForJobLoop_ExtendsOnceAfterJobStarts(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true, giveUpCancels)
 	})
 
 	if code != ExitSuccess {
@@ -2323,7 +2323,7 @@ func TestWaitForJobLoop_QueuedJobNotCancelledByTimeout(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
+		job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true, giveUpCancels)
 	})
 
 	if code != ExitSuccess {
@@ -2360,7 +2360,7 @@ func TestWaitForJobLoop_PendingToQueuedNotCancelled(t *testing.T) {
 
 	var job *protocol.JobInfo
 	var code int
-	job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true)
+	job, code = waitForJobLoop(fake, jobID, timeout, 0, false, true, giveUpCancels)
 
 	if code != ExitSuccess {
 		t.Fatalf("waitForJobLoop code = %d, want ExitSuccess (worker TIMEOUT verdict observed)", code)
@@ -2393,7 +2393,7 @@ func TestWaitForJobLoop_PollTimeoutCancelsPendingJob(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, 0, pollTimeout, false, true)
+		job, code = waitForJobLoop(fake, jobID, 0, pollTimeout, false, true, giveUpCancels)
 	})
 
 	if code != ExitError {
@@ -2435,7 +2435,7 @@ func TestWaitForJobLoop_PollTimeoutDoesNotCancelRunningJob(t *testing.T) {
 	var job *protocol.JobInfo
 	var code int
 	stderr := captureStderr(func() {
-		job, code = waitForJobLoop(fake, jobID, 0, pollTimeout, false, true)
+		job, code = waitForJobLoop(fake, jobID, 0, pollTimeout, false, true, giveUpCancels)
 	})
 
 	if code != ExitSuccess {
@@ -2558,7 +2558,7 @@ func TestWaitForJobLoop_RetriesExhausted(t *testing.T) {
 
 	var code int
 	stderr := captureStderr(func() {
-		_, code = waitForJobLoop(fake, "job-lost", 0, 0, false, true)
+		_, code = waitForJobLoop(fake, "job-lost", 0, 0, false, true, giveUpCancels)
 	})
 
 	if code != ExitDisconnected {
@@ -2633,5 +2633,439 @@ func TestReportTerminalJob_UnexpectedStatus(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "unexpected status: pending") {
 		t.Errorf("stderr = %q, want unexpected-status message", stderr)
+	}
+}
+
+// fakeResumeClient serves a scripted job record and output payload without a
+// server, recording every call so the resume path's invariants are assertable:
+// it never cancels a resumed job, and it waits only for a non-terminal one.
+type fakeResumeClient struct {
+	job       protocol.JobInfo
+	getErr    error
+	waitJob   *protocol.JobInfo // returned by the wait primitives; nil = DeadlineExceeded
+	payload   string
+	getCalls  int
+	waitCalls int
+	cancels   int
+	downloads []string
+}
+
+func (f *fakeResumeClient) GetJob(jobID string) (*protocol.JobInfo, error) {
+	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	job := f.job
+	return &job, nil
+}
+
+func (f *fakeResumeClient) WaitForJobWithLogs(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	f.waitCalls++
+	return f.waitResult()
+}
+
+func (f *fakeResumeClient) WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	f.waitCalls++
+	return f.waitResult()
+}
+
+func (f *fakeResumeClient) waitResult() (*protocol.JobInfo, error) {
+	if f.waitJob == nil {
+		return nil, context.DeadlineExceeded
+	}
+	job := *f.waitJob
+	return &job, nil
+}
+
+func (f *fakeResumeClient) CancelJob(jobID string) error {
+	f.cancels++
+	return nil
+}
+
+func (f *fakeResumeClient) DownloadOutput(fileID, outputPath string) error {
+	f.downloads = append(f.downloads, fileID)
+	return os.WriteFile(outputPath, []byte(f.payload), 0o644)
+}
+
+// runResumeForTest drives runResume with a fake client and returns its exit
+// code plus captured stderr.
+func runResumeForTest(t *testing.T, fake *fakeResumeClient, opts *Options) (int, string) {
+	t.Helper()
+	jobSubmitted = false
+	defer func() { jobSubmitted = false }()
+
+	var code int
+	stderr := captureStderr(func() {
+		code = runResume(fake, &config.Config{}, opts, &stderrTee{})
+	})
+	return code, stderr
+}
+
+// TestRunResume_DownloadsCompletedJob pins the core promise: a completed job
+// re-attaches without waiting and its server-side output lands at the
+// filename the job recorded.
+func TestRunResume_DownloadsCompletedJob(t *testing.T) {
+	const payload = "resumed-output-bytes"
+	dir := t.TempDir()
+	target := filepath.Join(dir, "recorded.mp4")
+
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-1",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: target,
+			OutputFiles:    []string{"file-1"},
+		},
+		payload: payload,
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-1"})
+
+	if code != ExitSuccess {
+		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
+	}
+	if got := len(fake.downloads); got != 1 || fake.downloads[0] != "file-1" {
+		t.Errorf("downloads = %v, want [file-1]", fake.downloads)
+	}
+	if fake.waitCalls != 0 {
+		t.Errorf("waitCalls = %d, want 0 (a terminal job needs no wait)", fake.waitCalls)
+	}
+	if fake.cancels != 0 {
+		t.Errorf("cancels = %d, want 0 (--resume never cancels)", fake.cancels)
+	}
+	b, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("output not written: %v", err)
+	}
+	if string(b) != payload {
+		t.Errorf("output = %q, want %q", string(b), payload)
+	}
+	if !strings.Contains(stderr, "Output saved: "+target) {
+		t.Errorf("stderr missing saved line: %s", stderr)
+	}
+}
+
+// TestRunResume_ExplicitTargetWins pins the override: an output path on the
+// command line replaces the job's recorded filename, which must not be written.
+func TestRunResume_ExplicitTargetWins(t *testing.T) {
+	dir := t.TempDir()
+	recorded := filepath.Join(dir, "recorded.mp4")
+	target := filepath.Join(dir, "chosen.mp4")
+
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-2",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: recorded,
+			OutputFiles:    []string{"file-2"},
+		},
+		payload: "explicit-target",
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-2", ResumeOutput: target})
+
+	if code != ExitSuccess {
+		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "explicit-target" {
+		t.Errorf("target not written: %q, %v", string(b), err)
+	}
+	if _, err := os.Stat(recorded); !os.IsNotExist(err) {
+		t.Errorf("recorded filename was written despite the explicit target (err=%v)", err)
+	}
+}
+
+// TestRunResume_WaitsForRunningJob pins the re-attach case that motivates
+// --resume: the job is still running (its first process gave up), so the
+// resumed run waits for the terminal status and then downloads the output.
+func TestRunResume_WaitsForRunningJob(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "running.mp4")
+
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-3",
+			Status:         protocol.JobStatusRunning,
+			OutputFilename: target,
+		},
+		waitJob: &protocol.JobInfo{
+			ID:             "job-resume-3",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: target,
+			OutputFiles:    []string{"file-3"},
+		},
+		payload: "late-output",
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-3"})
+
+	if code != ExitSuccess {
+		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
+	}
+	if fake.waitCalls != 1 {
+		t.Errorf("waitCalls = %d, want 1", fake.waitCalls)
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "late-output" {
+		t.Errorf("output not downloaded after wait: %q, %v", string(b), err)
+	}
+	if !strings.Contains(stderr, "Resuming job job-resume-3") {
+		t.Errorf("stderr missing resume banner: %s", stderr)
+	}
+}
+
+// TestRunResume_GiveUpDetaches pins the non-destructive give-up: when the
+// client-side bound exhausts, the resumed job must be left running server-side
+// (never cancelled) and the run must exit with the "still running" code so the
+// operator can attach again.
+func TestRunResume_GiveUpDetaches(t *testing.T) {
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-4",
+			Status:         protocol.JobStatusPending,
+			OutputFilename: filepath.Join(t.TempDir(), "pending.mp4"),
+		},
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-4", Timeout: 50 * time.Millisecond})
+
+	if code != ExitDisconnected {
+		t.Fatalf("code = %d, want ExitDisconnected; stderr: %s", code, stderr)
+	}
+	if fake.cancels != 0 {
+		t.Errorf("cancels = %d, want 0 (a resumed job must keep running)", fake.cancels)
+	}
+	if len(fake.downloads) != 0 {
+		t.Errorf("downloads = %v, want none", fake.downloads)
+	}
+	if !strings.Contains(stderr, "--resume job-resume-4") {
+		t.Errorf("stderr missing re-attach hint: %s", stderr)
+	}
+}
+
+// TestRunResume_FailedJobReportsTerminalFailure pins that a failed job is
+// reported as the job's own failure, with nothing downloaded.
+func TestRunResume_FailedJobReportsTerminalFailure(t *testing.T) {
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-5",
+			Status:         protocol.JobStatusFailed,
+			OutputFilename: filepath.Join(t.TempDir(), "failed.mp4"),
+			Error:          "ffmpeg exited with code 1",
+			FailureType:    "FFMPEG_ERROR",
+		},
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-5"})
+
+	if code != ExitError {
+		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
+	}
+	if len(fake.downloads) != 0 {
+		t.Errorf("downloads = %v, want none", fake.downloads)
+	}
+	if !strings.Contains(stderr, "Job failed:") || !strings.Contains(stderr, "FFMPEG_ERROR") {
+		t.Errorf("stderr missing terminal failure report: %s", stderr)
+	}
+}
+
+// TestRunResume_UnknownJob pins the lookup failure: an id the server does not
+// know is reported as such instead of being treated as a job with no output.
+func TestRunResume_UnknownJob(t *testing.T) {
+	fake := &fakeResumeClient{getErr: errors.New("job not found: 404")}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-missing"})
+
+	if code != ExitError {
+		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "cannot resume job job-missing") {
+		t.Errorf("stderr missing lookup failure: %s", stderr)
+	}
+}
+
+// TestRunResume_StreamingJobRejected pins that a streaming job is refused: its
+// output went to the stdout of the run that submitted it and cannot be replayed.
+func TestRunResume_StreamingJobRejected(t *testing.T) {
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:              "job-resume-6",
+			Status:          protocol.JobStatusCompleted,
+			StreamingOutput: true,
+			OutputFiles:     []string{"file-6"},
+		},
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-6"})
+
+	if code != ExitError {
+		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
+	}
+	if len(fake.downloads) != 0 {
+		t.Errorf("downloads = %v, want none", fake.downloads)
+	}
+	if !strings.Contains(stderr, "cannot replay") {
+		t.Errorf("stderr missing replay refusal: %s", stderr)
+	}
+}
+
+// TestRunResume_SharedFSJobReportsPath pins that a shared-FS job — whose worker
+// writes straight to the shared path and skips the upload — is reported as
+// already delivered rather than treated as a missing output.
+func TestRunResume_SharedFSJobReportsPath(t *testing.T) {
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-7",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: "/mnt/shared/out.mp4",
+			DirectPaths:    []string{"/mnt/shared/in.mp4"},
+		},
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-7"})
+
+	if code != ExitSuccess {
+		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
+	}
+	if len(fake.downloads) != 0 {
+		t.Errorf("downloads = %v, want none", fake.downloads)
+	}
+	if !strings.Contains(stderr, "/mnt/shared/out.mp4") {
+		t.Errorf("stderr missing shared-FS output path: %s", stderr)
+	}
+}
+
+// TestRunResume_NoServerSideOutput pins the empty-record case: a completed job
+// whose server-side output list is empty cannot satisfy the resume request and
+// must not report success.
+func TestRunResume_NoServerSideOutput(t *testing.T) {
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-8",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: "out.mp4",
+		},
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-8"})
+
+	if code != ExitError {
+		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "holds no output file") {
+		t.Errorf("stderr missing empty-output report: %s", stderr)
+	}
+}
+
+// TestRunResume_OverwriteRefusalPrecedesWait pins ffmpeg's overwrite semantics
+// on the resume target: without -y an existing file is refused before the run
+// parks itself in a wait, and the file is left untouched.
+func TestRunResume_OverwriteRefusalPrecedesWait(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "existing.mp4")
+	if err := os.WriteFile(target, []byte("user data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-9",
+			Status:         protocol.JobStatusRunning,
+			OutputFilename: target,
+		},
+		waitJob: &protocol.JobInfo{
+			ID:             "job-resume-9",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: target,
+			OutputFiles:    []string{"file-9"},
+		},
+		payload: "downloaded",
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-9"})
+
+	if code != ExitError {
+		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
+	}
+	if fake.waitCalls != 0 {
+		t.Errorf("waitCalls = %d, want 0 (refusal precedes the wait)", fake.waitCalls)
+	}
+	if len(fake.downloads) != 0 {
+		t.Errorf("downloads = %v, want none", fake.downloads)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "user data" {
+		t.Errorf("existing file was modified: %q", string(b))
+	}
+	if !strings.Contains(stderr, "already exists") {
+		t.Errorf("stderr missing overwrite refusal: %s", stderr)
+	}
+}
+
+// TestRunResume_SharedFSJobRejectsExplicitTarget pins the other half of the
+// shared-FS case: the job's output is not on the server, so a target the
+// operator asked for cannot be filled and must fail rather than silently
+// succeed with nothing written.
+func TestRunResume_SharedFSJobRejectsExplicitTarget(t *testing.T) {
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-10",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: "/mnt/shared/out.mp4",
+			DirectPaths:    []string{"/mnt/shared/in.mp4"},
+		},
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-10", ResumeOutput: filepath.Join(t.TempDir(), "want.mp4")})
+
+	if code != ExitError {
+		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "/mnt/shared/out.mp4") {
+		t.Errorf("stderr missing the job's real output path: %s", stderr)
+	}
+}
+
+// TestRunResume_RelativeRecordedNameReportsAbsoluteTarget pins the operator-
+// facing half of the resume contract: a recorded filename is a bare basename in
+// upload/download mode and lands in the process's working directory, so the run
+// must name the resolved absolute target instead of echoing the basename.
+func TestRunResume_RelativeRecordedNameReportsAbsoluteTarget(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatalf("restoring working directory: %v", err)
+		}
+	}()
+
+	fake := &fakeResumeClient{
+		job: protocol.JobInfo{
+			ID:             "job-resume-11",
+			Status:         protocol.JobStatusCompleted,
+			OutputFilename: "recorded.mp4",
+			OutputFiles:    []string{"file-11"},
+		},
+		payload: "cwd-output",
+	}
+
+	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-11"})
+
+	want, err := filepath.Abs("recorded.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != ExitSuccess {
+		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
+	}
+	if b, err := os.ReadFile(want); err != nil || string(b) != "cwd-output" {
+		t.Errorf("output not written to %s: %q, %v", want, string(b), err)
+	}
+	if !strings.Contains(stderr, "Downloading output to "+want) || !strings.Contains(stderr, "Output saved: "+want) {
+		t.Errorf("stderr does not name the absolute target %s: %s", want, stderr)
 	}
 }

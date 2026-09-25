@@ -72,7 +72,12 @@ type Options struct {
 	ServerLossTimeout    time.Duration
 	ServerLossTimeoutSet bool
 	Retry                bool
-	FmpegArgs            []string
+	// ResumeJobID re-attaches to a job an earlier run submitted instead of
+	// creating a new one; ResumeOutput is the optional explicit download target
+	// (empty = the job's recorded output filename).
+	ResumeJobID  string
+	ResumeOutput string
+	FmpegArgs    []string
 
 	// Info flags
 	ShowEncoders   bool
@@ -119,6 +124,11 @@ func parseArgs(argList []string) (*Options, error) {
 
 		switch arg {
 		case "--":
+			// --resume never runs ffmpeg, so there is nothing to pass through;
+			// accepting the separator would silently drop the target it hides.
+			if opts.ResumeJobID != "" {
+				return nil, errors.New("--resume does not accept a '--' separator: pass the output path and -y/-n directly")
+			}
 			// Pass everything after "--" to ffmpeg verbatim.
 			opts.FmpegArgs = append(opts.FmpegArgs, positionalArgs...)
 			positionalArgs = positionalArgs[:0]
@@ -216,6 +226,20 @@ func parseArgs(argList []string) (*Options, error) {
 		case "--retry", "-retry":
 			opts.Retry = true
 
+		case "--resume", "-resume":
+			val, err := needValue(i, arg)
+			if err != nil {
+				return nil, err
+			}
+			// A value starting with "-" is a mistyped flag, not a job id: no
+			// server-generated id (UUID) can look like one.
+			if val == "" || strings.HasPrefix(val, "-") {
+				return nil, fmt.Errorf("flag %s requires a job id, got %q", arg, val)
+			}
+			warnDuplicate(arg)
+			opts.ResumeJobID = val
+			i++
+
 		case "-encoders", "--encoders":
 			opts.ShowEncoders = true
 		case "-decoders", "--decoders":
@@ -305,12 +329,93 @@ func parseArgs(argList []string) (*Options, error) {
 				}
 			}
 		}
+	} else if opts.ResumeJobID != "" {
+		// --resume re-attaches to an existing job instead of running ffmpeg, so
+		// its positionals are the optional output path plus -y / -n.
+		if err := parseResumeArgs(opts, positionalArgs); err != nil {
+			return nil, err
+		}
 	} else {
 		// Not a probe subcommand — all positional args are ffmpeg args
 		opts.FmpegArgs = append(opts.FmpegArgs, positionalArgs...)
 	}
 
+	// --resume replaces the whole transcode flow: a capability query or a probe
+	// combined with it is a contradiction, not a precedence question, and
+	// honoring one side silently would misreport what ran.
+	if opts.ResumeJobID != "" {
+		if opts.IsProbe {
+			return nil, errors.New("--resume cannot be combined with the probe subcommand")
+		}
+		if name := opts.infoFlagName(); name != "" {
+			return nil, fmt.Errorf("--resume cannot be combined with %s", name)
+		}
+	}
+
 	return opts, nil
+}
+
+// parseResumeArgs collects the arguments that follow --resume: at most one
+// output path plus ffmpeg's -y / -n overwrite flags. Any other argument is
+// rejected rather than dropped — --resume never re-runs ffmpeg, so ignoring an
+// ffmpeg option would misrepresent what the recorded job actually did.
+func parseResumeArgs(opts *Options, args []string) error {
+	for _, arg := range args {
+		switch {
+		case arg == "-y" || arg == "-n":
+			// Kept in FmpegArgs so the overwrite policy helpers read them the
+			// same way they read a transcode invocation.
+			opts.FmpegArgs = append(opts.FmpegArgs, arg)
+		case isStdoutTarget(arg):
+			return fmt.Errorf("--resume writes the job's output to a file; %q (stdout) is not supported", arg)
+		case strings.HasPrefix(arg, "-"):
+			return fmt.Errorf("--resume accepts only an optional output path and -y/-n, got %q", arg)
+		case opts.ResumeOutput != "":
+			return fmt.Errorf("--resume accepts at most one output path, got %q and %q", opts.ResumeOutput, arg)
+		case pathutil.IsRemoteURL(arg):
+			return fmt.Errorf("--resume downloads to a local file; %q is a remote URL", arg)
+		default:
+			opts.ResumeOutput = arg
+		}
+	}
+	return nil
+}
+
+// isStdoutTarget reports whether an --resume target names stdout, mirroring the
+// submit path's normalization of the output token: ffmpeg treats "-" and
+// "pipe:1" as the same stream, and matches protocol names without regard to
+// case. A resumed job's byte stream cannot be replayed, so both spellings are
+// refused rather than written out as a file literally named "pipe:1".
+func isStdoutTarget(arg string) bool {
+	return arg == "-" || strings.EqualFold(arg, "pipe:1")
+}
+
+// infoFlagName returns the set capability-query flag (-encoders and friends),
+// or "" when none is set.
+func (o *Options) infoFlagName() string {
+	for _, flag := range []struct {
+		name string
+		set  bool
+	}{
+		{"-encoders", o.ShowEncoders},
+		{"-decoders", o.ShowDecoders},
+		{"-codecs", o.ShowCodecs},
+		{"-hwaccels", o.ShowHwaccels},
+		{"-filters", o.ShowFilters},
+		{"-pix_fmts", o.ShowPixFmts},
+		{"-formats", o.ShowFormats},
+		{"-buildconf", o.ShowBuildconf},
+		{"-layouts", o.ShowLayouts},
+		{"-protocols", o.ShowProtocols},
+		{"-sample_fmts", o.ShowSampleFmts},
+		{"-bsfs", o.ShowBsfs},
+		{"-colors", o.ShowColors},
+	} {
+		if flag.set {
+			return flag.name
+		}
+	}
+	return ""
 }
 
 func main() {
@@ -403,11 +508,11 @@ func run() (code int) {
 
 	ffmpegArgs := opts.FmpegArgs
 
-	// If no ffmpeg args and not in probe mode, print the full help and exit
-	// non-zero. The exit code is what lets callers detect a missing command;
-	// the full option list is what lets an operator fix the invocation without
-	// a second run, which a bare usage line does not.
-	if !opts.IsProbe && len(ffmpegArgs) == 0 {
+	// If no ffmpeg args and neither probe nor --resume mode, print the full help
+	// and exit non-zero. The exit code is what lets callers detect a missing
+	// command; the full option list is what lets an operator fix the invocation
+	// without a second run, which a bare usage line does not.
+	if !opts.IsProbe && opts.ResumeJobID == "" && len(ffmpegArgs) == 0 {
 		printUsage()
 		return ExitError
 	}
@@ -482,6 +587,11 @@ func run() (code int) {
 		return runProbe(cli, opts.ProbeInput, opts.Quiet, sharedFS)
 	}
 
+	// --- Resume an earlier job ---
+	if opts.ResumeJobID != "" {
+		return runResume(cli, cfg, opts, tee)
+	}
+
 	return runTranscode(cli, cfg, opts, ffmpegArgs, sharedFS, tee)
 }
 
@@ -498,22 +608,27 @@ func unconfiguredServerURLHint(cfg *config.Config) string {
 	return fmt.Sprintf("Hint: no server URL configured, using the default %s; set RFFMPEG_SERVER_URL or pass --server <url>.", config.DefaultServerURL)
 }
 
+// pollTimeoutBudget resolves the client-side poll cap, flag > env/config >
+// default. 0 means "no cap" (opt out). config.Load already folds
+// RFFMPEG_POLL_TIMEOUT and rffmpeg.json's "poll_timeout" into cfg.PollTimeout
+// (nil = unset).
+func pollTimeoutBudget(cfg *config.Config, opts *Options) time.Duration {
+	if opts.PollTimeoutSet {
+		return opts.PollTimeout
+	}
+	if cfg.PollTimeout != nil {
+		return time.Duration(*cfg.PollTimeout)
+	}
+	return config.DefaultPollTimeout
+}
+
 // runTranscode submits the transcoding job described by opts/ffmpegArgs and
 // waits for it, streaming logs and downloading outputs.
 func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegArgs []string, sharedFS bool, tee *stderrTee) int {
 	quiet := opts.Quiet
 	autoHW := opts.AutoHW
 	timeout := opts.Timeout
-	// Client-side poll cap, resolved flag > env/config > default. 0 means "no
-	// cap" (opt out). config.Load already folds RFFMPEG_POLL_TIMEOUT and
-	// rffmpeg.json's "poll_timeout" into cfg.PollTimeout (nil = unset).
-	pollTimeout := config.DefaultPollTimeout
-	if cfg.PollTimeout != nil {
-		pollTimeout = time.Duration(*cfg.PollTimeout)
-	}
-	if opts.PollTimeoutSet {
-		pollTimeout = opts.PollTimeout
-	}
+	pollTimeout := pollTimeoutBudget(cfg, opts)
 
 	// Parse ffmpeg arguments
 	parser := args.NewParser()
@@ -811,7 +926,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	// reverts to pending, the next GetJob reports one. Re-reading on each
 	// iteration lets the client extend its wait to the freshly attached
 	// verdict instead of giving up before the server can emit it.
-	job, code := waitForJobLoop(cli, jobID, timeout, pollTimeout, result.StreamingOutput, quiet)
+	job, code := waitForJobLoop(cli, jobID, timeout, pollTimeout, result.StreamingOutput, quiet, giveUpCancels)
 	if code != ExitSuccess {
 		// ExitDisconnected leaves the job running server-side, so its output
 		// may still land and must not be touched. A give-up (ExitError) cancels
@@ -846,31 +961,8 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		// Streaming output: data already written to stdout via WebSocket
 		// No file download needed
 	} else if len(job.OutputFiles) > 0 {
-		for i, outputFileID := range job.OutputFiles {
-			outputPath := multiOutputPath(result.OutputFile, i)
-
-			// Enforce ffmpeg's overwrite semantics before writing the local
-			// output: in the default upload/download mode the CLI is the sole
-			// writer of the user's output file, so a pre-existing file must not
-			// be silently truncated. Without -y (or with -n), refuse
-			// with ffmpeg's message and a non-zero exit, mirroring the worker's
-			// shared-FS guard.
-			if code := rejectOverwriteIfNeeded(outputPath, ffmpegArgs); code != ExitSuccess {
-				return code
-			}
-
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "Downloading output to %s...\n", outputPath)
-			}
-
-			if err := cli.DownloadOutput(outputFileID, outputPath); err != nil {
-				fmt.Fprintf(os.Stderr, "Error downloading output: %v\n", err)
-				return ExitError
-			}
-
-			if !quiet {
-				fmt.Fprintf(os.Stderr, "Output saved: %s\n", outputPath)
-			}
+		if code := downloadJobOutputs(cli, job, result.OutputFile, ffmpegArgs, quiet); code != ExitSuccess {
+			return code
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "Warning: no output files returned from server")
@@ -881,6 +973,174 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 	}
 
 	// Return success exit code
+	return ExitSuccess
+}
+
+// outputDownloader is the subset of *client.Client the output download needs.
+// It is an interface so tests can serve a scripted file without a server.
+type outputDownloader interface {
+	DownloadOutput(fileID, outputPath string) error
+}
+
+// jobResumeClient is the client surface --resume needs: the wait primitives
+// (shared with the submit path) plus the output download.
+type jobResumeClient interface {
+	jobWaitClient
+	outputDownloader
+}
+
+// downloadJobOutputs writes a completed job's server-side output files to the
+// local target path(s). The caller has already established that the job has
+// files to download and that a local target is the right destination.
+//
+// Each target is guarded by ffmpeg's overwrite semantics before it is written:
+// in the default upload/download mode the CLI is the sole writer of the user's
+// output file, so a pre-existing file must not be silently truncated. Without
+// -y (or with -n), the download refuses with ffmpeg's message and a non-zero
+// exit, mirroring the worker's shared-FS guard.
+func downloadJobOutputs(cli outputDownloader, job *protocol.JobInfo, outputFile string, ffmpegArgs []string, quiet bool) int {
+	for i, outputFileID := range job.OutputFiles {
+		outputPath := multiOutputPath(outputFile, i)
+
+		if code := rejectOverwriteIfNeeded(outputPath, ffmpegArgs); code != ExitSuccess {
+			return code
+		}
+
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Downloading output to %s...\n", outputPath)
+		}
+
+		if err := cli.DownloadOutput(outputFileID, outputPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error downloading output: %v\n", err)
+			return ExitError
+		}
+
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Output saved: %s\n", outputPath)
+		}
+	}
+	return ExitSuccess
+}
+
+// runResume re-attaches to a job an earlier CLI run submitted — typically one
+// that gave up waiting with ExitDisconnected — and delivers its output. It
+// never cancels the job: a client-side give-up here leaves the work running
+// server-side, so the operator can attach again later.
+func runResume(cli jobResumeClient, cfg *config.Config, opts *Options, tee *stderrTee) int {
+	jobID := opts.ResumeJobID
+	quiet := opts.Quiet
+
+	job, err := cli.GetJob(jobID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot resume job %s: %v\n", jobID, err)
+		return ExitError
+	}
+	// The job exists server-side, so a later failure is not a pre-submit one:
+	// the RFFMPEG_LOG_FILE diagnostic's "no job to query" framing no longer
+	// applies. Stop mirroring stderr before the wait below starts its
+	// WebSocket listener goroutines (see runTranscode).
+	jobSubmitted = true
+	tee.stop()
+
+	// A streaming job's output went to the stdout of the run that submitted
+	// it; the byte stream is not replayable, so there is nothing to deliver.
+	if job.StreamingOutput {
+		fmt.Fprintf(os.Stderr, "Error: job %s streamed its output to stdout; a resumed run cannot replay it\n", jobID)
+		return ExitError
+	}
+
+	outputFile := opts.ResumeOutput
+	if outputFile == "" {
+		// The recorded filename is what the submit run sent: a basename in
+		// upload/download mode, an absolute path in shared-FS mode.
+		outputFile = job.OutputFilename
+	}
+	if outputFile == "" {
+		fmt.Fprintf(os.Stderr, "Error: job %s records no output filename; pass the target explicitly: rffmpeg --resume %s <output-path>\n", jobID, jobID)
+		return ExitError
+	}
+
+	// Resolve a local target to an absolute path: a recorded filename is a bare
+	// basename in upload/download mode, so the download prompt and every refusal
+	// that names the target must say where the file actually lands instead of
+	// leaving the operator to guess which directory the run resolved it against.
+	if !pathutil.IsRemoteURL(outputFile) {
+		abs, err := filepath.Abs(outputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: resolving output path %s: %v\n", outputFile, err)
+			return ExitError
+		}
+		outputFile = abs
+	}
+
+	// A direct-path (shared-FS) job's worker writes straight to the shared path
+	// and skips the upload, so the server holds no copy to hand over. The job's
+	// own record decides this: the resuming client's shared_fs setting says how
+	// this client would submit, not how the job ran. An explicit target cannot
+	// be satisfied either way, so it fails before the wait.
+	jobSharedFS := len(job.DirectPaths) > 0
+	if jobSharedFS && opts.ResumeOutput != "" {
+		fmt.Fprintf(os.Stderr, "Error: job %s ran in shared filesystem mode; its output is at %s, not on the server\n", jobID, job.OutputFilename)
+		return ExitError
+	}
+
+	// Consume -y / -n on the local target before waiting: ffmpeg decides before
+	// encoding, and a resumed job must not park the operator behind a long wait
+	// only to refuse the write. Skipped when the server holds no copy — the
+	// file at the recorded path is then the worker's own output, not a target
+	// this run may touch.
+	if !jobSharedFS {
+		if code := enforceOverwritePolicy(outputFile, false, opts.FmpegArgs); code != ExitSuccess {
+			return code
+		}
+	}
+
+	// Wait only when the job has not finished: a terminal job is delivered from
+	// the record just read, and re-subscribing to a finished job's stream would
+	// only add a poll round-trip.
+	if !protocol.IsTerminalStatus(job.Status) {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Resuming job %s (status: %s)\n", jobID, job.Status)
+			fmt.Fprintln(os.Stderr, "Waiting for completion...")
+		}
+		var code int
+		job, code = waitForJobLoop(cli, jobID, opts.Timeout, pollTimeoutBudget(cfg, opts), false, quiet, giveUpDetaches)
+		if code != ExitSuccess {
+			return code
+		}
+	}
+
+	if code := reportTerminalJob(job); code != ExitSuccess {
+		// The job produced no output, so a stale file at the target must not
+		// masquerade as this job's result.
+		removeStaleOutputs(outputFile, false, jobSharedFS, opts.FmpegArgs)
+		return code
+	}
+
+	if jobSharedFS {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Job %s ran in shared filesystem mode; its output is at %s (nothing to download)\n", jobID, outputFile)
+		}
+		return ExitSuccess
+	}
+	if pathutil.IsRemoteURL(outputFile) {
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "Job %s wrote its output to the network URL %s (nothing to download)\n", jobID, outputFile)
+		}
+		return ExitSuccess
+	}
+	if len(job.OutputFiles) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: job %s holds no output file on the server; nothing to download\n", jobID)
+		return ExitError
+	}
+
+	if code := downloadJobOutputs(cli, job, outputFile, opts.FmpegArgs, quiet); code != ExitSuccess {
+		return code
+	}
+
+	if !quiet {
+		fmt.Fprintln(os.Stderr, "Done!")
+	}
 	return ExitSuccess
 }
 
@@ -1049,8 +1309,20 @@ type jobWaitClient interface {
 	CancelJob(jobID string) error
 }
 
+// giveUpPolicy says what a client-side wait give-up does to the server-side
+// job. The submit path owns the job it just created, so it cancels; --resume
+// attaches to a job from an earlier run, so it detaches and leaves it running.
+type giveUpPolicy int
+
+const (
+	giveUpCancels giveUpPolicy = iota
+	giveUpDetaches
+)
+
 // waitForJobLoop waits for the job to reach a terminal status and returns it,
-// or cancels the job and returns ExitError when the client gives up. It loops
+// or gives up on it when the client-side bound exhausts: onGiveUp decides
+// whether that give-up cancels the server-side job (submit path) or leaves it
+// running for a later --resume (detach path). It loops
 // because the server's NO_WORKER_AVAILABLE verdict deadline is only attached
 // to pending/unassigned jobs: a job queued at submit time carries none, but
 // reverts to pending if its worker dies. Re-reading the deadline each
@@ -1058,7 +1330,7 @@ type jobWaitClient interface {
 // instead of giving up before the server can emit it. pollTimeout is the
 // client-side cap on the wait-for-worker (pending) phase, applied only when no
 // --timeout budget and no server verdict deadline bound it.
-func waitForJobLoop(cli jobWaitClient, jobID string, timeout, pollTimeout time.Duration, streamingOutput, quiet bool) (*protocol.JobInfo, int) {
+func waitForJobLoop(cli jobWaitClient, jobID string, timeout, pollTimeout time.Duration, streamingOutput, quiet bool, onGiveUp giveUpPolicy) (*protocol.JobInfo, int) {
 	var job *protocol.JobInfo
 	for {
 		var noWorkerDeadline *time.Time
@@ -1129,20 +1401,30 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout, pollTimeout time.D
 			continue
 		}
 
-		// The job is genuinely not done. Cancel it server-side so it doesn't
-		// linger, and report a clear client-side timeout — distinct from a
-		// server verdict (NO_WORKER_AVAILABLE, TIMEOUT, ...) so operators can
-		// tell who gave up. No server verdict can be pending here: the extend
-		// guard above already continued whenever a NoWorkerDeadline attached,
-		// so this branch means the lookup failed or no deadline exists (sweep
-		// disabled or status not pending).
+		// The job is genuinely not done. Report the duration of the bound that
+		// actually exhausted, not a re-derived default: a wait bounded by the
+		// server's NO_WORKER_AVAILABLE verdict deadline must print that horizon,
+		// not the poll-cap fallback. No server verdict can be pending here: the
+		// extend guard above already continued whenever a NoWorkerDeadline
+		// attached, so this branch means the lookup failed or no deadline exists
+		// (sweep disabled or status not pending).
+		budget := giveUpBudget(waitDeadline, finalJob, timeout, pollTimeout)
+
+		// A detached job belongs to an earlier run: leave it running so the
+		// operator can attach again, and say so. ExitDisconnected is the exit
+		// code that already means "the job keeps running server-side".
+		if onGiveUp == giveUpDetaches {
+			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s; it keeps running server-side — re-run with --resume %s to attach again\n", jobID, budget, jobID)
+			return nil, ExitDisconnected
+		}
+
+		// The submitted job is this run's to clean up: cancel it server-side so
+		// it doesn't linger, and report a clear client-side timeout — distinct
+		// from a server verdict (NO_WORKER_AVAILABLE, TIMEOUT, ...) so operators
+		// can tell who gave up.
 		if cancelErr := cli.CancelJob(jobID); cancelErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to cancel timed-out job %s: %v\n", jobID, cancelErr)
 		}
-		// Report the duration of the bound that actually exhausted, not a
-		// re-derived default: a wait bounded by the server's NO_WORKER_AVAILABLE
-		// verdict deadline must print that horizon, not the poll-cap fallback.
-		budget := giveUpBudget(waitDeadline, finalJob, timeout, pollTimeout)
 		if finalErr == nil && (finalJob.Status == protocol.JobStatusPending || finalJob.Status == protocol.JobStatusQueued) {
 			fmt.Fprintf(os.Stderr, "Error: job %s did not start within %s and was cancelled by the client (still waiting for a worker)\n", jobID, budget)
 		} else {
@@ -2076,6 +2358,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `rffmpeg - Remote FFmpeg Client
 Usage:
   rffmpeg [rffmpeg_options] [ffmpeg_options]        Run ffmpeg transcoding
+  rffmpeg --resume <job-id> [output-path] [-y|-n]    Re-attach to an existing job and download its output
   rffmpeg probe <file|URL> [-i <file|URL>] [-show_streams] [-show_format] [-of json] [--server URL] [--token TOKEN] [-q]   Probe media file or URL
   rffmpeg -encoders                                  List available encoders (ffmpeg-compatible format)
   rffmpeg -decoders                                  List available decoders (ffmpeg-compatible format)
@@ -2117,6 +2400,9 @@ rffmpeg options:
   --max-retries N         Max WS reconnect attempts / HTTP poll retry budget (default: 14, ~5 min; 0 = no retries)
   --server-loss-timeout D Max wait for a submitted job once the server stops responding (default: 5s; 0 = no cap)
   --retry                 Retry job submission on rate-limit (429) with exponential backoff (default: off)
+  --resume JOB_ID         Re-attach to a job an earlier run submitted and download its output.
+                          Never cancels the job; --timeout/--poll-timeout bound the wait, and
+                          the optional output-path overrides the job's recorded filename.
 
 ffmpeg options:
   All standard ffmpeg options are supported and passed through to the server.
@@ -2172,6 +2458,10 @@ Examples:
 
   # Auto hardware encoder upgrade
   rffmpeg --auto-hw -i input.mp4 -c:v libx264 output.mp4
+
+  # Re-attach to a job an earlier run gave up on (exit code 2) and fetch its output
+  rffmpeg --resume 3f2a9c1e-... -y
+  rffmpeg --resume 3f2a9c1e-... /data/output.mp4 -y
 
 Configuration:
   Config file locations (in order of priority):
