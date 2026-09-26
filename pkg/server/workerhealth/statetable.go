@@ -150,19 +150,16 @@ type SlowNodeDetectionResult struct {
 	Median       float64
 }
 
-// DetectSlowWorkers scans all worker states, computes the cluster median of EWMA-smoothed
-// throughput, and marks workers as evicted if their throughput is below median/SlowNodeThreshold.
-// Previously evicted workers are recovered if their throughput exceeds median/RecoveryThreshold.
-// Workers with zero throughput and no active jobs (idle) are excluded from the median calculation
-// and are not marked as slow — they are simply skipped. Newly registered workers that have
-// completed fewer than MinJobsForEviction jobs are also excluded, so cold-start throughput
-// (which is not yet representative) cannot trigger a false eviction.
-
 // workerInfo is the per-worker view DetectSlowWorkers evaluates.
 type workerInfo struct {
 	id             string
 	ewmaJobsPerSec float64
-	hasJobs        bool
+	// jobsPerSec is the raw throughput of the latest heartbeat. It is what
+	// separates "no work this interval" from "slow work": the EWMA of a worker
+	// that stopped producing decays toward zero without ever reaching it, so an
+	// exact-zero test on the smoothed value cannot identify an idle worker.
+	jobsPerSec float64
+	hasJobs    bool
 }
 
 // eligibleSlowNodeWorkersLocked collects the workers eligible for slow-node
@@ -182,6 +179,7 @@ func (t *WorkerStateTable) eligibleSlowNodeWorkersLocked() []workerInfo {
 		workers = append(workers, workerInfo{
 			id:             id,
 			ewmaJobsPerSec: state.EWMAJobsPerSec,
+			jobsPerSec:     state.JobsPerSec,
 			hasJobs:        len(state.ActiveJobs) > 0,
 		})
 	}
@@ -189,15 +187,18 @@ func (t *WorkerStateTable) eligibleSlowNodeWorkersLocked() []workerInfo {
 }
 
 // medianSample reduces the eligible worker pool to the median sample pool:
-// idle workers (zero throughput and no active jobs) are excluded. Returns the
-// surviving workers alongside their EWMA throughput values so DetectSlowWorkers
-// and ClusterMedian share a single idle-filter definition.
+// idle workers are excluded. A worker is idle when its latest heartbeat
+// reported no throughput and it holds no active jobs; its EWMA is then a decay
+// tail of measurement absence rather than a current rate, so it must neither
+// seed the median nor be judged against it. Returns the surviving workers
+// alongside their EWMA throughput values so DetectSlowWorkers and ClusterMedian
+// share a single idle-filter definition.
 func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 	sampled := make([]workerInfo, 0, len(workers))
 	throughputs := make([]float64, 0, len(workers))
 	for _, w := range workers {
-		// Skip idle workers: zero throughput AND no active jobs
-		if w.ewmaJobsPerSec == 0 && !w.hasJobs {
+		// Skip idle workers: no throughput in the latest heartbeat AND no active jobs
+		if w.jobsPerSec == 0 && !w.hasJobs {
 			continue
 		}
 		sampled = append(sampled, w)
@@ -206,6 +207,14 @@ func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 	return sampled, throughputs
 }
 
+// DetectSlowWorkers scans all worker states, computes the cluster median of EWMA-smoothed
+// throughput, and marks workers as evicted if their throughput is below median/SlowNodeThreshold.
+// Previously evicted workers are recovered if their throughput exceeds median/RecoveryThreshold.
+// Workers that reported no throughput in their latest heartbeat and hold no active jobs (idle)
+// are excluded from the median calculation and are not marked as slow — their EWMA is a decay
+// tail of measurement absence, not a current rate. Newly registered workers that have completed
+// fewer than MinJobsForEviction jobs are also excluded, so cold-start throughput (which is not
+// yet representative) cannot trigger a false eviction.
 func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -244,13 +253,14 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 				state.Evicted = false
 				recovered = append(recovered, w.id)
 			}
-		} else if w.hasJobs && w.ewmaJobsPerSec == 0 && t.busyExempt(w) {
-			// Busy worker with no throughput samples yet (job just started):
-			// EWMA decay is measurement absence, not slowness — exempt from
-			// eviction until real samples arrive, but only for a bounded
-			// window (see busyExpiry): a hung ffmpeg with active jobs must
-			// eventually face the slow-node safety net instead of hiding in
-			// "measurement absence" forever.
+		} else if w.jobsPerSec == 0 && t.busyExempt(w) {
+			// Busy worker with no throughput sample this interval (job just
+			// started): EWMA decay is measurement absence, not slowness —
+			// exempt from eviction until real samples arrive, but only for a
+			// bounded window (see busyExpiry): a hung ffmpeg with active jobs
+			// must eventually face the slow-node safety net instead of hiding
+			// in "measurement absence" forever. Only busy workers reach this
+			// branch: medianSample drops workers with no sample and no jobs.
 			continue
 		} else {
 			// Slow node detection: if throughput is below median/SlowNodeThreshold

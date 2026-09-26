@@ -1,6 +1,7 @@
 package workerhealth
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -227,5 +228,112 @@ func TestSlowWorkerEvictionE2E_RecoveryAfterSpeedup(t *testing.T) {
 	}
 	if !found {
 		t.Error("Expected recovered worker-slow to be back in the schedulable pool")
+	}
+}
+
+// TestSlowWorkerEvictionE2E_IdleClusterKeepsHealthyWorker covers the
+// load-drain misjudgment: the healthy worker's EWMA decays toward zero (never
+// reaching it) while the recovered worker's samples set a high median, and a
+// check cycle in that state used to evict the idle worker. An idle worker has
+// no current throughput to judge, so it must leave the median sample pool and
+// never be marked.
+func TestSlowWorkerEvictionE2E_IdleClusterKeepsHealthyWorker(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	for _, w := range []struct{ id, name string }{
+		{"worker-fast", "fast-worker"},
+		{"worker-slow", "slow-worker"},
+		{"worker-other", "other-worker"},
+	} {
+		if _, err := database.CreateWorker(w.id, w.name, protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "n9.0.1",
+			MaxConcurrent: 1,
+		}); err != nil {
+			t.Fatalf("Failed to create worker %s: %v", w.id, err)
+		}
+	}
+
+	stateTable := NewWorkerStateTable(30 * time.Second)
+
+	// Injection window active: worker-slow reports a fraction of its real
+	// throughput and is evicted, worker-fast and worker-other stay healthy.
+	for i := 1; i <= 8; i++ {
+		now := time.Now()
+		for _, w := range []struct {
+			id   string
+			rate float64
+		}{{"worker-fast", 1.6}, {"worker-slow", 0.08}, {"worker-other", 1.64}} {
+			stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+				WorkerID: w.id, Status: string(protocol.WorkerStatusBusy),
+				JobsPerSec: w.rate, ActiveJobs: []string{"job-" + w.id}, CompletedJobs: i, Timestamp: now,
+			})
+		}
+	}
+
+	monitor := New(database, Config{
+		HeartbeatTimeout:    30 * time.Second,
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 1 * time.Second,
+		MaxRetryCount:       3,
+	})
+	monitor.SetStateTable(stateTable)
+	monitor.detectSlowWorkers()
+
+	if evicted, err := database.IsWorkerEvicted("worker-slow"); err != nil || !evicted {
+		t.Fatalf("Precondition: worker-slow should be evicted, evicted=%v err=%v", evicted, err)
+	}
+
+	// The injection window lapses (worker-slow reports real throughput) in the
+	// same stretch of cycles in which the load drains: worker-fast finishes its
+	// job and reports zero throughput with no active jobs.
+	for range 14 {
+		now := time.Now()
+		for _, w := range []struct {
+			id   string
+			rate float64
+		}{{"worker-slow", 1.6}, {"worker-other", 1.64}} {
+			stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+				WorkerID: w.id, Status: string(protocol.WorkerStatusBusy),
+				JobsPerSec: w.rate, ActiveJobs: []string{"job-" + w.id}, CompletedJobs: 40, Timestamp: now,
+			})
+		}
+		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "worker-fast", Status: "online",
+			JobsPerSec: 0, CompletedJobs: 40, Timestamp: now,
+		})
+	}
+
+	// The decayed EWMA is nonzero, which is what kept the idle worker inside the
+	// eviction evaluation instead of the idle filter.
+	fast, _ := stateTable.Get("worker-fast")
+	if fast.EWMAJobsPerSec == 0 {
+		t.Fatalf("Precondition: expected a nonzero EWMA decay tail, got %f", fast.EWMAJobsPerSec)
+	}
+
+	monitor.detectSlowWorkers()
+
+	// 1. The idle healthy worker is not evicted on its decayed EWMA.
+	if evicted, err := database.IsWorkerEvicted("worker-fast"); err != nil {
+		t.Fatalf("Failed to check worker-fast eviction: %v", err)
+	} else if evicted {
+		t.Error("Expected idle worker-fast to remain non-evicted (no throughput sample, no jobs)")
+	}
+
+	// 2. The recovered worker is still restored in that same cycle.
+	if evicted, err := database.IsWorkerEvicted("worker-slow"); err != nil {
+		t.Fatalf("Failed to check worker-slow eviction: %v", err)
+	} else if evicted {
+		t.Error("Expected worker-slow eviction cleared by its throughput recovery")
+	}
+
+	// 3. The idle worker left the median sample pool: the reported median is the
+	// mean of the two workers that still report throughput.
+	slow, _ := stateTable.Get("worker-slow")
+	other, _ := stateTable.Get("worker-other")
+	wantMedian := (slow.EWMAJobsPerSec + other.EWMAJobsPerSec) / 2
+	if got := stateTable.ClusterMedian(); math.Abs(got-wantMedian) > 1e-9 {
+		t.Errorf("ClusterMedian = %f, want %f (idle worker must not seed the median)", got, wantMedian)
 	}
 }
