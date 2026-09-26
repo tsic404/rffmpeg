@@ -644,18 +644,25 @@ func (t *ParameterTranslatorImpl) av1CRFToVAAPIQualityConverter(v string) (strin
 	return fmt.Sprintf("%d", quality), nil
 }
 
+// x264PresetToQSV converts an x264 preset name to the QSV TargetUsage that
+// ffmpeg's numeric -preset expects (1 = best quality … 7 = best speed).
+//
+// Numeric because the Intel driver quantizes TargetUsage: TargetUsage 5 encodes
+// byte-identically to the balanced default 4, so mapping "fast" to QSV "fast"
+// (5) leaves the user's speed request without effect. 6 is the first value
+// rendered faster than the default, so "fast" and "faster" both land there.
 func (t *ParameterTranslatorImpl) x264PresetToQSV(v string) (string, error) {
 	mapping := map[string]string{
-		"ultrafast": "veryfast",
-		"superfast": "veryfast",
-		"veryfast":  "veryfast",
-		"faster":    "faster",
-		"fast":      "fast",
-		"medium":    "medium",
-		"slow":      "slow",
-		"slower":    "slower",
-		"veryslow":  "veryslow",
-		"placebo":   "veryslow",
+		"ultrafast": "7",
+		"superfast": "7",
+		"veryfast":  "7",
+		"faster":    "6",
+		"fast":      "6",
+		"medium":    "4",
+		"slow":      "3",
+		"slower":    "2",
+		"veryslow":  "1",
+		"placebo":   "1",
 	}
 	if result, ok := mapping[v]; ok {
 		return result, nil

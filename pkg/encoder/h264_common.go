@@ -359,21 +359,23 @@ func initValueConversionRules(m *H264CommonMapping) {
 		RangeMappingKey: "preset",
 	}
 
-	// Preset conversion to QSV
+	// Preset conversion to QSV, in TargetUsage numbers: the driver renders
+	// TargetUsage 5 identically to the balanced default 4, so "fast" maps to 6
+	// (the first value that actually encodes faster than the default).
 	m.ValueConversionRules["preset_to_qsv"] = ValueConversionRule{
 		SourceParam:     "preset",
 		TargetParamType: "preset",
 		ValueMap: map[string]string{
-			"ultrafast": "veryfast",
-			"superfast": "veryfast",
-			"veryfast":  "veryfast",
-			"faster":    "faster",
-			"fast":      "fast",
-			"medium":    "medium",
-			"slow":      "slow",
-			"slower":    "slower",
-			"veryslow":  "veryslow",
-			"placebo":   "veryslow",
+			"ultrafast": "7",
+			"superfast": "7",
+			"veryfast":  "7",
+			"faster":    "6",
+			"fast":      "6",
+			"medium":    "4",
+			"slow":      "3",
+			"slower":    "2",
+			"veryslow":  "1",
+			"placebo":   "1",
 		},
 		RangeMappingKey: "preset",
 	}
@@ -498,10 +500,10 @@ func initRangeMappings(m *H264CommonMapping) {
 		Description: "NVENC preset values: p1 (fastest) to p7 (slowest/best quality)",
 	}
 
-	// QSV preset valid values
+	// QSV preset valid values, in TargetUsage numbers (see preset_to_qsv).
 	m.RangeMappings["qsv_preset"] = ValueRange{
-		ValidValues: []string{"veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"},
-		Description: "QSV preset values",
+		ValidValues: []string{"1", "2", "3", "4", "6", "7"},
+		Description: "QSV TargetUsage preset values",
 	}
 
 	// AMF quality valid values

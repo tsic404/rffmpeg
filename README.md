@@ -128,15 +128,17 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
 
 **静默模式（`-q` / `--quiet`）**：`--quiet` 抑制进度类输出——banner、上传/下载进度（`Uploading`/`Uploaded`/`Downloading`/`Output saved` 等）、`Job status:` 状态轮询、`Progress: …% | ETA: …` 转码进度行，以及 Worker 实时 stderr 中 ffmpeg 自身的输出（输入头/编码器信息、错误与警告行）。`[rffmpeg]` 前缀的通知行（如 `[rffmpeg] Cache hit: <key>`、编码器改写/回退）不属于进度输出，`--quiet` 下仍写入 stderr；任务终态失败报告（`Job failed:` / `Job timed out:` 等）始终打印、不受 `--quiet` 影响。需要查看 ffmpeg 原始错误/警告时，去掉 `--quiet` 重新运行即可。
 
-**硬件编码升级（`--auto-hw`）与参数去向**：`--auto-hw` 让 Worker 把软件编码升级为本地硬件编码（如 `libx264 → h264_qsv`），改写结果通过 `[rffmpeg]` 行输出：升级/回退行之后紧跟一行「参数去向」，逐个列出用户传入的编码参数在目标编码器上的形态——改名的显示映射关系（`-crf 23 → -global_quality 23`），值被转换的显示新值（`-preset slow → -preset p7`），名字与值都不变的原样列出（`-preset fast`）：
+**硬件编码升级（`--auto-hw`）与参数去向**：`--auto-hw` 让 Worker 把软件编码升级为本地硬件编码（如 `libx264 → h264_qsv`），改写结果通过 `[rffmpeg]` 行输出：升级/回退行之后紧跟一行「参数去向」，逐个列出用户传入的编码参数在目标编码器上的形态——改名的显示映射关系（`-crf 23 → -global_quality 23`），值被转换的显示新值（`-preset slow → -preset p7`），名字与值都不变的原样列出（`-profile high`）：
 
 ```bash
 $ rffmpeg --auto-hw -i input.mp4 -c:v libx264 -crf 23 -preset fast output.mp4
 [rffmpeg] upgraded libx264 → h264_qsv
-[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast
+[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast → -preset 6
 ```
 
 目标编码器不支持的参数（如 h264_qsv 上的 `-tune`）标注为 `(not supported by h264_qsv)`——它们对硬件编码器不生效，日志给出显式提示而不是随升级静默忽略。该行与 `--quiet` 无关（`[rffmpeg]` 行始终打印）；未传编码参数时不输出该行。
+
+**QSV 的 `-preset` 用数值 TargetUsage 表达**：`h264_qsv`/`hevc_qsv` 的 `-preset` 是 TargetUsage 整数（1 = 最重质量，7 = 最快），不是 x264 的档位名。rffmpeg 把 x264 档位名换算成该数值——`ultrafast`/`superfast`/`veryfast` → `7`，`faster`/`fast` → `6`，`medium` → `4`，`slow` → `3`，`slower` → `2`，`veryslow`/`placebo` → `1`；已经是数值的输入原样透传。`fast` 落到 6 而不是 5，是因为 Intel 驱动把 TargetUsage 5 与默认档位 4 渲染成完全相同的码流（实测 `-preset fast` 与不传 preset 的 h264_qsv 输出 md5 一致），映射到 5 等于用户的提速请求被静默忽略；6 是编码器实际会执行的第一档「比默认更快」。
 
 **任务超时（`--timeout`）**：`--timeout` 为每个转码任务的 **ffmpeg 执行预算**（Go duration 格式，如 `30s`/`5m`/`2h`），只约束 ffmpeg 进程本身的运行时长——上传、调度、输入下载、时长探测等执行前阶段不占用该预算。Worker 在 ffmpeg 执行起点开始计时，用完预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过 `--timeout`，例如：
 

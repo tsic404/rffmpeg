@@ -590,10 +590,10 @@ func TestRewrite_ParamFateNotification(t *testing.T) {
 		wantLine string
 	}{
 		{
-			name:     "crf becomes global_quality, preset carries over unchanged",
+			name:     "crf becomes global_quality, preset becomes its TargetUsage",
 			target:   encoder.EncoderH264QSV,
 			params:   map[string]string{"crf": "23", "preset": "fast"},
-			wantLine: "[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast",
+			wantLine: "[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast → -preset 6",
 		},
 		{
 			name:     "parameter the target encoder does not support is called out",
