@@ -2150,6 +2150,89 @@ func TestWorkerListExposesEWMAAndMedian(t *testing.T) {
 	}
 }
 
+// TestWorkerHeartbeatThroughputScaleInjection verifies the
+// RFFMPEG_THROUGHPUT_SCALE fault injection end to end on the server side:
+// heartbeats from a listed worker are recorded with scaled throughput, so the
+// workers API reports that worker below cluster_median_throughput/3 — the
+// slow-node eviction threshold — while an unlisted worker keeps its real
+// throughput.
+func TestWorkerHeartbeatThroughputScaleInjection(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	registerTestWorkerWithID(t, router, "worker-fast", "fast-worker", []string{"libx264"})
+	registerTestWorkerWithID(t, router, "worker-slow", "slow-worker", []string{"libx264"})
+
+	// Rules are written against the registered name, the form an operator uses.
+	h.SetThroughputScaler(workerhealth.NewThroughputScaler([]workerhealth.ThroughputScaleEntry{
+		{Worker: "slow-worker", Factor: 0.05},
+	}))
+
+	heartbeat := func(workerID string, throughput float64) {
+		req := protocol.WorkerHeartbeatRequest{
+			WorkerID:      workerID,
+			Status:        protocol.WorkerStatusBusy,
+			JobsPerSec:    throughput,
+			CompletedJobs: 5,
+		}
+		body, _ := json.Marshal(req)
+		httpReq := httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(body))
+		httpReq.Header.Set("Authorization", "Bearer test-token")
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Heartbeat for %s failed with status %d: %s", workerID, rec.Code, rec.Body.String())
+		}
+	}
+	heartbeat("worker-fast", 2.0)
+	heartbeat("worker-slow", 2.0)
+
+	req := httptest.NewRequest("GET", "/api/v1/workers", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("List workers failed with status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var listResp struct {
+		ClusterMedianThroughput float64 `json:"cluster_median_throughput"`
+		Workers                 []struct {
+			ID     string `json:"id"`
+			Health *struct {
+				EWMAJobsPerSec float64 `json:"ewma_jobs_per_sec"`
+			} `json:"health"`
+		} `json:"workers"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&listResp); err != nil {
+		t.Fatalf("Failed to decode list workers response: %v", err)
+	}
+
+	ewmaByID := make(map[string]float64)
+	for _, w := range listResp.Workers {
+		if w.Health == nil {
+			t.Fatalf("worker %s has nil health", w.ID)
+		}
+		ewmaByID[w.ID] = w.Health.EWMAJobsPerSec
+	}
+
+	// Both workers reported 2.0 jobs/sec; only the listed one is scaled.
+	if got := ewmaByID["worker-fast"]; got != 2.0 {
+		t.Errorf("worker-fast ewma_jobs_per_sec = %f, want 2.0", got)
+	}
+	if got := ewmaByID["worker-slow"]; got != 0.1 {
+		t.Errorf("worker-slow ewma_jobs_per_sec = %f, want 0.1", got)
+	}
+	if want := 1.05; listResp.ClusterMedianThroughput != want {
+		t.Errorf("cluster_median_throughput = %f, want %f", listResp.ClusterMedianThroughput, want)
+	}
+	if ewmaByID["worker-slow"] >= listResp.ClusterMedianThroughput/3 {
+		t.Errorf("worker-slow ewma %f is not below median/3 (%f)",
+			ewmaByID["worker-slow"], listResp.ClusterMedianThroughput/3)
+	}
+}
+
 // TestListWorkersActiveOnlyFilter verifies GET /api/v1/workers
 // returns every registered worker by default, and that ?active_only=true
 // excludes offline rows retained within the --worker-offline-threshold window.

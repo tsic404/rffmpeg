@@ -37,8 +37,12 @@ type Handler struct {
 	wsHub       *websocket.Hub
 	rateLimiter ratelimit.ClientJobCounter
 	stateTable  *workerhealth.WorkerStateTable
-	scheduler   *scheduler.Scheduler // scheduler reference for immediate job assignment
-	authToken   string               // Non-empty when auth is configured
+	// throughputScaler is the slow-worker eviction fault injection: when set,
+	// heartbeat throughput is scaled for the workers it targets. nil (the
+	// default) records heartbeats verbatim.
+	throughputScaler *workerhealth.ThroughputScaler
+	scheduler        *scheduler.Scheduler // scheduler reference for immediate job assignment
+	authToken        string               // Non-empty when auth is configured
 	// heartbeatTimeout mirrors the worker health monitor's knob: submit-time
 	// fail-fast treats workers whose last heartbeat is older than this as dead
 	// <=0 disables the freshness check.
@@ -114,6 +118,12 @@ func (h *Handler) GetWSHub() *websocket.Hub {
 // GetStateTable returns the worker state table
 func (h *Handler) GetStateTable() *workerhealth.WorkerStateTable {
 	return h.stateTable
+}
+
+// SetThroughputScaler installs the slow-worker eviction fault injection.
+// Without it heartbeats are recorded verbatim.
+func (h *Handler) SetThroughputScaler(scaler *workerhealth.ThroughputScaler) {
+	h.throughputScaler = scaler
 }
 
 // workerStateMap returns the worker state table contents keyed by worker ID.
@@ -1183,11 +1193,21 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	// Update WorkerStateTable with throughput data
 	if h.stateTable != nil {
+		jobsPerSec := req.JobsPerSec
+		if h.throughputScaler.Enabled() {
+			// Rules match on worker ID or registered name; the name is only
+			// read when the injection is actually configured.
+			workerName := ""
+			if worker, err := h.db.GetWorker(req.WorkerID); err == nil {
+				workerName = worker.Name
+			}
+			jobsPerSec = h.throughputScaler.Scale(req.WorkerID, workerName, jobsPerSec)
+		}
 		statePayload := protocol.WorkerHeartbeatPayload{
 			WorkerID:        req.WorkerID,
 			Status:          string(req.Status),
 			ActiveJobs:      req.ActiveJobs,
-			JobsPerSec:      req.JobsPerSec,
+			JobsPerSec:      jobsPerSec,
 			CompletedJobs:   req.CompletedJobs,
 			GPUUtilPct:      req.GPUUtilPct,
 			GPUMemUsedMB:    req.GPUMemUsedMB,
