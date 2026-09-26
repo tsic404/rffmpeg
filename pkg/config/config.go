@@ -42,6 +42,12 @@ type ServerConfig struct {
 	// MaxRetryCount bounds how many times the health monitor may migrate a
 	// job from a failed worker before failing it. 0 disables migration.
 	MaxRetryCount int `json:"max_retry_count" yaml:"max_retry_count"`
+	// ThroughputScale is a fault-injection switch for the slow-worker eviction
+	// path: heartbeats from the listed workers report scaled throughput, so an
+	// E2E run can cross the eviction threshold without a genuinely slow worker.
+	// Syntax: "<worker>=<factor>[@<window>][,<worker>=<factor>...]" — see
+	// workerhealth.ParseThroughputScale. Empty disables injection.
+	ThroughputScale string `json:"throughput_scale" yaml:"throughput_scale"`
 
 	// Input file persistence settings. Uploaded input blobs are
 	// content-addressed and would otherwise accumulate without bound; a
@@ -278,6 +284,11 @@ func LoadFromEnv() *ServerConfig {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			config.MaxRetryCount = n
 		}
+	}
+	// Slow-node eviction fault injection; the value is parsed at startup so a
+	// typo aborts the server instead of silently disabling the injection.
+	if v := os.Getenv("RFFMPEG_THROUGHPUT_SCALE"); v != "" {
+		config.ThroughputScale = v
 	}
 
 	// Rate limit environment variables — symmetric boolean

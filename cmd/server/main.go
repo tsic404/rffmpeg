@@ -169,6 +169,19 @@ func main() {
 	h := handlers.New(database, store, cfg.Version, stateTable)
 	h.SetMultipartTmpDir(cfg.MultipartTmpDir)
 
+	// Fault injection for the slow-worker eviction path: heartbeats from the
+	// listed workers report scaled throughput. A malformed value aborts startup
+	// — a silently ignored switch would leave an E2E run waiting on an eviction
+	// that can never happen.
+	if cfg.ThroughputScale != "" {
+		scaleEntries, err := workerhealth.ParseThroughputScale(cfg.ThroughputScale)
+		if err != nil {
+			log.Fatalf("Invalid RFFMPEG_THROUGHPUT_SCALE: %v", err)
+		}
+		h.SetThroughputScaler(workerhealth.NewThroughputScaler(scaleEntries))
+		log.Printf("Throughput scale injection configured: %s", cfg.ThroughputScale)
+	}
+
 	// Create chunk upload handler
 	chunkHandler := handlers.NewChunkUploadHandler(database, store, 0) // Uses default chunk size (10MB)
 	chunkHandler.SetAuthToken(cfg.AuthToken)
