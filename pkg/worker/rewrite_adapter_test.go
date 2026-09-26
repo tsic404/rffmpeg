@@ -932,3 +932,48 @@ func TestRewriteAdapter_PassThroughNotification(t *testing.T) {
 		t.Errorf("default path args changed: got %v, want %v", rewritten, wantArgs)
 	}
 }
+
+// TestRewriteAdapter_AutoHWUpgradeReportsParamFate pins the CLI-visible
+// contract of an auto-hw upgrade: alongside the encoder swap the user learns
+// what became of the libx264 parameters they passed, and the mapped form is
+// what actually reaches ffmpeg.
+func TestRewriteAdapter_AutoHWUpgradeReportsParamFate(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_qsv", Type: "video", IsHW: true},
+			{Name: "libx264", Type: "video", IsHW: false},
+		},
+	})
+
+	rewritten, result, err := adapter.RewriteArgs(
+		context.Background(),
+		[]string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "-preset", "fast", "output.mp4"},
+		true,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	const wantNotice = "[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast"
+	if !slices.Contains(result.Notifications, wantNotice) {
+		t.Errorf("missing parameter report %q in notifications %v", wantNotice, result.Notifications)
+	}
+
+	wantPair := []string{"-global_quality", "23"}
+	found := false
+	for i := 0; i+1 < len(rewritten); i++ {
+		if rewritten[i] == wantPair[0] && rewritten[i+1] == wantPair[1] {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected %v in rewritten args, got %v", wantPair, rewritten)
+	}
+	for _, arg := range rewritten {
+		if arg == "-crf" {
+			t.Errorf("original -crf must not survive the upgrade: %v", rewritten)
+		}
+	}
+}

@@ -2,6 +2,8 @@ package rewrite
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -573,5 +575,97 @@ func TestEndToEnd_ParamsToFilter_NVENC(t *testing.T) {
 	}
 	if !foundNVENC {
 		t.Error("expected h264_nvenc in rewritten args")
+	}
+}
+
+// TestRewrite_ParamFateNotification pins the transparency contract of an
+// auto-hw upgrade: the user's encoder parameters are reported in their
+// post-translation form, and a parameter the target encoder cannot carry is
+// called out instead of vanishing with the encoder change.
+func TestRewrite_ParamFateNotification(t *testing.T) {
+	tests := []struct {
+		name     string
+		target   encoder.EncoderFamily
+		params   map[string]string
+		wantLine string
+	}{
+		{
+			name:     "crf becomes global_quality, preset carries over unchanged",
+			target:   encoder.EncoderH264QSV,
+			params:   map[string]string{"crf": "23", "preset": "fast"},
+			wantLine: "[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast",
+		},
+		{
+			name:     "parameter the target encoder does not support is called out",
+			target:   encoder.EncoderH264QSV,
+			params:   map[string]string{"crf": "23", "tune": "film"},
+			wantLine: "[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -tune film (not supported by h264_qsv)",
+		},
+		{
+			name:     "converted value is reported",
+			target:   encoder.EncoderH264NVENC,
+			params:   map[string]string{"crf": "23", "preset": "slow"},
+			wantLine: "[rffmpeg] h264_nvenc params: -crf 23 → -cq 23, -preset slow → -preset p7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine := NewEngineCoordinator()
+
+			response, err := engine.Rewrite(context.Background(), &EncoderRewriteRequest{
+				OriginalArgs:     []string{"-i", "input.mp4", "-c:v", "libx264", "output.mp4"},
+				SpecifiedEncoder: encoder.EncoderLibX264,
+				HardwareCapabilities: HardwareCapabilities{
+					AvailableEncoders: []encoder.EncoderFamily{tt.target, encoder.EncoderLibX264},
+					HardwareEncoders:  []encoder.EncoderFamily{tt.target},
+					SoftwareEncoders:  []encoder.EncoderFamily{encoder.EncoderLibX264},
+					SupportedCodecs:   []encoder.CodecFormat{encoder.CodecH264},
+					EncoderPriority:   DefaultEncoderPriority(),
+				},
+				EncoderParams: tt.params,
+				AutoHW:        true,
+			})
+			if err != nil {
+				t.Fatalf("rewrite failed: %v", err)
+			}
+
+			var messages []string
+			for _, n := range response.Notifications {
+				messages = append(messages, n.Message)
+			}
+			if !slices.Contains(messages, tt.wantLine) {
+				t.Errorf("missing parameter report %q in notifications %v", tt.wantLine, messages)
+			}
+		})
+	}
+}
+
+// TestRewrite_NoParamFateReportWithoutUserParams guards the noise budget: a
+// rewrite with no user encoder parameters reports only the encoder change.
+func TestRewrite_NoParamFateReportWithoutUserParams(t *testing.T) {
+	engine := NewEngineCoordinator()
+
+	response, err := engine.Rewrite(context.Background(), &EncoderRewriteRequest{
+		OriginalArgs:     []string{"-i", "input.mp4", "-c:v", "libx264", "output.mp4"},
+		SpecifiedEncoder: encoder.EncoderLibX264,
+		HardwareCapabilities: HardwareCapabilities{
+			AvailableEncoders: []encoder.EncoderFamily{encoder.EncoderH264QSV, encoder.EncoderLibX264},
+			HardwareEncoders:  []encoder.EncoderFamily{encoder.EncoderH264QSV},
+			SoftwareEncoders:  []encoder.EncoderFamily{encoder.EncoderLibX264},
+			SupportedCodecs:   []encoder.CodecFormat{encoder.CodecH264},
+			EncoderPriority:   DefaultEncoderPriority(),
+		},
+		EncoderParams: map[string]string{},
+		AutoHW:        true,
+	})
+	if err != nil {
+		t.Fatalf("rewrite failed: %v", err)
+	}
+
+	for _, n := range response.Notifications {
+		if strings.Contains(n.Message, " params: ") {
+			t.Errorf("unexpected parameter report for an empty parameter set: %q", n.Message)
+		}
 	}
 }

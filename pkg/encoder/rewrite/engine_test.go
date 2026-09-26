@@ -889,3 +889,26 @@ func TestTranslatorAdapter_CanTranslate_CrossFormatRejected(t *testing.T) {
 		t.Error("CanTranslate(AV1, AV1) should be true: same-family translation rules exist")
 	}
 }
+
+// TestFormatParamFateReport pins the report against records that describe no
+// applied rewrite: a failed translation (its converter may have returned a
+// value, but the original parameter is what survives) and a hardware
+// injection (not a user parameter) must not be rendered as a mapping.
+func TestFormatParamFateReport(t *testing.T) {
+	records := []AuditRecord{
+		{
+			SourceParam: "crf", SourceValue: "23",
+			TargetParam: "global_quality", TargetValue: "23",
+			ErrorMessage: "value conversion failed", Success: false,
+		},
+		{
+			SourceParam: "async_depth", TargetParam: "async_depth", TargetValue: "4",
+			Reason: encoder.ConverterUsedHardwareInjection, Success: true,
+		},
+	}
+	translated := map[string]string{"crf": "23", "async_depth": "4"}
+
+	if got := formatParamFateReport(records, translated, encoder.EncoderH264QSV); got != "" {
+		t.Errorf("formatParamFateReport() = %q, want empty report", got)
+	}
+}

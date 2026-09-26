@@ -217,6 +217,7 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 	var translatedParams map[string]string
 	var paramsToFilter map[string]string    // Original params that should be filtered from args
 	var sameNameConverted map[string]string // Same-name params whose values were converted
+	var paramFateReport string              // User-visible summary of what happened to the user's params
 
 	// When the user specified no encoder (auto-HW selection), the source for
 	// translation is empty. User-supplied params like "-preset ultrafast" are
@@ -261,8 +262,6 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 				translatedParams[k] = v
 			}
 
-			// Collect warnings from translation
-
 			// When translation is performed, filter out the original params
 			// that were successfully translated (e.g., "crf" -> "quality").
 			// ONLY records with Success=true are eligible: a FAILED record
@@ -291,6 +290,12 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 					sameNameConverted[record.SourceParam] = record.TargetValue
 				}
 			}
+
+			// Describe what became of the user's encoder parameters: without
+			// this line an auto-hw upgrade silently remaps a quality setting
+			// (crf -> global_quality) or leaves one the target encoder does
+			// not support (tune on h264_qsv), and the user cannot tell.
+			paramFateReport = formatParamFateReport(translationResult.AuditRecords, translatedParams, targetEncoder)
 		} else {
 			// Translation returned nil result, use original params
 			translatedParams = make(map[string]string)
@@ -363,6 +368,12 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 	}
 	e.notify(response, NotificationLevelInfo, notificationMsg)
 
+	// Parameter report for the encoder the rewrite selected, so an upgrade
+	// never hides what happened to the user's own encoder parameters.
+	if paramFateReport != "" {
+		e.notify(response, NotificationLevelInfo, paramFateReport)
+	}
+
 	// Record final audit summary
 	if e.auditRecorder != nil {
 		for _, record := range response.AuditRecords {
@@ -402,6 +413,61 @@ func (e *EngineCoordinator) formatEncoder(enc encoder.EncoderFamily) string {
 		return "(none)"
 	}
 	return string(enc)
+}
+
+// formatParamFateReport summarizes what translation did to each user-supplied
+// encoder parameter, e.g.
+//
+//	[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast
+//
+// A parameter the mapping table declares unsupported by the target encoder is
+// called out ("not supported by <encoder>") instead of vanishing with the
+// encoder change. Parameters without a translation rule (audio options,
+// unknown flags) are passed through untouched and omitted: the report covers
+// only the parameters the translator decided on. Returns "" when it decided
+// on none.
+func formatParamFateReport(records []AuditRecord, translatedParams map[string]string, targetEncoder encoder.EncoderFamily) string {
+	parts := make([]string, 0, len(records))
+	for _, record := range records {
+		// Hardware injections are not user parameters: they are identified by
+		// ConverterUsedHardwareInjection and only configure the target encoder.
+		if record.SourceParam == "" || record.Reason == encoder.ConverterUsedHardwareInjection {
+			continue
+		}
+		// A failed translation never took effect: the translator keeps the
+		// original parameter (a converter may still have returned a value
+		// alongside its error), so reporting it as an applied mapping would
+		// claim a rewrite that did not happen.
+		if !record.Success {
+			continue
+		}
+		source := formatParamToken(record.SourceParam, record.SourceValue)
+		switch {
+		case record.TargetParam != "" && record.TargetValue != "":
+			if record.TargetParam == record.SourceParam && record.TargetValue == record.SourceValue {
+				parts = append(parts, source)
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s → %s", source, formatParamToken(record.TargetParam, record.TargetValue)))
+		case record.TargetParam == "" && translatedParams[record.SourceParam] == "":
+			// Declared unsupported by the mapping table, so it is absent from
+			// the translated parameter set and has no effect on this encoder.
+			parts = append(parts, fmt.Sprintf("%s (not supported by %s)", source, targetEncoder))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("[rffmpeg] %s params: %s", targetEncoder, strings.Join(parts, ", "))
+}
+
+// formatParamToken renders a parameter as "-name value", or just "-name" when
+// it carries no value.
+func formatParamToken(name, value string) string {
+	if value == "" {
+		return "-" + name
+	}
+	return fmt.Sprintf("-%s %s", name, value)
 }
 
 // globalInitParamNames lists ffmpeg global initialization parameters that must
