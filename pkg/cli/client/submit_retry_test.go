@@ -135,7 +135,7 @@ func TestSubmitJobWithOptions_NoRetryOnSubmitConflict(t *testing.T) {
 	if !errors.As(err, &rl) {
 		t.Fatalf("error = %v (%T), want *RateLimitError", err, err)
 	}
-	if got, want := err.Error(), "concurrent submission conflict"; got != want {
+	if got, want := err.Error(), "job submission failed [submit_conflict]: concurrent submission conflict"; got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
 	if got := atomic.LoadInt32(attempts); got != 1 {
