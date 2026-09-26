@@ -59,6 +59,20 @@ type ProgressParser struct {
 	// etaMinWallSeconds of wall-clock time suppress ETA: not enough data has
 	// accumulated for a stable wall-clock rate.
 	speedSamples int
+	// maxPercent is the highest percent emitted for this job, or -1 when none
+	// has been. Frames that would report less are dropped by ParseLine: ffmpeg's
+	// media timeline restarts at zero when a second attempt re-runs it (the
+	// worker's multi-stage retry after a mid-encode crash — OOM, SIGABRT), and a
+	// job's user-visible progress must not rewind with it. The floor is measured
+	// in percent, so a changed denominator (setDurationUs) re-bases it, and it
+	// spans attempts — StartAttempt deliberately leaves it alone.
+	maxPercent float64
+	// hasSeekWindow records that SetSeekWindow established the denominator for a
+	// trimmed job. That window stays authoritative: SetDuration is ignored
+	// afterwards so the input header's Duration: line (which the router feeds
+	// through SetDuration) cannot widen the denominator back to the full input
+	// and re-base every later percent onto the untrimmed scale.
+	hasSeekWindow bool
 }
 
 // etaSpeedAlpha is the EWMA smoothing factor for speed observations used in
@@ -84,6 +98,7 @@ func NewProgressParser() *ProgressParser {
 	return &ProgressParser{
 		minPushInterval: 1 * time.Second, // throttle to 1 push per second
 		nowFunc:         time.Now,
+		maxPercent:      -1,
 	}
 }
 
@@ -96,7 +111,26 @@ func (p *ProgressParser) now() time.Time {
 }
 
 // SetDuration sets the known total duration from an external source (e.g., prior probe).
+// It is ignored once SetSeekWindow has established the denominator: the output
+// window, not the full input, is what percent and ETA are measured against for
+// a trimmed job.
 func (p *ProgressParser) SetDuration(durationUs int64) {
+	if p.hasSeekWindow {
+		return
+	}
+	p.setDurationUs(durationUs)
+}
+
+// setDurationUs sets the percent denominator. The monotonic floor is measured
+// in percent, so it is cleared whenever the denominator actually changes: a
+// re-based scale (the input header's Duration: line can overwrite the window
+// the probe seeded, or exceed the probe's value) would otherwise leave the
+// restarted scale reporting percentages below the old floor forever, stalling
+// progress while the media time keeps advancing.
+func (p *ProgressParser) setDurationUs(durationUs int64) {
+	if durationUs != p.durationUs {
+		p.maxPercent = -1
+	}
 	p.durationUs = durationUs
 }
 
@@ -139,7 +173,8 @@ func (p *ProgressParser) SetSeekWindow(inputDurationUs, seekUs, tUs, toUs int64)
 	// Always overwrite: a degenerate window (0) must clear the full-input
 	// duration that SetDuration seeded, so percent falls back to -1 instead
 	// of reporting a meaningless ratio against the full input.
-	p.durationUs = windowUs
+	p.hasSeekWindow = true
+	p.setDurationUs(windowUs)
 }
 
 // ParseDurationLine attempts to extract Duration from an ffmpeg header line.
@@ -179,11 +214,11 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 	// Use stored duration if available, otherwise try to parse from line
 	durationUs := p.durationUs
 	if durationUs == 0 {
-		durMatches := durationRegex.FindStringSubmatch(line)
-		if durMatches != nil {
-			durationUs = parseTimeToUs(durMatches[1], durMatches[2], durMatches[3], durMatches[4])
-			p.durationUs = durationUs
-		}
+		// SetDuration itself refuses to re-base a seek window, so a trimmed job
+		// whose window is degenerate stays at "unknown" instead of silently
+		// reporting against the full input.
+		p.SetDuration(ParseDurationLine(line))
+		durationUs = p.durationUs
 	}
 	frame.DurationUs = durationUs
 
@@ -234,6 +269,20 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		}
 	}
 
+	// A job's percent never goes backward, so a restarted attempt's frames are
+	// dropped instead of rewinding progress the CLI already displayed. The
+	// drop suppresses the push only: every frame still updated the attempt
+	// state above, so the displayed speed and the ETA stay live while the
+	// restarted attempt climbs back to the mark. Frames with an unknown
+	// duration (-1) carry no percent to compare against and pass through
+	// untouched.
+	if frame.Percent >= 0 {
+		if p.maxPercent >= 0 && frame.Percent < p.maxPercent {
+			return nil
+		}
+		p.maxPercent = frame.Percent
+	}
+
 	return frame
 }
 
@@ -247,14 +296,30 @@ func (p *ProgressParser) ShouldPush() bool {
 	return false
 }
 
+// StartAttempt re-bases the state ParseLine derives from one ffmpeg process —
+// the wall-clock baseline the ETA is measured against and the speed EWMA — for
+// a new process re-running the same job (the worker's multi-stage retry). The
+// producer reports the boundary instead of the parser inferring it from time=
+// going backward: a legitimate timeline restart (segment sharding, sequential
+// outputs) is not a re-run and must keep its baseline, while a real re-run must
+// not leave the dead attempt's downtime in the ETA. The percent floor is not
+// touched: it spans the whole job.
+func (p *ProgressParser) StartAttempt() {
+	p.firstSampleTime = time.Time{}
+	p.ewmaSpeed = 0
+	p.speedSamples = 0
+}
+
 // Reset resets the parser state for a new job.
 func (p *ProgressParser) Reset() {
 	p.startTime = p.now()
 	p.lastPushTime = time.Time{}
-	p.durationUs = 0
+	p.setDurationUs(0)
 	p.firstSampleTime = time.Time{}
 	p.ewmaSpeed = 0
 	p.speedSamples = 0
+	p.maxPercent = -1
+	p.hasSeekWindow = false
 }
 
 // parseTimeToUs converts hh, mm, ss, ms components to microseconds.

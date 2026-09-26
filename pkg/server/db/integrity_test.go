@@ -332,7 +332,7 @@ func TestConcurrentWritesNoDatabaseLocked(t *testing.T) {
 					}
 					continue
 				}
-				if err := database.UpdateJobProgress(job.ID, float64(i), i); isLockedErr(err) {
+				if _, err := database.UpdateJobProgress(job.ID, float64(i), i); isLockedErr(err) {
 					errCh <- err
 					return
 				}

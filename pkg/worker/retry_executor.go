@@ -220,7 +220,10 @@ func NewRetryExecutorWithFallback(executor *Executor, config *RetryConfig, fallb
 // stderrHandler, when non-nil, receive stdout chunks / stderr lines on every
 // retry attempt so streamed data reaches the client and the full ffmpeg log
 // streams to the CLI in real time on each attempt.
-func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, outputPath string, networkOutput bool, stdoutHandler StdoutHandler, stderrHandler StderrHandler) *RetryResult {
+// onAttemptStart, when non-nil, is called once before each attempt launches
+// ffmpeg, so callers can re-base state that is scoped to one ffmpeg process
+// (the progress parser's ETA baseline and speed EWMA).
+func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, outputPath string, networkOutput bool, stdoutHandler StdoutHandler, stderrHandler StderrHandler, onAttemptStart func()) *RetryResult {
 	result := &RetryResult{
 		AuditTrail:    make([]RetryAuditEntry, 0),
 		FinalStage:    RetryStageInitial,
@@ -256,6 +259,12 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 		// Record attempt start
 		attemptStart := time.Now()
 		stage = e.determineStage(attempt)
+
+		// This attempt runs a fresh ffmpeg process: announce it before any of
+		// its stderr reaches the caller's handler.
+		if onAttemptStart != nil {
+			onAttemptStart()
+		}
 
 		// Idempotency: a failed attempt may have left a partial output file
 		// behind. A later attempt that exits 0 without producing output would
@@ -409,6 +418,10 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 		if fallbackArgs != nil {
 			log.Printf("Attempting final software encoder fallback")
 			attemptStart := time.Now()
+			// Same boundary as a retry attempt: this is a fresh ffmpeg process.
+			if onAttemptStart != nil {
+				onAttemptStart()
+			}
 			var execResult ExecResult
 			if stderrHandler != nil {
 				execResult = e.executor.ExecuteWithHandlers(ctx, fallbackArgs, stdoutHandler, stderrHandler)

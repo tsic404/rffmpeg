@@ -55,9 +55,6 @@ func TestParseDurationLine(t *testing.T) {
 }
 
 func TestProgressParser_ParseLine(t *testing.T) {
-	p := NewProgressParser()
-	p.SetDuration(100_000_000) // 100 seconds in microseconds
-
 	tests := []struct {
 		line            string
 		wantNil         bool
@@ -72,7 +69,12 @@ func TestProgressParser_ParseLine(t *testing.T) {
 		{line: "frame= 1000 fps= 60 size= 50000kB time=00:01:30.00 bitrate=4500.0kbits/s speed=3.00x", wantTimeUs: 90_000_000, wantDurationUs: 100_000_000, wantPercentLow: 89, wantPercentHigh: 91},
 	}
 
+	// Each case gets its own parser: ParseLine drops frames reporting less than
+	// the job's high-water mark, so cases must not share one parser's mark.
 	for _, tt := range tests {
+		p := NewProgressParser()
+		p.SetDuration(100_000_000) // 100 seconds in microseconds
+
 		frame := p.ParseLine(tt.line)
 		if tt.wantNil {
 			if frame != nil {
@@ -893,5 +895,223 @@ func TestProgressRouterHandlerFiltersStatsLines(t *testing.T) {
 		if forwarded[i] != want[i] {
 			t.Errorf("forwarded[%d] = %q, want %q", i, forwarded[i], want[i])
 		}
+	}
+}
+
+// TestProgressRouter_ProgressNeverRegresses pins the job-level progress
+// contract: the percents pushed to the server never decrease. A retryable
+// ffmpeg death mid-encode (OOM/SIGABRT, process_crash) makes the worker's
+// multi-stage retry re-run ffmpeg from scratch on the same parser, so the
+// media timeline restarts at ~0. The restarted attempt must not drag the
+// progress already displayed back down — that rewind is the reported
+// 71.1% → 0.5% sequence.
+func TestProgressRouter_ProgressNeverRegresses(t *testing.T) {
+	var mu sync.Mutex
+	var percents []float64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req protocol.JobUpdateRequest
+		if err := json.Unmarshal(body, &req); err == nil {
+			mu.Lock()
+			percents = append(percents, req.Progress)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "worker-1", "")
+	router := NewProgressRouter(client, "job-1", func(string) {})
+	router.SetDuration(60_000_000) // 60s input, what probeInputDurationUs seeds
+	router.sendDelay = 0           // the 1s throttle is not what this test pins
+
+	h := router.Handler()
+	// Attempt 1 encodes to 9.3% of the 60s input before ffmpeg dies.
+	h(buildProgressLine(2_000_000, 2.0) + "\n") // 3.3%
+	h(buildProgressLine(5_600_000, 2.0) + "\n") // 9.3%
+	// The retry re-runs ffmpeg from scratch: time= restarts at zero.
+	h(buildProgressLine(1_900_000, 2.0) + "\n")  // 3.2% — must not be pushed
+	h(buildProgressLine(5_800_000, 2.0) + "\n")  // 9.7%
+	h(buildProgressLine(12_000_000, 2.0) + "\n") // 20.0%
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(percents) < 4 {
+		t.Fatalf("pushed %d progress updates, want >= 4: %v", len(percents), percents)
+	}
+	for i := 1; i < len(percents); i++ {
+		if percents[i] < percents[i-1] {
+			t.Fatalf("progress regressed at update %d: %v — a restarted attempt must not rewind the job's progress", i, percents)
+		}
+	}
+	last := percents[len(percents)-1]
+	if last < 19.99 || last > 20.01 {
+		t.Errorf("final pushed percent = %v, want 20 (the last frame's own value)", last)
+	}
+}
+
+// TestProgressParser_ResetClearsProgressFloor: the monotonic floor is
+// per-job state, so Reset must clear it — a parser reused for a new job must
+// not stay pinned to the previous job's high-water mark.
+func TestProgressParser_ResetClearsProgressFloor(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(60_000_000)
+
+	mid := p.ParseLine(buildProgressLine(30_000_000, 2.0))
+	if mid == nil || mid.Percent < 49.99 || mid.Percent > 50.01 {
+		t.Fatalf("first frame percent = %v, want ~50", mid)
+	}
+	if late := p.ParseLine(buildProgressLine(1_000_000, 2.0)); late != nil {
+		t.Fatalf("regressing frame accepted mid-job: percent=%.1f", late.Percent)
+	}
+
+	p.Reset()
+	p.SetDuration(60_000_000)
+	restarted := p.ParseLine(buildProgressLine(1_000_000, 2.0))
+	if restarted == nil || restarted.Percent < 1.66 || restarted.Percent > 1.67 {
+		t.Fatalf("after Reset the new job's first frame was dropped: %v", restarted)
+	}
+}
+
+// TestProgressParser_DurationChangeRebasesFloor: the floor is measured in
+// percent, so a denominator change re-bases it. Without that, a late header
+// Duration: line that grows the denominator would leave every later frame below
+// the old floor and the progress would stall for the rest of the job even
+// though the media time keeps advancing.
+func TestProgressParser_DurationChangeRebasesFloor(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(60_000_000)
+
+	if f := p.ParseLine(buildProgressLine(18_000_000, 2.0)); f == nil || f.Percent < 29.99 || f.Percent > 30.01 {
+		t.Fatalf("first frame percent = %v, want ~30", f)
+	}
+
+	// The denominator grows to three times the seeded value (the input
+	// header's Duration: overwrites what the probe seeded), so the same media
+	// position now reads as a lower percent.
+	p.SetDuration(180_000_000)
+	f := p.ParseLine(buildProgressLine(21_000_000, 2.0))
+	if f == nil {
+		t.Fatal("frame after the denominator change was dropped: progress would stall below the old floor")
+	}
+	if f.Percent < 11.66 || f.Percent > 11.67 {
+		t.Fatalf("percent after the re-base = %v, want ~11.7", f.Percent)
+	}
+}
+
+// TestProgressParser_AttemptBoundaryRebasesETABaseline: StartAttempt — what the
+// retry executor reports before each ffmpeg re-run — re-bases the wall-clock
+// baseline, so a restarted attempt's ETA is not derived from a clock that still
+// includes the dead attempt's downtime. A timeline that merely goes backward
+// without that boundary (a legitimate restart such as segment sharding or
+// sequential outputs) keeps its baseline. The percent floor is unaffected
+// either way: a restarted attempt stays off the wire until it catches up.
+func TestProgressParser_AttemptBoundaryRebasesETABaseline(t *testing.T) {
+	run := func(t *testing.T, newAttemptBoundary bool) int {
+		t.Helper()
+		p := NewProgressParser()
+		p.SetDuration(60_000_000)
+		wallSec := 0.0
+		p.nowFunc = func() time.Time {
+			return time.Unix(0, int64(wallSec*1e9))
+		}
+
+		// Attempt 1 reaches 70% with a live wall-clock rate.
+		p.ParseLine(buildProgressLine(30_000_000, 2.0)) // seeds the baseline at wall 0
+		wallSec = 12
+		if f := p.ParseLine(buildProgressLine(42_000_000, 2.0)); f == nil || f.EtaSeconds <= 0 {
+			t.Fatalf("attempt 1 ETA = %v, want > 0", f)
+		}
+
+		// ffmpeg dies; the next attempt re-runs from zero a second later.
+		wallSec = 13
+		if newAttemptBoundary {
+			p.StartAttempt()
+		}
+		if f := p.ParseLine(buildProgressLine(300_000, 2.0)); f != nil {
+			t.Fatalf("restarted attempt's frame was pushed: percent=%.1f", f.Percent)
+		}
+
+		// Past the mark, the retry's ETA is only free of the dead attempt's
+		// clock when the boundary was reported.
+		wallSec = 14
+		f := p.ParseLine(buildProgressLine(43_000_000, 2.0))
+		if f == nil {
+			t.Fatal("retry frame above the mark was dropped")
+		}
+		return f.EtaSeconds
+	}
+
+	if eta := run(t, true); eta != 0 {
+		t.Errorf("ETA right after a reported attempt boundary = %ds, want 0 (the dead attempt's clock must not be used)", eta)
+	}
+	if eta := run(t, false); eta <= 0 {
+		t.Errorf("ETA after a bare time= rewind = %ds, want > 0 (a legitimate timeline restart keeps its baseline)", eta)
+	}
+
+	// Ten seconds into a restarted attempt the ETA returns, computed from the
+	// restarted attempt's own rate.
+	p := NewProgressParser()
+	p.SetDuration(60_000_000)
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*1e9))
+	}
+	p.ParseLine(buildProgressLine(30_000_000, 2.0))
+	wallSec = 13
+	p.StartAttempt()
+	p.ParseLine(buildProgressLine(300_000, 2.0))
+	wallSec = 14
+	p.ParseLine(buildProgressLine(43_000_000, 2.0))
+	wallSec = 24
+	f := p.ParseLine(buildProgressLine(51_000_000, 2.0))
+	if f == nil {
+		t.Fatal("retry frame above the mark was dropped")
+	}
+	if f.EtaSeconds <= 0 {
+		t.Errorf("ETA 10s into the restarted attempt = %ds, want > 0", f.EtaSeconds)
+	}
+}
+
+// TestProgressRouter_HeaderDurationDoesNotWidenSeekWindow: for a trimmed job the
+// output window is the denominator, so the input header's Duration: line — which
+// the router feeds through SetDuration on every job — must not re-base the
+// percent onto the full input. Doing so would read a finished trimmed segment as
+// a few percent, and with the monotonic floor in place the job would then stall
+// there for the rest of the run.
+func TestProgressRouter_HeaderDurationDoesNotWidenSeekWindow(t *testing.T) {
+	var mu sync.Mutex
+	var percents []float64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req protocol.JobUpdateRequest
+		if err := json.Unmarshal(body, &req); err == nil {
+			mu.Lock()
+			percents = append(percents, req.Progress)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "worker-1", "")
+	router := NewProgressRouter(client, "job-1", func(string) {})
+	router.sendDelay = 0 // the throttle is not what this test pins
+
+	// -ss 240 -t 60 over a 5-minute input: a 60s output window.
+	router.SetDuration(300_000_000)
+	router.SetSeekWindow(300_000_000, 240_000_000, 60_000_000, 0)
+
+	h := router.Handler()
+	h("  Duration: 00:05:00.00, start: 0.000000, bitrate: 1000 kb/s\n")
+	h(buildProgressLine(30_000_000, 2.0) + "\n") // 30s into the 60s window
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(percents) != 1 {
+		t.Fatalf("pushed %d progress updates, want 1: %v", len(percents), percents)
+	}
+	if percents[0] < 49.99 || percents[0] > 50.01 {
+		t.Errorf("percent = %v, want ~50 (the 60s output window, not the 5-minute input)", percents[0])
 	}
 }

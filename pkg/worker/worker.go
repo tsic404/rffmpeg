@@ -1194,7 +1194,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			progressRouter.Handler()(notification + "\n")
 
 			// Use RetryExecutor for multi-stage retry:
-			retryResult := w.retryExecutor.ExecuteWithRetry(execCtx, args, outputPath, networkOutput, stdoutHandler, progressRouter.Handler())
+			retryResult := w.retryExecutor.ExecuteWithRetry(execCtx, args, outputPath, networkOutput, stdoutHandler, progressRouter.Handler(), progressRouter.StartAttempt)
 
 			if retryResult.Success {
 				// Retry succeeded — use the final result

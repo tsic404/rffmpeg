@@ -128,6 +128,8 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
 
 **静默模式（`-q` / `--quiet`）**：`--quiet` 抑制进度类输出——banner、上传/下载进度（`Uploading`/`Uploaded`/`Downloading`/`Output saved` 等）、`Job status:` 状态轮询、`Progress: …% | ETA: …` 转码进度行，以及 Worker 实时 stderr 中 ffmpeg 自身的输出（输入头/编码器信息、错误与警告行）。`[rffmpeg]` 前缀的通知行（如 `[rffmpeg] Cache hit: <key>`、编码器改写/回退）不属于进度输出，`--quiet` 下仍写入 stderr；任务终态失败报告（`Job failed:` / `Job timed out:` 等）始终打印、不受 `--quiet` 影响。需要查看 ffmpeg 原始错误/警告时，去掉 `--quiet` 重新运行即可。
 
+**进度行单调不回退**：`Progress: …% | ETA: …` 只增不减，且作业级同样成立。Worker 在 ffmpeg 中途崩溃（OOM、SIGABRT 等）后走多阶段重试、从零重跑时，重试的早期帧被丢弃而不是把已显示的百分比拉回去——stderr 里先出现的 `[RETRY] Initial attempt failed (…)` 行就是这个重跑的信号，进度停在崩溃点直到重试追平。作业被迁移到另一 Worker 重新执行时，Server 按 jobID 拒绝回退的进度上报（既不存储也不广播），因此新 Worker 从 0 重跑的低百分比不会让已显示的进度回退：进度停在迁移前的高点，待新 Worker 追平后继续推进（此时 stderr 中会再次出现 ffmpeg 头与改写通知行）。
+
 **硬件编码升级（`--auto-hw`）与参数去向**：`--auto-hw` 让 Worker 把软件编码升级为本地硬件编码（如 `libx264 → h264_qsv`），改写结果通过 `[rffmpeg]` 行输出：升级/回退行之后紧跟一行「参数去向」，逐个列出用户传入的编码参数在目标编码器上的形态——改名的显示映射关系（`-crf 23 → -global_quality 23`），值被转换的显示新值（`-preset slow → -preset p7`），名字与值都不变的原样列出（`-profile high`）：
 
 ```bash

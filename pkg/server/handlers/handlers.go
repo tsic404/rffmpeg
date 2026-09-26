@@ -927,13 +927,21 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 
 	// Handle progress update from worker
 	if req.Progress > 0 || req.EtaSeconds > 0 {
-		// Store progress in DB
-		if err := h.db.UpdateJobProgress(jobID, req.Progress, req.EtaSeconds); err != nil {
+		// Store progress in DB. A report that would move the job's percent
+		// backward is rejected (see Database.UpdateJobProgress): the job's
+		// progress is monotonic across re-dispatches, and neither the stored
+		// value nor the broadcast may rewind what the CLI already showed.
+		accepted, err := h.db.UpdateJobProgress(jobID, req.Progress, req.EtaSeconds)
+		if err != nil {
 			log.Printf("Failed to update job progress for job %s: %v", jobID, err)
 		}
-		// Broadcast progress via WebSocket
-		if err := h.wsHub.BroadcastProgress(jobID, req.Progress, req.TimeUs, req.DurationUs, req.Speed, req.EtaSeconds); err != nil {
-			log.Printf("Failed to broadcast progress for job %s: %v", jobID, err)
+		// Broadcast when the report was accepted, or when the store failed so
+		// a degraded DB does not also silence the live stream. A rejected
+		// (regressing) report is skipped on both sinks.
+		if accepted || err != nil {
+			if err := h.wsHub.BroadcastProgress(jobID, req.Progress, req.TimeUs, req.DurationUs, req.Speed, req.EtaSeconds); err != nil {
+				log.Printf("Failed to broadcast progress for job %s: %v", jobID, err)
+			}
 		}
 	}
 

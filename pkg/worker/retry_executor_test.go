@@ -561,7 +561,7 @@ func TestExecuteWithRetry_StdoutOutputSkipsFileValidation(t *testing.T) {
 
 	// ffmpeg exits 0 writing only to stdout ("-"); no local file is created.
 	args := []string{"-f", "lavfi", "-i", "testsrc=duration=0.1", "-f", "mpegts", "-"}
-	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil, nil)
+	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil, nil, nil)
 
 	if !result.Success {
 		t.Fatalf("expected success for stdout output, got stage=%s attempts=%d",
@@ -615,7 +615,7 @@ func TestExecuteWithRetry_SigAbortRetriesAndSucceeds(t *testing.T) {
 	}
 
 	args := []string{"-i", "input.mp4", "-c:v", "libx264", "-f", "mpegts", "pipe:1"}
-	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil, nil)
+	result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil, nil, nil)
 
 	if !result.Success {
 		t.Fatalf("expected retry success after SIGABRT, got stage=%s attempts=%d",
@@ -701,7 +701,7 @@ func TestExecuteWithRetry_StreamsStderrEveryAttempt(t *testing.T) {
 	var streamed []string
 	handler := func(chunk string) { streamed = append(streamed, chunk) }
 
-	result := re.ExecuteWithRetry(context.Background(), []string{"-f", "lavfi", "-i", "testsrc", "-f", "mpegts", "-"}, "-", false, nil, handler)
+	result := re.ExecuteWithRetry(context.Background(), []string{"-f", "lavfi", "-i", "testsrc", "-f", "mpegts", "-"}, "-", false, nil, handler, nil)
 
 	if !result.Success {
 		t.Fatalf("expected retry success after SIGABRT, got stage=%s attempts=%d",
