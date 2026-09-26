@@ -1248,6 +1248,7 @@ type WorkerHealth struct {
 	ActiveJobs     []string `json:"active_jobs,omitempty"`
 	JobsPerSec     float64  `json:"jobs_per_sec"`
 	EWMAJobsPerSec float64  `json:"ewma_jobs_per_sec,omitempty"`
+	CompletedJobs  int      `json:"completed_jobs"`
 	LastSeen       string   `json:"last_seen"`
 }
 

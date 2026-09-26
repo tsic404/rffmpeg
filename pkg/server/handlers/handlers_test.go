@@ -1729,6 +1729,7 @@ type WorkerHealth struct {
 	GPUMetricsValid bool     `json:"gpu_metrics_valid"`
 	ActiveJobs      []string `json:"active_jobs,omitempty"`
 	JobsPerSec      float64  `json:"jobs_per_sec,omitempty"`
+	CompletedJobs   int      `json:"completed_jobs,omitempty"`
 	LastSeen        string   `json:"last_seen"`
 }
 
@@ -1981,6 +1982,123 @@ func TestWorkerHealthJobsPerSecAlwaysPresent(t *testing.T) {
 	}
 	if getResp.Worker.Health.JobsPerSec != 0 {
 		t.Errorf("Expected jobs_per_sec 0 for idle worker, got %f", getResp.Worker.Health.JobsPerSec)
+	}
+}
+
+// TestWorkerHealthCompletedJobsAlwaysPresent verifies the health object always
+// carries completed_jobs — the count the slow-node warmup gate
+// (workerhealth.MinJobsForEviction) compares against — and that a heartbeat's
+// cumulative count reaches the API. omitempty previously hid the key at 0,
+// leaving a fresh worker's warmup state unobservable.
+func TestWorkerHealthCompletedJobsAlwaysPresent(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	regReq := protocol.WorkerRegisterRequest{
+		Name: "test-worker-completed-jobs",
+		Capabilities: protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "5.1.2",
+		},
+	}
+	regBody, _ := json.Marshal(regReq)
+	req := httptest.NewRequest("POST", "/api/v1/workers/register", bytes.NewReader(regBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("registration failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var regResp protocol.WorkerRegisterResponse
+	json.NewDecoder(rec.Body).Decode(&regResp)
+
+	// getWorkerHealth and listWorkerHealth return the health of the registered
+	// worker plus the raw body, so callers can assert key presence as well.
+	getWorkerHealth := func() (*WorkerHealth, string) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/v1/workers/"+regResp.WorkerID, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		var resp struct {
+			Worker struct {
+				Health *WorkerHealth `json:"health"`
+			} `json:"worker"`
+		}
+		if err := json.Unmarshal([]byte(body), &resp); err != nil {
+			t.Fatalf("decode get worker: %v", err)
+		}
+		return resp.Worker.Health, body
+	}
+	listWorkerHealth := func() (*WorkerHealth, string) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/v1/workers", nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		body := rec.Body.String()
+		var resp struct {
+			Workers []struct {
+				ID     string        `json:"id"`
+				Health *WorkerHealth `json:"health"`
+			} `json:"workers"`
+		}
+		if err := json.Unmarshal([]byte(body), &resp); err != nil {
+			t.Fatalf("decode list workers: %v", err)
+		}
+		for i := range resp.Workers {
+			if resp.Workers[i].ID == regResp.WorkerID {
+				return resp.Workers[i].Health, body
+			}
+		}
+		t.Fatalf("registered worker missing from list response")
+		return nil, body
+	}
+
+	// Before the first heartbeat the worker is inside the warmup window and the
+	// count is 0 — the key must still be present on the list endpoint.
+	health, body := listWorkerHealth()
+	if !strings.Contains(body, `"completed_jobs"`) {
+		t.Fatalf("Expected list response to contain completed_jobs, got: %s", body)
+	}
+	if health == nil {
+		t.Fatalf("Expected non-null health for registered worker")
+	}
+	if health.CompletedJobs != 0 {
+		t.Errorf("Expected completed_jobs 0 before first heartbeat, got %d", health.CompletedJobs)
+	}
+
+	// A heartbeat's cumulative count must surface on both worker endpoints.
+	heartbeatReq := protocol.WorkerHeartbeatRequest{
+		WorkerID:      regResp.WorkerID,
+		Status:        protocol.WorkerStatusBusy,
+		ActiveJobs:    []string{"job-1"},
+		JobsPerSec:    1.5,
+		CompletedJobs: 7,
+	}
+	heartbeatBody, _ := json.Marshal(heartbeatReq)
+	req = httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(heartbeatBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("heartbeat failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	for name, fetch := range map[string]func() (*WorkerHealth, string){
+		"get":  getWorkerHealth,
+		"list": listWorkerHealth,
+	} {
+		health, _ = fetch()
+		if health == nil {
+			t.Fatalf("%s: expected non-null health after heartbeat", name)
+		}
+		if health.CompletedJobs != 7 {
+			t.Errorf("%s: completed_jobs = %d, want 7", name, health.CompletedJobs)
+		}
 	}
 }
 

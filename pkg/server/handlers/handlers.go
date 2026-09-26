@@ -2201,7 +2201,11 @@ type WorkerHealth struct {
 	ActiveJobs      []string `json:"active_jobs,omitempty"`
 	JobsPerSec      float64  `json:"jobs_per_sec"`
 	EWMAJobsPerSec  float64  `json:"ewma_jobs_per_sec"` // EWMA-smoothed throughput (jobs/sec); 0 until the first heartbeat sample
-	LastSeen        string   `json:"last_seen"`
+	// CompletedJobs is cumulative since the current registration — the count
+	// the slow-node warmup gate compares against. Emitted unconditionally: a
+	// worker below the gate reports 0, so omitting the key hid the gate state.
+	CompletedJobs int    `json:"completed_jobs"`
+	LastSeen      string `json:"last_seen"`
 }
 
 // WorkerInfo represents worker information for API responses
@@ -2423,6 +2427,7 @@ func dbWorkerToWorkerInfo(worker *db.Worker, states map[string]*protocol.WorkerS
 		health.GPUMetricsValid = state.GPUMetricsValid
 		health.JobsPerSec = state.JobsPerSec
 		health.EWMAJobsPerSec = state.EWMAJobsPerSec
+		health.CompletedJobs = state.CompletedJobs
 		health.ActiveJobs = state.ActiveJobs
 		// !Before (not After): when the two timestamps are equal, prefer the
 		// fresher state-table sample instead of falling back to the DB record.
