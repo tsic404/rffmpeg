@@ -179,11 +179,11 @@ func TestTranslate_PresetMapping(t *testing.T) {
 		{"NVENC veryslow→p7", EncoderH264NVENC, "veryslow", "p7"},
 		{"NVENC placebo→p7", EncoderH264NVENC, "placebo", "p7"},
 
-		// QSV presets: ultrafast→veryfast, medium→medium, slow→slow, placebo→veryslow
-		{"QSV ultrafast→veryfast", EncoderH264QSV, "ultrafast", "veryfast"},
-		{"QSV medium→medium", EncoderH264QSV, "medium", "medium"},
-		{"QSV slow→slow", EncoderH264QSV, "slow", "slow"},
-		{"QSV placebo→veryslow", EncoderH264QSV, "placebo", "veryslow"},
+		// QSV presets are TargetUsage numbers: ultrafast→7, medium→4, slow→3, placebo→1
+		{"QSV ultrafast→7", EncoderH264QSV, "ultrafast", "7"},
+		{"QSV medium→4", EncoderH264QSV, "medium", "4"},
+		{"QSV slow→3", EncoderH264QSV, "slow", "3"},
+		{"QSV placebo→1", EncoderH264QSV, "placebo", "1"},
 
 		// AMF presets: ultrafast→speed, medium→balanced, slow→quality, veryslow→quality
 		{"AMF ultrafast→speed", EncoderH264AMF, "ultrafast", "speed"},

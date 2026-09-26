@@ -800,7 +800,7 @@ func TestRewriteAdapter_AutoHWPresetCompatibility(t *testing.T) {
 				},
 			},
 			args:         []string{"-i", "input.mp4", "-preset", "ultrafast", "output.mp4"},
-			expectPair:   []string{"-preset", "veryfast"},
+			expectPair:   []string{"-preset", "7"},
 			expectAbsent: []string{"ultrafast"},
 		},
 		{
@@ -834,7 +834,7 @@ func TestRewriteAdapter_AutoHWPresetCompatibility(t *testing.T) {
 			expectAbsent: []string{"ultrafast"},
 		},
 		{
-			name: "auto-selected qsv keeps supported preset unchanged",
+			name: "auto-selected qsv converts slower to its TargetUsage",
 			caps: &protocol.WorkerCapabilities{
 				VideoEncoders: []protocol.EncoderInfo{
 					{Name: "h264_qsv", Type: "video", IsHW: true},
@@ -845,8 +845,8 @@ func TestRewriteAdapter_AutoHWPresetCompatibility(t *testing.T) {
 				},
 			},
 			args:         []string{"-i", "input.mp4", "-preset", "slower", "output.mp4"},
-			expectPair:   []string{"-preset", "slower"},
-			expectAbsent: nil,
+			expectPair:   []string{"-preset", "2"},
+			expectAbsent: []string{"slower"},
 		},
 	}
 
@@ -955,21 +955,24 @@ func TestRewriteAdapter_AutoHWUpgradeReportsParamFate(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	const wantNotice = "[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast"
+	const wantNotice = "[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast → -preset 6"
 	if !slices.Contains(result.Notifications, wantNotice) {
 		t.Errorf("missing parameter report %q in notifications %v", wantNotice, result.Notifications)
 	}
 
-	wantPair := []string{"-global_quality", "23"}
-	found := false
-	for i := 0; i+1 < len(rewritten); i++ {
-		if rewritten[i] == wantPair[0] && rewritten[i+1] == wantPair[1] {
-			found = true
-			break
+	// Both the renamed (crf -> global_quality) and the re-valued (preset)
+	// parameter must reach ffmpeg in the form the report claims.
+	for _, wantPair := range [][]string{{"-global_quality", "23"}, {"-preset", "6"}} {
+		found := false
+		for i := 0; i+1 < len(rewritten); i++ {
+			if rewritten[i] == wantPair[0] && rewritten[i+1] == wantPair[1] {
+				found = true
+				break
+			}
 		}
-	}
-	if !found {
-		t.Errorf("expected %v in rewritten args, got %v", wantPair, rewritten)
+		if !found {
+			t.Errorf("expected %v in rewritten args, got %v", wantPair, rewritten)
+		}
 	}
 	for _, arg := range rewritten {
 		if arg == "-crf" {
