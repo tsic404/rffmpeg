@@ -85,13 +85,11 @@ const (
 	// already-submitted job once the server stops answering at all
 	// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT): only transport-level
 	// failures count, so an answered request — an error status included — resets
-	// the clock. A silent server therefore surfaces as the distinct
-	// "gave up waiting" exit code within seconds instead of leaving the CLI in
-	// backoff until the retry budget (~5 min) or an external timeout ends the
-	// run. Two reconnect rounds fit inside it, absorbing a brief server restart;
-	// raise it for a server that restarts slowly, or set it to 0 to let
-	// --max-retries alone decide.
-	DefaultServerLossTimeout = 5 * time.Second
+	// the clock. The cap must outlast a routine server restart, or an ordinary
+	// restart turns into the "gave up waiting" exit code while the job keeps
+	// running server-side; 30s spans the reconnect ramp (0s/1s/3s/7s/15s) and
+	// stays far below the ~5 min retry budget. 0 = --max-retries decides alone.
+	DefaultServerLossTimeout = 30 * time.Second
 
 	// DefaultSubmitRetries bounds the CLI's rate-limit (HTTP 429) resubmission
 	// loop when --retry is enabled. Backoff starts at the server's retry_in
