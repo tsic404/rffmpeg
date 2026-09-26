@@ -1734,9 +1734,30 @@ func runProbe(cli *client.Client, input string, quiet bool, sharedFS bool) int {
 	return runProbeRequest(cli, fileID, quiet)
 }
 
+// localFallbackEnv opts into answering a server-backed capability query from
+// local ffmpeg when the server cannot answer it (see localFallbackAllowed).
+const localFallbackEnv = "RFFMPEG_LOCAL_FALLBACK"
+
+// localFallbackAllowed decides what a server-backed capability query does after
+// the server failed to answer it. The capability list describes the cluster the
+// job will run on, so answering with the local machine's list is a substitution
+// the caller must ask for: without the opt-in the query fails, and with it the
+// substitution is announced on stderr. Returns true when the caller should run
+// local ffmpeg.
+func localFallbackAllowed(flag string, serverErr error) bool {
+	switch os.Getenv(localFallbackEnv) {
+	case "1", "true":
+		fmt.Fprintf(os.Stderr, "[rffmpeg] local fallback: %s server query failed (%v); listing LOCAL ffmpeg capabilities\n", flag, serverErr)
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "Error: %s server query failed: %v\n", flag, serverErr)
+	fmt.Fprintf(os.Stderr, "Hint: this list comes from the cluster; set %s=1 to list the LOCAL ffmpeg's capabilities instead.\n", localFallbackEnv)
+	return false
+}
+
 // runEncoders queries encoders from the server and prints in ffmpeg-compatible format.
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg if server is unavailable.
+// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
 func runEncoders(serverURL, token string, jsonOut bool) int {
 	cli, err := setupClient(serverURL, token)
 	if err == nil {
@@ -1756,8 +1777,11 @@ func runEncoders(serverURL, token string, jsonOut bool) int {
 			}
 			return ExitSuccess
 		}
+		err = apiErr
 	}
-	// Server unavailable — fall back to local ffmpeg
+	if !localFallbackAllowed("-encoders", err) {
+		return ExitError
+	}
 	if !jsonOut {
 		return runLocalFfmpegPassthrough("-encoders")
 	}
@@ -1772,7 +1796,7 @@ func runEncoders(serverURL, token string, jsonOut bool) int {
 
 // runDecoders queries decoders from the server and prints in ffmpeg-compatible format.
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg if server is unavailable.
+// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
 func runDecoders(serverURL, token string, jsonOut bool) int {
 	cli, err := setupClient(serverURL, token)
 	if err == nil {
@@ -1792,8 +1816,11 @@ func runDecoders(serverURL, token string, jsonOut bool) int {
 			}
 			return ExitSuccess
 		}
+		err = apiErr
 	}
-	// Server unavailable — fall back to local ffmpeg
+	if !localFallbackAllowed("-decoders", err) {
+		return ExitError
+	}
 	if !jsonOut {
 		return runLocalFfmpegPassthrough("-decoders")
 	}
@@ -1818,52 +1845,46 @@ func runDecoders(serverURL, token string, jsonOut bool) int {
 // runCodecsFromServer queries both encoders and decoders from the server and prints in
 // ffmpeg-compatible format: encoder list first, then decoder list.
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg if server is unavailable.
+// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
 func runCodecsFromServer(serverURL, token string, jsonOut bool) int {
 	cli, err := setupClient(serverURL, token)
 	if err == nil {
-		if jsonOut {
-			encoders, apiErr1 := cli.ListAllEncoders()
-			if apiErr1 != nil {
-				goto fallback
-			}
-			decoders, apiErr2 := cli.ListAllDecoders()
-			if apiErr2 != nil {
-				goto fallback
-			}
-			return outputInfoFlagJSON("codecs", encoders, decoders)
+		var encoders []protocol.EncoderInfo
+		var decoders []protocol.DecoderInfo
+		encoders, err = cli.ListAllEncoders()
+		if err == nil {
+			decoders, err = cli.ListAllDecoders()
 		}
-
-		encoders, apiErr := cli.ListAllEncoders()
-		if apiErr == nil {
-			decoders, apiErr2 := cli.ListAllDecoders()
-			if apiErr2 == nil {
-				printCodecsHeader("Encoders")
-				if len(encoders) > 0 {
-					for _, enc := range encoders {
-						capFlags := encoderCapabilityFlags(enc.Type)
-						fmt.Printf("%s %-22s %s\n", capFlags, enc.Name, enc.Description)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "No encoders available\n")
-				}
-
-				printCodecsHeader("Decoders")
-				if len(decoders) > 0 {
-					for _, dec := range decoders {
-						capFlags := decoderCapabilityFlags(dec.Type)
-						fmt.Printf("%s %-22s %s\n", capFlags, dec.Name, dec.Description)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "No decoders available\n")
-				}
-				return ExitSuccess
+		if err == nil {
+			if jsonOut {
+				return outputInfoFlagJSON("codecs", encoders, decoders)
 			}
+			printCodecsHeader("Encoders")
+			if len(encoders) > 0 {
+				for _, enc := range encoders {
+					capFlags := encoderCapabilityFlags(enc.Type)
+					fmt.Printf("%s %-22s %s\n", capFlags, enc.Name, enc.Description)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "No encoders available\n")
+			}
+
+			printCodecsHeader("Decoders")
+			if len(decoders) > 0 {
+				for _, dec := range decoders {
+					capFlags := decoderCapabilityFlags(dec.Type)
+					fmt.Printf("%s %-22s %s\n", capFlags, dec.Name, dec.Description)
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "No decoders available\n")
+			}
+			return ExitSuccess
 		}
 	}
 
-fallback:
-	// Server unavailable — fall back to local ffmpeg
+	if !localFallbackAllowed("-codecs", err) {
+		return ExitError
+	}
 	if !jsonOut {
 		return runLocalFfmpegPassthrough("-codecs")
 	}
@@ -1904,7 +1925,8 @@ func runLocalFfmpegInfo(flag string) int {
 	return ExitSuccess
 }
 
-// === Local ffmpeg fallback helpers for P0/P1 info flags ===
+// === Local ffmpeg fallback helpers for P0/P1 info flags (opt-in, see
+// localFallbackAllowed) ===
 
 // runLocalFfmpegOutput runs a local ffmpeg with the given flag, capturing stdout
 // and discarding stderr. Returns the combined output string.
@@ -2128,7 +2150,7 @@ func jsonEncodeToStdout(enc *json.Encoder, v interface{}) int {
 
 // runHwaccels queries hwaccels from the server and prints in ffmpeg-compatible format (single-column list).
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg if server is unavailable.
+// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
 func runHwaccels(serverURL, token string, jsonOut bool) int {
 	cli, err := setupClient(serverURL, token)
 	if err == nil {
@@ -2146,8 +2168,11 @@ func runHwaccels(serverURL, token string, jsonOut bool) int {
 			}
 			return ExitSuccess
 		}
+		err = apiErr
 	}
-	// Server unavailable — fall back to local ffmpeg
+	if !localFallbackAllowed("-hwaccels", err) {
+		return ExitError
+	}
 	if !jsonOut {
 		return runLocalFfmpegPassthrough("-hwaccels")
 	}
@@ -2161,7 +2186,7 @@ func runHwaccels(serverURL, token string, jsonOut bool) int {
 }
 
 // runFilters queries filters from the server and prints in ffmpeg-compatible format.
-// Falls back to local ffmpeg if server is unavailable.
+// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
 func runFilters(serverURL, token string, jsonOut bool) int {
 	cli, err := setupClient(serverURL, token)
 	if err == nil {
@@ -2180,8 +2205,11 @@ func runFilters(serverURL, token string, jsonOut bool) int {
 			}
 			return ExitSuccess
 		}
+		err = apiErr
 	}
-	// Server unavailable — fall back to local ffmpeg
+	if !localFallbackAllowed("-filters", err) {
+		return ExitError
+	}
 	if !jsonOut {
 		return runLocalFfmpegPassthrough("-filters")
 	}
@@ -2195,7 +2223,7 @@ func runFilters(serverURL, token string, jsonOut bool) int {
 }
 
 // runPixFmts queries pixel formats from the server and prints in ffmpeg-compatible format.
-// Falls back to local ffmpeg if server is unavailable.
+// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
 func runPixFmts(serverURL, token string, jsonOut bool) int {
 	cli, err := setupClient(serverURL, token)
 	if err == nil {
@@ -2214,8 +2242,11 @@ func runPixFmts(serverURL, token string, jsonOut bool) int {
 			}
 			return ExitSuccess
 		}
+		err = apiErr
 	}
-	// Server unavailable — fall back to local ffmpeg
+	if !localFallbackAllowed("-pix_fmts", err) {
+		return ExitError
+	}
 	if !jsonOut {
 		return runLocalFfmpegPassthrough("-pix_fmts")
 	}
@@ -2229,7 +2260,7 @@ func runPixFmts(serverURL, token string, jsonOut bool) int {
 }
 
 // runFormats queries formats from the server and prints in ffmpeg-compatible format.
-// Falls back to local ffmpeg if server is unavailable.
+// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
 func runFormats(serverURL, token string, jsonOut bool) int {
 	cli, err := setupClient(serverURL, token)
 	if err == nil {
@@ -2248,8 +2279,11 @@ func runFormats(serverURL, token string, jsonOut bool) int {
 			}
 			return ExitSuccess
 		}
+		err = apiErr
 	}
-	// Server unavailable — fall back to local ffmpeg
+	if !localFallbackAllowed("-formats", err) {
+		return ExitError
+	}
 	if !jsonOut {
 		return runLocalFfmpegPassthrough("-formats")
 	}
@@ -2394,6 +2428,10 @@ rffmpeg options:
   -filters        List all available filters (queries server, no input file required)
   -pix_fmts       List all available pixel formats (queries server, no input file required)
   -formats        List all available muxers/demuxers (queries server, no input file required)
+  Capability queries (-encoders/-decoders/-codecs/-hwaccels/-filters/-pix_fmts/-formats)
+  describe the cluster, so they fail when the server cannot answer instead of
+  silently listing this machine's ffmpeg; RFFMPEG_LOCAL_FALLBACK=1 opts into the
+  local list (announced on stderr).
   -buildconf      Show build configuration (runs local ffmpeg)
   -layouts        List channel layouts (runs local ffmpeg)
   -protocols      List protocols (runs local ffmpeg)
@@ -2482,6 +2520,8 @@ Configuration:
     RFFMPEG_SERVER_URL  Server URL
     RFFMPEG_TOKEN       Auth token
     RFFMPEG_SHARED_FS   Enable shared filesystem mode (set to 1 or true)
+    RFFMPEG_LOCAL_FALLBACK  Allow capability queries to answer from local ffmpeg
+                        when the server cannot (set to 1 or true; default: fail)
 
 `)
 }

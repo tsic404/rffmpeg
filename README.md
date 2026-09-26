@@ -450,7 +450,10 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 | `RFFMPEG_MAX_RETRIES` | WS/HTTP 重试次数上限（连接中断后） | `14`（约 5 分钟） |
 | `RFFMPEG_SERVER_LOSS_TIMEOUT` | 已提交任务等待期间 Server 断连的快速失败预算（`0` = 关闭该预算） | `30s` |
 | `RFFMPEG_POLL_TIMEOUT` | 等待 Worker（pending）阶段的最长轮询时长（`0` = 不设上限） | `10m` |
+| `RFFMPEG_LOCAL_FALLBACK` | 允许能力查询（`-encoders`/`-decoders`/`-codecs`/`-hwaccels`/`-filters`/`-pix_fmts`/`-formats`）在 Server 无法应答时改列本地 ffmpeg 能力（`1`/`true` 开启，并打印 `[rffmpeg] local fallback:` 告警行） | 未设置（Server 无法应答即失败退出） |
 | `RFFMPEG_LOG_FILE` | 提交前失败诊断日志路径（追加写入，未设置则禁用） | - |
+
+**能力查询在 Server 无法应答时失败退出**：`-encoders`/`-decoders`/`-codecs`/`-hwaccels`/`-filters`/`-pix_fmts`/`-formats` 回答的是**集群**（Worker）的能力，与 `-buildconf`/`-layouts` 等本地查询标志定位不同。因此当 Server 不可达、令牌错误或返回错误时，CLI 打印错误并以非零码退出，**不会静默改用本地 ffmpeg 的能力列表**——否则用户会把本机能力误当成集群能力（例如据此选定一个集群并不支持的编码器）。确需本机列表时：直接运行 `ffmpeg -encoders` 等本地命令，或设置 `RFFMPEG_LOCAL_FALLBACK=1` 显式开启回退（回退时会打印 `[rffmpeg] local fallback: …; listing LOCAL ffmpeg capabilities` 告警行）。
 
 **未配置 Server URL 时的连接失败提示**：`--server`、`RFFMPEG_SERVER_URL` 与配置文件都没有提供 Server URL 时，CLI 使用默认 `http://localhost:8080`；此时若健康检查失败，除错误信息外会额外打印一行提示（说明当前用的是默认 URL，并提示设置 `RFFMPEG_SERVER_URL` 或 `--server`），避免首次使用只看到 `connection refused` 而无从判断。显式指定过 URL（命令行、环境变量、配置文件任一）时不打印该提示。
 
