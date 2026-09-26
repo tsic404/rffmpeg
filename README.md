@@ -384,12 +384,14 @@ Usage of ./bin/rffmpeg-worker:
 }
 ```
 
+**`RFFMPEG_SERVER_URL` 优先于配置文件 `server_url`**：完整覆盖顺序为 `-server-url` > `RFFMPEG_SERVER_URL` > 配置文件 `server_url` > 默认 `http://localhost:8080`；环境变量为空串时等同未设置，不参与覆盖。因此从 shell、CI 或 systemd 继承到 `RFFMPEG_SERVER_URL` 时，本文件里的 `server_url` 会被静默压掉：同机多实例（各自独立端口 + 独立配置文件）会全部连向该变量指向的 Server，表现为注册/心跳/上传 401（`unauthorized: Invalid token`）或连接被拒，或目标 Server 上任务一直 pending、CLI 收到 503 `worker_unavailable`。启动日志打印的是合并后的生效 URL——注册成功时为 `Worker <id> started, polling <url>`，失败时 `Failed to register worker: ... Post "<url>/api/v1/workers/register"` 也带该 URL，可据此确认实例实际连向哪个 Server。
+
 #### 环境变量
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `RFFMPEG_CONFIG` | JSON 配置文件路径（即 `-config`） | - |
-| `RFFMPEG_SERVER_URL` | Server API URL | `http://localhost:8080` |
+| `RFFMPEG_SERVER_URL` | Server API URL（优先于配置文件 `server_url`，见上方覆盖顺序） | `http://localhost:8080` |
 | `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
 | `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |
 | `RFFMPEG_TOKEN` | API 认证令牌（须与 Server 一致） | - |
