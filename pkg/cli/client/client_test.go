@@ -843,6 +843,34 @@ func TestNonUploadNonOKEmptyMessage(t *testing.T) {
 	}
 }
 
+// TestProbeRejectionKeepsClassificationCode pins the unified submission
+// rejection shape on the probe endpoint: probe and job submission share the
+// same worker-availability guard and rate limiter, so a workerless cluster
+// answers 503 with the same `worker_unavailable` classification. The code must
+// stay on the line as "<op> failed [<code>]: <message>" — the probe path used
+// to drop it by decoding ProbeResponse, which has no code field.
+func TestProbeRejectionKeepsClassificationCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(protocol.ErrorResponse{
+			Code:    protocol.ErrCodeWorkerUnavailable,
+			Message: "No workers available. Please ensure at least one worker is registered and online.",
+		})
+	}))
+	defer srv.Close()
+
+	c := client.New(srv.URL, "")
+	_, err := c.Probe("in.mp4")
+	if err == nil {
+		t.Fatal("Probe succeeded against a 503 rejection, want an error")
+	}
+	const want = "probe failed [worker_unavailable]: No workers available. Please ensure at least one worker is registered and online."
+	if got := err.Error(); got != want {
+		t.Errorf("probe rejection = %q, want %q", got, want)
+	}
+}
+
 // TestUploadFileChunked tests the chunked file upload
 func TestUploadFileChunked(t *testing.T) {
 	server, _, _, cleanup := setupTestServer(t)
@@ -1439,9 +1467,10 @@ func TestSubmitJobBackwardsCompat(t *testing.T) {
 }
 
 // TestSubmitJobRateLimitMessage is the regression test: the rate-limit
-// 429 error must render the exact single-line stderr message, without a retry
-// promise — the default path (no --retry) fails fast, so telling the user to
-// "Retry after N seconds" would promise a retry that never happens.
+// 429 error must render the exact single-line stderr message in the unified
+// classified form — "[rate_limit_exceeded]" on the same line — and without a
+// retry promise: the default path (no --retry) fails fast, so telling the user
+// to "Retry after N seconds" would promise a retry that never happens.
 func TestSubmitJobRateLimitMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1461,9 +1490,40 @@ func TestSubmitJobRateLimitMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected rate-limit error, got nil")
 	}
-	const want = "rate limit exceeded: 10/10 concurrent jobs"
+	const want = "job submission failed [rate_limit_exceeded]: rate limit exceeded: 10/10 concurrent jobs"
 	if got := err.Error(); got != want {
 		t.Errorf("rate-limit error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), "Retry after") {
+		t.Errorf("rate-limit error = %q, want no retry promise on the default (no --retry) path", err)
+	}
+}
+
+// TestSubmitJobRateLimitUndecodableBodyKeepsRejectionPrefix pins the 429
+// fallback: a rate-limited response whose body carries no readable code must
+// still render the unified "<op> failed: <message>" shape instead of the bare
+// typed error, and the typed error must stay wrapped so errors.As — and with
+// it the --retry backoff — still sees it.
+func TestSubmitJobRateLimitUndecodableBodyKeepsRejectionPrefix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("proxy said no"))
+	}))
+	defer srv.Close()
+
+	c := client.New(srv.URL, "")
+	_, err := c.SubmitJob([]string{"in.mp4"}, []string{"-c:v", "libx264"}, "out.mp4", false)
+	if err == nil {
+		t.Fatal("expected rate-limit error, got nil")
+	}
+	const want = "job submission failed: rate limit exceeded (HTTP 429): proxy said no"
+	if got := err.Error(); got != want {
+		t.Errorf("rate-limit fallback error = %q, want %q", got, want)
+	}
+	var rl *client.RateLimitError
+	if !errors.As(err, &rl) {
+		t.Errorf("error %v (%T) must still wrap *RateLimitError so the --retry backoff keeps retrying", err, err)
 	}
 }
 

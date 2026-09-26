@@ -199,11 +199,11 @@ func TestRun_HealthCheckFailureOmitsHintForExplicitServerURL(t *testing.T) {
 
 // TestRun_QuietSuppressesBannerOnRateLimit pins the --quiet contract on the
 // error path: a rate-limited submission under --quiet must emit exactly the
-// single "Error submitting job: rate limit exceeded: …" line — no identity
-// banner (version/Server), no "Input files"/"Output file" lines, no
-// "Submitting job..." or upload progress noise. Automation asserting a
-// one-line error message relies on --quiet suppressing the pre-error banner;
-// the terminal error itself is never suppressed.
+// single "Error submitting job: job submission failed [rate_limit_exceeded]:
+// …" line — no identity banner (version/Server), no "Input files"/"Output
+// file" lines, no "Submitting job..." or upload progress noise. Automation
+// asserting a one-line error message relies on --quiet suppressing the
+// pre-error banner; the terminal error itself is never suppressed.
 func TestRun_QuietSuppressesBannerOnRateLimit(t *testing.T) {
 	input := filepath.Join(t.TempDir(), "in.mp4")
 	if err := os.WriteFile(input, []byte("dummy"), 0o644); err != nil {
@@ -258,7 +258,7 @@ func TestRun_QuietSuppressesBannerOnRateLimit(t *testing.T) {
 	// the server's limit check and its response, so the same rejection may read
 	// 9/10 or 10/10. Only the message shape is fixed, so match that and not the
 	// count — the anchored pattern still pins the single-line --quiet contract.
-	wantPattern := regexp.MustCompile(`^Error submitting job: rate limit exceeded: \d+/10 concurrent jobs\n$`)
+	wantPattern := regexp.MustCompile(`^Error submitting job: job submission failed \[rate_limit_exceeded\]: rate limit exceeded: \d+/10 concurrent jobs\n$`)
 	if !wantPattern.MatchString(stderr) {
 		t.Errorf("run() --quiet rate-limit stderr = %q, want exactly one %q line", stderr, wantPattern)
 	}

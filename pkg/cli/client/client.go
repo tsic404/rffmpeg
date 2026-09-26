@@ -320,6 +320,23 @@ func parseErrorResponse(body io.Reader) (protocol.ErrorResponse, bool) {
 	return errResp, true
 }
 
+// serverRejection renders a non-2xx response from a job-submission endpoint
+// (POST /jobs, POST /probe) as a one-line error. The server's classification
+// code stays on that line — "<op> failed [<code>]: <message>" — so the
+// rejection can be keyed off without parsing the message text. A response the
+// server did not classify falls back to the HTTP status, and a body without a
+// message never degrades to a bare "<op> failed: ".
+func serverRejection(op string, status int, code protocol.ErrorCode, message string) error {
+	switch {
+	case message == "":
+		return fmt.Errorf("%s failed with status %d", op, status)
+	case code == "":
+		return fmt.Errorf("%s failed: %s", op, message)
+	default:
+		return fmt.Errorf("%s failed [%s]: %s", op, code, message)
+	}
+}
+
 // UploadFile uploads a file to the server using streaming to avoid loading
 // large files entirely into memory.
 func (c *Client) UploadFile(filePath string) (string, error) {
@@ -539,14 +556,23 @@ func (c *Client) submitJobOnce(ctx context.Context, inputFiles []string, directP
 
 	if resp.StatusCode != http.StatusOK {
 		// Rate limit (429): surface a typed error so a caller with a retry
-		// budget can honor the server's backoff hint.
+		// budget can honor the server's backoff hint. The rejection keeps the
+		// unified single-line shape — "[<code>]: <message>" when the body
+		// carried a code, the message-only form otherwise — and the typed
+		// error stays wrapped so errors.As, and with it the --retry backoff,
+		// keeps working.
 		if resp.StatusCode == http.StatusTooManyRequests {
-			return "", decodeRateLimitError(resp.Body)
+			rlErr := decodeRateLimitError(resp.Body)
+			if rl, ok := rlErr.(*RateLimitError); ok && rl.Code != "" {
+				return "", fmt.Errorf("job submission failed [%s]: %w", rl.Code, rl)
+			}
+			// No classification code in the body (unreadable or codeless):
+			// the message-only form of the same shape, never the bare typed
+			// error past the operation prefix.
+			return "", fmt.Errorf("job submission failed: %w", rlErr)
 		}
-		if errResp, ok := parseErrorResponse(resp.Body); ok {
-			return "", fmt.Errorf("job submission failed [%s]: %s", errResp.Code, errResp.Message)
-		}
-		return "", fmt.Errorf("job submission failed with status %d", resp.StatusCode)
+		errResp, _ := parseErrorResponse(resp.Body)
+		return "", serverRejection("job submission", resp.StatusCode, errResp.Code, errResp.Message)
 	}
 
 	var jobResp protocol.JobSubmitResponse
@@ -1188,11 +1214,17 @@ func (c *Client) Probe(input string) (*protocol.ProbeResponse, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		var probeResp protocol.ProbeResponse
-		if decodeErr := json.NewDecoder(resp.Body).Decode(&probeResp); decodeErr == nil && probeResp.Message != "" {
-			return nil, fmt.Errorf("probe failed: %s", probeResp.Message)
+		// The probe endpoint shares the job-submission guard and rate limiter,
+		// so its rejections (503 worker_unavailable, 429) come back as
+		// ErrorResponse bodies. Decoding the error envelope — not
+		// ProbeResponse, which has no code field — keeps the classification
+		// code on the line, exactly like the job-submission path. A probe
+		// failure body without a code still surfaces its message.
+		var errResp protocol.ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			errResp = protocol.ErrorResponse{}
 		}
-		return nil, fmt.Errorf("probe failed with status %d", resp.StatusCode)
+		return nil, serverRejection("probe", resp.StatusCode, errResp.Code, errResp.Message)
 	}
 
 	var probeResp protocol.ProbeResponse
