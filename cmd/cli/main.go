@@ -29,7 +29,7 @@ const (
 	ExitError   = 1
 	// ExitDisconnected is returned when a job was submitted successfully but
 	// the client gave up waiting for it: the server stayed silent past the
-	// server-loss budget (--server-loss-timeout, default 5s) or the retry
+	// server-loss budget (--server-loss-timeout, default 30s) or the retry
 	// budget was spent. The job keeps running server-side; query its final
 	// status via GET /api/v1/jobs/{id}. Distinct from ExitError, which also
 	// covers submission-phase failures where no job exists to query.
@@ -2407,7 +2407,7 @@ rffmpeg options:
   --timeout DURATION      Job execution timeout (e.g., 30s, 5m, 2h)
   --poll-timeout DURATION Max time to poll a waiting-for-worker (pending) job (default: 10m; 0 = no cap)
   --max-retries N         Max WS reconnect attempts / HTTP poll retry budget (default: 14, ~5 min; 0 = no retries)
-  --server-loss-timeout D Max wait for a submitted job once the server stops responding (default: 5s; 0 = no cap)
+  --server-loss-timeout D Max wait for a submitted job once the server stops responding (default: 30s; 0 = no cap)
   --retry                 Retry job submission on rate-limit (429) with exponential backoff (default: off)
   --resume JOB_ID         Re-attach to a job an earlier run submitted and download its output.
                           Never cancels the job; --timeout/--poll-timeout bound the wait, and
