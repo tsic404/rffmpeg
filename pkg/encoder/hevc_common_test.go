@@ -194,12 +194,12 @@ func TestHEVCCommonMapping_ValueConversion_PresetToQSV(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"ultrafast", "veryfast"},
-		{"veryfast", "veryfast"},
-		{"fast", "fast"},
-		{"medium", "medium"},
-		{"slow", "slow"},
-		{"veryslow", "veryslow"},
+		{"ultrafast", "7"},
+		{"veryfast", "7"},
+		{"fast", "6"},
+		{"medium", "4"},
+		{"slow", "3"},
+		{"veryslow", "1"},
 	}
 
 	for _, tt := range tests {

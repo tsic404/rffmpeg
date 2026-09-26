@@ -912,3 +912,57 @@ func TestFormatParamFateReport(t *testing.T) {
 		t.Errorf("formatParamFateReport() = %q, want empty report", got)
 	}
 }
+
+// TestBuildRewrittenArgs_SameNameConversion pins where a converted same-name
+// value is applied: the separate-value form carries the converted value, while
+// the inline "-preset=<value>" form keeps the user's own string — ffmpeg
+// rejects encoder options in that form, so rewriting it would only put a value
+// the user never typed into ffmpeg's error message.
+func TestBuildRewrittenArgs_SameNameConversion(t *testing.T) {
+	engine := NewEngineCoordinator()
+	params := map[string]string{"preset": "6"}
+	converted := map[string]string{"preset": "6"}
+
+	has := func(args []string, want string) bool {
+		for _, arg := range args {
+			if arg == want {
+				return true
+			}
+		}
+		return false
+	}
+	hasPair := func(args []string, flag, value string) bool {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == flag && args[i+1] == value {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("separate-value form carries the converted value", func(t *testing.T) {
+		result := engine.buildRewrittenArgs(
+			[]string{"-i", "input.mp4", "-c:v", "libx264", "-preset", "fast", "output.mp4"},
+			encoder.EncoderH264QSV, params, nil, converted,
+		)
+		if !hasPair(result, "-preset", "6") {
+			t.Errorf("expected -preset 6 in rewritten args, got %v", result)
+		}
+		if has(result, "fast") {
+			t.Errorf("original preset value must be replaced, got %v", result)
+		}
+	})
+
+	t.Run("inline form keeps the user's value", func(t *testing.T) {
+		result := engine.buildRewrittenArgs(
+			[]string{"-i", "input.mp4", "-c:v", "libx264", "-preset=fast", "output.mp4"},
+			encoder.EncoderH264QSV, params, nil, converted,
+		)
+		if !has(result, "-preset=fast") {
+			t.Errorf("expected the user's -preset=fast to survive, got %v", result)
+		}
+		if has(result, "-preset=6") {
+			t.Errorf("inline preset must not be rewritten, got %v", result)
+		}
+	})
+}

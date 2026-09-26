@@ -359,22 +359,12 @@ func initValueConversionRules(m *H264CommonMapping) {
 		RangeMappingKey: "preset",
 	}
 
-	// Preset conversion to QSV
+	// Preset conversion to QSV: the TargetUsage numbers come from the single
+	// source in defaults.go (see x264PresetToQSVTargetUsage).
 	m.ValueConversionRules["preset_to_qsv"] = ValueConversionRule{
 		SourceParam:     "preset",
 		TargetParamType: "preset",
-		ValueMap: map[string]string{
-			"ultrafast": "veryfast",
-			"superfast": "veryfast",
-			"veryfast":  "veryfast",
-			"faster":    "faster",
-			"fast":      "fast",
-			"medium":    "medium",
-			"slow":      "slow",
-			"slower":    "slower",
-			"veryslow":  "veryslow",
-			"placebo":   "veryslow",
-		},
+		ValueMap:        x264PresetToQSVTargetUsage,
 		RangeMappingKey: "preset",
 	}
 
@@ -496,12 +486,6 @@ func initRangeMappings(m *H264CommonMapping) {
 	m.RangeMappings["nvenc_preset"] = ValueRange{
 		ValidValues: []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"},
 		Description: "NVENC preset values: p1 (fastest) to p7 (slowest/best quality)",
-	}
-
-	// QSV preset valid values
-	m.RangeMappings["qsv_preset"] = ValueRange{
-		ValidValues: []string{"veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"},
-		Description: "QSV preset values",
 	}
 
 	// AMF quality valid values

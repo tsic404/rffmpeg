@@ -213,12 +213,12 @@ func TestH264CommonMapping_ValueConversion_PresetToQSV(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"ultrafast", "veryfast"},
-		{"veryfast", "veryfast"},
-		{"fast", "fast"},
-		{"medium", "medium"},
-		{"slow", "slow"},
-		{"veryslow", "veryslow"},
+		{"ultrafast", "7"},
+		{"veryfast", "7"},
+		{"fast", "6"},
+		{"medium", "4"},
+		{"slow", "3"},
+		{"veryslow", "1"},
 	}
 
 	for _, tt := range tests {
@@ -913,7 +913,7 @@ func TestH264CommonMapping_ConvertParameter_PresetToQSV(t *testing.T) {
 	if targetParam != "preset" {
 		t.Errorf("ConvertParameter() targetParam = %v, want preset", targetParam)
 	}
-	if convertedValue != "veryfast" {
-		t.Errorf("ConvertParameter() convertedValue = %v, want veryfast", convertedValue)
+	if convertedValue != "7" {
+		t.Errorf("ConvertParameter() convertedValue = %v, want 7", convertedValue)
 	}
 }

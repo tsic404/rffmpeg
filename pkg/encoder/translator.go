@@ -644,20 +644,10 @@ func (t *ParameterTranslatorImpl) av1CRFToVAAPIQualityConverter(v string) (strin
 	return fmt.Sprintf("%d", quality), nil
 }
 
+// x264PresetToQSV converts an x264 preset name to the QSV TargetUsage number
+// ffmpeg's -preset expects. Values outside the table pass through unchanged.
 func (t *ParameterTranslatorImpl) x264PresetToQSV(v string) (string, error) {
-	mapping := map[string]string{
-		"ultrafast": "veryfast",
-		"superfast": "veryfast",
-		"veryfast":  "veryfast",
-		"faster":    "faster",
-		"fast":      "fast",
-		"medium":    "medium",
-		"slow":      "slow",
-		"slower":    "slower",
-		"veryslow":  "veryslow",
-		"placebo":   "veryslow",
-	}
-	if result, ok := mapping[v]; ok {
+	if result, ok := x264PresetToQSVTargetUsage[v]; ok {
 		return result, nil
 	}
 	return v, nil
