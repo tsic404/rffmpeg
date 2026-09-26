@@ -279,9 +279,8 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 
 			// Same-name params whose VALUE was converted by a translation rule
 			// (e.g., x264 preset "fast" -> NVENC "p5", audit Reason carries the
-			// converter). These keep their flag name but must have their value
-			// rewritten in place so inline (-preset=fast) and separate forms
-			// behave identically. Hardware injections are not user params.
+			// converter). These keep their flag name and get their value
+			// rewritten in place. Hardware injections are not user params.
 			sameNameConverted = make(map[string]string)
 			for _, record := range translationResult.AuditRecords {
 				if record.Success &&
@@ -418,7 +417,7 @@ func (e *EngineCoordinator) formatEncoder(enc encoder.EncoderFamily) string {
 // formatParamFateReport summarizes what translation did to each user-supplied
 // encoder parameter, e.g.
 //
-//	[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast
+//	[rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast → -preset 6
 //
 // A parameter the mapping table declares unsupported by the target encoder is
 // called out ("not supported by <encoder>") instead of vanishing with the
@@ -626,21 +625,20 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 
 			if convertedValue, found := lookup(sameNameConverted); found {
 				// Same-name param whose value was converted by a translation
-				// rule (e.g., x264 "preset fast" -> NVENC "p5"): rewrite the
-				// VALUE so inline and separate forms behave identically. The
-				// flag name itself stays unchanged.
+				// rule (e.g., x264 "preset fast" -> NVENC "p5"). Only the
+				// separate-value form is rewritten: ffmpeg rejects encoder
+				// options written as "-preset=<value>", so rewriting an inline
+				// value would put a string the user never typed into ffmpeg's
+				// error message and still fail.
 				markSeen()
-				if inlineForm {
-					eqIdx := strings.IndexByte(arg, '=')
-					result = append(result, arg[:eqIdx+1]+convertedValue)
-				} else {
+				if !inlineForm {
 					result = append(result, arg)
 					if i+1 < len(originalArgs) && !strings.HasPrefix(originalArgs[i+1], "-") {
 						result = append(result, convertedValue)
 						skipNext = true
 					}
+					continue
 				}
-				continue
 			}
 
 			if _, exists := lookup(params); exists {

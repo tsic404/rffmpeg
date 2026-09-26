@@ -210,6 +210,27 @@ func x265PresetToNVENC(preset string) (string, error) {
 	return x264PresetToNVENC(preset)
 }
 
+// x264PresetToQSVTargetUsage is the single source for the libx264 → QSV preset
+// translation: the TargetUsage numbers ffmpeg's -preset takes (1 = best
+// quality … 7 = best speed).
+//
+// Numeric because the Intel driver quantizes TargetUsage: 5 encodes
+// byte-identically to the balanced default 4, so "fast" maps to 6 — the first
+// value the encoder renders faster than its default. Read-only; shared by the
+// translator and the h264/hevc mapping tables.
+var x264PresetToQSVTargetUsage = map[string]string{
+	"ultrafast": "7",
+	"superfast": "7",
+	"veryfast":  "7",
+	"faster":    "6",
+	"fast":      "6",
+	"medium":    "4",
+	"slow":      "3",
+	"slower":    "2",
+	"veryslow":  "1",
+	"placebo":   "1",
+}
+
 // crfToCQ passes CRF value through to NVENC CQ parameter.
 func crfToCQ(value string) (string, error) {
 	return value, nil
