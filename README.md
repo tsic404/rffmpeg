@@ -998,6 +998,9 @@ GPU——两个软件编码（libx264）worker 即可单机复现。驱逐判定
 `--worker-heartbeat-timeout`；两个 worker 各自完成 ≥ `MinJobsForEviction=5` 个作业后，健康监控在下一个
 巡检周期（`--worker-health-check-interval`）做出判定。
 
+空闲 worker（最近一次心跳 0 吞吐且无运行中作业）不进入中位数样本池，也不会被判为慢节点：它的 EWMA 只是
+衰减尾而非当前吞吐样本——负载整体转空闲时健康 worker 因此不会被误判驱逐。
+
 **前置**：编译三个二进制，并生成一个极小的测试输入（1s 即可，让快 worker 的吞吐尽量高）：
 
 ```bash

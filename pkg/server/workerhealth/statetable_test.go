@@ -286,6 +286,55 @@ func TestDetectSlowWorkers_IdleWorkerWithActiveJobs(t *testing.T) {
 	}
 }
 
+// TestDetectSlowWorkers_BusyWorkerWithoutSample pins the busy-worker exemption
+// to the last real sample: a worker holding a job that reports no throughput
+// this interval is not judged on its decayed EWMA while that sample is fresh,
+// and is judged once busyExpiry lapses — so a hung ffmpeg still reaches the
+// eviction safety net instead of hiding behind measurement absence forever.
+func TestDetectSlowWorkers_BusyWorkerWithoutSample(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	// Healthy peers keep the median high; both are busy and report throughput.
+	for _, id := range []string{"w1", "w2"} {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: id, Status: "online", JobsPerSec: 100,
+			ActiveJobs: []string{"job-" + id}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+
+	// w-fresh sampled 1 job/sec just now; its next job has produced no sample yet.
+	for range 2 {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "w-fresh", Status: "online", JobsPerSec: 1,
+			ActiveJobs: []string{"job-fresh"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-fresh", Status: "online", JobsPerSec: 0,
+		ActiveJobs: []string{"job-fresh"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+
+	// w-hung's last real sample predates busyExpiry; its job reports nothing since.
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-hung", Status: "online", JobsPerSec: 1,
+		ActiveJobs: []string{"job-hung"}, CompletedJobs: MinJobsForEviction,
+		Timestamp: time.Now().Add(-busyExpiry - time.Minute),
+	})
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-hung", Status: "online", JobsPerSec: 0,
+		ActiveJobs: []string{"job-hung"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+
+	result := table.DetectSlowWorkers()
+
+	if len(result.NewlyEvicted) != 1 || result.NewlyEvicted[0] != "w-hung" {
+		t.Fatalf("expected only w-hung evicted once the exemption lapsed, got %v", result.NewlyEvicted)
+	}
+	if state, _ := table.Get("w-fresh"); state.Evicted {
+		t.Error("busy worker within busyExpiry of its last sample should not be evicted")
+	}
+}
+
 func TestDetectSlowWorkers_NewWorkerWarmup(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 
