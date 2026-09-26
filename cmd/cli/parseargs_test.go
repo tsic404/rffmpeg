@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -1009,24 +1010,47 @@ func TestParseArgs_Resume(t *testing.T) {
 	rejected := []struct {
 		name string
 		args []string
+		// want is a substring the error must carry; "" accepts any error.
+		want string
 	}{
-		{"missing job id", []string{"--resume"}},
-		{"flag as job id", []string{"--resume", "-y"}},
-		{"two output paths", []string{"--resume", jobID, "a.mp4", "b.mp4"}},
-		{"ffmpeg option", []string{"--resume", jobID, "-i", "in.mp4", "out.mp4"}},
-		{"stdout target", []string{"--resume", jobID, "-"}},
-		{"stdout target pipe:1", []string{"--resume", jobID, "pipe:1"}},
-		{"stdout target PIPE:1", []string{"--resume", jobID, "PIPE:1"}},
-		{"remote URL target", []string{"--resume", jobID, "rtmp://host/app/key"}},
-		{"dash-dash separator", []string{"--resume", jobID, "--", "out.mp4"}},
-		{"probe subcommand", []string{"--resume", jobID, "probe", "in.mp4"}},
-		{"capability query", []string{"--resume", jobID, "-encoders"}},
+		{"missing job id", []string{"--resume"}, ""},
+		{"flag as job id", []string{"--resume", "-y"}, ""},
+		{"two output paths", []string{"--resume", jobID, "a.mp4", "b.mp4"}, ""},
+		{"ffmpeg option", []string{"--resume", jobID, "-i", "in.mp4", "out.mp4"}, ""},
+		{"stdout target", []string{"--resume", jobID, "-"}, ""},
+		{"stdout target pipe:1", []string{"--resume", jobID, "pipe:1"}, ""},
+		{"stdout target PIPE:1", []string{"--resume", jobID, "PIPE:1"}, ""},
+		{"remote URL target", []string{"--resume", jobID, "rtmp://host/app/key"}, ""},
+		{"dash-dash separator", []string{"--resume", jobID, "--", "out.mp4"}, ""},
+		// "probe" in the first positional slot is read as the subcommand, so the
+		// conflict with --resume is what gets reported.
+		{"probe subcommand", []string{"--resume", jobID, "probe", "in.mp4"}, "cannot be combined with the probe subcommand"},
+		{"probe subcommand with -y", []string{"--resume", jobID, "probe", "-y"}, "cannot be combined with the probe subcommand"},
+		// The reported misreading: -y puts "probe" behind the first positional
+		// slot, so it used to be taken as the download target.
+		{"bare probe token after -y", []string{"--resume", jobID, "-y", "probe"}, `"probe" is rffmpeg's subcommand`},
+		{"capability query", []string{"--resume", jobID, "-encoders"}, ""},
 	}
 	for _, tc := range rejected {
 		t.Run(tc.name, func(t *testing.T) {
-			if opts, err := parseArgs(tc.args); err == nil {
-				t.Errorf("parseArgs(%v) = %+v, want error", tc.args, opts)
+			opts, err := parseArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseArgs(%v) = %+v, want error", tc.args, opts)
+			}
+			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("parseArgs(%v) error = %q, want it to mention %q", tc.args, err, tc.want)
 			}
 		})
 	}
+
+	// Only the bare token is refused, so the error's "./probe" advice holds.
+	t.Run("dotted probe is an output path", func(t *testing.T) {
+		opts, err := parseArgs([]string{"--resume", jobID, "./probe"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if opts.ResumeOutput != "./probe" {
+			t.Errorf("ResumeOutput = %q, want %q", opts.ResumeOutput, "./probe")
+		}
+	})
 }
