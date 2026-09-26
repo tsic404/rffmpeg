@@ -760,55 +760,99 @@ func TestPrintEncoderDecoderHeader(t *testing.T) {
 	}
 }
 
-func TestRunEncoders_FallbackToLocal(t *testing.T) {
-	// When server is unavailable, should fall back to local ffmpeg
-	// and return success (ffmpeg is available in test environment)
-	exitCode := runEncoders("http://127.0.0.1:1", "", false)
-	if exitCode != ExitSuccess {
-		t.Errorf("expected fallback to local ffmpeg success, got exit code %d", exitCode)
+// capabilityQueryCases enumerates every server-backed info flag with its run
+// entry point and the JSON key it must emit, so the capability-query tests
+// below cover the whole family without repeating one body per flag.
+var capabilityQueryCases = []struct {
+	flag    string
+	jsonKey string
+	run     func(serverURL, token string, jsonOut bool) int
+}{
+	{"-encoders", "encoders", runEncoders},
+	{"-decoders", "decoders", runDecoders},
+	{"-codecs", "codecs", runCodecsFromServer},
+	{"-hwaccels", "hwaccels", runHwaccels},
+	{"-filters", "filters", runFilters},
+	{"-pix_fmts", "pix_fmts", runPixFmts},
+	{"-formats", "formats", runFormats},
+}
+
+// TestCapabilityQuery_ServerUnavailableFails pins the contract: the list these
+// flags print describes the cluster, so when the server cannot be reached the
+// query must fail — printing the local machine's list would have a caller read
+// it as the cluster's capabilities.
+func TestCapabilityQuery_ServerUnavailableFails(t *testing.T) {
+	for _, tc := range capabilityQueryCases {
+		t.Run(tc.flag, func(t *testing.T) {
+			for _, jsonOut := range []bool{false, true} {
+				var code int
+				stderr := ""
+				stdout := captureStdout(func() {
+					stderr = captureStderr(func() { code = tc.run("http://127.0.0.1:1", "", jsonOut) })
+				})
+				if code != ExitError {
+					t.Errorf("json=%v: exit code = %d, want %d", jsonOut, code, ExitError)
+				}
+				if strings.TrimSpace(stdout) != "" {
+					t.Errorf("json=%v: leaked a capability list without a server: %q", jsonOut, stdout)
+				}
+				if !strings.Contains(stderr, tc.flag) || !strings.Contains(stderr, localFallbackEnv) {
+					t.Errorf("json=%v: stderr must name the query and the opt-in: %q", jsonOut, stderr)
+				}
+			}
+		})
 	}
 }
 
-func TestRunDecoders_FallbackToLocal(t *testing.T) {
-	// When server is unavailable, should fall back to local ffmpeg
-	exitCode := runDecoders("http://127.0.0.1:1", "", false)
-	if exitCode != ExitSuccess {
-		t.Errorf("expected fallback to local ffmpeg success, got exit code %d", exitCode)
+// TestCapabilityQuery_LocalFallbackOptIn covers the other half: with the opt-in
+// the degradation is kept, but it is announced on stderr instead of silent.
+func TestCapabilityQuery_LocalFallbackOptIn(t *testing.T) {
+	t.Setenv(localFallbackEnv, "1")
+	for _, tc := range capabilityQueryCases {
+		t.Run(tc.flag, func(t *testing.T) {
+			var code int
+			stderr := ""
+			stdout := captureStdout(func() {
+				stderr = captureStderr(func() { code = tc.run("http://127.0.0.1:1", "", false) })
+			})
+			if code != ExitSuccess {
+				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitSuccess, stderr)
+			}
+			if !strings.Contains(stderr, "[rffmpeg] local fallback: "+tc.flag) {
+				t.Errorf("stderr missing local-fallback warning: %q", stderr)
+			}
+			if strings.TrimSpace(stdout) == "" {
+				t.Error("expected the local ffmpeg list on stdout")
+			}
+		})
 	}
 }
 
-func TestRunEncoders_FallbackJSON(t *testing.T) {
-	// JSON mode should also fall back and produce valid JSON
-	output := captureStdout(func() {
-		exitCode := runEncoders("http://127.0.0.1:1", "", true)
-		if exitCode != ExitSuccess {
-			t.Errorf("expected JSON fallback success, got exit code %d", exitCode)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-	if _, ok := result["encoders"]; !ok {
-		t.Errorf("expected 'encoders' key in JSON output")
-	}
-}
-
-func TestRunDecoders_FallbackJSON(t *testing.T) {
-	output := captureStdout(func() {
-		exitCode := runDecoders("http://127.0.0.1:1", "", true)
-		if exitCode != ExitSuccess {
-			t.Errorf("expected JSON fallback success, got exit code %d", exitCode)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-	if _, ok := result["decoders"]; !ok {
-		t.Errorf("expected 'decoders' key in JSON output")
+// TestCapabilityQuery_LocalFallbackJSON pins that the opt-in keeps --json output
+// parseable: the warning lands on stderr, stdout stays a single JSON document.
+func TestCapabilityQuery_LocalFallbackJSON(t *testing.T) {
+	t.Setenv(localFallbackEnv, "1")
+	for _, tc := range capabilityQueryCases {
+		t.Run(tc.flag, func(t *testing.T) {
+			var code int
+			stdout := captureStdout(func() {
+				captureStderr(func() { code = tc.run("http://127.0.0.1:1", "", true) })
+			})
+			if code != ExitSuccess {
+				t.Fatalf("exit code = %d, want %d", code, ExitSuccess)
+			}
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, stdout)
+			}
+			items, ok := result[tc.jsonKey].([]interface{})
+			if !ok {
+				t.Fatalf("expected %q array in JSON output, got %T", tc.jsonKey, result[tc.jsonKey])
+			}
+			if len(items) == 0 {
+				t.Errorf("expected non-empty %q array", tc.jsonKey)
+			}
+		})
 	}
 }
 
@@ -1111,151 +1155,6 @@ func TestParseFFmpegNameList_RealFormatsOutput(t *testing.T) {
 }
 
 // =============================================================================
-// P0/P1 fallback-to-local tests
-// =============================================================================
-
-func TestRunHwaccels_FallbackToLocal(t *testing.T) {
-	// When server is unavailable, should fall back to local ffmpeg
-	exitCode := runHwaccels("http://127.0.0.1:1", "", false)
-	if exitCode != ExitSuccess {
-		t.Errorf("expected fallback to local ffmpeg success, got exit code %d", exitCode)
-	}
-}
-
-func TestRunHwaccels_FallbackJSON(t *testing.T) {
-	output := captureStdout(func() {
-		exitCode := runHwaccels("http://127.0.0.1:1", "", true)
-		if exitCode != ExitSuccess {
-			t.Errorf("expected JSON fallback success, got exit code %d", exitCode)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-	hwaccels, ok := result["hwaccels"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'hwaccels' key with array, got %T", result["hwaccels"])
-	}
-	if len(hwaccels) == 0 {
-		t.Error("expected non-empty hwaccels array in JSON")
-	}
-}
-
-func TestRunFilters_FallbackToLocal(t *testing.T) {
-	exitCode := runFilters("http://127.0.0.1:1", "", false)
-	if exitCode != ExitSuccess {
-		t.Errorf("expected fallback to local ffmpeg success, got exit code %d", exitCode)
-	}
-}
-
-func TestRunFilters_FallbackJSON(t *testing.T) {
-	output := captureStdout(func() {
-		exitCode := runFilters("http://127.0.0.1:1", "", true)
-		if exitCode != ExitSuccess {
-			t.Errorf("expected JSON fallback success, got exit code %d", exitCode)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-	filters, ok := result["filters"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'filters' key with array, got %T", result["filters"])
-	}
-	if len(filters) == 0 {
-		t.Error("expected non-empty filters array in JSON")
-	}
-}
-
-func TestRunPixFmts_FallbackToLocal(t *testing.T) {
-	exitCode := runPixFmts("http://127.0.0.1:1", "", false)
-	if exitCode != ExitSuccess {
-		t.Errorf("expected fallback to local ffmpeg success, got exit code %d", exitCode)
-	}
-}
-
-func TestRunPixFmts_FallbackJSON(t *testing.T) {
-	output := captureStdout(func() {
-		exitCode := runPixFmts("http://127.0.0.1:1", "", true)
-		if exitCode != ExitSuccess {
-			t.Errorf("expected JSON fallback success, got exit code %d", exitCode)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-	pixFmts, ok := result["pix_fmts"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'pix_fmts' key with array, got %T", result["pix_fmts"])
-	}
-	if len(pixFmts) == 0 {
-		t.Error("expected non-empty pix_fmts array in JSON")
-	}
-}
-
-func TestRunFormats_FallbackToLocal(t *testing.T) {
-	exitCode := runFormats("http://127.0.0.1:1", "", false)
-	if exitCode != ExitSuccess {
-		t.Errorf("expected fallback to local ffmpeg success, got exit code %d", exitCode)
-	}
-}
-
-func TestRunFormats_FallbackJSON(t *testing.T) {
-	output := captureStdout(func() {
-		exitCode := runFormats("http://127.0.0.1:1", "", true)
-		if exitCode != ExitSuccess {
-			t.Errorf("expected JSON fallback success, got exit code %d", exitCode)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-	formats, ok := result["formats"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'formats' key with array, got %T", result["formats"])
-	}
-	if len(formats) == 0 {
-		t.Error("expected non-empty formats array in JSON")
-	}
-}
-
-func TestRunCodecs_FallbackToLocal(t *testing.T) {
-	exitCode := runCodecsFromServer("http://127.0.0.1:1", "", false)
-	if exitCode != ExitSuccess {
-		t.Errorf("expected fallback to local ffmpeg success, got exit code %d", exitCode)
-	}
-}
-
-func TestRunCodecs_FallbackJSON(t *testing.T) {
-	output := captureStdout(func() {
-		exitCode := runCodecsFromServer("http://127.0.0.1:1", "", true)
-		if exitCode != ExitSuccess {
-			t.Errorf("expected JSON fallback success, got exit code %d", exitCode)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-	codecs, ok := result["codecs"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'codecs' key with array, got %T", result["codecs"])
-	}
-	if len(codecs) == 0 {
-		t.Error("expected non-empty codecs array in JSON")
-	}
-}
-
-// =============================================================================
 // P2 info flag tests — these run local ffmpeg directly (no server needed)
 // =============================================================================
 
@@ -1415,8 +1314,10 @@ func TestJSONOutput_CodecsFields(t *testing.T) {
 func TestOutputFormat_EncodersVsFfmpeg(t *testing.T) {
 	// The rffmpeg encoder output format should match ffmpeg's
 	// Verify the format: "{flags} {name:22} {description}"
+	// The local list is the fixture here, so enable the opt-in.
+	t.Setenv(localFallbackEnv, "1")
 
-	// Capture rffmpeg output (via fallback to local ffmpeg)
+	// Capture rffmpeg output (via the opt-in local ffmpeg fallback)
 	rffmpegOutput := captureStdout(func() {
 		exitCode := runEncoders("http://127.0.0.1:1", "", false)
 		if exitCode != ExitSuccess {
@@ -1466,6 +1367,7 @@ func TestOutputFormat_EncodersVsFfmpeg(t *testing.T) {
 }
 
 func TestOutputFormat_DecodersVsFfmpeg(t *testing.T) {
+	t.Setenv(localFallbackEnv, "1")
 	rffmpegOutput := captureStdout(func() {
 		exitCode := runDecoders("http://127.0.0.1:1", "", false)
 		if exitCode != ExitSuccess {
@@ -1501,6 +1403,7 @@ func TestOutputFormat_DecodersVsFfmpeg(t *testing.T) {
 
 func TestOutputFormat_HwaccelsVsFfmpeg(t *testing.T) {
 	// ffmpeg -hwaccels output is a simple list
+	t.Setenv(localFallbackEnv, "1")
 	rffmpegOutput := captureStdout(func() {
 		exitCode := runHwaccels("http://127.0.0.1:1", "", false)
 		if exitCode != ExitSuccess {
@@ -1528,6 +1431,7 @@ func TestOutputFormat_HwaccelsVsFfmpeg(t *testing.T) {
 }
 
 func TestOutputFormat_FiltersVsFfmpeg(t *testing.T) {
+	t.Setenv(localFallbackEnv, "1")
 	rffmpegOutput := captureStdout(func() {
 		exitCode := runFilters("http://127.0.0.1:1", "", false)
 		if exitCode != ExitSuccess {
