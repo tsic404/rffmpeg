@@ -1038,6 +1038,16 @@ components:
             jobs_per_sec). The raw value slow-node detection compares against
             the cluster median. Always present (0 until the first heartbeat
             sample).
+        completed_jobs:
+          type: integer
+          format: int64
+          description: >-
+            Cumulative jobs this worker has completed since its current
+            registration; failures, cancels and probe jobs are not counted.
+            Slow-node eviction excludes workers still inside its warmup window
+            (completed_jobs below workerhealth.MinJobsForEviction), so this
+            count is how a client observes whether a worker is eligible yet.
+            Always present (0 before the first heartbeat).
         last_seen:
           type: string
           format: date-time

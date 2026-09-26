@@ -920,6 +920,7 @@ GET /api/v1/workers?active_only=true
         "active_jobs": ["job_id_1"],
         "jobs_per_sec": 0.4,
         "ewma_jobs_per_sec": 0.35,
+        "completed_jobs": 12,
         "last_seen": "2024-01-01T00:00:00Z"
       }
     }
@@ -939,6 +940,9 @@ GET /api/v1/workers/{workerId}/jobs
   面板无需靠字段缺失来判断；无采样时数值保留上一次有效采样。
 - `health.ewma_jobs_per_sec`：该 worker 吞吐的 EWMA 平滑值（jobs/sec），慢节点检测直接用它与
   集群中位数比较；首次心跳样本前为 0。
+- `health.completed_jobs`：本次注册以来该 worker 完成的作业累计数（失败/取消/probe 不计入）。
+  驱逐判定的预热门槛（`MinJobsForEviction=5`）比对该值，**始终输出**（首次心跳前为 0），
+  因此外部可直接判断某 worker 是否已通过预热、进入中位数样本池，无需靠字段缺失猜测。
 - `cluster_median_throughput`：参与慢节点判定的集群 EWMA 中位数原值（offline / 预热中 / 空闲
   worker 排除在外，与驱逐判定同口径）；不足两个有效样本时为 0。E2E 断言慢节点判定可直接比较
   `health.ewma_jobs_per_sec` 与该值，无需等待真实驱逐事件。
