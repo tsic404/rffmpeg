@@ -20,6 +20,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/tsic404/rffmpeg/pkg/config"
+	"github.com/tsic404/rffmpeg/pkg/server/accesslog"
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/handlers"
@@ -264,9 +265,15 @@ func main() {
 	jobScheduler.SetRateLimiter(h.GetRateLimiter())
 	jobScheduler.SetJobNotifier(h.GetWSHub())
 
-	// Setup router
+	// Setup router. Access logging goes through a non-blocking sink: chi's
+	// Logger writes the access line from inside the handler chain, before the
+	// response is flushed, so a stalled stdout would stall every response it
+	// logs — health probes and business endpoints alike (see pkg/server/accesslog).
+	accessLog := accesslog.NewSink(os.Stdout, accesslog.DefaultQueueDepth)
+	defer accessLog.Close()
+
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(accesslog.Middleware(accessLog))
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
