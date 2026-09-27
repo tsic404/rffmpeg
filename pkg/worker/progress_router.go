@@ -46,6 +46,15 @@ func (r *ProgressRouter) SetSeekWindow(inputDurationUs, seekUs, tUs, toUs int64)
 	r.parser.SetSeekWindow(inputDurationUs, seekUs, tUs, toUs)
 }
 
+// StartAttempt tells the parser that a new ffmpeg process is starting for the
+// same job (the retry executor's next attempt), so it re-bases the attempt-scoped
+// state its ETA and displayed speed are derived from. The monotonic floor is
+// intentionally not re-based: it spans attempts, which is what keeps a re-run
+// from rewinding the progress the CLI already showed.
+func (r *ProgressRouter) StartAttempt() {
+	r.parser.StartAttempt()
+}
+
 // SendFinal sends a terminal 100% progress update to the server so CLI
 // clients always see a completed progress line even when ffmpeg's last
 // -stats frame landed at ~95%. Bypasses the throttle: the job is done.

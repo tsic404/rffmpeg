@@ -994,20 +994,30 @@ func (d *Database) updateJobTerminalStatusWithOwner(jobID, workerID string, stat
 	return nil
 }
 
-// UpdateJobProgress updates the progress and ETA seconds for a job.
-func (d *Database) UpdateJobProgress(id string, progress float64, etaSeconds int) error {
+// UpdateJobProgress stores the progress and ETA seconds for a job, reporting
+// whether the report was accepted. A job's progress is monotonic: a report
+// that would move the percent backward is rejected without writing, so a
+// re-dispatched job — its new worker re-encodes from zero and reports low
+// percentages again — cannot rewind the value the API and the CLI already
+// published. The comparison runs inside the UPDATE, so concurrent reporters
+// (a late request racing the new owner's) serialize on the row.
+func (d *Database) UpdateJobProgress(id string, progress float64, etaSeconds int) (bool, error) {
 	now := time.Now()
 
-	_, err := d.db.Exec(`
+	res, err := d.db.Exec(`
 		UPDATE jobs SET progress_percent = ?, eta_seconds = ?, updated_at = ?
-		WHERE id = ?
-	`, progress, etaSeconds, now, id)
+		WHERE id = ? AND progress_percent <= ?
+	`, progress, etaSeconds, now, id, progress)
 
 	if err != nil {
-		return fmt.Errorf("failed to update job progress: %w", err)
+		return false, fmt.Errorf("failed to update job progress: %w", err)
+	}
+	written, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to update job progress: %w", err)
 	}
 
-	return nil
+	return written > 0, nil
 }
 
 // AssignJobToWorker atomically assigns a job to a worker: one statement sets
