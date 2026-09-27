@@ -64,6 +64,23 @@ const (
 	DefaultTimeout  = 30 * time.Second
 	UploadTimeout   = 10 * time.Minute
 	DownloadTimeout = 10 * time.Minute
+	// HealthProbeTimeout bounds a single health probe attempt. The probe is a
+	// readiness gate, not a data transfer: a server that accepts the connection
+	// but cannot answer within this budget is stalled, and a fresh attempt is
+	// cheaper than waiting longer on one. Kept below DefaultTimeout so the
+	// probe never inherits the business timeout it does not need.
+	HealthProbeTimeout = 20 * time.Second
+	// HealthProbeAttempts bounds the probe's retry loop: 3 attempts of
+	// HealthProbeTimeout plus 1s/2s backoff wait up to 63s in total before a
+	// hung server is reported. That is deliberately longer than the single 30s
+	// attempt it replaces — a server busy enough to miss one probe (a
+	// concurrent-client burst, a host under memory or I/O pressure) is reached
+	// by a later one instead of failing the command outright — and the worst
+	// case is only paid when every attempt hangs; a refused connection still
+	// fails immediately.
+	HealthProbeAttempts = 3
+	// HealthProbeBackoff is the first retry interval; it doubles per attempt.
+	HealthProbeBackoff = time.Second
 	// ProbeTimeout bounds a single probe request. The probe endpoint is
 	// synchronous: it dispatches a job and waits for a worker to run ffprobe,
 	// which on a cold worker (first ffmpeg/GPU initialization) can exceed the
@@ -120,6 +137,14 @@ var pollInterval = PollInterval
 // the wait and exercise the timing-sensitive path without a 30s+ real-time
 // delay.
 var probeTimeout = ProbeTimeout
+
+// healthProbeTimeout and healthProbeBackoff are the effective health-probe
+// budget; vars (rather than const references) so tests can shrink the retry
+// loop instead of waiting out real probe timeouts.
+var (
+	healthProbeTimeout = HealthProbeTimeout
+	healthProbeBackoff = HealthProbeBackoff
+)
 
 // Overridable sleep for rate-limit resubmission backoff; production value
 // waits d or until ctx is done (whichever comes first). Internal tests stub
@@ -1140,26 +1165,65 @@ func (c *Client) DownloadOutput(fileID, outputPath string) error {
 	return nil
 }
 
-// HealthCheck checks server health
+// HealthCheck reports whether the server answers a health probe.
+//
+// The probe runs on its own client and attempt budget instead of the shared
+// business client (DefaultTimeout): a readiness gate must not queue behind
+// business traffic, and one stalled answer must not abort the command — a
+// server busy enough to miss a probe (a concurrent-client burst) can still
+// serve the job that follows. Only attempts with no answer at all are retried;
+// a refused connection or a non-200 status is reported at once.
 func (c *Client) HealthCheck() error {
+	probe := &http.Client{Timeout: healthProbeTimeout}
+	var lastErr error
+	for attempt := 1; attempt <= HealthProbeAttempts; attempt++ {
+		retryable, err := c.probeHealth(probe)
+		if err == nil {
+			return nil
+		}
+		if !retryable {
+			return err
+		}
+		lastErr = err
+		if attempt < HealthProbeAttempts {
+			time.Sleep(healthProbeBackoff << (attempt - 1))
+		}
+	}
+	return fmt.Errorf("%w (after %d attempts)", lastErr, HealthProbeAttempts)
+}
+
+// probeHealth performs one health probe attempt and reports whether a further
+// attempt could succeed.
+func (c *Client) probeHealth(probe *http.Client) (bool, error) {
 	req, err := http.NewRequest("GET", c.serverURL+HealthEndpoint, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return false, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	c.setAuthHeader(req)
 
-	resp, err := c.http.Do(req)
+	resp, err := probe.Do(req)
 	if err != nil {
-		return fmt.Errorf("health check failed: %w", err)
+		return isProbeTimeout(err), fmt.Errorf("health check failed: %w", err)
 	}
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server unhealthy: status %d", resp.StatusCode)
+		return false, fmt.Errorf("server unhealthy: status %d", resp.StatusCode)
 	}
 
-	return nil
+	return false, nil
+}
+
+// isProbeTimeout reports whether err is a probe that got no answer within its
+// time budget — the failure a retry can clear. A refused connection is not
+// retried: it means nothing is listening, and no retry changes that.
+func isProbeTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // Probe sends a probe request to the server and returns media information.
