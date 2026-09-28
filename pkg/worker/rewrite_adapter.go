@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tsic404/rffmpeg/pkg/audit"
 	"github.com/tsic404/rffmpeg/pkg/encoder"
 	"github.com/tsic404/rffmpeg/pkg/encoder/rewrite"
 	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
@@ -326,18 +327,32 @@ type RewriteResult struct {
 	FallbackUsed bool
 }
 
-// buildCapabilitiesSummary creates a concise string summary of worker hardware capabilities.
+// buildCapabilitiesSummary creates a string summary of worker hardware capabilities.
+// Every available encoder is listed in the order the worker reported it, with
+// hardware encoders suffixed by audit.HardwareEncoderMarker. The summary is
+// stored in the audit record in full; the rewrite chain line truncates it for
+// display (see audit.FormatRewriteChainLine).
 func (a *RewriteAdapter) buildCapabilitiesSummary(hwCaps *rewrite.HardwareCapabilities) string {
 	if hwCaps == nil {
 		return "unknown"
 	}
+	// Hardware membership comes from what the worker reported (IsHW, carried in
+	// HardwareEncoders), not from the static EncoderFamily classifier: the
+	// classifier only knows a fixed set of names, so a detected encoder such as
+	// av1_amf or mjpeg_qsv would be misfiled as software and could then be
+	// truncated away on the display line.
+	hardware := make(map[encoder.EncoderFamily]struct{}, len(hwCaps.HardwareEncoders))
+	for _, enc := range hwCaps.HardwareEncoders {
+		hardware[enc] = struct{}{}
+	}
+
 	encoders := make([]string, 0, len(hwCaps.AvailableEncoders))
 	for _, enc := range hwCaps.AvailableEncoders {
-		marker := string(enc)
-		if enc.IsHardware() {
-			marker += "[HW]"
+		if _, isHW := hardware[enc]; isHW {
+			encoders = append(encoders, string(enc)+audit.HardwareEncoderMarker)
+			continue
 		}
-		encoders = append(encoders, marker)
+		encoders = append(encoders, string(enc))
 	}
 	if len(encoders) == 0 {
 		return "none"

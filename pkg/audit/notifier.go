@@ -119,11 +119,24 @@ func (n *StderrNotifier) NotifyOperation(op AuditOperation) error {
 // DefaultNotifierPrefix is the standard notification line prefix.
 const DefaultNotifierPrefix = "[rffmpeg]"
 
+// HardwareEncoderMarker suffixes a hardware encoder in a capabilities summary
+// (e.g. "h264_qsv[HW],libx264"). It is the contract between the summary the
+// worker stores and formatCapabilitiesForDisplay below.
+const HardwareEncoderMarker = "[HW]"
+
+// maxSoftwareEncodersOnLine caps how many software encoders the rewrite chain
+// line lists. A stock ffmpeg build reports well over a hundred encoders and
+// this line reaches the user's terminal on every rewrite, so the software tail
+// is replaced by a "[... +N more]" count. Hardware encoders are exempt: they
+// are what the rewrite decision is about and they are a short, bounded set.
+const maxSoftwareEncodersOnLine = 10
+
 // FormatRewriteChainLine renders the detailed rewrite chain as a complete
 // notification line, including the "<prefix> <LEVEL>: " prefix. It is the
 // single source of truth for this format: the Worker's per-job stderr stream
 // emits its output so CLI clients see exactly what worker-side
-// logs show.
+// logs show. The capabilities are summarized for display; the persisted audit
+// record keeps the full summary.
 func FormatRewriteChainLine(capabilitiesSummary string, requested string, rewritten string, reason string, level NotifyLevel) string {
 	return fmt.Sprintf("%s %s: %s\n", DefaultNotifierPrefix, level, formatRewriteChainSegments(capabilitiesSummary, requested, rewritten, reason))
 }
@@ -134,7 +147,7 @@ func FormatRewriteChainLine(capabilitiesSummary string, requested string, rewrit
 func formatRewriteChainSegments(capabilitiesSummary string, requested string, rewritten string, reason string) string {
 	var parts []string
 	if capabilitiesSummary != "" {
-		parts = append(parts, fmt.Sprintf("Worker capabilities: %s", capabilitiesSummary))
+		parts = append(parts, fmt.Sprintf("Worker capabilities: %s", formatCapabilitiesForDisplay(capabilitiesSummary)))
 	}
 	if requested != "" {
 		parts = append(parts, fmt.Sprintf("Requested: %s", requested))
@@ -146,6 +159,39 @@ func formatRewriteChainSegments(capabilitiesSummary string, requested string, re
 		parts = append(parts, fmt.Sprintf("Reason: %s", reason))
 	}
 	return strings.Join(parts, " | ")
+}
+
+// formatCapabilitiesForDisplay renders a capabilities summary for the rewrite
+// chain line: hardware encoders first, then the software encoders truncated to
+// maxSoftwareEncodersOnLine. Only this line is bounded — the audit record
+// stores the summary as produced.
+func formatCapabilitiesForDisplay(capabilitiesSummary string) string {
+	var hardware, software []string
+	for _, name := range strings.Split(capabilitiesSummary, ",") {
+		if strings.HasSuffix(name, HardwareEncoderMarker) {
+			hardware = append(hardware, name)
+			continue
+		}
+		software = append(software, name)
+	}
+
+	groups := make([]string, 0, 2)
+	if len(hardware) > 0 {
+		groups = append(groups, strings.Join(hardware, ","))
+	}
+	if len(software) > 0 {
+		groups = append(groups, summarizeNames(software, maxSoftwareEncodersOnLine))
+	}
+	return strings.Join(groups, "; ")
+}
+
+// summarizeNames joins up to limit names and appends the count of the omitted
+// tail, so the displayed line stays bounded for any ffmpeg build size.
+func summarizeNames(names []string, limit int) string {
+	if len(names) <= limit {
+		return strings.Join(names, ",")
+	}
+	return fmt.Sprintf("%s [... +%d more]", strings.Join(names[:limit], ","), len(names)-limit)
 }
 
 // NotifyRewriteChain outputs the detailed rewrite chain notification.

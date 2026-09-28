@@ -2,14 +2,39 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/tsic404/rffmpeg/pkg/audit"
 	"github.com/tsic404/rffmpeg/pkg/encoder"
 	"github.com/tsic404/rffmpeg/pkg/encoder/rewrite"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
+
+// testHWEncoderNames lists every hardware encoder family the shared classifier
+// recognises; the capabilities summary must mark all of them.
+var testHWEncoderNames = []string{
+	"h264_nvenc", "h264_qsv", "h264_vaapi", "h264_amf", "h264_videotoolbox",
+	"hevc_nvenc", "hevc_qsv", "hevc_vaapi", "hevc_amf", "hevc_videotoolbox",
+	"vp9_nvenc", "vp9_qsv", "vp9_vaapi",
+	"av1_nvenc", "av1_qsv", "av1_vaapi",
+}
+
+// testEncoderInfos builds a capability set with the software encoders listed
+// first, so a summary that puts hardware up front proves it reorders rather
+// than echoing the input order.
+func testEncoderInfos(hw, sw int) []protocol.EncoderInfo {
+	encoders := make([]protocol.EncoderInfo, 0, hw+sw)
+	for i := range sw {
+		encoders = append(encoders, protocol.EncoderInfo{Name: fmt.Sprintf("sw-%02d", i), Type: "video"})
+	}
+	for _, name := range testHWEncoderNames[:hw] {
+		encoders = append(encoders, protocol.EncoderInfo{Name: name, Type: "video", IsHW: true})
+	}
+	return encoders
+}
 
 func TestRewriteAdapter_RewriteArgs(t *testing.T) {
 	adapter := NewRewriteAdapter()
@@ -978,5 +1003,108 @@ func TestRewriteAdapter_AutoHWUpgradeReportsParamFate(t *testing.T) {
 		if arg == "-crf" {
 			t.Errorf("original -crf must not survive the upgrade: %v", rewritten)
 		}
+	}
+}
+
+// TestRewriteAdapter_CapabilitiesSummaryMarksReportedHardware pins the summary
+// the worker reports: every encoder it saw, in the reported order, with the
+// hardware ones marked from the worker's own IsHW flag — not from the static
+// EncoderFamily classifier, which only knows a fixed set of names. The summary
+// stays complete; truncation for humans happens on the display line.
+func TestRewriteAdapter_CapabilitiesSummaryMarksReportedHardware(t *testing.T) {
+	tests := []struct {
+		name        string
+		encoders    []protocol.EncoderInfo
+		wantSummary string
+	}{
+		{
+			name:        "no encoders",
+			wantSummary: "none",
+		},
+		{
+			name: "reported hardware keeps its marker and order",
+			encoders: []protocol.EncoderInfo{
+				{Name: "libx264", Type: "video"},
+				{Name: "h264_qsv", Type: "video", IsHW: true},
+				{Name: "libx265", Type: "video"},
+			},
+			wantSummary: "libx264,h264_qsv[HW],libx265",
+		},
+		{
+			// The probe classifies hardware by name suffix, so it reports
+			// encoders the static family classifier does not know. Missing the
+			// marker on these let them sort into the truncatable software group
+			// and disappear from the display line behind "[... +N more]".
+			name: "reported hardware unknown to the static classifier is marked",
+			encoders: []protocol.EncoderInfo{
+				{Name: "av1_amf", Type: "video", IsHW: true},
+				{Name: "vp9_amf", Type: "video", IsHW: true},
+				{Name: "mpeg2_vaapi", Type: "video", IsHW: true},
+				{Name: "mjpeg_qsv", Type: "video", IsHW: true},
+				{Name: "libx264", Type: "video"},
+			},
+			wantSummary: "av1_amf[HW],vp9_amf[HW],mpeg2_vaapi[HW],mjpeg_qsv[HW],libx264",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := NewRewriteAdapter()
+			hwCaps := adapter.convertCapabilities(&protocol.WorkerCapabilities{VideoEncoders: tt.encoders})
+
+			if got := adapter.buildCapabilitiesSummary(hwCaps); got != tt.wantSummary {
+				t.Errorf("buildCapabilitiesSummary() = %q, want %q", got, tt.wantSummary)
+			}
+		})
+	}
+
+	if got := NewRewriteAdapter().buildCapabilitiesSummary(nil); got != "unknown" {
+		t.Errorf("buildCapabilitiesSummary(nil) = %q, want %q", got, "unknown")
+	}
+}
+
+// TestRewriteChainLineStaysBoundedForFullFFmpegBuild is the regression for the
+// full-screen stderr dump: a worker reporting a stock ffmpeg build's video
+// encoders must stream a single terminal-friendly line to CLI clients, with
+// every hardware encoder still visible — including the ones the static
+// classifier does not know.
+func TestRewriteChainLineStaysBoundedForFullFFmpegBuild(t *testing.T) {
+	encoders := append([]protocol.EncoderInfo{
+		{Name: "av1_amf", Type: "video", IsHW: true},
+		{Name: "mjpeg_qsv", Type: "video", IsHW: true},
+	}, testEncoderInfos(4, 125)...)
+
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: encoders,
+		GPUDevices:    []protocol.GPUDeviceInfo{{Type: "nvenc", Vendor: "NVIDIA", Accessible: true}},
+	})
+
+	_, result, err := adapter.RewriteArgs(
+		context.Background(),
+		[]string{"-i", "input.mp4", "-c:v", "libx264", "output.mp4"},
+		true,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	line := audit.FormatRewriteChainLine(
+		result.CapabilitiesSummary, "libx264", result.TargetEncoder, result.DecisionReason, audit.InfoLevel)
+
+	if strings.Count(line, "\n") != 1 {
+		t.Errorf("rewrite chain must stay one line, got %q", line)
+	}
+	// 125 software encoders push the tail behind [... +N more]; hardware
+	// encoders the classifier does not recognise must still be on the line.
+	for _, want := range []string{"av1_amf[HW]", "mjpeg_qsv[HW]", "h264_nvenc[HW]", "[... +115 more]"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("capabilities line missing %q, got %q", want, line)
+		}
+	}
+	// 6 hardware names, 10 software names and one "[... +N more]" tail; listing
+	// all 131 entries produced a line over 1 KB, i.e. several terminal screens.
+	if len(line) > 512 {
+		t.Errorf("rewrite chain line too long (%d bytes): %q", len(line), line)
 	}
 }

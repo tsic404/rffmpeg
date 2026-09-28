@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -257,6 +258,72 @@ func TestStderrNotifier_NotifyRewriteChain_EmptyFields(t *testing.T) {
 	}
 	if strings.Contains(output, "Reason:") {
 		t.Errorf("Expected NO Reason in output when empty, got: %s", output)
+	}
+}
+
+// TestFormatRewriteChainLine_TruncatesCapabilities pins the display transform
+// of the capabilities summary: hardware encoders (marked "[HW]") are listed in
+// full ahead of the software tail, which is capped so a stock ffmpeg build's
+// hundred-plus encoders cannot flood the terminal. Both display sinks must
+// render the same line, and the summary handed in here is not modified — the
+// audit record keeps it whole.
+func TestFormatRewriteChainLine_TruncatesCapabilities(t *testing.T) {
+	software := func(count int) string {
+		names := make([]string, count)
+		for i := range count {
+			names[i] = fmt.Sprintf("sw-%02d", i)
+		}
+		return strings.Join(names, ",")
+	}
+
+	tests := []struct {
+		name     string
+		summary  string
+		wantCaps string
+	}{
+		{
+			name:     "software list below the cap is kept whole",
+			summary:  software(7),
+			wantCaps: software(7),
+		},
+		{
+			name:     "software list at the cap is kept whole",
+			summary:  software(10),
+			wantCaps: software(10),
+		},
+		{
+			name:     "software list past the cap reports the omitted tail",
+			summary:  software(12),
+			wantCaps: software(10) + " [... +2 more]",
+		},
+		{
+			name:     "hardware leads, is never truncated and keeps its marker",
+			summary:  software(12) + ",h264_qsv[HW],av1_amf[HW]",
+			wantCaps: "h264_qsv[HW],av1_amf[HW]; " + software(10) + " [... +2 more]",
+		},
+		{
+			name:     "hardware-only summary is untouched",
+			summary:  "h264_nvenc[HW],h264_qsv[HW]",
+			wantCaps: "h264_nvenc[HW],h264_qsv[HW]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := "[rffmpeg] INFO: Worker capabilities: " + tt.wantCaps + " | Requested: libx264 | Rewritten: h264_qsv | Reason: upgrade\n"
+
+			if got := FormatRewriteChainLine(tt.summary, "libx264", "h264_qsv", "upgrade", InfoLevel); got != want {
+				t.Errorf("FormatRewriteChainLine() = %q, want %q", got, want)
+			}
+
+			var buf bytes.Buffer
+			if err := NewNotifierWithOutput(&buf).NotifyRewriteChain(tt.summary, "libx264", "h264_qsv", "upgrade", InfoLevel); err != nil {
+				t.Fatalf("NotifyRewriteChain failed: %v", err)
+			}
+			if got := buf.String(); got != want {
+				t.Errorf("NotifyRewriteChain() = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
