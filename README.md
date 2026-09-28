@@ -171,7 +171,7 @@ $ rffmpeg --auto-hw -i input.mp4 -c:v libx264 -crf 23 -preset fast output.mp4
 
 **连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。**Server 断连检测预算**（`--server-loss-timeout` / `RFFMPEG_SERVER_LOSS_TIMEOUT` / 配置文件 `"server_loss_timeout"`，默认 `30s`）约束「已提交任务等待期间」**连续失去联系**的最长时间：只有「服务器完全没有响应」的失败（拨号失败、连接被拒、握手无响应）才计入该预算——任何 HTTP 响应（含 4xx/5xx）都说明服务器可达，会重置该预算，这类失败仍由 `--max-retries` 约束。预算耗尽即快速失败，以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。取回该作业的输出无需手工查询 API：`rffmpeg --resume <job-id>` 会重新附着并在任务完成后下载输出（见「任务重连（`--resume`）」）。默认 30s 覆盖完整的前段重连退避爬坡（尝试点 0s→1s→3s→7s→15s），Server 在预算内恢复即自动重连、继续等待，常规重启（含容器编排下重启慢于数秒的场景）不会中断等待——默认值短于重启间隔时，CLI 会对一次正常运行中的重启误报退出码 `2`。取舍是 Server 真死时放弃得更晚（30s，而非数秒），且该等待有界、仍远低于重试次数上限的约 5 分钟；重启更慢的 Server 可调大该值，设为 `0` 则关闭该预算，退回由重试次数上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / `"max_retries"`，默认 14 次、约 5 分钟）决定何时放弃。两个上限都支持 `0` 且不会被静默回落为默认值：`--max-retries 0` 表示**不重试、首次失败即退出**。
 
-**限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。并发提交突发时，作业写入还可能因数据库写冲突（SQLITE_BUSY）未落库，此时提交接口返回 HTTP 429（`submit_conflict`，同样不创建作业、同样可被 `--retry` 退避重投；该响应不带 `retry_in`，CLI 以默认 1s 起步）。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。`submit_conflict` 依赖真实的写锁竞争：默认 5s busy timeout 下并发提交多数会排队成功，该路径难以稳定复现。需要确定性验证它（如 E2E）时用 `--busy-timeout-ms <ms>`（环境变量 `BUSY_TIMEOUT_MS`，配置文件 `"busy_timeout_ms"`）缩短写锁等待窗口——设为 `0` 表示完全不等待，任何写锁竞争立即以 429 `submit_conflict` 失败，而非排队 5s 后成功。
+**限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。并发提交突发时，作业写入还可能因数据库写冲突（SQLITE_BUSY）未落库，此时提交接口返回 HTTP 429（`submit_conflict`，同样不创建作业、同样可被 `--retry` 退避重投；该响应不带 `retry_in`，CLI 以默认 1s 起步）。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。`submit_conflict` 依赖真实的写锁竞争：默认 5s busy timeout 下并发提交多数会排队成功，该路径难以稳定复现。需要确定性验证它（如 E2E）时用 `--busy-timeout-ms <ms>`（环境变量 `BUSY_TIMEOUT_MS`，配置文件 `"busy_timeout_ms"`）缩短写锁等待窗口——设为 `0` 表示完全不等待，任何写锁竞争立即以 429 `submit_conflict` 失败，而非排队 5s 后成功。该上限只控制**准入**：通过限流不代表作业立刻并行执行，它与 Worker 的 `max_concurrent` 是两级独立上限，分工与叠加效果见「并发上限的两级语义」。
 
 **提交失败的错误包装**：提交类端点（`POST /api/v1/jobs`、`POST /api/v1/probe`）的服务端拒绝统一打印为单行 `<操作> failed [<分类码>]: <消息>`，分类码取自响应体的 `code` 字段、与消息同一行：job 提交为 `Error submitting job: job submission failed [worker_unavailable]: No workers available. …`、`… [rate_limit_exceeded]: rate limit exceeded: 10/10 concurrent jobs`、`… [submit_conflict]: concurrent submission conflict`；probe 提交为 `Error probing file: probe failed [worker_unavailable]: No workers available. …`。服务端未给出分类码（响应体不可解码、或只有一条无 `code` 的消息）时退回 `<操作> failed with status <HTTP 状态码>` 或 `<操作> failed: <消息>`，不会输出空的 `[]`。
 
@@ -186,6 +186,20 @@ $ rffmpeg --auto-hw -i input.mp4 -c:v libx264 -crf 23 -preset fast output.mp4
 流式输出到 stdout（`-f <fmt> -`、`-o -`、`-`，或 `pipe:1`——CLI 会将其归一化为 `-`）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）或 `-o <本地路径>`。
 
 ## 配置说明
+
+### 并发上限的两级语义（rate-limit 与 max_concurrent）
+
+**「提交 N 个并发作业」不等于「N 路并行执行」**：并发提交只把作业送进服务端队列，实际并行路数由两道**互相独立**的上限共同决定。
+
+| 层级 | 开关 | 默认值 | 作用对象 | 超出上限时 |
+|------|------|--------|----------|------------|
+| Server 准入（rate-limit） | `--max-concurrent-jobs-per-client`（环境变量 `MAX_CONCURRENT_JOBS_PER_CLIENT`） | 10 | 每个 client | 提交接口立即返回 HTTP 429 `rate_limit_exceeded`，作业**不创建、不排队** |
+| Worker 执行（`max_concurrent`） | Worker 配置 `max_concurrent`（环境变量 `RFFMPEG_MAX_CONCURRENT`） | 1 | 每个 Worker 节点 | 作业留在服务端队列保持 `pending`，等该 Worker 空出槽位后按序执行 |
+
+- **rate-limit 是准入闸门**：准入计数按 client 维护，只统计该 client 当前**活跃**（非终态，即 `pending`/`queued`/`running`）的作业数；设计上 `POST /api/v1/jobs` 与 `POST /api/v1/probe` 走同一套计数——probe 处理期间同样占用一个名额。正常情况下，被准入但仍在排队的作业照常占用名额，直到作业进入终态（`completed`/`failed`/`cancelled`/`timeout`）才释放——因此在 `max_concurrent=1` 的 Worker 上提交 10 个作业，会先填满准入名额、再一路串行执行，第 11 个提交收到 429，即使此刻只有一个作业在跑。以上是**准入语义描述，不构成对计数完整性的保证**：异常路径（如 probe 请求失败）可能多释放名额，使该 client 得以提交超过 `--max-concurrent-jobs-per-client` 的作业；该计数完整性问题由 TSI-3625 跟踪。
+- **`max_concurrent` 是执行槽位**：只决定单个 Worker 同时跑几个 ffmpeg。被容量挡下的作业不会被超配执行，也不会提升调度优先级；它由拥有该字段的 Worker 自行声明，Server 的 `MAX_JOBS_PER_WORKER`（配置文件 `max_jobs_per_worker`，默认 1）只是 Worker 未上报（≤ 0）时的回退值。
+- **集群实际并行路数 ≤ Σ（各在线 Worker 的 `max_concurrent`）**，且每条并发作业都先受自己 client 的准入名额约束。全集群只有一台 `max_concurrent=1` 的 Worker 时，同一时刻最多执行 1 个作业——这就是「队列里排了一堆作业、却只有一个在跑」的原因，并发提交只让队列变长。
+- 并发提交来自**同时运行的多个 CLI 进程**（单次 CLI 调用提交并等待一个作业）。要提高并行度必须**同时**放宽两级：Server 侧调大 `--max-concurrent-jobs-per-client`（或用 `RATE_LIMIT_ENABLED=false` / 配置文件 `rate_limit_enabled: false` 关闭准入限流），Worker 侧按节点 CPU/GPU 承载能力调大 `max_concurrent`。只放宽一级不会增加实际并行路数：只放宽 rate-limit 时多出的作业在队列里排队，只放宽 `max_concurrent` 时提交仍在第 N+1 个被 429 挡下。
 
 ### Server 配置
 
@@ -241,7 +255,7 @@ Server 支持通过配置文件、环境变量和命令行参数三种方式配�
 | `JOB_TIMEOUT` | 任务执行超时时间 | `30m` |
 | `SCHEDULE_INTERVAL` | 任务调度间隔 | `5s` |
 | `TIMEOUT_CHECK_INTERVAL` | 超时检查间隔 | `30s` |
-| `MAX_JOBS_PER_WORKER` | 每个 Worker 最大并发任务数 | `1` |
+| `MAX_JOBS_PER_WORKER` | 每个 Worker 最大并发任务数的**回退值**——仅在 Worker 未上报 `max_concurrent`（≤ 0）时生效；按 client 计数的准入限流是另一级独立上限（见「并发上限的两级语义」） | `1` |
 | `NO_WORKER_JOB_TIMEOUT` | 无可调度 Worker 时 pending 任务的最长等待时间，超时判失败；`0` 禁用 | `2m` |
 | `MAX_TIMEOUT_RETRIES` | 任务超时后重新调度的最大次数，超限判失败；`0` 禁用重试（首次超时即失败） | `2` |
 | `MAX_RETRY_COUNT` | Worker 故障后任务迁移的最大次数，超限判失败；`0` 禁用迁移 | `3` |
@@ -327,7 +341,7 @@ Usage of ./bin/rffmpeg-server:
 
 ### Worker 配置
 
-Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提供少数覆盖项。优先级：命令行 flag > 环境变量 > 配置文件 > 默认值；追加 `-strict-config` 后环境变量整段被跳过，优先级变为命令行 flag > 配置文件 > 默认值（见下方「严格配置模式」）。
+Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提供少数覆盖项。优先级：命令行 flag > 环境变量 > 配置文件 > 默认值；追加 `-strict-config` 后环境变量整段被跳过，优先级变为命令行 flag > 配置文件 > 默认值（见下方「严格配置模式」）。其中 `max_concurrent` 声明该 Worker 的**并行执行槽位**，与 Server 按 client 计数的准入限流（rate-limit）是两级独立上限，详见「并发上限的两级语义」。
 
 #### 命令行参数
 
@@ -419,7 +433,7 @@ Usage of ./bin/rffmpeg-worker:
 | `RFFMPEG_TEMP_DIR` | 临时文件目录 | `/var/tmp/rffmpeg-worker/<workerID>`（root 部署 FHS 主路径）<br>`~/.cache/rffmpeg-worker/<workerID>`（XDG 私有）<br>`$TMPDIR/rffmpeg-worker-<uid>/<workerID>`（XDG 不可用时的 fallback） |
 | `RFFMPEG_FFMPEG_PATH` | FFmpeg 可执行文件路径 | `ffmpeg` |
 | `RFFMPEG_TIMEOUT` | 任务执行超时时间 | `2h` |
-| `RFFMPEG_MAX_CONCURRENT` | 最大并发任务数 | `1` |
+| `RFFMPEG_MAX_CONCURRENT` | 该 Worker 的并行执行槽位数（超出部分留在服务端队列排队，不是拒绝提交；与准入限流是两级独立上限，见「并发上限的两级语义」） | `1` |
 | `RFFMPEG_HEARTBEAT_INTERVAL` | Worker 心跳上报间隔 | `30s` |
 | `RFFMPEG_POLL_INTERVAL` | Worker 任务轮询间隔 | `1s` |
 | `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |
