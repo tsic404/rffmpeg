@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -941,4 +942,54 @@ func TestConfigValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMergeAndReport locks the reporting the worker startup notice relies on:
+// only environment variables that actually replace a config-file value are
+// named, sorted for stable log output.
+func TestMergeAndReport(t *testing.T) {
+	t.Run("reports only variables that changed a value", func(t *testing.T) {
+		t.Setenv(envServerURL, "http://env:19090")
+		t.Setenv(envWorkerName, "same-name")
+		t.Setenv(envMaxConcurrent, "8")
+
+		fileCfg := &Config{
+			ServerURL:     "http://file:18080",
+			Name:          "same-name", // identical to the env value: no override
+			MaxConcurrent: 3,
+		}
+
+		merged, applied := MergeAndReport(fileCfg, LoadFromEnv())
+
+		if merged.ServerURL != "http://env:19090" {
+			t.Errorf("ServerURL = %q, want env value", merged.ServerURL)
+		}
+		if merged.MaxConcurrent != 8 {
+			t.Errorf("MaxConcurrent = %d, want env value 8", merged.MaxConcurrent)
+		}
+		if !slices.IsSorted(applied) {
+			t.Errorf("applied = %v, want sorted order", applied)
+		}
+		if slices.Contains(applied, envWorkerName) {
+			t.Errorf("applied = %v, want no entry for %q (value equals the file's)", applied, envWorkerName)
+		}
+		for _, want := range []string{envServerURL, envMaxConcurrent} {
+			if !slices.Contains(applied, want) {
+				t.Errorf("applied = %v, want it to contain %q", applied, want)
+			}
+		}
+	})
+
+	t.Run("ignores a value LoadFromEnv rejected", func(t *testing.T) {
+		t.Setenv(envMaxConcurrent, "not-a-number")
+
+		merged, applied := MergeAndReport(&Config{MaxConcurrent: 3}, LoadFromEnv())
+
+		if merged.MaxConcurrent != 3 {
+			t.Errorf("MaxConcurrent = %d, want the file value 3", merged.MaxConcurrent)
+		}
+		if slices.Contains(applied, envMaxConcurrent) {
+			t.Errorf("applied = %v, want no entry for an unusable value", applied)
+		}
+	})
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,42 +25,27 @@ const (
 
 func main() {
 	configPath := flag.String("config", getEnv("RFFMPEG_CONFIG", defaultConfigPath), "Path to worker config file (JSON)")
-	token := flag.String("token", "", "Worker authentication token (overrides config file and RFFMPEG_TOKEN env)")
-	inputAuthHeader := flag.String("input-auth-header", "", "Authorization header for remote input URLs (overrides config file and RFFMPEG_INPUT_AUTH_HEADER env)")
-	serverURL := flag.String("server-url", "", "Server URL (overrides config file and RFFMPEG_SERVER_URL env)")
+	token, inputAuthHeader, serverURL := registerConnectionFlags(flag.CommandLine)
+	strictConfig := flag.Bool("strict-config", false, "Config file is authoritative: ignore RFFMPEG_* environment overrides")
 	cacheEnabled, cacheTTL, cacheMaxSizeMB := registerCacheFlags(flag.CommandLine)
 	flag.Parse()
 
-	// Load configuration. On file-load failure, fall back to defaults but
-	// still merge environment variables — silently discarding
-	// RFFMPEG_TOKEN/RFFMPEG_SERVER_URL would leave the worker unable to
-	// authenticate against a token-required server.
-	var cfg *workerconfig.Config
-	if *configPath != "" {
-		fileCfg, err := workerconfig.LoadFromFile(*configPath)
-		if err != nil {
-			log.Printf("Warning: Failed to load config file: %v, using defaults merged with environment", err)
-			cfg = workerconfig.Merge(workerconfig.DefaultConfig(), workerconfig.LoadFromEnv())
-		} else {
-			// Merge with environment (env takes precedence)
-			cfg = workerconfig.Merge(fileCfg, workerconfig.LoadFromEnv())
-		}
-	} else {
-		// Load from environment only
-		cfg = workerconfig.LoadFromEnv()
+	cfg, load, err := resolveConfig(*configPath, *strictConfig)
+	if err != nil {
+		log.Fatalf("Worker configuration error: %v", err)
 	}
 
 	// CLI flags take highest precedence
-	if *token != "" {
-		cfg.Token = *token
+	appliedFlags := applyConnectionFlagOverrides(token, inputAuthHeader, serverURL, cfg)
+	for name := range applyCacheFlagOverrides(flag.CommandLine, cacheEnabled, cacheTTL, cacheMaxSizeMB, cfg) {
+		appliedFlags[name] = true
 	}
-	if *inputAuthHeader != "" {
-		cfg.InputAuthHeader = *inputAuthHeader
+	// The precedence notice is rendered last: only now is it known which sources
+	// the flag overrides left standing.
+	if notice := load.notice(appliedFlags); notice != "" {
+		log.Print(notice)
 	}
-	if *serverURL != "" {
-		cfg.ServerURL = *serverURL
-	}
-	applyCacheFlagOverrides(flag.CommandLine, cacheEnabled, cacheTTL, cacheMaxSizeMB, cfg)
+
 	// Validate configuration before building the worker.
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
@@ -137,6 +124,130 @@ func main() {
 	log.Println("Worker stopped")
 }
 
+// envFlagNames maps the environment overrides that have a same-name CLI flag to
+// that flag. Flags outrank the environment, so a startup notice must not blame
+// a variable whose field a flag actually replaced.
+var envFlagNames = map[string]string{
+	"RFFMPEG_SERVER_URL":        "server-url",
+	"RFFMPEG_TOKEN":             "token",
+	"RFFMPEG_INPUT_AUTH_HEADER": "input-auth-header",
+	"RFFMPEG_CACHE_ENABLED":     "cache-enabled",
+	"RFFMPEG_CACHE_TTL":         "cache-ttl",
+	"RFFMPEG_CACHE_MAX_SIZE_MB": "cache-max-size-mb",
+}
+
+// configLoad records how the effective configuration was chosen, so the startup
+// notice can name the sources that decided it.
+type configLoad struct {
+	strict     bool
+	filePath   string   // config file used; empty when running on env/defaults
+	applied    []string // env variables that replaced a config-file value
+	fileFailed error    // config file could not be loaded
+}
+
+// notice renders the startup precedence report, or "" when there is nothing to
+// report. appliedFlags names the CLI flags that actually wrote a value, so a
+// variable a flag replaced is not named as the one that decided the
+// configuration.
+func (l configLoad) notice(appliedFlags map[string]bool) string {
+	if l.fileFailed != nil {
+		return fmt.Sprintf("Warning: Failed to load config file: %v, using defaults merged with environment", l.fileFailed)
+	}
+
+	names := l.effective(appliedFlags)
+	if l.strict {
+		notice := fmt.Sprintf("Strict config mode: config file %s is authoritative; RFFMPEG_* overrides ignored", l.filePath)
+		if len(names) > 0 {
+			notice += fmt.Sprintf(" (%s)", strings.Join(names, ", "))
+		}
+		return notice
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Warning: %s override config file %s; pass -strict-config to keep the config file authoritative",
+		strings.Join(names, ", "), l.filePath)
+}
+
+// effective keeps the applied overrides that no effective flag replaced — the
+// variables the notice may name.
+func (l configLoad) effective(appliedFlags map[string]bool) []string {
+	names := make([]string, 0, len(l.applied))
+	for _, env := range l.applied {
+		if flagName, ok := envFlagNames[env]; ok && appliedFlags[flagName] {
+			continue
+		}
+		names = append(names, env)
+	}
+	return names
+}
+
+// resolveConfig loads the worker configuration and reports the precedence
+// steps that decided it. Priority is command-line flags > RFFMPEG_* environment
+// variables > config file > defaults; the caller applies flag overrides on top,
+// then asks configLoad.notice what to report.
+//
+// strict makes the config file authoritative: the environment step is skipped,
+// and a missing or unreadable file is an error instead of a fall-back to
+// environment-only config.
+func resolveConfig(configPath string, strict bool) (*workerconfig.Config, configLoad, error) {
+	envCfg := workerconfig.LoadFromEnv()
+
+	if configPath == "" {
+		if strict {
+			return nil, configLoad{}, errors.New("-strict-config requires a config file: pass -config or set RFFMPEG_CONFIG")
+		}
+		return envCfg, configLoad{}, nil
+	}
+
+	fileCfg, err := workerconfig.LoadFromFile(configPath)
+	if err != nil {
+		if strict {
+			return nil, configLoad{}, fmt.Errorf("-strict-config: %w", err)
+		}
+		// A failed load must not discard RFFMPEG_TOKEN/RFFMPEG_SERVER_URL: they
+		// are the only remaining route to a token-protected server.
+		return workerconfig.Merge(workerconfig.DefaultConfig(), envCfg), configLoad{fileFailed: err}, nil
+	}
+
+	merged, applied := workerconfig.MergeAndReport(fileCfg, envCfg)
+	if strict {
+		return fileCfg, configLoad{strict: true, filePath: configPath, applied: applied}, nil
+	}
+	return merged, configLoad{filePath: configPath, applied: applied}, nil
+}
+
+// registerConnectionFlags registers the connection CLI flags on fs and returns
+// pointers to their values.
+func registerConnectionFlags(fs *flag.FlagSet) (token, inputAuthHeader, serverURL *string) {
+	token = fs.String("token", "", "Worker authentication token (overrides config file and RFFMPEG_TOKEN env)")
+	inputAuthHeader = fs.String("input-auth-header", "", "Authorization header for remote input URLs (overrides config file and RFFMPEG_INPUT_AUTH_HEADER env)")
+	serverURL = fs.String("server-url", "", "Server URL (overrides config file and RFFMPEG_SERVER_URL env)")
+	return token, inputAuthHeader, serverURL
+}
+
+// applyConnectionFlagOverrides maps the connection CLI flags onto cfg and
+// reports which of them took effect. An empty value means the operator supplied
+// nothing, so it neither writes a field nor counts as replacing it: with
+// `-server-url ""` the merged value — and the variable that chose it — stays in
+// charge and must remain in the precedence notice.
+func applyConnectionFlagOverrides(token, inputAuthHeader, serverURL *string, cfg *workerconfig.Config) map[string]bool {
+	applied := make(map[string]bool)
+	if *token != "" {
+		cfg.Token = *token
+		applied["token"] = true
+	}
+	if *inputAuthHeader != "" {
+		cfg.InputAuthHeader = *inputAuthHeader
+		applied["input-auth-header"] = true
+	}
+	if *serverURL != "" {
+		cfg.ServerURL = *serverURL
+		applied["server-url"] = true
+	}
+	return applied
+}
+
 // cacheEnabledValue adapts a *bool to flag.Value so -cache-enabled accepts the
 // same boolean aliases as RFFMPEG_CACHE_ENABLED (workerconfig.ParseBool).
 type cacheEnabledValue struct {
@@ -178,10 +289,13 @@ func registerCacheFlags(fs *flag.FlagSet) (cacheEnabled *bool, cacheTTL *time.Du
 }
 
 // applyCacheFlagOverrides maps the cache CLI flags onto cfg for every flag the
-// operator explicitly set. fs.Visit reports only set flags — not defaults — so
+// operator explicitly set and reports which of them took effect. Every cache
+// flag is assigned unconditionally — flag parsing rejects an empty value — so
+// fs.Visit alone decides it. fs.Visit reports only set flags, not defaults, so
 // -cache-enabled=false stays expressible while an absent flag never clobbers a
 // value loaded from the config file or environment.
-func applyCacheFlagOverrides(fs *flag.FlagSet, cacheEnabled *bool, cacheTTL *time.Duration, cacheMaxSizeMB *int64, cfg *workerconfig.Config) {
+func applyCacheFlagOverrides(fs *flag.FlagSet, cacheEnabled *bool, cacheTTL *time.Duration, cacheMaxSizeMB *int64, cfg *workerconfig.Config) map[string]bool {
+	applied := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "cache-enabled":
@@ -190,8 +304,12 @@ func applyCacheFlagOverrides(fs *flag.FlagSet, cacheEnabled *bool, cacheTTL *tim
 			cfg.CacheTTL = workerconfig.Duration(*cacheTTL)
 		case "cache-max-size-mb":
 			cfg.CacheMaxSizeMB = *cacheMaxSizeMB
+		default:
+			return
 		}
+		applied[f.Name] = true
 	})
+	return applied
 }
 
 // detectCapabilities performs capability detection based on configuration.
