@@ -327,29 +327,31 @@ Usage of ./bin/rffmpeg-server:
 
 ### Worker 配置
 
-Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提供少数覆盖项。优先级：命令行 flag > 环境变量 > 配置文件 > 默认值。
+Worker 的配置以 **JSON 配置文件 + 环境变量为主**，命令行仅提供少数覆盖项。优先级：命令行 flag > 环境变量 > 配置文件 > 默认值；追加 `-strict-config` 后环境变量整段被跳过，优先级变为命令行 flag > 配置文件 > 默认值（见下方「严格配置模式」）。
 
 #### 命令行参数
 
-Worker 仅定义以下 7 个 flag（见 `cmd/worker/main.go`）：
+Worker 仅定义以下 8 个 flag（见 `cmd/worker/main.go`）：
 
 ```bash
 ./bin/rffmpeg-worker --help
 Usage of ./bin/rffmpeg-worker:
   -cache-enabled
-    Enable job output cache (default true)
+    	Enable job output cache (default true)
   -cache-max-size-mb int
-    Cache max size in MiB (default 10240)
+    	Cache max size in MiB (default 10240)
   -cache-ttl duration
-    Cache entry TTL (default 24h0m0s)
+    	Cache entry TTL (default 24h0m0s)
   -config string
-    Path to worker config file (JSON)
+    	Path to worker config file (JSON)
   -input-auth-header string
-    Authorization header for remote input URLs (overrides config file and RFFMPEG_INPUT_AUTH_HEADER env)
+    	Authorization header for remote input URLs (overrides config file and RFFMPEG_INPUT_AUTH_HEADER env)
   -server-url string
-    Server URL (overrides config file and RFFMPEG_SERVER_URL env)
+    	Server URL (overrides config file and RFFMPEG_SERVER_URL env)
+  -strict-config
+    	Config file is authoritative: ignore RFFMPEG_* environment overrides
   -token string
-    Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
+    	Worker authentication token (overrides config file and RFFMPEG_TOKEN env)
 ```
 
 > **Usage 头部**：`Usage of` 头部由 Go `flag` 包按 `os.Args[0]` 生成，随调用路径变化——`./bin/rffmpeg-worker --help` 显示 `Usage of ./bin/rffmpeg-worker:`，经 PATH 调用显示 `Usage of rffmpeg-worker:`，绝对路径调用则显示该绝对路径。仅头部文本不同，flag 行为不受影响。
@@ -394,11 +396,21 @@ Usage of ./bin/rffmpeg-worker:
 
 **`RFFMPEG_SERVER_URL` 优先于配置文件 `server_url`**：完整覆盖顺序为 `-server-url` > `RFFMPEG_SERVER_URL` > 配置文件 `server_url` > 默认 `http://localhost:8080`；环境变量为空串时等同未设置，不参与覆盖。因此从 shell、CI 或 systemd 继承到 `RFFMPEG_SERVER_URL` 时，本文件里的 `server_url` 会被静默压掉：同机多实例（各自独立端口 + 独立配置文件）会全部连向该变量指向的 Server，表现为注册/心跳/上传 401（`unauthorized: Invalid token`）或连接被拒，或目标 Server 上任务一直 pending、CLI 收到 503 `worker_unavailable`。启动日志打印的是合并后的生效 URL——注册成功时为 `Worker <id> started, polling <url>`，失败时 `Failed to register worker: ... Post "<url>/api/v1/workers/register"` 也带该 URL，可据此确认实例实际连向哪个 Server。
 
+**环境变量覆盖不再静默**：环境变量在合并步骤中实际改写了配置文件取值时，Worker 启动（命令行 flag 应用完毕）后会在 stderr 打印一行 `Warning: RFFMPEG_SERVER_URL, RFFMPEG_TOKEN override config file <path>; pass -strict-config to keep the config file authoritative`，列出在合并步骤中被实际应用的变量名：与配置文件取值相同的变量不列（合并后取值不变），实际写入了取值的同名命令行 flag（`-server-url`/`-token`/`-input-auth-header`/`-cache-*`）所对应的变量也不列——命令行 flag 仍优先级最高（见上方覆盖顺序），此时列它会把决定权归错来源。注意连接类 flag 只在**非空**时才写入配置（`-server-url=` / `-token=` / `-input-auth-header=` 传空值与不传等价），因此 `-server-url "$OVERRIDE"` 变量为空时仍由环境变量决定、提示照常打印。默认优先级（env > 配置文件）保持不变，该行只是让覆盖关系可见。
+
+**严格配置模式（`-strict-config`）**：给显式传入的 `-config` 配置文件加 `-strict-config` 后，配置文件成为唯一来源——**所有** `RFFMPEG_*` 覆盖一律忽略（不止 `RFFMPEG_SERVER_URL`/`RFFMPEG_TOKEN`），优先级变为命令行 flag（`-server-url`、`-token`、`-cache-*` 等）> 配置文件 > 默认值。`RFFMPEG_CONFIG` 仅用于选择文件路径，不属于覆盖项，仍然生效。该模式下：
+
+- 启动时 stderr 固定打印 `Strict config mode: config file <path> is authoritative; RFFMPEG_* overrides ignored`，括号内追加被忽略、且本会改写取值的变量名（同值变量与被同名 flag 取代的变量不列），例如 `(... RFFMPEG_SERVER_URL, RFFMPEG_TOKEN)`。
+- 未提供配置文件（`-config` 与 `RFFMPEG_CONFIG` 都为空）时直接以非零退出码终止并报 `-strict-config requires a config file: pass -config or set RFFMPEG_CONFIG`。
+- 配置文件读取或解析失败同样终止（`Worker configuration error: -strict-config: failed to read config file: ...`），不再退回「默认值 + 环境变量」——否则严格模式仍会静默连到环境变量指定的 Server。
+
+同机多实例、CI/验收测试等「配置文件即真源」的场景建议一律加 `-strict-config`；其余场景可保持默认优先级，覆盖关系靠上面的 Warning 行观察。
+
 #### 环境变量
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `RFFMPEG_CONFIG` | JSON 配置文件路径（即 `-config`） | - |
+| `RFFMPEG_CONFIG` | JSON 配置文件路径（即 `-config`；`-strict-config` 下仍用于选择文件） | - |
 | `RFFMPEG_SERVER_URL` | Server API URL（优先于配置文件 `server_url`，见上方覆盖顺序） | `http://localhost:8080` |
 | `RFFMPEG_WORKER_NAME` | Worker 名称 | 自动生成 |
 | `RFFMPEG_WORKER_ID` | Worker ID | 自动生成 |

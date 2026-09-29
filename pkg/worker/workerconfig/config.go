@@ -1,4 +1,8 @@
 // Package workerconfig provides configuration management for the worker.
+//
+// Load priority, highest first: command-line flags > RFFMPEG_* environment
+// variables > config file > built-in defaults. The worker's -strict-config
+// flag drops the environment step so the config file stays authoritative.
 package workerconfig
 
 import (
@@ -7,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -484,13 +489,30 @@ func LoadFromEnv() *Config {
 	return config
 }
 
-// Merge merges file config with environment config (env takes precedence).
-// A field is copied from envConfig only when envConfig.setKeys marks its
-// environment variable as explicitly set. Merge never reads the process
-// environment, so it is a pure function of its arguments and directly
-// testable with hand-built Config values.
+// Merge merges file config with environment config, implementing the
+// environment-over-config-file step of the package load priority. A field is
+// copied from envConfig only when envConfig.setKeys marks its environment
+// variable as explicitly set, so unset variables never clobber a file value;
+// caller-supplied command-line flags apply on top of the result.
+//
+// The worker's -strict-config flag skips this call so the config file stays
+// authoritative. Merge never reads the process environment, so it is a pure
+// function of its arguments and directly testable with hand-built Config
+// values.
 func Merge(fileConfig, envConfig *Config) *Config {
+	merged, _ := MergeAndReport(fileConfig, envConfig)
+	return merged
+}
+
+// MergeAndReport merges like Merge and additionally returns, sorted, the names
+// of the environment variables whose value actually replaced a config-file
+// value. Variables set to a value equal to the file's — or to a value
+// LoadFromEnv rejected, which never enters setKeys — change nothing and are not
+// reported, so a caller announcing load precedence cannot blame a variable that
+// decided nothing.
+func MergeAndReport(fileConfig, envConfig *Config) (*Config, []string) {
 	result := &Config{}
+	var applied []string
 
 	// Start with file config
 	if fileConfig != nil {
@@ -502,85 +524,110 @@ func Merge(fileConfig, envConfig *Config) *Config {
 
 	// Override with env config values if explicitly set
 	if envConfig != nil {
-		if envConfig.setKeys[envServerURL] {
+		if envConfig.setKeys[envServerURL] && envConfig.ServerURL != result.ServerURL {
 			result.ServerURL = envConfig.ServerURL
+			applied = append(applied, envServerURL)
 		}
-		if envConfig.setKeys[envWorkerID] {
+		if envConfig.setKeys[envWorkerID] && envConfig.WorkerID != result.WorkerID {
 			result.WorkerID = envConfig.WorkerID
+			applied = append(applied, envWorkerID)
 		}
-		if envConfig.setKeys[envWorkerName] {
+		if envConfig.setKeys[envWorkerName] && envConfig.Name != result.Name {
 			result.Name = envConfig.Name
+			applied = append(applied, envWorkerName)
 		}
-		if envConfig.setKeys[envToken] {
+		if envConfig.setKeys[envToken] && envConfig.Token != result.Token {
 			result.Token = envConfig.Token
+			applied = append(applied, envToken)
 		}
-		if envConfig.setKeys[envInputAuthHeader] {
+		if envConfig.setKeys[envInputAuthHeader] && envConfig.InputAuthHeader != result.InputAuthHeader {
 			result.InputAuthHeader = envConfig.InputAuthHeader
+			applied = append(applied, envInputAuthHeader)
 		}
-		if envConfig.setKeys[envTempDir] {
+		if envConfig.setKeys[envTempDir] && envConfig.TempDir != result.TempDir {
 			result.TempDir = envConfig.TempDir
+			applied = append(applied, envTempDir)
 		}
-		if envConfig.setKeys[envSharedFSAllowedPrefix] {
+		if envConfig.setKeys[envSharedFSAllowedPrefix] && envConfig.SharedFSAllowedPrefix != result.SharedFSAllowedPrefix {
 			result.SharedFSAllowedPrefix = envConfig.SharedFSAllowedPrefix
+			applied = append(applied, envSharedFSAllowedPrefix)
 		}
-		if envConfig.setKeys[envFFmpegPath] {
+		if envConfig.setKeys[envFFmpegPath] && envConfig.FFmpegPath != result.FFmpegPath {
 			result.FFmpegPath = envConfig.FFmpegPath
+			applied = append(applied, envFFmpegPath)
 		}
-		if envConfig.setKeys[envTimeout] {
+		if envConfig.setKeys[envTimeout] && envConfig.Timeout != result.Timeout {
 			result.Timeout = envConfig.Timeout
+			applied = append(applied, envTimeout)
 		}
-		if envConfig.setKeys[envIdleTimeout] {
+		if envConfig.setKeys[envIdleTimeout] && envConfig.IdleTimeout != result.IdleTimeout {
 			result.IdleTimeout = envConfig.IdleTimeout
+			applied = append(applied, envIdleTimeout)
 		}
-		if envConfig.setKeys[envHeartbeatInterval] {
+		if envConfig.setKeys[envHeartbeatInterval] && envConfig.HeartbeatInterval != result.HeartbeatInterval {
 			result.HeartbeatInterval = envConfig.HeartbeatInterval
+			applied = append(applied, envHeartbeatInterval)
 		}
-		if envConfig.setKeys[envPollInterval] {
+		if envConfig.setKeys[envPollInterval] && envConfig.PollInterval != result.PollInterval {
 			result.PollInterval = envConfig.PollInterval
+			applied = append(applied, envPollInterval)
 		}
-		if envConfig.setKeys[envMaxConcurrent] {
+		if envConfig.setKeys[envMaxConcurrent] && envConfig.MaxConcurrent != result.MaxConcurrent {
 			result.MaxConcurrent = envConfig.MaxConcurrent
+			applied = append(applied, envMaxConcurrent)
 		}
-		if envConfig.setKeys[envAutoDetectGPU] {
+		if envConfig.setKeys[envAutoDetectGPU] && envConfig.AutoDetectGPU != result.AutoDetectGPU {
 			result.AutoDetectGPU = envConfig.AutoDetectGPU
+			applied = append(applied, envAutoDetectGPU)
 		}
-		if envConfig.setKeys[envAutoDetectCodecs] {
+		if envConfig.setKeys[envAutoDetectCodecs] && envConfig.AutoDetectCodecs != result.AutoDetectCodecs {
 			result.AutoDetectCodecs = envConfig.AutoDetectCodecs
+			applied = append(applied, envAutoDetectCodecs)
 		}
 
 		// Cache settings
-		if envConfig.setKeys[envCacheEnabled] {
+		if envConfig.setKeys[envCacheEnabled] && envConfig.CacheEnabled != result.CacheEnabled {
 			result.CacheEnabled = envConfig.CacheEnabled
+			applied = append(applied, envCacheEnabled)
 		}
-		if envConfig.setKeys[envCacheDir] {
+		if envConfig.setKeys[envCacheDir] && envConfig.CacheDir != result.CacheDir {
 			result.CacheDir = envConfig.CacheDir
+			applied = append(applied, envCacheDir)
 		}
-		if envConfig.setKeys[envCacheTTL] {
+		if envConfig.setKeys[envCacheTTL] && envConfig.CacheTTL != result.CacheTTL {
 			result.CacheTTL = envConfig.CacheTTL
+			applied = append(applied, envCacheTTL)
 		}
-		if envConfig.setKeys[envCacheMaxSizeMB] {
+		if envConfig.setKeys[envCacheMaxSizeMB] && envConfig.CacheMaxSizeMB != result.CacheMaxSizeMB {
 			result.CacheMaxSizeMB = envConfig.CacheMaxSizeMB
+			applied = append(applied, envCacheMaxSizeMB)
 		}
 
 		// Retry settings
-		if envConfig.setKeys[envRetryMaxRetries] {
+		if envConfig.setKeys[envRetryMaxRetries] && envConfig.RetryMaxRetries != result.RetryMaxRetries {
 			result.RetryMaxRetries = envConfig.RetryMaxRetries
+			applied = append(applied, envRetryMaxRetries)
 		}
-		if envConfig.setKeys[envRetryInitialInterval] {
+		if envConfig.setKeys[envRetryInitialInterval] && envConfig.RetryInitialInterval != result.RetryInitialInterval {
 			result.RetryInitialInterval = envConfig.RetryInitialInterval
+			applied = append(applied, envRetryInitialInterval)
 		}
-		if envConfig.setKeys[envRetryExponentialBackoff] {
+		if envConfig.setKeys[envRetryExponentialBackoff] && envConfig.RetryUseExponentialBackoff != result.RetryUseExponentialBackoff {
 			result.RetryUseExponentialBackoff = envConfig.RetryUseExponentialBackoff
+			applied = append(applied, envRetryExponentialBackoff)
 		}
-		if envConfig.setKeys[envRetryMaxInterval] {
+		if envConfig.setKeys[envRetryMaxInterval] && envConfig.RetryMaxInterval != result.RetryMaxInterval {
 			result.RetryMaxInterval = envConfig.RetryMaxInterval
+			applied = append(applied, envRetryMaxInterval)
 		}
-		if envConfig.setKeys[envRetrySoftwareFallback] {
+		if envConfig.setKeys[envRetrySoftwareFallback] && envConfig.RetryEnableSoftwareFallback != result.RetryEnableSoftwareFallback {
 			result.RetryEnableSoftwareFallback = envConfig.RetryEnableSoftwareFallback
+			applied = append(applied, envRetrySoftwareFallback)
 		}
 	}
 
-	return result
+	sort.Strings(applied)
+	return result, applied
 }
 
 // ResolvePaths resolves relative paths to absolute paths based on a base directory.
