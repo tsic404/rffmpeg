@@ -1345,28 +1345,17 @@ func inputExists(store *storage.Storage, input string) bool {
 
 // Probe handles ffprobe requests via job dispatch to workers.
 // POST /api/v1/probe
+//
+// The rate-limit slot this request occupies is reserved and released by
+// ratelimit.ProbeMiddleware around this handler, so the handler keeps no
+// counter bookkeeping of its own.
 func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
-	// Rate-limit quota release: JobSubmitMiddleware incremented this client's
-	// counter, but unlike job submission there is no RegisterJob mapping and
-	// no worker completion callback — a probe is synchronous. Release the
-	// slot exactly once per request, here. (The middleware's non-2xx decrement
-	// would double-release on error exits; the counter floors at 0, so the
-	// net effect is still correct — one request consumes at most one slot.)
-	clientID := auth.GetClientID(r)
-	if clientID == "" {
-		// Must mirror JobSubmitMiddleware's fallback or the decrement targets
-		// a different bucket than the increment did.
-		clientID = r.RemoteAddr
-	}
-	defer h.rateLimiter.Decrement(clientID)
-
 	// Bound the JSON body — a probe request is a path/URL plus optional
 	// options, never megabytes. Without a cap the endpoint is a free
 	// memory-amplification DoS vector.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 	var req protocol.ProbeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.rateLimiter.Decrement(clientID)
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Invalid JSON body", err,
 		))

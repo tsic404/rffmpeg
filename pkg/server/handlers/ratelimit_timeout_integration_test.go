@@ -64,6 +64,10 @@ func setupTestWithRateLimit(t *testing.T, rateLimit int) (*handlers.Handler, *ch
 			r.Use(ratelimit.JobSubmitMiddleware(h.GetRateLimiter(), rateLimitCfg))
 			r.Post("/jobs", h.SubmitJob)
 		})
+		r.Group(func(r chi.Router) {
+			r.Use(ratelimit.ProbeMiddleware(h.GetRateLimiter(), rateLimitCfg))
+			r.Post("/probe", h.Probe)
+		})
 		r.Get("/jobs/{jobId}", h.GetJob)
 		r.Delete("/jobs/{jobId}", h.CancelJob)
 		r.Patch("/jobs/{jobId}", h.UpdateJob)
@@ -380,6 +384,51 @@ func TestIntegration_RateLimit_RollbackOnFailure(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Errorf("Job %d should succeed after rollback, got %d: %s", i+1, w.Code, w.Body.String())
 		}
+	}
+}
+
+// TestIntegration_RateLimit_ProbeFailureReleasesOnlyItsOwnSlot verifies that a
+// rejected probe releases exactly the slot it reserved. A second release would
+// free the slot of a job that is still active and let this client submit past
+// --max-concurrent-jobs-per-client.
+func TestIntegration_RateLimit_ProbeFailureReleasesOnlyItsOwnSlot(t *testing.T) {
+	h, router, cleanup := setupTestWithRateLimit(t, 2)
+	defer cleanup()
+
+	registerWorkerWithAuth(t, router, "worker-1", []string{"libx264"})
+	fileID := uploadTestFile(t, router)
+
+	w := submitJobWithAuth(t, router, fileID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("First job should succeed, got %d: %s", w.Code, w.Body.String())
+	}
+
+	clientID := auth.GenerateClientID("test-token")
+	rejectedProbes := map[string][]byte{
+		"malformed JSON": []byte("{not-json"),
+		"missing input":  []byte(`{}`),
+		"unknown file":   []byte(`{"input":"does-not-exist.mp4"}`),
+	}
+	for name, body := range rejectedProbes {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, makeAuthRequest("POST", "/api/v1/probe", body))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+		if got := h.GetRateLimiter().Count(clientID); got != 1 {
+			t.Errorf("%s: failed probe released the active job's slot: count = %d, want 1", name, got)
+		}
+	}
+
+	// Limit 2 with one live job leaves exactly one slot: the next submission
+	// must fit and the one after it must be rejected.
+	w = submitJobWithAuth(t, router, fileID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Second job should use the remaining slot, got %d: %s", w.Code, w.Body.String())
+	}
+	w = submitJobWithAuth(t, router, fileID)
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("Third job must be rate-limited, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

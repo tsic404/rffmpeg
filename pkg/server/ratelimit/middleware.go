@@ -68,13 +68,7 @@ func JobSubmitMiddleware(counter ClientJobCounter, runtimeCfg *RuntimeConfig) fu
 				return
 			}
 
-			clientID := auth.GetClientID(r)
-			if clientID == "" {
-				// Fall back to remote IP when no auth context (e.g., worker requests
-				// or unauthenticated clients) so rate limiting still applies.
-				clientID = r.RemoteAddr
-			}
-
+			clientID := clientIDFor(r)
 			limit := runtimeCfg.GetLimit()
 			current, allowed := counter.TryIncrement(clientID, limit)
 			if !allowed {
@@ -92,6 +86,45 @@ func JobSubmitMiddleware(counter ClientJobCounter, runtimeCfg *RuntimeConfig) fu
 			next.ServeHTTP(wrapped, r)
 		})
 	}
+}
+
+// ProbeMiddleware returns an HTTP middleware for the synchronous probe
+// endpoint. It reserves a slot for the duration of the request and releases it
+// when the handler returns: a probe registers no job mapping, so no completion
+// callback exists to release the slot, and holding the reservation for the
+// whole request keeps a running probe charged against the client's limit.
+// Reserve and release sit in this one function, so a failed probe releases
+// exactly the slot it took — never one held by another in-flight job.
+func ProbeMiddleware(counter ClientJobCounter, runtimeCfg *RuntimeConfig) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !runtimeCfg.IsEnabled() {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			clientID := clientIDFor(r)
+			limit := runtimeCfg.GetLimit()
+			current, allowed := counter.TryIncrement(clientID, limit)
+			if !allowed {
+				writeRateLimitResponse(w, current, limit)
+				return
+			}
+
+			defer counter.Decrement(clientID)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// clientIDFor resolves the rate-limit bucket key: the authenticated client ID,
+// falling back to the remote address when no auth context exists (e.g. worker
+// or unauthenticated requests) so rate limiting still applies.
+func clientIDFor(r *http.Request) string {
+	if clientID := auth.GetClientID(r); clientID != "" {
+		return clientID
+	}
+	return r.RemoteAddr
 }
 
 // rateLimitResponseWriter wraps http.ResponseWriter to decrement the counter
