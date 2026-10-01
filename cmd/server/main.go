@@ -359,9 +359,12 @@ func main() {
 
 		// Probe (ffprobe sync endpoint) — behind the job-submission rate
 		// limiter: a probe dispatches real work, so an unthrottled client can
-		// starve the queue just like unbounded job submissions.
+		// starve the queue just like unbounded job submissions. The probe
+		// variant releases its slot when the handler returns (no job mapping
+		// exists for the completion callback), so the reservation lasts exactly
+		// one request.
 		r.Group(func(r chi.Router) {
-			r.Use(ratelimit.JobSubmitMiddleware(h.GetRateLimiter(), rateLimitCfg))
+			r.Use(ratelimit.ProbeMiddleware(h.GetRateLimiter(), rateLimitCfg))
 			r.Post("/probe", h.Probe)
 		})
 	})
