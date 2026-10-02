@@ -102,8 +102,12 @@ type AuditOperation struct {
 	// DecisionReason explains why this rewrite was applied.
 	DecisionReason string `json:"decision_reason"`
 
-	// CapabilitiesSummary provides a concise summary of the worker's hardware capabilities
-	// at the time of this operation (e.g., "h264_nvenc,h264_qsv,libx264").
+	// CapabilitiesSummary records the worker's capabilities at the time of
+	// this operation as a comma-separated encoder list, hardware encoders
+	// suffixed "[HW]" (e.g. "h264_qsv[HW],libx264"). It is the full list the
+	// worker reported, so an operator can reconstruct what was available at
+	// this moment; only the rewrite chain line shown to users is truncated
+	// (see FormatRewriteChainLine).
 	CapabilitiesSummary string `json:"capabilities_summary,omitempty"`
 
 	// Context contains additional contextual information.
