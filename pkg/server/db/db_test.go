@@ -2075,3 +2075,92 @@ func TestZeroBusyTimeoutSurfacesBurstConflicts(t *testing.T) {
 		t.Fatal("busy timeout 0 produced no write conflict in a 100-writer burst; submit_conflict would be unreachable from an E2E")
 	}
 }
+
+// The starvation clock's anchor must be the oldest *pending, unassigned* job:
+// the scheduler arms its expiry wake from it, and a job already claimed by a
+// worker is never swept, so a claimed job must not pull the wake earlier than
+// the deadline the sweep would really act on.
+func TestEarliestPendingCreatedAt(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	if _, ok, err := database.EarliestPendingCreatedAt(); err != nil || ok {
+		t.Fatalf("EarliestPendingCreatedAt with no jobs = (ok %v, err %v), want (false, nil)", ok, err)
+	}
+
+	worker, err := database.CreateWorker("", "anchor-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorker: %v", err)
+	}
+
+	// Claimed (queued) job, older than the pending one.
+	claimed, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`,
+		time.Now().Add(-time.Hour), claimed.ID); err != nil {
+		t.Fatalf("backdate claimed job: %v", err)
+	}
+	if err := database.AssignJobToWorker(claimed.ID, worker.ID); err != nil {
+		t.Fatalf("AssignJobToWorker: %v", err)
+	}
+
+	waiting, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	anchor, ok, err := database.EarliestPendingCreatedAt()
+	if err != nil {
+		t.Fatalf("EarliestPendingCreatedAt: %v", err)
+	}
+	if !ok {
+		t.Fatal("EarliestPendingCreatedAt reported no pending job while one exists")
+	}
+	if !anchor.Equal(waiting.CreatedAt) {
+		t.Errorf("anchor = %s, want the pending job's created_at %s (the older claimed job must not count)", anchor, waiting.CreatedAt)
+	}
+}
+
+// The anchor must be the *oldest* pending unassigned job, not the newest:
+// the scheduler arms its expiry wake from the anchor, and the sweep fails
+// every pending job past the cutoff, so arming for a newer job would postpone
+// the older jobs' verdict past the acceptance window. ORDER BY must therefore
+// be ASC; a DESC regression must fail this test.
+func TestEarliestPendingCreatedAtSelectsOldest(t *testing.T) {
+	database, cleanup := setupDBTest(t)
+	defer cleanup()
+
+	oldest, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("CreateJob oldest: %v", err)
+	}
+	newest, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
+	if err != nil {
+		t.Fatalf("CreateJob newest: %v", err)
+	}
+
+	// Separate the two created_at values far enough that a wrong ordering is
+	// unambiguous even under a coarse clock.
+	backdated := time.Now().Add(-time.Hour)
+	if _, err := database.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, backdated, oldest.ID); err != nil {
+		t.Fatalf("backdate oldest: %v", err)
+	}
+
+	anchor, ok, err := database.EarliestPendingCreatedAt()
+	if err != nil {
+		t.Fatalf("EarliestPendingCreatedAt: %v", err)
+	}
+	if !ok {
+		t.Fatal("EarliestPendingCreatedAt reported no pending job while two exist")
+	}
+	if !anchor.Equal(backdated) {
+		t.Errorf("anchor = %s, want the OLDEST pending job's created_at %s (newest job %s must not be chosen)",
+			anchor, backdated, newest.ID)
+	}
+}
