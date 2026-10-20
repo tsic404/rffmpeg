@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,6 +23,9 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 // responses it logs. chi's own middleware.Logger writes the line on the response
 // path, so with it the first write into a stalled destination hangs the request
 // that produced it and every request behind it — health probes included.
+//
+// The middleware is exercised in-process — no network path — so the contract is
+// judged purely on the sink, with no port or transport races to flake on.
 func TestMiddlewareKeepsResponsesOffTheStalledSink(t *testing.T) {
 	release := make(chan struct{})
 	destination := writerFunc(func(p []byte) (int, error) {
@@ -36,22 +38,20 @@ func TestMiddlewareKeepsResponsesOffTheStalledSink(t *testing.T) {
 	sink := NewSink(destination, queueDepth)
 	defer sink.Close()
 
-	srv := httptest.NewServer(Middleware(sink)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := Middleware(sink)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	})))
-	defer srv.Close()
+	}))
 
-	client := &http.Client{Timeout: 5 * time.Second}
 	for i := 1; i <= requests; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		start := time.Now()
-		resp, err := client.Get(srv.URL)
-		if err != nil {
-			t.Fatalf("request %d waited on the stalled log destination: %v", i, err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		handler.ServeHTTP(rec, req)
 		if elapsed := time.Since(start); elapsed > time.Second {
 			t.Fatalf("request %d took %v with a stalled log destination; responses must not wait for it", i, elapsed)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d status = %d, want %d", i, rec.Code, http.StatusOK)
 		}
 	}
 
@@ -180,16 +180,15 @@ func TestMiddlewareLogsRequests(t *testing.T) {
 	var out bytes.Buffer
 	sink := NewSink(&out, 8)
 
-	srv := httptest.NewServer(Middleware(sink)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := Middleware(sink)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
-	})))
-	resp, err := http.Get(srv.URL + "/api/v1/health")
-	if err != nil {
-		t.Fatalf("GET failed: %v", err)
+	}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusTeapot)
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	srv.Close()
 	sink.Close()
 
 	line := out.String()
