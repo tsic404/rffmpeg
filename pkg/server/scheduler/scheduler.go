@@ -20,6 +20,16 @@ import (
 // generic no-worker message so the crash semantics stay observable.
 const crashStarvationErrMsg = "worker crashed (heartbeat timeout) and no surviving worker to take over the job"
 
+// starvationExpiryMargin is how far past a pending job's no-worker deadline
+// the expiry wake runs the sweep. The sweep's cutoff is strict (a job must be
+// pending for longer than NoWorkerJobTimeout), so a wake landing exactly on
+// the deadline would judge nothing and hand the verdict back to the next
+// timeout check — the quantization this wake exists to remove. The margin is
+// three orders of magnitude below the default 30s check interval, so the
+// verdict stays far inside the (120s, 150s] acceptance window (AC-17) and well
+// before the CLI's own no-worker give-up at deadline+check interval.
+const starvationExpiryMargin = time.Second
+
 type Config struct {
 	JobTimeout           time.Duration // Maximum time a job can run before being considered timed out
 	ScheduleInterval     time.Duration // Interval for scheduling checks
@@ -155,6 +165,17 @@ func (s *Scheduler) run() {
 	timeoutTicker := time.NewTicker(s.config.TimeoutCheckInterval)
 	defer timeoutTicker.Stop()
 
+	// starvationWake fires once at the oldest pending job's no-worker deadline.
+	// The sweep on the timeout tick alone quantizes the verdict to that tick's
+	// phase, which spreads it over the whole (120s, 150s] acceptance window and
+	// can leave the CLI giving up (cancelling) before the server's verdict is
+	// written. Armed by armStarvationWake; stopped while no verdict is due.
+	starvationWake := time.NewTimer(time.Hour)
+	starvationWake.Stop()
+	defer starvationWake.Stop()
+
+	s.armStarvationWake(starvationWake)
+
 	for {
 		select {
 		case <-s.stop:
@@ -165,11 +186,70 @@ func (s *Scheduler) run() {
 		case <-s.resched:
 			// Immediate rescheduling triggered (e.g., after worker offline migration)
 			s.schedulePendingJobs()
+			s.armStarvationWake(starvationWake)
 		case <-timeoutTicker.C:
 			s.checkTimeouts()
 			s.checkNoWorkerStarvation()
+			s.armStarvationWake(starvationWake)
+		case <-starvationWake.C:
+			// A pending job's no-worker clock just expired: judge it now rather
+			// than at the next timeout tick. The sweep is idempotent and keeps
+			// its live-worker short-circuit, so an early wake only makes the
+			// verdict's timing exact.
+			s.checkNoWorkerStarvation()
+			s.armStarvationWake(starvationWake)
 		}
 	}
+}
+
+// armStarvationWake (re)points the expiry wake at the oldest pending job's
+// no-worker deadline. It runs at loop start, on every timeout tick, after
+// each wake, and after a reschedule that may have requeued jobs.
+//
+// With at least one live schedulable worker the sweep can never judge, so the
+// wake stays stopped and the pending backlog is not scanned — the same
+// short-circuit checkNoWorkerStarvation applies before its own query.
+//
+// A deadline already in the past is left to the timeout tick: only a sweep
+// that has not run yet (loop start) leaves one, and re-arming for "now" would
+// just re-run it at tick frequency.
+func (s *Scheduler) armStarvationWake(timer *time.Timer) {
+	if !s.noWorkerEnabled {
+		return
+	}
+	// Stop and drain before reading: a value delivered while the select took
+	// another ready branch would otherwise wake the loop again immediately.
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+
+	schedulable, err := s.db.GetLiveSchedulableWorkers(s.config.HeartbeatFreshness)
+	if err != nil {
+		log.Printf("Scheduler: Failed to check schedulable workers: %v", err)
+		return
+	}
+	if len(schedulable) > 0 {
+		// A live worker can still take pending jobs, so no starvation verdict
+		// can be due.
+		return
+	}
+
+	anchor, ok, err := s.db.EarliestPendingCreatedAt()
+	if err != nil {
+		log.Printf("Scheduler: Failed to read the earliest pending job: %v", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	wait := time.Until(anchor.Add(s.config.NoWorkerJobTimeout + starvationExpiryMargin))
+	if wait <= 0 {
+		return
+	}
+	timer.Reset(wait)
 }
 
 // TriggerReschedule triggers an immediate scheduling pass.

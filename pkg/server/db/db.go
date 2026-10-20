@@ -1901,6 +1901,43 @@ type StarvedJob struct {
 	Crashed bool
 }
 
+// pendingUnassigned is the shared WHERE predicate of the starvation anchor
+// lookup and the starved-job sweep: a job counts toward starvation only while
+// it is pending and unclaimed. One predicate keeps the two queries from
+// drifting apart.
+const pendingUnassigned = "status = ? AND worker_id IS NULL"
+
+// EarliestPendingCreatedAt returns the created_at of the oldest pending,
+// unassigned job — the anchor the starvation sweep's pending clock is measured
+// from, since every requeue path (failover, timeout requeue, restart recovery)
+// refreshes created_at on the way back to pending.
+//
+// ok is false when no such job exists, i.e. no starvation verdict can be due.
+// The scheduler arms a one-shot wake for anchor + NoWorkerJobTimeout so a due
+// verdict is emitted just past the deadline instead of at the next check
+// interval, which would place it anywhere in the (120s, 150s] acceptance
+// window the tick quantizes (AC-17).
+//
+// ORDER BY created_at ASC must pick the job whose clock expires first: the
+// sweep fails every pending job past the cutoff, so arming for anything newer
+// would postpone the older jobs' verdict past the acceptance window.
+func (d *Database) EarliestPendingCreatedAt() (time.Time, bool, error) {
+	var anchor time.Time
+	err := d.db.QueryRow(`
+		SELECT created_at FROM jobs
+		WHERE `+pendingUnassigned+`
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, protocol.JobStatusPending).Scan(&anchor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("failed to read the earliest pending job: %w", err)
+	}
+	return anchor, true, nil
+}
+
 // GetStarvedPendingJobs lists the pending jobs created before the cutoff (the
 // set the starvation sweep fails) and classifies each by its most recent
 // migration event. The classification is computed once here and reused by
@@ -1921,7 +1958,7 @@ func (d *Database) GetStarvedPendingJobs(cutoff time.Time, crashReason string) (
 		         LIMIT 1
 		       ), '') = ?
 		FROM jobs j
-		WHERE j.status = ? AND j.worker_id IS NULL AND j.created_at < ?
+		WHERE `+pendingUnassigned+` AND j.created_at < ?
 	`, crashReason, protocol.JobStatusPending, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list starved pending jobs: %w", err)
