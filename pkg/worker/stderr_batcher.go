@@ -135,17 +135,39 @@ func (b *StderrBatcher) Flush() {
 	b.flushLocked()
 }
 
+// terminalFlushBudget bounds how long a terminal-status flush may wait for
+// tail stderr sends. FlushAndWait exists so the terminal verdict is delivered
+// after the tail stderr has actually reached the server — but an unresponsive
+// server (e.g. a congested PATCH path) must not stall the terminal report for
+// the full stderr HTTP timeout: ffmpeg already stopped, and every second the
+// verdict is delayed shows up in the CLI's wall clock. The budget keeps the
+// common prompt-server case unchanged while bounding the pathological one.
+// A package var (not a const) so tests can shrink it.
+var terminalFlushBudget = 2 * time.Second
+
 // FlushAndWait flushes any pending chunks and blocks until all in-flight
 // stderr sends complete. Unlike Close it neither stops the flush timer nor
 // cancels the context, so callers may keep appending afterward. It exists so
 // a terminal job status can be reported after the tail stderr has actually
 // reached the server on the fast-failure path, where the batcher timer may
-// not have fired yet.
+// not have fired yet. The wait is bounded by terminalFlushBudget so a
+// stalled server cannot delay the terminal verdict past the convergence
+// budget (AC-31).
 func (b *StderrBatcher) FlushAndWait() {
 	b.mu.Lock()
 	b.flushLocked()
 	b.mu.Unlock()
-	b.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		b.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(terminalFlushBudget):
+		log.Printf("Job %s: terminal stderr flush timed out after %s; reporting terminal status anyway", b.jobID, terminalFlushBudget)
+	}
 }
 
 // Close stops the batcher and flushes any remaining chunks.
