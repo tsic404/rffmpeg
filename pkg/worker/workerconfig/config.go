@@ -33,6 +33,7 @@ const (
 	envIdleTimeout             = "RFFMPEG_IDLE_TIMEOUT"
 	envHeartbeatInterval       = "RFFMPEG_HEARTBEAT_INTERVAL"
 	envPollInterval            = "RFFMPEG_POLL_INTERVAL"
+	envStreamingCancelPoll     = "RFFMPEG_STREAMING_CANCEL_POLL_INTERVAL"
 	envMaxConcurrent           = "RFFMPEG_MAX_CONCURRENT"
 	envAutoDetectGPU           = "RFFMPEG_AUTO_DETECT_GPU"
 	envAutoDetectCodecs        = "RFFMPEG_AUTO_DETECT_CODECS"
@@ -114,6 +115,12 @@ type Config struct {
 	IdleTimeout       Duration `json:"idle_timeout" yaml:"idle_timeout"`
 	HeartbeatInterval Duration `json:"heartbeat_interval" yaml:"heartbeat_interval"`
 	PollInterval      Duration `json:"poll_interval" yaml:"poll_interval"`
+	// StreamingCancelPollInterval is how often a running streaming job queries
+	// its own status to discover a cancellation. Streaming jobs are attached to
+	// a live client whose Ctrl+C must stop ffmpeg promptly, while the heartbeat
+	// channel is capped at HeartbeatInterval; this poll is the fast path and
+	// the heartbeat response stays the backstop.
+	StreamingCancelPollInterval Duration `json:"streaming_cancel_poll_interval" yaml:"streaming_cancel_poll_interval"`
 
 	// Job handling
 	MaxConcurrent int `json:"max_concurrent" yaml:"max_concurrent"`
@@ -252,13 +259,17 @@ func DefaultConfig() *Config {
 		IdleTimeout:       Duration(defaultIdleTimeout),
 		HeartbeatInterval: Duration(30 * time.Second),
 		PollInterval:      Duration(1 * time.Second),
-		MaxConcurrent:     1,
-		AutoDetectGPU:     true,
-		AutoDetectCodecs:  true,
-		CacheEnabled:      true,
-		CacheDir:          DefaultCacheDir(),
-		CacheTTL:          Duration(24 * time.Hour),
-		CacheMaxSizeMB:    10240, // 10 GiB
+		// Cancellation must reach a streaming job well inside the acceptance
+		// bound (15s); one second keeps the worst case at one poll plus the
+		// request round trip.
+		StreamingCancelPollInterval: Duration(1 * time.Second),
+		MaxConcurrent:               1,
+		AutoDetectGPU:               true,
+		AutoDetectCodecs:            true,
+		CacheEnabled:                true,
+		CacheDir:                    DefaultCacheDir(),
+		CacheTTL:                    Duration(24 * time.Hour),
+		CacheMaxSizeMB:              10240, // 10 GiB
 
 		// Retry defaults
 		RetryMaxRetries:             3,
@@ -286,6 +297,9 @@ func (c *Config) Validate() error {
 	}
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll_interval must be positive")
+	}
+	if c.StreamingCancelPollInterval <= 0 {
+		return fmt.Errorf("streaming_cancel_poll_interval must be positive")
 	}
 	if !c.AutoDetectCodecs && len(c.ManualEncoders) == 0 {
 		return fmt.Errorf("manual_encoders must be non-empty when auto_detect_codecs is disabled")
@@ -400,6 +414,12 @@ func LoadFromEnv() *Config {
 		if d, err := time.ParseDuration(pollInterval); err == nil {
 			config.PollInterval = Duration(d)
 			config.setKeys[envPollInterval] = true
+		}
+	}
+	if cancelPoll := os.Getenv(envStreamingCancelPoll); cancelPoll != "" {
+		if d, err := time.ParseDuration(cancelPoll); err == nil {
+			config.StreamingCancelPollInterval = Duration(d)
+			config.setKeys[envStreamingCancelPoll] = true
 		}
 	}
 	if maxConcurrent := os.Getenv(envMaxConcurrent); maxConcurrent != "" {
@@ -571,6 +591,10 @@ func MergeAndReport(fileConfig, envConfig *Config) (*Config, []string) {
 		if envConfig.setKeys[envPollInterval] && envConfig.PollInterval != result.PollInterval {
 			result.PollInterval = envConfig.PollInterval
 			applied = append(applied, envPollInterval)
+		}
+		if envConfig.setKeys[envStreamingCancelPoll] && envConfig.StreamingCancelPollInterval != result.StreamingCancelPollInterval {
+			result.StreamingCancelPollInterval = envConfig.StreamingCancelPollInterval
+			applied = append(applied, envStreamingCancelPoll)
 		}
 		if envConfig.setKeys[envMaxConcurrent] && envConfig.MaxConcurrent != result.MaxConcurrent {
 			result.MaxConcurrent = envConfig.MaxConcurrent

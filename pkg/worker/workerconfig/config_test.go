@@ -31,6 +31,9 @@ func TestDefaultConfig(t *testing.T) {
 	if config.PollInterval == 0 {
 		t.Error("DefaultConfig() PollInterval should not be zero")
 	}
+	if config.StreamingCancelPollInterval <= 0 {
+		t.Error("DefaultConfig() StreamingCancelPollInterval should be positive")
+	}
 	if config.MaxConcurrent <= 0 {
 		t.Error("DefaultConfig() MaxConcurrent should be positive")
 	}
@@ -664,6 +667,7 @@ func TestTimingEnvOverrides(t *testing.T) {
 	t.Run("env only", func(t *testing.T) {
 		t.Setenv("RFFMPEG_HEARTBEAT_INTERVAL", "45s")
 		t.Setenv("RFFMPEG_POLL_INTERVAL", "7s")
+		t.Setenv("RFFMPEG_STREAMING_CANCEL_POLL_INTERVAL", "500ms")
 
 		cfg := LoadFromEnv()
 
@@ -672,6 +676,9 @@ func TestTimingEnvOverrides(t *testing.T) {
 		}
 		if cfg.PollInterval.ToDuration() != 7*time.Second {
 			t.Errorf("PollInterval = %v, want %v", cfg.PollInterval.ToDuration(), 7*time.Second)
+		}
+		if cfg.StreamingCancelPollInterval.ToDuration() != 500*time.Millisecond {
+			t.Errorf("StreamingCancelPollInterval = %v, want %v", cfg.StreamingCancelPollInterval.ToDuration(), 500*time.Millisecond)
 		}
 	})
 
@@ -698,8 +705,9 @@ func TestTimingEnvOverrides(t *testing.T) {
 
 	t.Run("config only", func(t *testing.T) {
 		fileCfg := &Config{
-			HeartbeatInterval: Duration(60 * time.Second),
-			PollInterval:      Duration(9 * time.Second),
+			HeartbeatInterval:           Duration(60 * time.Second),
+			PollInterval:                Duration(9 * time.Second),
+			StreamingCancelPollInterval: Duration(250 * time.Millisecond),
 		}
 
 		merged := Merge(fileCfg, LoadFromEnv())
@@ -710,14 +718,19 @@ func TestTimingEnvOverrides(t *testing.T) {
 		if merged.PollInterval.ToDuration() != 9*time.Second {
 			t.Errorf("PollInterval = %v, want %v", merged.PollInterval.ToDuration(), 9*time.Second)
 		}
+		if merged.StreamingCancelPollInterval.ToDuration() != 250*time.Millisecond {
+			t.Errorf("StreamingCancelPollInterval = %v, want %v", merged.StreamingCancelPollInterval.ToDuration(), 250*time.Millisecond)
+		}
 	})
 
 	t.Run("env overrides config", func(t *testing.T) {
 		t.Setenv("RFFMPEG_HEARTBEAT_INTERVAL", "20s")
 		t.Setenv("RFFMPEG_POLL_INTERVAL", "3s")
+		t.Setenv("RFFMPEG_STREAMING_CANCEL_POLL_INTERVAL", "100ms")
 		fileCfg := &Config{
-			HeartbeatInterval: Duration(60 * time.Second),
-			PollInterval:      Duration(9 * time.Second),
+			HeartbeatInterval:           Duration(60 * time.Second),
+			PollInterval:                Duration(9 * time.Second),
+			StreamingCancelPollInterval: Duration(5 * time.Second),
 		}
 
 		merged := Merge(fileCfg, LoadFromEnv())
@@ -727,6 +740,9 @@ func TestTimingEnvOverrides(t *testing.T) {
 		}
 		if merged.PollInterval.ToDuration() != 3*time.Second {
 			t.Errorf("PollInterval = %v, want %v", merged.PollInterval.ToDuration(), 3*time.Second)
+		}
+		if merged.StreamingCancelPollInterval.ToDuration() != 100*time.Millisecond {
+			t.Errorf("StreamingCancelPollInterval = %v, want %v (env override)", merged.StreamingCancelPollInterval.ToDuration(), 100*time.Millisecond)
 		}
 	})
 
@@ -738,6 +754,9 @@ func TestTimingEnvOverrides(t *testing.T) {
 		}
 		if cfg.PollInterval.ToDuration() != 1*time.Second {
 			t.Errorf("PollInterval = %v, want default %v", cfg.PollInterval.ToDuration(), 1*time.Second)
+		}
+		if cfg.StreamingCancelPollInterval.ToDuration() != 1*time.Second {
+			t.Errorf("StreamingCancelPollInterval = %v, want default %v", cfg.StreamingCancelPollInterval.ToDuration(), 1*time.Second)
 		}
 	})
 }
@@ -856,6 +875,11 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name:    "zero poll interval",
 			mutate:  func(c *Config) { c.PollInterval = 0 },
+			wantErr: true,
+		},
+		{
+			name:    "zero streaming cancel poll interval",
+			mutate:  func(c *Config) { c.StreamingCancelPollInterval = 0 },
 			wantErr: true,
 		},
 		{

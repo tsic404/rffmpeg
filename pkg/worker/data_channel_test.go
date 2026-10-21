@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -44,7 +45,7 @@ func TestClient_DownloadInput_HTTPRemote(t *testing.T) {
 	destPath := filepath.Join(tmpDir, "downloaded-input.mp4")
 
 	// Download the file
-	err = client.DownloadInput("any-file-id", destPath)
+	err = client.DownloadInput(context.Background(), "any-file-id", destPath)
 	if err != nil {
 		t.Fatalf("DownloadInput failed: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestClient_DownloadInput_ErrorHandling(t *testing.T) {
 			tmpDir, _ := os.MkdirTemp("", "rffmpeg-err-test")
 			defer os.RemoveAll(tmpDir)
 
-			err := client.DownloadInput("test-file", filepath.Join(tmpDir, "out.mp4"))
+			err := client.DownloadInput(context.Background(), "test-file", filepath.Join(tmpDir, "out.mp4"))
 			if tt.expectErr && err == nil {
 				t.Error("Expected error but got nil")
 			}
@@ -114,7 +115,7 @@ func TestClient_HTTPInput_WithTokenAuth(t *testing.T) {
 	tmpDir, _ := os.MkdirTemp("", "rffmpeg-auth-test")
 	defer os.RemoveAll(tmpDir)
 
-	err := client.DownloadInput("file-id", filepath.Join(tmpDir, "out.mp4"))
+	err := client.DownloadInput(context.Background(), "file-id", filepath.Join(tmpDir, "out.mp4"))
 	if err != nil {
 		t.Fatalf("DownloadInput failed: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestClient_DownloadInput_RemoteURL_InputAuthHeader(t *testing.T) {
 
 			remoteURL := ts.URL + "/input.mkv"
 			dest := filepath.Join(t.TempDir(), "input.mkv")
-			if err := client.DownloadInput(remoteURL, dest); err != nil {
+			if err := client.DownloadInput(context.Background(), remoteURL, dest); err != nil {
 				t.Fatalf("DownloadInput(%q): %v", remoteURL, err)
 			}
 			if gotAuth != tt.wantAuth {
@@ -204,7 +205,7 @@ func TestClient_DownloadInput_RemoteURL_NonASCIIFilename(t *testing.T) {
 			// shape ffmpeg later reads.
 			destPath := filepath.Join(t.TempDir(), "input-"+sanitizeInputBaseName(filepath.Base(remoteURL)))
 
-			if err := NewClient(ts.URL, "test-worker", "").DownloadInput(remoteURL, destPath); err != nil {
+			if err := NewClient(ts.URL, "test-worker", "").DownloadInput(context.Background(), remoteURL, destPath); err != nil {
 				t.Fatalf("DownloadInput(%q): %v", remoteURL, err)
 			}
 			if gotPath != tt.wantPath {

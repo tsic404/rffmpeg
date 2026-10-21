@@ -52,7 +52,11 @@ type Worker struct {
 	activeJobs        map[string]context.CancelFunc
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
-	lastHeartbeatTime time.Time
+	// streamingCancelPollInterval is how often a running streaming job queries
+	// its own status to discover a cancellation (the heartbeat channel is the
+	// backstop and remains capped at heartbeatInterval).
+	streamingCancelPollInterval time.Duration
+	lastHeartbeatTime           time.Time
 	// pullConflictCount counts consecutive pull conflicts that require the
 	// eviction backoff (evicted slow nodes, or offline workers whose immediate
 	// re-registration failed). It drives the exponential backoff and bounds
@@ -85,20 +89,23 @@ type Worker struct {
 
 // Config holds worker configuration
 type Config struct {
-	ServerURL             string
-	WorkerID              string
-	Name                  string
-	Token                 string // Auth token for server communication
-	InputAuthHeader       string // Raw Authorization header for remote input URL downloads
-	TempDir               string
-	FFmpegPath            string
-	Timeout               time.Duration
-	IdleTimeout           time.Duration // Kill ffmpeg after this long with no output; 0 disables
-	HeartbeatInterval     time.Duration // Interval between heartbeats
-	PollInterval          time.Duration // Interval for polling jobs
-	CacheConfig           CacheConfig   // Cache configuration
-	RetryConfig           *RetryConfig  // Retry configuration
-	SharedFSAllowedPrefix string        // Comma-separated path prefixes allowed in pass-through mode; empty = unlimited
+	ServerURL         string
+	WorkerID          string
+	Name              string
+	Token             string // Auth token for server communication
+	InputAuthHeader   string // Raw Authorization header for remote input URL downloads
+	TempDir           string
+	FFmpegPath        string
+	Timeout           time.Duration
+	IdleTimeout       time.Duration // Kill ffmpeg after this long with no output; 0 disables
+	HeartbeatInterval time.Duration // Interval between heartbeats
+	PollInterval      time.Duration // Interval for polling jobs
+	// StreamingCancelPollInterval is how often a running streaming job polls
+	// its own status for cancellation; zero selects the 1s default.
+	StreamingCancelPollInterval time.Duration
+	CacheConfig                 CacheConfig  // Cache configuration
+	RetryConfig                 *RetryConfig // Retry configuration
+	SharedFSAllowedPrefix       string       // Comma-separated path prefixes allowed in pass-through mode; empty = unlimited
 }
 
 // New creates a new worker
@@ -119,6 +126,9 @@ func New(cfg Config) (*Worker, error) {
 	}
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 1 * time.Second // Default poll interval
+	}
+	if cfg.StreamingCancelPollInterval <= 0 {
+		cfg.StreamingCancelPollInterval = 1 * time.Second // Default streaming cancel poll interval
 	}
 
 	// Create temp directory. A defaulted path (root FHS path, per-user XDG
@@ -181,26 +191,27 @@ func New(cfg Config) (*Worker, error) {
 	allowedPrefixes := parseAllowedPrefixes(cfg.SharedFSAllowedPrefix)
 
 	return &Worker{
-		id:                 cfg.WorkerID,
-		name:               cfg.Name,
-		client:             client,
-		executor:           executor,
-		retryExecutor:      retryExecutor,
-		rewriteAdapter:     rewriteAdapter,
-		cache:              cache,
-		tempDir:            cfg.TempDir,
-		activeJobs:         make(map[string]context.CancelFunc),
-		heartbeatInterval:  cfg.HeartbeatInterval,
-		allowedPrefixes:    allowedPrefixes,
-		pollInterval:       cfg.PollInterval,
-		lastHeartbeatTime:  time.Now(),
-		ffprobeExecutor:    ffprobeExecutor,
-		pixelFormatChecker: pixelFormatChecker,
-		hwCodecChecker:     hwCodecChecker,
-		auditRecorder:      auditRecorder,
-		auditNotifier:      auditNotifier,
-		gpuDetector:        gpu.NewDetector(),
-		stopCh:             make(chan struct{}),
+		id:                          cfg.WorkerID,
+		name:                        cfg.Name,
+		client:                      client,
+		executor:                    executor,
+		retryExecutor:               retryExecutor,
+		rewriteAdapter:              rewriteAdapter,
+		cache:                       cache,
+		tempDir:                     cfg.TempDir,
+		activeJobs:                  make(map[string]context.CancelFunc),
+		heartbeatInterval:           cfg.HeartbeatInterval,
+		allowedPrefixes:             allowedPrefixes,
+		pollInterval:                cfg.PollInterval,
+		streamingCancelPollInterval: cfg.StreamingCancelPollInterval,
+		lastHeartbeatTime:           time.Now(),
+		ffprobeExecutor:             ffprobeExecutor,
+		pixelFormatChecker:          pixelFormatChecker,
+		hwCodecChecker:              hwCodecChecker,
+		auditRecorder:               auditRecorder,
+		auditNotifier:               auditNotifier,
+		gpuDetector:                 gpu.NewDetector(),
+		stopCh:                      make(chan struct{}),
 	}, nil
 }
 
@@ -608,6 +619,16 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	log.Printf("Processing job %s (auto_hw=%v, streaming_output=%v)", job.ID, job.AutoHW, job.StreamingOutput)
 
+	// Streaming output is attached to a live CLI client whose Ctrl+C must stop
+	// ffmpeg promptly. The heartbeat response is the designed cancel channel,
+	// but its default 30s cadence keeps a cancelled stream encoding long past
+	// the client's bound. Poll this job's status instead; the heartbeat keeps
+	// covering every non-streaming job.
+	if job.StreamingOutput {
+		stopCancelWatch := w.watchStreamingJobCancellation(ctx, job.ID, cancel)
+		defer stopCancelWatch()
+	}
+
 	// The per-job timeout is a dedicated ffmpeg execution budget, not a
 	// wall-clock bound on the pre-execution pipeline. Download, duration
 	// probe, and classification must NOT be charged against it: a short
@@ -820,14 +841,25 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			} else {
 				inputPath = filepath.Join(jobDir, "input-"+fileID)
 			}
-			if err := w.client.DownloadInput(fileID, inputPath); err != nil {
+			if err := w.client.DownloadInput(ctx, fileID, inputPath); err != nil {
 				jobFailed = true
+				if ctx.Err() == context.Canceled {
+					w.reportJobCancelled(job.ID)
+					return
+				}
 				w.reportInputDownloadFailure(job.ID, fileID, err)
 				return
 			}
 			inputPaths = append(inputPaths, inputPath)
 			log.Printf("Downloaded input file %s to %s", fileID, inputPath)
 		}
+	}
+	// Cancellation may have landed during the download: stop before paying for
+	// the duration probe, encoder rewrite, and ffmpeg startup.
+	if ctx.Err() == context.Canceled {
+		jobFailed = true
+		w.reportJobCancelled(job.ID)
+		return
 	}
 	// Prepare output path.
 	// Streaming jobs must write to stdout ("-") so ffmpeg's transcoded data
@@ -1066,6 +1098,15 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	}
 
+	// Cancellation can land during the duration probe / encoder rewrite above.
+	// Check once more at the execution boundary so a cancelled job never pays
+	// for ffmpeg startup.
+	if ctx.Err() == context.Canceled {
+		jobFailed = true
+		w.reportJobCancelled(job.ID)
+		return
+	}
+
 	log.Printf("Executing ffmpeg with args: %v", args)
 
 	// Mark the job running here, at the ffmpeg execution boundary, so the
@@ -1073,6 +1114,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// The pre-execution pipeline above keeps the job queued: a slow download
 	// or probe must not consume the client's --timeout wait window.
 	if err := w.client.UpdateJob(job.ID, protocol.JobStatusRunning, 0, "", false); err != nil {
+		if ctx.Err() == context.Canceled {
+			jobFailed = true
+			w.reportJobCancelled(job.ID)
+			return
+		}
 		log.Printf("Failed to update job status to running: %v", err)
 		jobFailed = true
 		w.reportInfraFailure(job.ID, 1, fmt.Sprintf("Failed to update job status to running: %v", err))
@@ -1108,11 +1154,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 	// Check for context cancellation
 	if jobCtx.Err() == context.Canceled {
-		log.Printf("Job %s was cancelled", job.ID)
-		// Use -1 for cancelled jobs as the exit code may not be meaningful
-		if err := w.client.UpdateJob(job.ID, protocol.JobStatusCancelled, -1, "Job cancelled", false); err != nil {
-			logTerminalReportError(job.ID, "report cancelled", err)
-		}
+		w.reportJobCancelled(job.ID)
 		jobFailed = true
 		return
 	}
@@ -1315,6 +1357,16 @@ uploadOutput:
 		logTerminalReportError(job.ID, "report completed", err)
 	} else {
 		log.Printf("Job %s completed successfully", job.ID)
+	}
+}
+
+// reportJobCancelled reports the terminal cancelled status for a job whose
+// context was cancelled (client cancel, failover, or worker shutdown).
+func (w *Worker) reportJobCancelled(jobID string) {
+	log.Printf("Job %s was cancelled", jobID)
+	// Use -1 for cancelled jobs as the exit code may not be meaningful.
+	if err := w.client.UpdateJob(jobID, protocol.JobStatusCancelled, -1, "Job cancelled", false); err != nil {
+		logTerminalReportError(jobID, "report cancelled", err)
 	}
 }
 
@@ -1525,7 +1577,11 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 		} else {
 			inputPath = filepath.Join(jobDir, "input-"+fileID)
 		}
-		if err := w.client.DownloadInput(fileID, inputPath); err != nil {
+		if err := w.client.DownloadInput(ctx, fileID, inputPath); err != nil {
+			if ctx.Err() == context.Canceled {
+				w.reportJobCancelled(job.ID)
+				return
+			}
 			w.reportInputDownloadFailure(job.ID, fileID, err)
 			return
 		}
@@ -1616,6 +1672,105 @@ func (w *Worker) sendHeartbeat() {
 		}
 		w.mu.Unlock()
 	}
+}
+
+// defaultStreamingCancelPollInterval bounds how long a cancelled streaming job
+// keeps running when no interval is configured. The heartbeat response is the
+// designed cancel backstop, but its default 30s cadence is far past the bound a
+// client Ctrl+C must meet; the poll rate is bounded by the number of
+// concurrently attached streams.
+const defaultStreamingCancelPollInterval = 1 * time.Second
+
+// streamingCancelRequestTimeoutFactor bounds a single cancellation-status
+// query: the request is abandoned after this many poll intervals, so a slow
+// status endpoint cannot swallow the next tick and push the cancel latency
+// past the acceptance bound. The heartbeat remains the backstop meanwhile.
+const streamingCancelRequestTimeoutFactor = 2
+
+// streamingCancelFailureLogEvery limits how often consecutive poll failures
+// are logged: the first failure is always logged (so a degraded fast path is
+// visible), then one line per this many failures instead of one per interval.
+const streamingCancelFailureLogEvery = 30
+
+// cancelPollInterval returns the configured streaming cancel poll interval,
+// falling back to the default for workers constructed without New (tests).
+func (w *Worker) cancelPollInterval() time.Duration {
+	if w.streamingCancelPollInterval > 0 {
+		return w.streamingCancelPollInterval
+	}
+	return defaultStreamingCancelPollInterval
+}
+
+// watchStreamingJobCancellation polls jobID's server-side state and cancels
+// the job context as soon as the job is no longer this worker's to execute.
+// The cancel func is the job's own, so the cancellation tears down execCtx and
+// cmd.Cancel kills the whole ffmpeg process group. The returned stop function
+// must be called exactly once when the job finishes; it ends the watcher,
+// aborts any in-flight status query, and returns once the watcher goroutine
+// has exited.
+//
+// Poll failures never fail a job — the heartbeat response remains the cancel
+// backstop — but they are counted and logged so a degraded fast path is
+// observable.
+func (w *Worker) watchStreamingJobCancellation(ctx context.Context, jobID string, cancel context.CancelFunc) func() {
+	watchCtx, watchCancel := context.WithCancel(ctx)
+	interval := w.cancelPollInterval()
+	requestTimeout := streamingCancelRequestTimeoutFactor * interval
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		failures := 0
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				reqCtx, reqCancel := context.WithTimeout(watchCtx, requestTimeout)
+				job, err := w.client.GetJob(reqCtx, jobID)
+				reqCancel()
+				if err != nil {
+					// A stop() or job-context teardown cancels the in-flight
+					// query; that is normal shutdown, not a degraded fast path,
+					// so it must not surface as a fallback warning.
+					if watchCtx.Err() != nil {
+						return
+					}
+					failures++
+					if failures == 1 || failures%streamingCancelFailureLogEvery == 0 {
+						log.Printf("Job %s: cancel status poll failed (%d consecutive): %v; heartbeat remains the backstop",
+							jobID, failures, err)
+					}
+					continue
+				}
+				failures = 0
+				if jobCancelledElsewhere(job, w.ID()) {
+					log.Printf("Cancelling job %s (cancelled on server)", jobID)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		watchCancel()
+		<-finished
+	}
+}
+
+// jobCancelledElsewhere mirrors the Server's heartbeat cancel predicate: a job
+// is no longer ours to run when it was cancelled, re-queued for another
+// dispatch, or reassigned to a different worker after failover.
+func jobCancelledElsewhere(job *protocol.JobInfo, workerID string) bool {
+	if job.Status == protocol.JobStatusCancelled || job.Status == protocol.JobStatusPending {
+		return true
+	}
+	return job.WorkerID != "" && job.WorkerID != workerID
 }
 
 // cleanupJobDir cleans up the job's temporary directory
