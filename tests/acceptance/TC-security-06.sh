@@ -31,8 +31,24 @@ fi
 DURATION="$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$MEDIA")"
 [[ "$DURATION" == 120.* ]] || { echo "unexpected media duration: $DURATION" >&2; exit 1; }
 
+# busybox date has no %N: `date +%s%N` silently degrades to whole seconds,
+# WALL_MS collapses to 0 and the 15s criterion can never fail. Resolve the
+# clock once, in this parent shell — a subshell assignment would be lost on
+# every $(now_ns) call. Prefer python's monotonic clock (immune to NTP steps,
+# Python >= 3.3); date +%s%N is only a fallback when python3 is missing.
+# Accept exactly 10-digit seconds + 9-digit %N; pure-second or short %N output
+# would scale WALL_MS down a thousandfold and reopen the false-positive.
+if command -v python3 >/dev/null; then
+	now_ns() { python3 -c 'import time; print(int(time.monotonic() * 1e9))'; }
+elif command -v date >/dev/null && [[ "$(date +%s%N)" =~ ^[0-9]{19}$ ]]; then
+	now_ns() { date +%s%N; }
+else
+	echo "FATAL: neither python3 (monotonic clock) nor a nanosecond-capable date is available" >&2
+	exit 1
+fi
+
 OUT="$TMP_ROOT/sec6b.mp4"
-START_NS=$(date +%s%N)
+START_NS=$(now_ns)
 set +e
 "$RFFMPEG_BIN/rffmpeg" \
 	--server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
@@ -41,9 +57,9 @@ set +e
 	"$OUT" 2> "$TMP_ROOT/cli.log"
 RC=$?
 set -e
-END_NS=$(date +%s%N)
+END_NS=$(now_ns)
 WALL_MS=$(( (END_NS - START_NS) / 1000000 ))
-WALL_S=$(( WALL_MS / 1000 ))
+WALL_DISPLAY=$(printf '%d.%03ds' $((WALL_MS / 1000)) $((WALL_MS % 1000)))
 
 # rc≠0
 [[ $RC -ne 0 ]] || { echo "FAIL: rc=$RC, want != 0" >&2; exit 1; }
@@ -73,4 +89,4 @@ if kill -0 "$WORKER_PID" 2>/dev/null; then
 	fi
 fi
 
-echo "PASS: rc=$RC wall=${WALL_S}s <= 15s, TIMEOUT classified, no partial output, no residual ffmpeg"
+echo "PASS: rc=$RC wall=${WALL_DISPLAY} <= 15s, TIMEOUT classified, no partial output, no residual ffmpeg"
