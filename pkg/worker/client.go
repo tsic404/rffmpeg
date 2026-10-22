@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -207,6 +208,25 @@ func (c *Client) Heartbeat(status protocol.WorkerStatus, activeJobs []string, jo
 	return result.CancelledJobs, nil
 }
 
+// GetJob fetches one job's server-side state. Streaming jobs use it to poll
+// for cancellation: the heartbeat response is the designed cancel backstop,
+// but its default 30s cadence is far past the bound a Ctrl+C must meet. The
+// caller's context bounds the request, so a stop or a slow status endpoint
+// never leaves the poll goroutine holding an in-flight request.
+func (c *Client) GetJob(ctx context.Context, jobID string) (*protocol.JobInfo, error) {
+	resp, err := c.doRequestContext(ctx, "GET", "/jobs/"+jobID, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result protocol.JobStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode job response: %w", err)
+	}
+	return &result.Job, nil
+}
+
 // PullJobs pulls pending jobs assigned to this worker
 func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 	url := fmt.Sprintf("%s%s/workers/%s/jobs", c.baseURL, apiSuffix, c.getWorkerID())
@@ -257,8 +277,9 @@ func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 // DownloadInput downloads an input file from the server or directly from a remote URL.
 // If fileID is a remote URL per pathutil.IsRemoteURL (scheme-prefixed, excluding the local
 // "file" scheme), it is downloaded directly. Otherwise, it is treated as a
-// server-side file ID and fetched from the server.
-func (c *Client) DownloadInput(fileID, destPath string) error {
+// server-side file ID and fetched from the server. The context aborts the
+// transfer and the copy when the job is cancelled.
+func (c *Client) DownloadInput(ctx context.Context, fileID, destPath string) error {
 	var downloadURL string
 	var req *http.Request
 	var err error
@@ -266,7 +287,7 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 	if pathutil.IsRemoteURL(fileID) {
 		// Remote URL — download directly
 		downloadURL = fileID
-		req, err = http.NewRequest("GET", downloadURL, nil)
+		req, err = http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 		if err != nil {
 			return fmt.Errorf("failed to create request for URL %s: %w", fileID, err)
 		}
@@ -280,7 +301,7 @@ func (c *Client) DownloadInput(fileID, destPath string) error {
 	} else {
 		// Server file ID — fetch from server
 		downloadURL = fmt.Sprintf("%s%s/files/%s", c.baseURL, apiSuffix, fileID)
-		req, err = http.NewRequest("GET", downloadURL, nil)
+		req, err = http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 		if err != nil {
 			return fmt.Errorf("failed to create request: %w", err)
 		}
@@ -553,6 +574,12 @@ func escapeMultipartQuotes(s string) string {
 
 // doRequest is a helper for making JSON requests
 func (c *Client) doRequest(method, path string, body interface{}) (*http.Response, error) {
+	return c.doRequestContext(context.Background(), method, path, body)
+}
+
+// doRequestContext is doRequest bounded by ctx: a caller that abandons the
+// request (watcher stop, per-poll deadline) never leaves it in flight.
+func (c *Client) doRequestContext(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
 	url := c.baseURL + apiSuffix + path
 
 	var reqBody io.Reader
@@ -564,7 +591,7 @@ func (c *Client) doRequest(method, path string, body interface{}) (*http.Respons
 		reqBody = bytes.NewReader(jsonBody)
 	}
 
-	req, err := http.NewRequest(method, url, reqBody)
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

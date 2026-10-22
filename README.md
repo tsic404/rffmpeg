@@ -387,6 +387,7 @@ Usage of ./bin/rffmpeg-worker:
   "timeout": "2h",
   "heartbeat_interval": "30s",
   "poll_interval": "1s",
+  "streaming_cancel_poll_interval": "1s",
   "max_concurrent": 1,
   "auto_detect_gpu": true,
   "auto_detect_codecs": true,
@@ -436,6 +437,7 @@ Usage of ./bin/rffmpeg-worker:
 | `RFFMPEG_MAX_CONCURRENT` | 该 Worker 的并行执行槽位数（超出部分留在服务端队列排队，不是拒绝提交；与准入限流是两级独立上限，见「并发上限的两级语义」） | `1` |
 | `RFFMPEG_HEARTBEAT_INTERVAL` | Worker 心跳上报间隔 | `30s` |
 | `RFFMPEG_POLL_INTERVAL` | Worker 任务轮询间隔 | `1s` |
+| `RFFMPEG_STREAMING_CANCEL_POLL_INTERVAL` | 流式作业发现取消的状态查询间隔（仅配置文件或环境变量设置；须为正） | `1s` |
 | `RFFMPEG_AUTO_DETECT_GPU` | 自动检测 GPU（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |
 | `RFFMPEG_AUTO_DETECT_CODECS` | 自动检测编解码器（同上布尔值语义） | `true` |
 | `RFFMPEG_CACHE_ENABLED` | 启用任务文件缓存（布尔值：`1`/`true`/`yes`/`on` 启用，`0`/`false`/`no`/`off` 禁用，大小写不敏感；非法值不覆盖配置文件） | `true` |
