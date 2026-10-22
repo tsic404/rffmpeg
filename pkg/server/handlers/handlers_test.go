@@ -2351,6 +2351,78 @@ func TestWorkerHeartbeatThroughputScaleInjection(t *testing.T) {
 	}
 }
 
+// TestHeartbeatThroughputScaleTracedToStateTable follows the fault injection
+// from its Scale() call site in the heartbeat handler into the worker state
+// table the slow-node detector reads: the recorded state must carry the scaled
+// value (not the reported one), for a rule that matches the worker ID and for
+// one that matches the registered name while the ID differs. A break anywhere
+// in that chain silently disables the end-to-end slow-node path even though
+// scaling and detection each work in isolation.
+func TestHeartbeatThroughputScaleTracedToStateTable(t *testing.T) {
+	tests := []struct {
+		name string
+		// rule targets the worker ID (name differs) or its registered name.
+		targetID bool
+		// reported is what the worker claims; wantScaled is what the state
+		// table must retain after the injection is applied.
+		reported, factor, wantScaled float64
+	}{
+		{name: "matches worker ID, not name", targetID: true, reported: 8, factor: 0.25, wantScaled: 2},
+		{name: "matches registered name, not ID", targetID: false, reported: 8, factor: 0.05, wantScaled: 0.4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, router, cleanup := setupTest(t)
+			defer cleanup()
+
+			const workerID, workerName = "worker-by-id", "worker-by-name"
+			registerTestWorkerWithID(t, router, workerID, workerName, []string{"libx264"})
+
+			rule := workerName
+			if tt.targetID {
+				rule = workerID
+			}
+			h.SetThroughputScaler(workerhealth.NewThroughputScaler([]workerhealth.ThroughputScaleEntry{
+				{Worker: rule, Factor: tt.factor},
+			}))
+
+			body, _ := json.Marshal(protocol.WorkerHeartbeatRequest{
+				WorkerID:      workerID,
+				Status:        protocol.WorkerStatusBusy,
+				JobsPerSec:    tt.reported,
+				CompletedJobs: workerhealth.MinJobsForEviction,
+			})
+			req := httptest.NewRequest("POST", "/api/v1/workers/heartbeat", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("heartbeat failed with status %d: %s", rec.Code, rec.Body.String())
+			}
+
+			state, ok := h.GetStateTable().Get(workerID)
+			if !ok {
+				t.Fatalf("worker %s missing from the state table after its heartbeat", workerID)
+			}
+			if state.JobsPerSec != tt.wantScaled {
+				t.Errorf("state table JobsPerSec = %f, want the scaled %f (reported %f, factor %g)",
+					state.JobsPerSec, tt.wantScaled, tt.reported, tt.factor)
+			}
+			if state.EWMAJobsPerSec != tt.wantScaled {
+				t.Errorf("state table EWMA = %f, want %f", state.EWMAJobsPerSec, tt.wantScaled)
+			}
+			// Non-throughput fields must stay real: the injection covers only
+			// the reported throughput.
+			if state.CompletedJobs != workerhealth.MinJobsForEviction {
+				t.Errorf("state table CompletedJobs = %d, want the reported %d",
+					state.CompletedJobs, workerhealth.MinJobsForEviction)
+			}
+		})
+	}
+}
+
 // TestListWorkersActiveOnlyFilter verifies GET /api/v1/workers
 // returns every registered worker by default, and that ?active_only=true
 // excludes offline rows retained within the --worker-offline-threshold window.

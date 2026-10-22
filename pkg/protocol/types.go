@@ -399,4 +399,10 @@ type WorkerState struct {
 	// non-zero throughput sample. Time-boxes the busy-worker eviction
 	// exemption in slow-node detection.
 	LastThroughputAt time.Time `json:"last_throughput_at,omitempty"`
+	// ZeroSampleStreak counts consecutive heartbeats that reported zero
+	// throughput. Slow-node detection uses it to tell a one-interval sampling
+	// gap (a worker that finished a job and is waiting out its poll interval)
+	// from a worker that actually stopped producing. Server-side bookkeeping;
+	// never serialized to clients.
+	ZeroSampleStreak int `json:"-"`
 }

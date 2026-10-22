@@ -61,6 +61,17 @@ func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatP
 	state.QueueDepth = payload.QueueDepth
 	state.LastSeen = payload.Timestamp
 
+	// Track the run of zero-throughput heartbeats. A single zero sample is not
+	// evidence that a worker stopped: a worker that completes a job and then
+	// waits out its poll interval reports a burst sample and a zero sample on
+	// alternating heartbeats. Median sample-pool membership needs the run
+	// length to tell that cadence apart from genuine idleness.
+	if payload.JobsPerSec > 0 {
+		state.ZeroSampleStreak = 0
+	} else {
+		state.ZeroSampleStreak++
+	}
+
 	// Compute EWMA-smoothed throughput
 	if exists {
 		if payload.JobsPerSec > 0 {
@@ -143,6 +154,14 @@ const RecoveryThreshold = 1.5
 // calculation and are never marked as slow, preventing cold-start false positives.
 const MinJobsForEviction = 5
 
+// MinZeroSamplesForIdle is how many consecutive zero-throughput heartbeats a
+// worker without active jobs must report before it leaves the median sample
+// pool. One zero sample cannot be distinguished from the gap between two job
+// bursts, and EWMA decay keeps such a worker within the eviction threshold for
+// this many steps anyway (0.6^2 > 1/3), so the pool keeps a producing worker
+// through a sampling gap without softening the eviction rule.
+const MinZeroSamplesForIdle = 2
+
 // SlowNodeDetectionResult holds the result of slow node detection.
 type SlowNodeDetectionResult struct {
 	NewlyEvicted []string
@@ -160,6 +179,10 @@ type workerInfo struct {
 	// exact-zero test on the smoothed value cannot identify an idle worker.
 	jobsPerSec float64
 	hasJobs    bool
+	// zeroStreak is how many consecutive heartbeats reported zero throughput.
+	// One zero sample is a gap between job bursts, not idleness; the run length
+	// is what tells the two apart.
+	zeroStreak int
 }
 
 // eligibleSlowNodeWorkersLocked collects the workers eligible for slow-node
@@ -181,25 +204,35 @@ func (t *WorkerStateTable) eligibleSlowNodeWorkersLocked() []workerInfo {
 			ewmaJobsPerSec: state.EWMAJobsPerSec,
 			jobsPerSec:     state.JobsPerSec,
 			hasJobs:        len(state.ActiveJobs) > 0,
+			zeroStreak:     state.ZeroSampleStreak,
 		})
 	}
 	return workers
 }
 
-// medianSample reduces the eligible worker pool to the median sample pool:
-// idle workers are excluded. A worker is idle when its latest heartbeat
-// reported no throughput and it holds no active jobs; its EWMA is then a decay
-// tail of measurement absence rather than a current rate, so it must neither
-// seed the median nor be judged against it. Returns the surviving workers
-// alongside their EWMA throughput values so DetectSlowWorkers and ClusterMedian
-// share a single idle-filter definition.
+// medianSample reduces the eligible worker pool to the median sample pool. A
+// worker without active jobs leaves it after MinZeroSamplesForIdle consecutive
+// zero-throughput heartbeats, or as soon as it reports zero throughput while
+// its EWMA is still zero — a worker that never produced a non-zero sample
+// would only drag the median down. One zero sample is not idleness: throughput
+// counts jobs completed since the previous heartbeat, so a worker that bursts
+// and then waits out its poll interval alternates non-zero and zero, and
+// excluding it on the zero collapses the pool and disables detection.
 func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 	sampled := make([]workerInfo, 0, len(workers))
 	throughputs := make([]float64, 0, len(workers))
 	for _, w := range workers {
-		// Skip idle workers: no throughput in the latest heartbeat AND no active jobs
-		if w.jobsPerSec == 0 && !w.hasJobs {
-			continue
+		if !w.hasJobs && w.jobsPerSec == 0 {
+			// No throughput this interval and no job running: either a gap
+			// between job bursts or genuine idleness. A single zero sample is
+			// the former — the EWMA remains a usable rate estimate — so the
+			// worker only leaves the pool after MinZeroSamplesForIdle
+			// consecutive zeros. A zero EWMA means no positive sample was ever
+			// recorded, and its 0 would drag the median down instead of
+			// describing the cluster.
+			if w.zeroStreak >= MinZeroSamplesForIdle || w.ewmaJobsPerSec == 0 {
+				continue
+			}
 		}
 		sampled = append(sampled, w)
 		throughputs = append(throughputs, w.ewmaJobsPerSec)
@@ -210,11 +243,11 @@ func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 // DetectSlowWorkers scans all worker states, computes the cluster median of EWMA-smoothed
 // throughput, and marks workers as evicted if their throughput is below median/SlowNodeThreshold.
 // Previously evicted workers are recovered if their throughput exceeds median/RecoveryThreshold.
-// Workers that reported no throughput in their latest heartbeat and hold no active jobs (idle)
-// are excluded from the median calculation and are not marked as slow — their EWMA is a decay
-// tail of measurement absence, not a current rate. Newly registered workers that have completed
-// fewer than MinJobsForEviction jobs are also excluded, so cold-start throughput (which is not
-// yet representative) cannot trigger a false eviction.
+// A worker with no active jobs and zero throughput in its latest heartbeat is never marked slow:
+// its EWMA is a decay tail of measurement absence, not a current rate. Pool membership is a
+// separate decision made by medianSample — one zero sample stays in the pool, consecutive zeros
+// leave it. Workers that completed fewer than MinJobsForEviction jobs are excluded from both the
+// evaluation and the pool, so cold-start throughput cannot trigger a false eviction.
 func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -253,6 +286,12 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 				state.Evicted = false
 				recovered = append(recovered, w.id)
 			}
+		} else if w.jobsPerSec == 0 && !w.hasJobs {
+			// Idle: the EWMA is a decay tail of measurement absence, not a
+			// current rate, so it is never evidence of slowness. Pool
+			// membership is medianSample's call: one zero sample stays in
+			// the pool, consecutive zeros leave it; neither is judged here.
+			continue
 		} else if w.jobsPerSec == 0 && t.busyExempt(w) {
 			// Busy worker with no throughput sample this interval (job just
 			// started): EWMA decay is measurement absence, not slowness —
@@ -260,7 +299,7 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 			// bounded window (see busyExpiry): a hung ffmpeg with active jobs
 			// must eventually face the slow-node safety net instead of hiding
 			// in "measurement absence" forever. Only busy workers reach this
-			// branch: medianSample drops workers with no sample and no jobs.
+			// branch: the idle branch above claims workers with no jobs.
 			continue
 		} else {
 			// Slow node detection: if throughput is below median/SlowNodeThreshold
@@ -279,10 +318,12 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 }
 
 // ClusterMedian returns the current cluster median of EWMA throughput, computed
-// from the same sample pool DetectSlowWorkers evaluates (offline, warmup, and
-// idle workers excluded). Read-only; returns 0 when fewer than two eligible
-// samples exist. Exposed so the workers API can report the raw median that E2E
-// assertions compare worker EWMA against.
+// from the same sample pool DetectSlowWorkers evaluates: offline and warmup
+// workers are excluded, as are idle workers — no active jobs and at least
+// MinZeroSamplesForIdle consecutive zero-throughput heartbeats, including
+// workers that never reported a non-zero sample. Read-only; returns 0 when
+// fewer than two eligible samples exist. Exposed so the workers API can report
+// the raw median that E2E assertions compare worker EWMA against.
 func (t *WorkerStateTable) ClusterMedian() float64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
