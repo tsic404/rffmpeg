@@ -93,6 +93,7 @@ type Cache struct {
 	mu      sync.RWMutex
 	stats   CacheStats
 	lruList *lruTracker
+	evictCh chan struct{}
 	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -165,6 +166,18 @@ func (l *lruTracker) remove(key string) {
 	}
 	l.entries = l.entries[:lastIdx]
 	delete(l.keyIndex, key)
+}
+
+// sizeOf reports the tracked size of a key.
+func (l *lruTracker) sizeOf(key string) (int64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	idx, ok := l.keyIndex[key]
+	if !ok {
+		return 0, false
+	}
+	return l.entries[idx].Size, true
 }
 
 // getLRU returns the least recently used entry that should be evicted.
@@ -243,6 +256,7 @@ func NewCache(cfg CacheConfig) (*Cache, error) {
 	c := &Cache{
 		cfg:     cfg,
 		lruList: newLRUTracker(),
+		evictCh: make(chan struct{}, 1),
 	}
 
 	// Scan existing cache entries to rebuild LRU state
@@ -471,10 +485,19 @@ func (c *Cache) Put(key string, srcPath string, ttlOverride ...time.Duration) er
 		return fmt.Errorf("failed to write cache metadata: %w", err)
 	}
 
-	// Track in LRU
+	// Track in LRU. Re-caching a key replaces the expired entry it overwrites,
+	// so swap the accounted size instead of adding a second copy.
+	if prev, ok := c.lruList.sizeOf(key); ok {
+		c.stats.CurrentSizeBytes -= prev
+	} else {
+		c.stats.EntryCount++
+	}
 	c.lruList.add(key, meta.Size)
 	c.stats.CurrentSizeBytes += meta.Size
-	c.stats.EntryCount++
+
+	// Enforce the size budget right away instead of waiting for the periodic
+	// tick: the cap must hold for writes that arrive between two checks.
+	c.requestLRUEviction()
 
 	return nil
 }
@@ -544,20 +567,39 @@ func (c *Cache) runTTLEviction() {
 	}
 }
 
-// runLRUEviction periodically checks cache size and evicts LRU entries if over limit.
+// runLRUEviction checks cache size on every write request and, as a backstop,
+// on the periodic tick. The initial pass covers a cache that is already over
+// budget at startup, e.g. after the size limit was lowered.
 func (c *Cache) runLRUEviction() {
 	defer c.wg.Done()
 
 	ticker := time.NewTicker(c.cfg.LRUCheckInterval)
 	defer ticker.Stop()
 
+	c.evictLRUIfNeeded()
+
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
+		case <-c.evictCh:
+			c.evictLRUIfNeeded()
 		case <-ticker.C:
 			c.evictLRUIfNeeded()
 		}
+	}
+}
+
+// requestLRUEviction asks the background eviction loop to re-check the size
+// budget after a write. It never blocks and never drops the request when the
+// loop is busy: a pending notification already covers every later write.
+func (c *Cache) requestLRUEviction() {
+	if c.evictCh == nil {
+		return
+	}
+	select {
+	case c.evictCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -610,27 +652,20 @@ func (c *Cache) evictExpired() {
 }
 
 // evictLRUIfNeeded checks if cache size exceeds limit and evicts LRU entries.
+// The whole pass runs under c.mu so a concurrent Put cannot add an entry that
+// the currently computed budget misses.
 func (c *Cache) evictLRUIfNeeded() {
-	for {
-		c.mu.RLock()
-		currentSize := c.stats.CurrentSizeBytes
-		c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-		if currentSize <= c.cfg.MaxSizeBytes {
-			return
-		}
-
+	for c.stats.CurrentSizeBytes > c.cfg.MaxSizeBytes {
 		lru, ok := c.lruList.getLRU()
 		if !ok {
 			return // nothing to evict
 		}
 
-		c.mu.Lock()
-		cachePath := c.keyPath(lru.Key)
-		metaPath := c.metaPath(lru.Key)
-		c.removeEntry(lru.Key, cachePath, metaPath, lru.Size)
+		c.removeEntry(lru.Key, c.keyPath(lru.Key), c.metaPath(lru.Key), lru.Size)
 		c.stats.Evictions++
-		c.mu.Unlock()
 
 		log.Printf("LRU eviction: removed %s (size=%d)", lru.Key, lru.Size)
 	}

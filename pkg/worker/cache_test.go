@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -280,6 +281,144 @@ func TestCacheLRUEviction(t *testing.T) {
 	_, hit := cache.Check(key2)
 	if !hit {
 		t.Error("key2 should still be in cache")
+	}
+}
+
+// TestCachePutTriggersLRUEviction locks in that a write enforces the size
+// budget itself. The startup pass would otherwise reclaim the over-cap entries
+// and mask a missing write trigger, so a seed entry is placed on disk before
+// Start and the test waits until the startup pass has evicted it; only after
+// that are over-cap entries written, and the periodic check is an hour away.
+func TestCachePutTriggersLRUEviction(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+
+	// One seed entry larger than the cap so the startup pass removes it and
+	// leaves nothing behind: observing an empty cache proves that pass ran.
+	seedKey := GenerateCacheKey([]string{"seed-input"}, []string{"-c:v", "libx264"}, false, "", "")
+	seedShard := filepath.Join(cacheDir, seedKey[:2])
+	if err := os.MkdirAll(seedShard, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	const seedSize = 60 // the 50-byte cap cannot hold one seed entry
+	if err := os.WriteFile(filepath.Join(seedShard, seedKey), make([]byte, seedSize), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	meta, err := json.Marshal(cacheEntryMeta{Key: seedKey, CreatedAt: time.Now(), Size: seedSize})
+	if err != nil {
+		t.Fatalf("marshal seed meta failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(seedShard, seedKey)+".meta", meta, 0644); err != nil {
+		t.Fatalf("write seed meta failed: %v", err)
+	}
+
+	cache, err := NewCache(CacheConfig{
+		Enabled:          true,
+		Dir:              cacheDir,
+		TTL:              24 * time.Hour,
+		MaxSizeBytes:     50,
+		LRUCheckInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewCache failed: %v", err)
+	}
+	if got := cache.Stats().EntryCount; got != 1 {
+		t.Fatalf("seeded cache has %d entries, want 1", got)
+	}
+	cache.Start(context.Background())
+	defer cache.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for cache.Stats().EntryCount != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := cache.Stats().EntryCount; got != 0 {
+		t.Fatalf("startup pass did not evict the seeded entry: %d entries left", got)
+	}
+
+	data := []byte("this is some test data that takes space")
+	put := func(name, input string, args ...string) string {
+		srcPath := filepath.Join(dir, name)
+		if err := os.WriteFile(srcPath, data, 0644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+		key := GenerateCacheKey([]string{input}, args, false, "", "")
+		if err := cache.Put(key, srcPath); err != nil {
+			t.Fatalf("Put %s failed: %v", name, err)
+		}
+		return key
+	}
+	key1 := put("src1.bin", "file-1", "-c:v", "libx264")
+	key2 := put("src2.bin", "file-2", "-c:v", "libx265")
+
+	deadline = time.Now().Add(2 * time.Second)
+	for cache.Stats().EntryCount > 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, hit := cache.Check(key1); hit {
+		t.Error("least recently used entry should have been evicted on write")
+	}
+	if _, hit := cache.Check(key2); !hit {
+		t.Error("newest entry should have been retained")
+	}
+	if evictions := cache.Stats().Evictions; evictions == 0 {
+		t.Error("expected at least one recorded eviction")
+	}
+}
+
+// TestCachePutOverwriteReplacesAccounting locks in that re-caching a key
+// replaces the accounted volume of the entry it overwrites instead of adding a
+// second copy. A drifting size would evict unrelated entries on later writes.
+func TestCachePutOverwriteReplacesAccounting(t *testing.T) {
+	cases := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "larger overwrites smaller", first: "small", second: "a much larger second payload"},
+		{name: "smaller overwrites larger", first: "a much larger first payload", second: "small"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cache, err := NewCache(CacheConfig{
+				Enabled:          true,
+				Dir:              filepath.Join(dir, "cache"),
+				TTL:              24 * time.Hour,
+				MaxSizeBytes:     10 * 1024 * 1024 * 1024, // no eviction pressure
+				LRUCheckInterval: time.Hour,               // keep the tick out of the way
+			})
+			if err != nil {
+				t.Fatalf("NewCache failed: %v", err)
+			}
+			cache.Start(context.Background())
+			defer cache.Stop()
+
+			key := GenerateCacheKey([]string{"same-input"}, []string{"-c:v", "libx264"}, false, "", "")
+			put := func(name, payload string) {
+				srcPath := filepath.Join(dir, name)
+				if err := os.WriteFile(srcPath, []byte(payload), 0644); err != nil {
+					t.Fatalf("WriteFile failed: %v", err)
+				}
+				if err := cache.Put(key, srcPath); err != nil {
+					t.Fatalf("Put %s failed: %v", name, err)
+				}
+			}
+			put("first.bin", tc.first)
+			put("second.bin", tc.second)
+
+			stats := cache.Stats()
+			if stats.EntryCount != 1 {
+				t.Errorf("EntryCount = %d, want 1", stats.EntryCount)
+			}
+			if want := int64(len(tc.second)); stats.CurrentSizeBytes != want {
+				t.Errorf("CurrentSizeBytes = %d, want %d", stats.CurrentSizeBytes, want)
+			}
+			if stats.Evictions != 0 {
+				t.Errorf("Evictions = %d, want 0", stats.Evictions)
+			}
+		})
 	}
 }
 
