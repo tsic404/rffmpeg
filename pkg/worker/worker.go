@@ -1135,6 +1135,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		defer execCancel()
 	}
 
+	// This attempt launches a fresh ffmpeg process: re-base the ETA baseline
+	// before any of its stderr reaches the parser. Retries report the same
+	// boundary through ExecuteWithRetry.
+	progressRouter.StartAttempt()
+
 	// Execute with appropriate handlers
 	var result ExecResult
 	var stdoutHandler StdoutHandler
