@@ -226,6 +226,147 @@ func TestDetectSlowWorkers_SlowNodeDetected(t *testing.T) {
 	}
 }
 
+// TestDetectSlowWorkers_BurstyWorkerStaysInMedianPool pins the sample-pool rule
+// for a worker whose reported throughput alternates between a burst and a zero:
+// throughput is "jobs completed since the previous heartbeat", so a fast worker
+// that finishes a job and then waits out its poll interval reports exactly that
+// pattern. Excluding it on the zero sample leaves the median computed from one
+// worker only, which zeroes the median and silently disables slow-node
+// detection instead of merely missing that worker for one interval.
+func TestDetectSlowWorkers_BurstyWorkerStaysInMedianPool(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	// ws reports its scaled throughput every interval and holds a long job.
+	// wf alternates burst/zero with no active job on the zero samples.
+	for range 3 {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "ws", Status: "busy", JobsPerSec: 0.05,
+			ActiveJobs: []string{"long-job"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "wf", Status: "busy", JobsPerSec: 12,
+			CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "wf", Status: "idle", JobsPerSec: 0,
+			CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+
+	result := table.DetectSlowWorkers()
+	if result.Median <= 0 {
+		t.Fatalf("median = %f: the bursty worker's zero sample collapsed the pool", result.Median)
+	}
+	if len(result.NewlyEvicted) != 1 || result.NewlyEvicted[0] != "ws" {
+		t.Fatalf("newly evicted = %v, want [ws] (median %f)", result.NewlyEvicted, result.Median)
+	}
+	if state, _ := table.Get("wf"); state.Evicted {
+		t.Error("the bursty worker must not be evicted on its between-bursts zero sample")
+	}
+}
+
+// TestDetectSlowWorkers_SustainedIdleLeavesMedianPool pins the other side of the
+// same rule: a worker that keeps reporting zero with no active jobs is idle, so
+// it leaves the median pool and is never judged against a live peer's median.
+func TestDetectSlowWorkers_SustainedIdleLeavesMedianPool(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-busy", Status: "busy", JobsPerSec: 10,
+		ActiveJobs: []string{"job-1"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+	// A long-idle worker keeps decaying but never exactly reaches zero.
+	for range 20 {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "w-idle", Status: "idle", JobsPerSec: 0,
+			CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+
+	state, _ := table.Get("w-idle")
+	if state.ZeroSampleStreak < MinZeroSamplesForIdle {
+		t.Fatalf("precondition: idle worker zero-sample streak = %d, want >= %d",
+			state.ZeroSampleStreak, MinZeroSamplesForIdle)
+	}
+
+	result := table.DetectSlowWorkers()
+	if len(result.NewlyEvicted) != 0 {
+		t.Errorf("idle worker must not be evicted on its decayed EWMA, got %v", result.NewlyEvicted)
+	}
+	if got := table.ClusterMedian(); got != 0 {
+		t.Errorf("cluster median = %f, want 0: only one sampled worker remains", got)
+	}
+}
+
+// TestDetectSlowWorkers_MedianPoolZeroSampleBoundary pins the exact point a
+// worker without active jobs leaves the median sample pool: it is still
+// sampled on its MinZeroSamplesForIdle-1'th consecutive zero heartbeat and
+// drops out on the next one. An off-by-one there shortens the window in which
+// an idle worker is exempt from judgement to a single sample, while every
+// coarser test still passes because a genuinely idle worker accumulates far
+// more zeros than the threshold.
+func TestDetectSlowWorkers_MedianPoolZeroSampleBoundary(t *testing.T) {
+	if MinZeroSamplesForIdle != 2 {
+		t.Fatalf("MinZeroSamplesForIdle = %d, want 2: the boundary asserted below is defined by this value",
+			MinZeroSamplesForIdle)
+	}
+
+	table := NewWorkerStateTable(30 * time.Second)
+
+	// Two steady producers whose EWMA settles at 10 and 12.
+	for range 3 {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "w-low", Status: "online", JobsPerSec: 10,
+			CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "w-high", Status: "online", JobsPerSec: 12,
+			CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+
+	// w-edge produces at 20, then stops while holding no job: each zero sample
+	// decays its EWMA (20 -> 12 -> 7.2), so its value moves the median only
+	// through pool membership.
+	for range 2 {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "w-edge", Status: "online", JobsPerSec: 20,
+			CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-edge", Status: "idle", JobsPerSec: 0,
+		CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+
+	state, _ := table.Get("w-edge")
+	if state.ZeroSampleStreak != MinZeroSamplesForIdle-1 {
+		t.Fatalf("precondition: zero-sample streak = %d, want %d",
+			state.ZeroSampleStreak, MinZeroSamplesForIdle-1)
+	}
+	// {10, 12, 12} -> 12; dropping w-edge would leave {10, 12} -> 11.
+	if got := table.ClusterMedian(); math.Abs(got-12) > 1e-9 {
+		t.Errorf("median with a %d-zero-sample worker = %f, want 12: the worker must still be in the pool",
+			state.ZeroSampleStreak, got)
+	}
+
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-edge", Status: "idle", JobsPerSec: 0,
+		CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+
+	state, _ = table.Get("w-edge")
+	if state.ZeroSampleStreak != MinZeroSamplesForIdle {
+		t.Fatalf("precondition: zero-sample streak = %d, want %d",
+			state.ZeroSampleStreak, MinZeroSamplesForIdle)
+	}
+	// {10, 12} -> 11; keeping w-edge in with its decayed 7.2 would give 10.
+	if got := table.ClusterMedian(); math.Abs(got-11) > 1e-9 {
+		t.Errorf("median with a %d-zero-sample worker = %f, want 11: the worker must have left the pool",
+			state.ZeroSampleStreak, got)
+	}
+}
+
 func TestDetectSlowWorkers_IdleWorkersSkipped(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 
@@ -332,6 +473,45 @@ func TestDetectSlowWorkers_BusyWorkerWithoutSample(t *testing.T) {
 	}
 	if state, _ := table.Get("w-fresh"); state.Evicted {
 		t.Error("busy worker within busyExpiry of its last sample should not be evicted")
+	}
+}
+
+// TestDetectSlowWorkers_SingleZeroSampleAfterSilence pins the idle branch to
+// the zero-sample rule rather than to the busy exemption: a worker holding no
+// job whose last real sample is older than busyExpiry, and which then reports
+// a single zero, is idle — the expired exemption must not hand it to the
+// eviction threshold in place of the one-zero-sample exemption.
+func TestDetectSlowWorkers_SingleZeroSampleAfterSilence(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	for _, id := range []string{"w1", "w2"} {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: id, Status: "busy", JobsPerSec: 100,
+			ActiveJobs: []string{"job-" + id}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-quiet", Status: "idle", JobsPerSec: 2,
+		CompletedJobs: MinJobsForEviction, Timestamp: time.Now().Add(-busyExpiry - time.Minute),
+	})
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-quiet", Status: "idle", JobsPerSec: 0,
+		CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+
+	state, _ := table.Get("w-quiet")
+	if state.ZeroSampleStreak != MinZeroSamplesForIdle-1 {
+		t.Fatalf("precondition: zero-sample streak = %d, want %d",
+			state.ZeroSampleStreak, MinZeroSamplesForIdle-1)
+	}
+
+	result := table.DetectSlowWorkers()
+	if len(result.NewlyEvicted) != 0 {
+		t.Errorf("newly evicted = %v, want none: one zero sample is idleness, not a hung worker", result.NewlyEvicted)
+	}
+	if state.Evicted {
+		t.Error("idle worker with a single zero sample must not be evicted once its last real sample expired")
 	}
 }
 

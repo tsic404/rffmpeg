@@ -984,7 +984,7 @@ GET /api/v1/workers/{workerId}/jobs
 - `health.completed_jobs`：本次注册以来该 worker 完成的作业累计数（失败/取消/probe 不计入）。
   驱逐判定的预热门槛（`MinJobsForEviction=5`）比对该值，**始终输出**（首次心跳前为 0），
   因此外部可直接判断某 worker 是否已通过预热、进入中位数样本池，无需靠字段缺失猜测。
-- `cluster_median_throughput`：参与慢节点判定的集群 EWMA 中位数原值（offline / 预热中 / 空闲
+- `cluster_median_throughput`：参与慢节点判定的集群 EWMA 中位数原值（offline / 预热中 / 持续空闲
   worker 排除在外，与驱逐判定同口径）；不足两个有效样本时为 0。E2E 断言慢节点判定可直接比较
   `health.ewma_jobs_per_sec` 与该值，无需等待真实驱逐事件。
 
@@ -1043,8 +1043,12 @@ GPU——两个软件编码（libx264）worker 即可单机复现。驱逐判定
 `--worker-heartbeat-timeout`；两个 worker 各自完成 ≥ `MinJobsForEviction=5` 个作业后，健康监控在下一个
 巡检周期（`--worker-health-check-interval`）做出判定。
 
-空闲 worker（最近一次心跳 0 吞吐且无运行中作业）不进入中位数样本池，也不会被判为慢节点：它的 EWMA 只是
-衰减尾而非当前吞吐样本——负载整体转空闲时健康 worker 因此不会被误判驱逐。
+空闲 worker（无运行中作业，且连续两次及以上心跳上报 0 吞吐；从未产出过非零样本的 worker 同属此类）不进入
+中位数样本池：它的 EWMA 只是衰减尾而非当前吞吐样本——负载整体转空闲时健康 worker 因此不会被误判驱逐。
+样本池成员资格与判定豁免是两件事：无运行中作业且本次心跳上报 0 吞吐的 worker 一律不参与驱逐判定。单次 0
+样本因此仍留在样本池内：吞吐上报的是「自上次心跳以来完成的作业数」，作业成批完成、随后等待拉取间隔的
+worker 会在相邻心跳上交替上报非零与 0，按单次样本剔除会让样本池随采样相位塌缩到只剩一个成员，中位数随之
+归零、判定静默失效。
 
 **前置**：编译三个二进制，并生成一个极小的测试输入（1s 即可，让快 worker 的吞吐尽量高）：
 
