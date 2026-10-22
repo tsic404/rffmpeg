@@ -82,7 +82,7 @@ func TestSchedulerNoWorkerStarvationReleasesQuotaAndBroadcasts(t *testing.T) {
 		t.Fatalf("precondition: count = %d, want 2", got)
 	}
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	if got := counter.Count("client-1"); got != 0 {
 		t.Errorf("quota after sweep = %d, want 0 (both slots released)", got)

@@ -30,6 +30,20 @@ const crashStarvationErrMsg = "worker crashed (heartbeat timeout) and no survivi
 // before the CLI's own no-worker give-up at deadline+check interval.
 const starvationExpiryMargin = time.Second
 
+// starvationTrigger records which path invoked the sweep. It is carried into
+// the verdict log so a timing complaint can be adjudicated from the server log
+// alone: the one-shot expiry wake, the periodic timeout tick, or an arm that
+// found the deadline already due. The values are internal (log fields), not a
+// wire contract.
+type starvationTrigger string
+
+const (
+	starvationTriggerWake   starvationTrigger = "wake"
+	starvationTriggerTick   starvationTrigger = "tick"
+	starvationTriggerDue    starvationTrigger = "deadline_due"
+	starvationTriggerDirect starvationTrigger = "direct_tests"
+)
+
 type Config struct {
 	JobTimeout           time.Duration // Maximum time a job can run before being considered timed out
 	ScheduleInterval     time.Duration // Interval for scheduling checks
@@ -111,6 +125,11 @@ type Scheduler struct {
 	// outside the HTTP handler path. Optional: nil skips broadcast.
 	jobNotifier JobBroadcaster
 
+	// starvationObserver, when set, receives the trigger of every starvation
+	// verdict. Tests use it to pin which path judged without parsing logs;
+	// production leaves it nil. Set before Start.
+	starvationObserver func(starvationTrigger)
+
 	// noWorkerEnabled mirrors config.NoWorkerJobTimeout > 0; captured at
 	// construction so the loop never sees a torn config read.
 	noWorkerEnabled bool
@@ -189,30 +208,26 @@ func (s *Scheduler) run() {
 			s.armStarvationWake(starvationWake)
 		case <-timeoutTicker.C:
 			s.checkTimeouts()
-			s.checkNoWorkerStarvation()
+			s.checkNoWorkerStarvation(starvationTriggerTick)
 			s.armStarvationWake(starvationWake)
 		case <-starvationWake.C:
 			// A pending job's no-worker clock just expired: judge it now rather
 			// than at the next timeout tick. The sweep is idempotent and keeps
 			// its live-worker short-circuit, so an early wake only makes the
 			// verdict's timing exact.
-			s.checkNoWorkerStarvation()
+			log.Printf("Scheduler: starvation wake fired at %s", time.Now().Format(time.RFC3339Nano))
+			s.checkNoWorkerStarvation(starvationTriggerWake)
 			s.armStarvationWake(starvationWake)
 		}
 	}
 }
 
 // armStarvationWake (re)points the expiry wake at the oldest pending job's
-// no-worker deadline. It runs at loop start, on every timeout tick, after
-// each wake, and after a reschedule that may have requeued jobs.
-//
-// With at least one live schedulable worker the sweep can never judge, so the
-// wake stays stopped and the pending backlog is not scanned — the same
-// short-circuit checkNoWorkerStarvation applies before its own query.
-//
-// A deadline already in the past is left to the timeout tick: only a sweep
-// that has not run yet (loop start) leaves one, and re-arming for "now" would
-// just re-run it at tick frequency.
+// no-worker deadline. It runs at loop start, on ticks, after each wake, and
+// after a reschedule that may have requeued jobs. A live schedulable worker
+// keeps it disarmed; a deadline that is already due is judged immediately,
+// never deferred to the next tick, which could add a full interval past the
+// acceptance window.
 func (s *Scheduler) armStarvationWake(timer *time.Timer) {
 	if !s.noWorkerEnabled {
 		return
@@ -233,7 +248,7 @@ func (s *Scheduler) armStarvationWake(timer *time.Timer) {
 	}
 	if len(schedulable) > 0 {
 		// A live worker can still take pending jobs, so no starvation verdict
-		// can be due.
+		// can be due. The timeout tick keeps re-evaluating this guard.
 		return
 	}
 
@@ -243,12 +258,19 @@ func (s *Scheduler) armStarvationWake(timer *time.Timer) {
 		return
 	}
 	if !ok {
+		// No pending unassigned job: no verdict can be due.
 		return
 	}
-	wait := time.Until(anchor.Add(s.config.NoWorkerJobTimeout + starvationExpiryMargin))
+	deadline := anchor.Add(s.config.NoWorkerJobTimeout + starvationExpiryMargin)
+	wait := time.Until(deadline)
 	if wait <= 0 {
+		log.Printf("Scheduler: starvation deadline %s already due (anchor=%s); judging now",
+			deadline.Format(time.RFC3339Nano), anchor.Format(time.RFC3339Nano))
+		s.checkNoWorkerStarvation(starvationTriggerDue)
 		return
 	}
+	log.Printf("Scheduler: starvation wake armed: anchor=%s deadline=%s wait=%s",
+		anchor.Format(time.RFC3339Nano), deadline.Format(time.RFC3339Nano), wait.Round(time.Millisecond))
 	timer.Reset(wait)
 }
 
@@ -510,12 +532,12 @@ func (s *Scheduler) checkTimeouts() {
 
 // checkNoWorkerStarvation fails pending jobs that have been waiting longer
 // than NoWorkerJobTimeout while the cluster has NO schedulable worker (all
-// offline or evicted). Without this, a job submitted just before its only
-// worker died would stay pending forever and CLI clients would hang.
-//
-// Jobs queued behind busy workers are deliberately untouched: schedulable
-// workers exist, so the job is expected to start once one frees up.
-func (s *Scheduler) checkNoWorkerStarvation() {
+// offline or evicted); without it such a job stays pending forever and CLI
+// clients hang. Jobs queued behind busy workers are untouched: a schedulable
+// worker exists, so they start once one frees up. trigger is logged with the
+// verdict so the judging path (expiry wake, timeout tick, due-at-arm) is
+// decidable from the server log alone.
+func (s *Scheduler) checkNoWorkerStarvation(trigger starvationTrigger) {
 	if !s.noWorkerEnabled {
 		return
 	}
@@ -563,6 +585,9 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 		log.Printf("Scheduler: Failed to list starved pending jobs: %v", err)
 		return
 	}
+	if len(starved) == 0 {
+		return
+	}
 
 	failed, err := s.db.FailStarvedPendingJobs(cutoff, starved, errMsg, crashStarvationErrMsg)
 	if err != nil {
@@ -570,8 +595,11 @@ func (s *Scheduler) checkNoWorkerStarvation() {
 		return
 	}
 	if failed > 0 {
-		log.Printf("Scheduler: Failed %d starved job(s) after waiting %s with no schedulable worker",
-			failed, s.config.NoWorkerJobTimeout)
+		log.Printf("Scheduler: starvation verdict via %s: failed %d job(s) after waiting %s with no schedulable worker (judged_at=%s)",
+			trigger, failed, s.config.NoWorkerJobTimeout, time.Now().Format(time.RFC3339Nano))
+		if s.starvationObserver != nil {
+			s.starvationObserver(trigger)
+		}
 
 		for _, sj := range starved {
 			msg := errMsg
