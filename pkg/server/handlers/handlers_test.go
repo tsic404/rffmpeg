@@ -776,9 +776,9 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 // TestUpdateJobFailureTypeAllEnumsAccepted locks the gap: every one
 // of the nine documented FailureType values must be accepted by the server
 // (not just TIMEOUT / INPUT_UNREACHABLE) and persisted onto the job, and each
-// must report the retryable flag it is defined with. A failed→failed update
-// is a legal retry-after-failure transition, so one job can exercise all
-// eight values in sequence.
+// must expose the retryable flag the contract assigns to it. A failed→failed
+// update is a legal retry-after-failure transition, so one job can exercise
+// all nine values in sequence.
 func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -837,7 +837,30 @@ func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 		protocol.FailureInfra,
 	}
 
+	// C-63 spells the flag out per classification. Literal expectations are
+	// the point: comparing the response against the implementation's own
+	// Retryable() would assert nothing about the API contract.
+	wantRetryable := map[protocol.FailureType]bool{
+		protocol.FailureInputUnreachable:   false,
+		protocol.FailureEncoderUnsupported: false,
+		protocol.FailureEncoderUnavailable: false,
+		protocol.FailureDiskFull:           false,
+		protocol.FailureTimeout:            true,
+		protocol.FailureWorkerCrash:        true,
+		protocol.FailureFFmpegError:        false,
+		protocol.FailureNoWorkerAvailable:  false,
+		protocol.FailureInfra:              false,
+	}
+	if len(wantRetryable) != len(allTypes) {
+		t.Fatalf("expected table covers %d classifications, want %d",
+			len(wantRetryable), len(allTypes))
+	}
+
 	for _, ft := range allTypes {
+		wantRetry, ok := wantRetryable[ft]
+		if !ok {
+			t.Fatalf("%s has no expected retryable value", ft)
+		}
 		if !ft.IsValid() {
 			t.Fatalf("%s must be a valid enum value", ft)
 		}
@@ -869,9 +892,9 @@ func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 		if statusResp.Job.FailureType != string(ft) {
 			t.Errorf("failure_type %s not persisted, got %q", ft, statusResp.Job.FailureType)
 		}
-		if statusResp.Job.Retryable != ft.Retryable() {
+		if statusResp.Job.Retryable != wantRetry {
 			t.Errorf("failure_type %s: retryable = %v, want %v",
-				ft, statusResp.Job.Retryable, ft.Retryable())
+				ft, statusResp.Job.Retryable, wantRetry)
 		}
 	}
 }
