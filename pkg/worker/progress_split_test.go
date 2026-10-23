@@ -65,21 +65,29 @@ func TestSplitProgressLinesCRLFPair(t *testing.T) {
 // \r-separated stats lines must produce multiple throttled progress frames
 // with percent and ETA populated from a seeded duration.
 func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
+	// One stats line per wall second with a steady 1.9s/s pace: dense enough
+	// for the rate window to measure a pace the estimate can certify, and long
+	// enough (20.9s of media at the last line) to be past the settle gate.
 	stream := "" +
 		"Input #0, mov,mp4:\n  Duration: N/A, start: 0.000000\n" + // unseekable input: no usable header duration
-		"frame=  17 fps=0.0 q=16.0 time=00:00:00.68 bitrate=0.6kbits/s speed=1.36x\r" +
-		"frame=  55 fps=27 q=16.0 time=00:00:02.20 bitrate=0.2kbits/s speed=1.10x\r" +
-		"frame= 130 fps=26 q=16.0 time=00:00:05.20 bitrate=0.2kbits/s speed=1.05x\r" +
-		"frame= 200 fps=26 q=-1.0 time=00:00:08.00 Lspeed=1.00x\r" +
-		"frame= 240 fps=26 q=-1.0 time=00:00:09.50 Lspeed=1.00x\r" +
-		"frame= 320 fps=26 q=-1.0 time=00:00:15.20 Lspeed=1.00x\r" +
-		"frame= 400 fps=26 q=-1.0 time=00:00:20.50 Lspeed=1.00x    \n"
+		"frame=   0 fps=0.0 q=16.0 time=00:00:00.00 bitrate=0.6kbits/s speed=1.00x\r" +
+		"frame=  30 fps=26 q=16.0 time=00:00:01.90 bitrate=0.2kbits/s speed=1.00x\r" +
+		"frame=  60 fps=26 q=16.0 time=00:00:03.80 bitrate=0.2kbits/s speed=1.00x\r" +
+		"frame=  90 fps=26 q=16.0 time=00:00:05.70 bitrate=0.2kbits/s speed=1.00x\r" +
+		"frame= 120 fps=26 q=-1.0 time=00:00:07.60 Lspeed=1.00x\r" +
+		"frame= 150 fps=26 q=-1.0 time=00:00:09.50 Lspeed=1.00x\r" +
+		"frame= 180 fps=26 q=-1.0 time=00:00:11.40 Lspeed=1.00x\r" +
+		"frame= 210 fps=26 q=-1.0 time=00:00:13.30 Lspeed=1.00x\r" +
+		"frame= 240 fps=26 q=-1.0 time=00:00:15.20 Lspeed=1.00x\r" +
+		"frame= 270 fps=26 q=-1.0 time=00:00:17.10 Lspeed=1.00x\r" +
+		"frame= 300 fps=26 q=-1.0 time=00:00:19.00 Lspeed=1.00x\r" +
+		"frame= 330 fps=26 q=-1.0 time=00:00:20.90 Lspeed=1.00x    \n"
 
 	parser := NewProgressParser()
 	parser.SetDuration(120 * 1_000_000) // what probeInputDurationUs seeds
 
-	// Inject wall-clock time: each stats line arrives 5s apart. The ETA
-	// needs a full rate window and enough published media to be past the
+	// Inject wall-clock time: each stats line arrives one second apart. The
+	// ETA needs a rate window and enough published media to be past the
 	// start-up ramp, which the last line provides.
 	wallSec := 0.0
 	parser.nowFunc = func() time.Time {
@@ -93,7 +101,7 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 			return
 		}
 		f := parser.ParseLine(line)
-		wallSec += 5.0
+		wallSec += 1.0
 		if f == nil || f.Percent < 0 {
 			return
 		}
@@ -114,8 +122,8 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 	// The old ScanLines behavior produced exactly ONE progress push (the
 	// final \n-terminated line). The fix must surface every intermediate
 	// update.
-	if sends != 7 {
-		t.Fatalf("expected every one of the 7 stats lines to surface, got %d — updates are still being swallowed", sends)
+	if sends != 12 {
+		t.Fatalf("expected every one of the 12 stats lines to surface, got %d — updates are still being swallowed", sends)
 	}
 	if lastFrame.Percent <= 0 || lastFrame.Percent > 100 {
 		t.Fatalf("final percent %.1f out of range", lastFrame.Percent)

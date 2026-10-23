@@ -371,7 +371,8 @@ func (p *ProgressParser) recordETASample(now time.Time, mediaUs int64) {
 // etaRates is the throughput evidence one sample window supports.
 type etaRates struct {
 	pace       float64 // rate the finish is projected from
-	spread     float64 // dispersion observed around that rate
+	rateLo     float64 // slowest rate the samples can vouch for
+	rateHi     float64 // fastest rate the samples can vouch for
 	newest     float64 // rate over the newest chunk
 	oldest     float64 // rate over the oldest chunk: where the window started
 	isTrending bool    // chunk rates drift in one direction without a level step
@@ -380,12 +381,15 @@ type etaRates struct {
 
 // etaRateRange returns the throughput evidence the recent samples support.
 //
-// A single slope hides the error a mixed window creates: it lands between the
-// old and the new rate. The window is split into 2s chunks instead. One level
-// is the pace right now; a level that changed for good withholds the estimate
-// until the old one slides out; a level that keeps coming back is a swing and
-// its mean predicts the finish. Reading only the newest pair let a two-level
-// window report zero dispersion and certify one level (a 1.3 swing, +25%).
+// The window is split into etaRateChunkSeconds chunks. With one level, the
+// pace is the window mean and the band spans every rate the window measured:
+// the newest pair can agree while the rest of the window sits 20% away, which
+// is exactly the dispersion a preempted CPU injects. A window holding more
+// than one level is a step or a swing. Only a level observed in two separate
+// runs on both sides of the window is a swing, whose mean predicts the
+// finish; a single departure is a burst that may already be over, and no
+// finish is certifiable until its old level slides out. A stream too sparse to
+// fill two chunks has no dispersion evidence at all.
 func (p *ProgressParser) etaRateRange(now time.Time, mediaUs int64) (etaRates, bool) {
 	window := time.Duration(etaRateWindowSeconds * float64(time.Second))
 	minSpan := time.Duration(etaRateMinSpanSeconds * float64(time.Second))
@@ -412,77 +416,75 @@ func (p *ProgressParser) etaRateRange(now time.Time, mediaUs int64) (etaRates, b
 		return etaRates{}, false
 	}
 	chunkRates := p.chunkRatesFrom(base, now)
-	if len(chunkRates) == 0 {
-		// A sparse stream may not fill any chunk; the window slope still is a
-		// rate measurement.
-		if _, rewound := p.rewindWall(base, len(p.etaSamples)-1); rewound {
-			return etaRates{}, false
-		}
-		whole := float64(mediaUs-p.etaSamples[base].mediaUs) / 1_000_000.0 / span.Seconds()
-		if whole <= 0 {
-			return etaRates{}, false
-		}
-		chunkRates = append(chunkRates, whole)
+	// One rate measurement carries no dispersion, so it can bound neither the
+	// rate nor the finish: render n/a rather than certify a slope whose error
+	// is unknown.
+	if len(chunkRates) < 2 {
+		return etaRates{}, false
+	}
+	// The chunk rates cover only the stretches that produced a measurable
+	// rate: rateBetween drops a chunk whose media stalled or rewound. The
+	// window as a whole still counts that time, so its throughput is the
+	// floor a future that repeats the stall would run at. A window that
+	// advanced no media bounds nothing.
+	windowRate := float64(mediaUs-p.etaSamples[base].mediaUs) / 1_000_000.0 / span.Seconds()
+	if windowRate <= 0 {
+		return etaRates{}, false
 	}
 
 	rates := etaRates{
-		pace:   chunkRates[0],
+		pace:   meanRate(chunkRates),
 		newest: chunkRates[0],
 		oldest: chunkRates[len(chunkRates)-1],
 	}
-	mean := float64(mediaUs-p.etaSamples[base].mediaUs) / 1_000_000.0 / span.Seconds()
-	if mean <= 0 {
-		mean = chunkRates[0]
-	}
 
-	changed, levelFlips, low, high := rateLevelChange(chunkRates)
+	changed, low, high := rateLevelChange(chunkRates)
 	if changed {
-		// The window holds more than one level. Reversals mean both levels
-		// are visited in turn: jitter around one pace, where the mean
-		// predicts and its standard error is the band. A level observed,
-		// left and observed again is a swing: the mean predicts a finish
-		// longer than the swing, and the band is half the amplitude it
-		// showed. A one-way departure whose newest level has landed near the
-		// mean is noise-sized too. A departure still crossing the newest
-		// chunk, or landing far from the mean, is a step: no finish is
-		// certifiable until the old level slides out of the window.
-		landed := len(chunkRates) < 2 ||
-			math.Abs(chunkRates[0]-chunkRates[1]) <= chunkRates[1]*etaTolerance/2
-		nearMean := landed && math.Abs(rates.newest-mean) <= mean*etaTolerance/2
-		switch {
-		case levelFlips > 0 || nearMean:
-			rates.pace = mean
-			rates.spread = rateStdDev(chunkRates, mean) / math.Sqrt(float64(len(chunkRates)))
-			rates.settled = true
-		case p.rateLevelRecurs(now):
-			rates.pace = mean
-			rates.spread = (high - low) / 2
-			rates.settled = true
+		// A mean predicts the finish only when the levels alternate: each
+		// level must have left and returned, once on each side of the window.
+		// A single departure is a burst that may already be over, and the
+		// mixed mean then undershoots the rate the finish actually runs at —
+		// a preemption that just ended showed a 25% high ETA. Until the old
+		// level slides out of the window, no finish is certifiable.
+		if !p.rateLevelAlternates(now) {
+			return rates, true
 		}
+		se := rateStdDev(chunkRates, rates.pace) / math.Sqrt(float64(len(chunkRates)))
+		rates.rateLo = rates.pace - se
+		if windowRate < rates.rateLo {
+			rates.rateLo = windowRate
+		}
+		rates.rateHi = rates.pace + se
+		rates.settled = true
 		return rates, true
 	}
 
+	// One level: every chunk rate the window measured bounds the pace, not
+	// just the newest pair. A window whose observed range is wider than the
+	// tolerance cannot certify an integer and renders n/a below.
+	rates.rateLo = low
+	if windowRate < rates.rateLo {
+		rates.rateLo = windowRate
+	}
+	rates.rateHi = high
 	rates.settled = true
-	if len(chunkRates) >= 2 {
-		previous, newest := chunkRates[1], chunkRates[0]
-		rates.spread = math.Abs(newest - previous)
-		rates.pace = (newest + previous) / 2
-		// The newest chunk is compared with the mean of the preceding three,
-		// not with one neighbour: a single chunk straddling a level boundary
-		// would otherwise read as a change still arriving and swallow half
-		// the samples of a 5s swing.
-		recent, count := 0.0, 0
-		for i := 1; i < len(chunkRates) && count < 3; i++ {
-			recent += chunkRates[i]
-			count++
-		}
-		recent /= float64(count)
-		if math.Abs(newest-recent) > recent*etaTolerance/2 {
-			rates.settled = false
-		}
+	// The newest chunk is compared with the mean of the preceding three, not
+	// with one neighbour: a single chunk straddling a level boundary would
+	// otherwise read as a change still arriving and swallow half the samples
+	// of a 5s swing.
+	recent, count := 0.0, 0
+	for i := 1; i < len(chunkRates) && count < 3; i++ {
+		recent += chunkRates[i]
+		count++
+	}
+	recent /= float64(count)
+	if math.Abs(rates.newest-recent) > recent*etaTolerance/2 {
+		rates.settled = false
 	}
 	// A drift is monotonic and moves in small steps; a level change moves in
-	// one large step and is not projected forward.
+	// one large step and is not projected forward. rateLevelChange already
+	// ruled out a level change here, so a window of three or more chunks whose
+	// steps keep one sign is a drift; alternating noise is not.
 	rates.isTrending = len(chunkRates) >= 3
 	flips, lastSign := 0, 0
 	for i := 0; i+1 < len(chunkRates); i++ {
@@ -550,11 +552,11 @@ func (p *ProgressParser) rewindWall(first, last int) (time.Time, bool) {
 }
 
 // rateLevelChange reports whether adjacent chunk rates inside one window
-// disagree by more than half the error budget, how many of those changes
-// reverse direction, and the window's low and high rate.
-func rateLevelChange(rates []float64) (bool, int, float64, float64) {
+// disagree by more than half the error budget, and the window's low and high
+// rate.
+func rateLevelChange(rates []float64) (bool, float64, float64) {
 	low, high := rates[0], rates[0]
-	changed, flips, lastSign := false, 0, 0
+	changed := false
 	for i, r := range rates {
 		if r < low {
 			low = r
@@ -562,20 +564,11 @@ func rateLevelChange(rates []float64) (bool, int, float64, float64) {
 		if r > high {
 			high = r
 		}
-		if i == 0 || math.Abs(r-rates[i-1]) <= rates[i-1]*etaTolerance/2 {
-			continue
+		if i > 0 && math.Abs(r-rates[i-1]) > rates[i-1]*etaTolerance/2 {
+			changed = true
 		}
-		changed = true
-		sign := 1
-		if r < rates[i-1] {
-			sign = -1
-		}
-		if lastSign != 0 && sign != lastSign {
-			flips++
-		}
-		lastSign = sign
 	}
-	return changed, flips, low, high
+	return changed, low, high
 }
 
 // rateStdDev is the sample deviation of the chunk rates around the window
@@ -588,35 +581,73 @@ func rateStdDev(rates []float64, mean float64) float64 {
 	return math.Sqrt(sum / float64(len(rates)))
 }
 
-// rateLevelRecurs reports whether the newest chunk rate appears again after
-// the history departed from it for more than one chunk. A level that returns
-// is a swing; one that never returns is a step.
-func (p *ProgressParser) rateLevelRecurs(now time.Time) bool {
+// meanRate is the arithmetic mean of the chunk rates.
+func meanRate(rates []float64) float64 {
+	sum := 0.0
+	for _, r := range rates {
+		sum += r
+	}
+	return sum / float64(len(rates))
+}
+
+// rateLevelAlternates reports whether the two-window history holds at least
+// two separate runs at each of its fastest and slowest rate. A run is a
+// maximal stretch of chunks within half the error budget of that extreme; a
+// chunk outside both bands (a boundary average, or a third level) carries no
+// alternation evidence and is skipped, so it does not split a run of the same
+// extreme. highRuns and lowRuns count those runs after the skip: two high
+// runs means the high level was seen again after the low level intervened.
+// One departure and return is a burst that may already be over; a level
+// observed again after leaving is the oscillation whose mean predicts a
+// finish. Three-level alternation that keeps revisiting both extremes also
+// qualifies — that is deliberate: the extremes are repeatedly confirmed, and
+// the standard error band carries the intermediate rates' dispersion.
+func (p *ProgressParser) rateLevelAlternates(now time.Time) bool {
 	span := 2 * time.Duration(etaRateWindowSeconds*float64(time.Second))
 	base := len(p.etaSamples) - 1
 	for base > 0 && now.Sub(p.etaSamples[base-1].wall) <= span {
 		base--
 	}
 	history := p.chunkRatesFrom(base, now)
-	if len(history) < 3 {
+	if len(history) < 4 {
 		return false
 	}
-	level := history[0]
-	near := func(r float64) bool {
-		return math.Abs(r-level) <= level*etaTolerance/2
+	low, high := history[0], history[0]
+	for _, r := range history {
+		if r < low {
+			low = r
+		}
+		if r > high {
+			high = r
+		}
 	}
-	i := 0
-	for i < len(history) && near(history[i]) {
-		i++
-	}
-	// A single chunk away from the level is noise, not a departure.
-	if i+1 >= len(history) || near(history[i+1]) {
+	if high <= low*(1+etaTolerance/2) {
 		return false
 	}
-	for i < len(history) && !near(history[i]) {
-		i++
+	level := func(r float64) int {
+		switch {
+		case math.Abs(r-high) <= high*etaTolerance/2:
+			return 1
+		case math.Abs(r-low) <= low*etaTolerance/2:
+			return -1
+		}
+		return 0
 	}
-	return i < len(history)
+	highRuns, lowRuns := 0, 0
+	last := 0
+	for _, r := range history {
+		at := level(r)
+		if at == 0 || at == last {
+			continue
+		}
+		if at > 0 {
+			highRuns++
+		} else {
+			lowRuns++
+		}
+		last = at
+	}
+	return lowRuns >= 2 && highRuns >= 2
 }
 
 // rateBetween measures the throughput between the first sample at or after
@@ -676,10 +707,9 @@ func (p *ProgressParser) etaEstimate(now time.Time, mediaUs, durationUs int64) i
 	}
 	// The evidence is measured backwards, so while a pace change crosses the
 	// window the newest chunks already show the new rate while the older ones
-	// still hold the old one. The two newest chunks are the pace as it is
-	// right now; when they disagree by more than half the error budget the
-	// change is still arriving, and no finish can be certified until it has
-	// landed (C-23 renders n/a meanwhile).
+	// still hold the old one. Until the change is a proven oscillation or has
+	// slid out of the window, nothing can be certified; meanwhile the CLI
+	// renders n/a (C-23).
 	if !rates.settled {
 		return 0
 	}
@@ -687,14 +717,7 @@ func (p *ProgressParser) etaEstimate(now time.Time, mediaUs, durationUs int64) i
 	if remaining <= 0 {
 		return 0
 	}
-	// The newest pair is the pace as it is now, and the band around it is the
-	// dispersion those two chunks actually showed — not the window's whole
-	// history. A fixed half-tolerance band would stack with the tail terms and
-	// leave no certifiable second on a steady run (measured: zero numeric
-	// samples on the acceptance job); the whole-window range would do the same
-	// whenever the pace oscillates.
-	rateLo := rates.pace - rates.spread/2
-	rateHi := rates.pace + rates.spread/2
+	rateLo, rateHi := rates.rateLo, rates.rateHi
 	if rateLo <= 0 {
 		return 0
 	}

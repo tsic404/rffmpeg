@@ -450,9 +450,12 @@ func TestProgressParser_ETACoversObservedRateDrift(t *testing.T) {
 // them. The phase sweep matters — with 5s plateaus and 2s chunks the newest
 // pair lands on one level for 0-2s at a time, and a pair-only estimate missed
 // the other level by 25% at one phase while the same fixture passed at others.
+// The clip is long enough to hold two full cycles: a one-off departure and a
+// swing look identical until the departed level returns, so the mean is only
+// trusted after both levels have been observed on both sides of the window.
 func TestProgressParser_ETAAvailabilityUnderJitter(t *testing.T) {
 	const (
-		durationSec = 120.0
+		durationSec = 600.0
 		fastRate    = 5.68
 		ratio       = 1.3
 		plateauSec  = 5.0
@@ -514,6 +517,177 @@ func TestProgressParser_ETAAvailabilityUnderJitter(t *testing.T) {
 				t.Fatalf("only %d numeric ETA samples under a 1.3 pace swing; the acceptance script requires 3", rendered)
 			}
 		})
+	}
+}
+
+// TestProgressParser_ContentionBurstNotCertified replays the shape a
+// preempted CPU produces: the pace drops for several seconds and then
+// recovers. While the rate window still mixes the two levels, the window mean
+// is not the pace the finish runs at — certifying it reported 21-30% high in
+// this fixture, the same direction as the acceptance run's 25.4% sample. Those
+// samples must render n/a, and once the old level has left the window the
+// estimate must come back on the recovered pace.
+func TestProgressParser_ContentionBurstNotCertified(t *testing.T) {
+	const (
+		durationSec = 300.0
+		fastRate    = 4.6
+		slowRate    = 3.3
+		burstStart  = 6.0
+		burstLen    = 8.0
+	)
+	rateAt := func(wall float64) float64 {
+		if wall >= burstStart && wall < burstStart+burstLen {
+			return slowRate
+		}
+		return fastRate
+	}
+	mediaAt := func(wall float64) float64 {
+		media := 0.0
+		for x := 0.0; x < wall; x += 0.01 {
+			media += rateAt(x) * 0.01
+		}
+		return media
+	}
+	timeToFinish := func(wall float64) float64 {
+		remain := durationSec - mediaAt(wall)
+		x := wall
+		for remain > 0 {
+			remain -= rateAt(x) * 0.01
+			x += 0.01
+		}
+		return x - wall
+	}
+
+	p := NewProgressParser()
+	p.SetDuration(int64(durationSec) * 1_000_000)
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*float64(time.Second)))
+	}
+	p.StartAttempt()
+
+	rendered := 0
+	for wall := 0.0; wall <= 60; wall += 0.5 {
+		wallSec = wall
+		frame := p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), rateAt(wall)))
+		if frame == nil {
+			t.Fatalf("frame at %.1fs: nil", wall)
+		}
+		// From the moment the burst ends until its level has slid out of the
+		// 10s window, the samples describe a step, not a pace.
+		if wall >= burstStart+burstLen-2 && wall <= burstStart+burstLen+9 {
+			if frame.EtaSeconds != 0 {
+				t.Errorf("ETA %ds at %.1fs while the preemption level still shared the rate window",
+					frame.EtaSeconds, wall)
+			}
+			continue
+		}
+		if frame.EtaSeconds == 0 {
+			continue
+		}
+		remaining := timeToFinish(wall)
+		if remaining < 3 {
+			continue
+		}
+		rendered++
+		if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+			t.Errorf("ETA %ds at %.1fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+				frame.EtaSeconds, wall, remaining, errPct)
+		}
+	}
+	if rendered == 0 {
+		t.Fatal("no ETA after the preemption level left the window; the guard must recover")
+	}
+}
+
+// TestProgressParser_FrozenMediaNotCertified covers a window whose chunks
+// rateBetween could not measure: media freezes for eight seconds and then
+// resumes at the same pace. The measurable chunks at the window's edges each
+// contain one second of stall and agree on half the active rate, so a band
+// built only from them is zero-width and certifies a finish twice as far away
+// as the truth. The window's whole-throughput floor counts the stalled time,
+// and no value is emitted until the freeze has left the window.
+func TestProgressParser_FrozenMediaNotCertified(t *testing.T) {
+	const (
+		durationSec = 600.0
+		rate        = 4.0
+		freezeStart = 30.0
+		freezeEnd   = 38.0
+	)
+	mediaAt := func(wall float64) float64 {
+		switch {
+		case wall <= freezeStart:
+			return wall * rate
+		case wall <= freezeEnd:
+			return freezeStart * rate
+		default:
+			return freezeStart*rate + (wall-freezeEnd)*rate
+		}
+	}
+	totalWallSec := freezeEnd + (durationSec-freezeStart*rate)/rate
+
+	p := NewProgressParser()
+	p.SetDuration(int64(durationSec) * 1_000_000)
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*float64(time.Second)))
+	}
+	p.StartAttempt()
+
+	rendered, recovered := 0, 0
+	for wall := 0.0; wall <= 70; wall += 0.5 {
+		wallSec = wall
+		frame := p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), rate))
+		if frame == nil {
+			t.Fatalf("frame at %.1fs: nil", wall)
+		}
+		if frame.EtaSeconds == 0 {
+			continue
+		}
+		remaining := totalWallSec - wall
+		if remaining < 3 {
+			continue
+		}
+		rendered++
+		if wall >= freezeEnd+etaRateWindowSeconds {
+			recovered++
+		}
+		if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+			t.Errorf("ETA %ds at %.1fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+				frame.EtaSeconds, wall, remaining, errPct)
+		}
+	}
+	if rendered == 0 {
+		t.Fatal("no ETA at all; the guard must report a job it can certify")
+	}
+	if recovered == 0 {
+		t.Fatal("no ETA after the freeze left the window; the guard must recover")
+	}
+}
+
+// TestProgressParser_SparseSamplesNotCertified pins the other half of the
+// guard: a progress stream too sparse to fill two rate chunks carries no
+// dispersion, so it cannot bound the finish. The old fallback certified the
+// whole-window slope with a zero-width band; the contract requires n/a until
+// the stream supports a range.
+func TestProgressParser_SparseSamplesNotCertified(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(300 * 1_000_000)
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*float64(time.Second)))
+	}
+	p.StartAttempt()
+
+	for wall := 0.0; wall <= 60; wall += 5 {
+		wallSec = wall
+		frame := p.ParseLine(buildProgressLine(int64(wall*5.0*1_000_000), 5.0))
+		if frame == nil {
+			t.Fatalf("frame at %.0fs: nil", wall)
+		}
+		if frame.EtaSeconds != 0 {
+			t.Fatalf("ETA %ds at %.0fs from a single rate measurement", frame.EtaSeconds, wall)
+		}
 	}
 }
 
@@ -1507,8 +1681,9 @@ func TestProgressParser_AttemptBoundaryRebasesETABaseline(t *testing.T) {
 		t.Errorf("ETA after a bare time= rewind = %ds, want > 0 (a legitimate timeline restart keeps its baseline)", eta)
 	}
 
-	// Once the restarted attempt has run past the suppression window the ETA
-	// returns, computed from the restarted attempt's own rate.
+	// Once the restarted attempt has run past the settle gate and built its
+	// own rate window, the ETA returns, computed from that attempt's pace.
+	// The retry re-runs from zero, so its stats stream is fed densely.
 	p := NewProgressParser()
 	p.SetDuration(600_000_000)
 	wallSec := 0.0
@@ -1518,18 +1693,18 @@ func TestProgressParser_AttemptBoundaryRebasesETABaseline(t *testing.T) {
 	p.ParseLine(buildProgressLine(30_000_000, 2.0))
 	wallSec = 18
 	p.StartAttempt()
-	p.ParseLine(buildProgressLine(300_000, 2.0))
-	wallSec = 19
-	p.ParseLine(buildProgressLine(43_000_000, 2.0))
-	wallSec = 33
-	p.ParseLine(buildProgressLine(51_000_000, 2.0))
-	wallSec = 36
-	f := p.ParseLine(buildProgressLine(57_000_000, 2.0))
+	mediaUs := int64(300_000)
+	var f *ProgressFrame
+	for sec := 18.0; sec <= 42; sec++ {
+		wallSec = sec
+		mediaUs += 2_000_000
+		f = p.ParseLine(buildProgressLine(mediaUs, 2.0))
+	}
 	if f == nil {
 		t.Fatal("retry frame above the mark was dropped")
 	}
 	if f.EtaSeconds <= 0 {
-		t.Errorf("ETA 18s into the restarted attempt = %ds, want > 0", f.EtaSeconds)
+		t.Errorf("ETA after the restarted attempt's rate window = %ds, want > 0", f.EtaSeconds)
 	}
 }
 
