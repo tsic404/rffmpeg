@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -262,11 +261,9 @@ func TestStarvationSweep_SubmitThenKillWorker_EndToEnd(t *testing.T) {
 	if final.FailureType != string(protocol.FailureWorkerCrash) {
 		t.Errorf("failure_type = %q, want %q", final.FailureType, protocol.FailureWorkerCrash)
 	}
-	if !strings.Contains(final.Error, "worker crashed (heartbeat timeout)") {
-		t.Errorf("error = %q, want crash-starvation message", final.Error)
-	}
-	if !strings.Contains(final.Error, "no surviving worker") {
-		t.Errorf("error = %q, want no-surviving-worker message", final.Error)
+	if final.Error != wantWorkerCrashMsg {
+		t.Errorf("job error (printed after \"Job failed: [WORKER_CRASH] \") = %q, want %q",
+			final.Error, wantWorkerCrashMsg)
 	}
 
 	// The kill -> offline -> migrate transition must be observable as a
