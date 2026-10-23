@@ -56,7 +56,7 @@ func TestSchedulerNoWorkerStarvationWakesTerminalNotifier(t *testing.T) {
 	notifyCh, cancel := database.JobNotifier().Subscribe(job.ID)
 	defer cancel()
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	select {
 	case <-notifyCh:

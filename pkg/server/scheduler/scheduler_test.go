@@ -991,7 +991,7 @@ func TestSchedulerNoWorkerStarvation(t *testing.T) {
 		t.Fatalf("Failed to backdate created_at: %v", err)
 	}
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	updatedJob, err := database.GetJob(job.ID)
 	if err != nil {
@@ -1067,7 +1067,7 @@ func TestSchedulerNoWorkerStarvation_PreservesWorkerCrash(t *testing.T) {
 		t.Fatalf("Failed to backdate created_at: %v", err)
 	}
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	updatedJob, err := database.GetJob(job.ID)
 	if err != nil {
@@ -1165,7 +1165,7 @@ func TestSchedulerNoWorkerStarvation_TimeoutRequeueNotCrash(t *testing.T) {
 		t.Fatalf("Failed to backdate created_at: %v", err)
 	}
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	updatedJob, err := database.GetJob(job.ID)
 	if err != nil {
@@ -1218,7 +1218,7 @@ func TestSchedulerNoWorkerStarvation_SkipsWhenWorkerBusy(t *testing.T) {
 		t.Fatalf("Failed to backdate created_at: %v", err)
 	}
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	updatedJob, err := database.GetJob(job.ID)
 	if err != nil {
@@ -1250,7 +1250,7 @@ func TestSchedulerNoWorkerStarvation_RespectsGracePeriod(t *testing.T) {
 	}
 
 	// No workers registered at all; but job was created just now
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	updatedJob, err := database.GetJob(job.ID)
 	if err != nil {
@@ -1286,7 +1286,7 @@ func TestSchedulerNoWorkerStarvation_DisabledByZero(t *testing.T) {
 		t.Fatalf("Failed to backdate created_at: %v", err)
 	}
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	updatedJob, err := database.GetJob(job.ID)
 	if err != nil {
@@ -1324,7 +1324,7 @@ func TestSchedulerNoWorkerStarvation_BulkBacklog(t *testing.T) {
 		t.Fatalf("Failed to backdate created_at: %v", err)
 	}
 
-	s.checkNoWorkerStarvation()
+	s.checkNoWorkerStarvation(starvationTriggerDirect)
 
 	pendingJobs, err := database.GetPendingJobs(1000)
 	if err != nil {

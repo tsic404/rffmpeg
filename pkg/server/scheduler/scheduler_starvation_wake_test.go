@@ -112,10 +112,12 @@ func TestStarvationWakeJudgesJustPastDeadline(t *testing.T) {
 	assertStarvedNoWorker(t, database, job.ID)
 }
 
-// A job whose deadline elapsed before the scheduler started has no future
-// instant to wake on; the timeout tick must still judge it. The expiry wake is
-// an accelerator, never the only path to a verdict.
-func TestStarvationWakeFallsBackToTickForAnExpiredDeadline(t *testing.T) {
+// A pending job whose no-worker deadline is already past when the loop starts
+// has no future instant to wake on. It must be judged immediately by the arm
+// path, not queued behind the next timeout tick: the tick may be up to a full
+// interval away, which is enough to push the verdict past the acceptance
+// window. The hour-long tick makes the arm the only possible trigger here.
+func TestStarvationDeadlineAlreadyDueIsJudgedAtArm(t *testing.T) {
 	database, err := db.New(":memory:")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
@@ -124,9 +126,10 @@ func TestStarvationWakeFallsBackToTickForAnExpiredDeadline(t *testing.T) {
 
 	s := New(database, Config{
 		ScheduleInterval:     time.Hour,
-		TimeoutCheckInterval: 500 * time.Millisecond,
+		TimeoutCheckInterval: time.Hour, // the arm path is the only trigger
 		MaxJobsPerWorker:     1,
 		NoWorkerJobTimeout:   time.Minute,
+		HeartbeatFreshness:   90 * time.Second,
 	})
 
 	offlineWorkerFixture(t, database)
@@ -141,10 +144,168 @@ func TestStarvationWakeFallsBackToTickForAnExpiredDeadline(t *testing.T) {
 
 	select {
 	case <-notifyCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("timeout tick did not judge a job whose no-worker deadline was already past at start")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a due deadline was left to the timeout tick instead of being judged while arming")
 	}
 	assertStarvedNoWorker(t, database, job.ID)
+}
+
+// The expiry wake is an accelerator, never the only path. A pending job whose
+// deadline passes while the wake could not be armed — a live worker kept it
+// disarmed and no reschedule signal fires afterwards — must still be judged by
+// the periodic timeout tick's sweep (which runs before that tick re-arms).
+func TestStarvationTickFallbackJudgesAfterWakeCouldNotArm(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: 50 * time.Millisecond,
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   time.Second,
+		HeartbeatFreshness:   90 * time.Second,
+	})
+
+	// A live worker keeps the wake disarmed at loop start.
+	if _, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+	job := pendingJob(t, database)
+
+	notifyCh, cancel := database.JobNotifier().Subscribe(job.ID)
+	defer cancel()
+
+	// The arm's due path and the tick sweep both end in the same terminal
+	// state; the trigger is what pins which path judged.
+	triggers := make(chan starvationTrigger, 4)
+	s.starvationObserver = func(trigger starvationTrigger) { triggers <- trigger }
+
+	s.Start()
+	defer s.Stop()
+
+	// Let the loop start and run its initial arm while the worker is still
+	// live (the wake stays disarmed). The trigger assertion below still holds
+	// if this sleep loses the race: the startup arm would report deadline_due.
+	time.Sleep(50 * time.Millisecond)
+
+	// The worker dies and the deadline passes. Nothing triggers a reschedule,
+	// so the tick sweep is the first path that can judge.
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+	backdatePendingAnchor(t, database, job.ID, time.Now().Add(-2*time.Second))
+
+	select {
+	case <-notifyCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout tick did not judge a due job whose wake could not be armed")
+	}
+	select {
+	case trigger := <-triggers:
+		if trigger != starvationTriggerTick {
+			t.Fatalf("verdict trigger = %q, want %q: the tick fallback must judge, not the arm's due path", trigger, starvationTriggerTick)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("verdict recorded no trigger")
+	}
+	assertStarvedNoWorker(t, database, job.ID)
+}
+
+// A crash migration requeues the job (ResetJobToPending refreshes created_at)
+// and signals the scheduler. That path must arm the expiry wake: with the tick
+// an hour out, only the wake can produce the verdict just past the re-anchored
+// deadline. This is the scheduling sequence behind the WORKER_CRASH branch of
+// the acceptance case, pinned without the real heartbeat timeout.
+func TestStarvationWakeJudgesCrashRequeuedJob(t *testing.T) {
+	database, err := db.New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer database.Close()
+
+	const noWorkerTimeout = 2 * time.Second
+	s := New(database, Config{
+		ScheduleInterval:     time.Hour,
+		TimeoutCheckInterval: time.Hour, // the expiry wake is the only trigger
+		MaxJobsPerWorker:     1,
+		NoWorkerJobTimeout:   noWorkerTimeout,
+		HeartbeatFreshness:   90 * time.Second,
+	})
+
+	if _, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.0",
+		MaxConcurrent: 1,
+	}); err != nil {
+		t.Fatalf("Failed to create worker: %v", err)
+	}
+	job := pendingJob(t, database)
+	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+		t.Fatalf("Failed to assign job: %v", err)
+	}
+	if _, err := database.CreateMigrationEvent(
+		"worker-1", "test-worker", "heartbeat_timeout", 1, []string{job.ID}, 1,
+	); err != nil {
+		t.Fatalf("Failed to create migration event: %v", err)
+	}
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+
+	notifyCh, cancel := database.JobNotifier().Subscribe(job.ID)
+	defer cancel()
+
+	triggers := make(chan starvationTrigger, 4)
+	s.starvationObserver = func(trigger starvationTrigger) { triggers <- trigger }
+
+	s.Start()
+	defer s.Stop()
+
+	// The monitor's failover sequence: requeue (refreshes the pending anchor)
+	// then signal the scheduler.
+	if err := database.ResetJobToPending(job.ID); err != nil {
+		t.Fatalf("Failed to requeue job: %v", err)
+	}
+	requeuedAt := time.Now()
+	s.TriggerReschedule()
+
+	select {
+	case <-notifyCh:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the requeued job was not judged: the reschedule did not arm the expiry wake")
+	}
+	select {
+	case trigger := <-triggers:
+		if trigger != starvationTriggerWake {
+			t.Fatalf("verdict trigger = %q, want %q: the requeued job's deadline must be judged by the expiry wake", trigger, starvationTriggerWake)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("verdict recorded no trigger")
+	}
+
+	deadline := requeuedAt.Add(noWorkerTimeout + starvationExpiryMargin)
+	if verdictAt := time.Now(); verdictAt.After(deadline.Add(starvationExpiryMargin + 4*time.Second)) {
+		t.Errorf("verdict at %s, more than %s past the requeued job's deadline %s: it fell back to the check interval instead of the expiry wake",
+			verdictAt, starvationExpiryMargin+4*time.Second, deadline)
+	}
+
+	updated, err := database.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("Failed to get job: %v", err)
+	}
+	if updated.Status != protocol.JobStatusFailed {
+		t.Errorf("Expected status failed, got %s", updated.Status)
+	}
+	if updated.FailureType != string(protocol.FailureWorkerCrash) {
+		t.Errorf("Expected failure_type %q, got %q", protocol.FailureWorkerCrash, updated.FailureType)
+	}
 }
 
 // While a live schedulable worker exists the sweep can never judge, so the
