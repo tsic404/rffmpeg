@@ -56,16 +56,51 @@ cache_bytes() {
 CAP_BYTES=$((1024 * 1024))
 ENTRY_BYTES="$(stat -c %s "$TMP_ROOT/lru-1.mp4" 2>/dev/null || true)"
 [[ "$ENTRY_BYTES" =~ ^[0-9]+$ ]] || fail "cannot size a cached entry"
-BEFORE="$(cache_bytes)" || fail "cannot measure the cache directory"
-(( BEFORE > CAP_BYTES )) ||
-	fail "test setup wrote ${BEFORE}B; not over the 1 MiB cap, eviction not exercised"
 
-# LRU runs on a fixed 5-minute tick; poll until the hard cap is enforced. The
-# tolerable overshoot is at most one entry, because eviction removes entries
-# one at a time until the stored volume fits.
+# A single entry larger than the cap cannot be retained once the cache settles,
+# so the settled floor is zero entries; otherwise the cap + one-entry budget
+# allows one.
+SETTLED_ENTRIES=1
+SETTLED_META=1
+if (( ENTRY_BYTES > CAP_BYTES )); then
+	SETTLED_ENTRIES=0
+	SETTLED_META=0
+fi
+
+# disk_entry_counts prints "<entry files> <metadata files>" from one find pass:
+# removeEntry deletes the file and its metadata separately, so two separate
+# listings could straddle both removals. A non-zero find exit (a file vanished
+# mid-traversal) is retried by the caller rather than killing the script.
+disk_entry_counts() {
+	find "$LRU_DIR" -type f 2>/dev/null | awk '
+		/\.tmp$/ { next }
+		/\.meta$/ { meta++; next }
+		{ entries++ }
+		END { printf "%d %d", entries + 0, meta + 0 }'
+}
+
+# Enforcement may already have run: a worker that re-checks the budget on write
+# evicts before this sample, so an over-cap reading is not a precondition. The
+# poll below still fails any implementation that leaves the cache over budget
+# within 330s, and the eviction log below still proves the cap was exercised.
+# The tolerable overshoot is at most one entry, because eviction removes
+# entries one at a time until the stored volume fits.
 DEADLINE=$((SECONDS + 330))
 while :; do
 	SIZE="$(cache_bytes)" || fail "cannot measure the cache directory"
+	if ! COUNTS="$(disk_entry_counts)"; then
+		(( SECONDS < DEADLINE )) ||
+			fail "cannot enumerate the cache directory after 330s"
+		sleep 5
+		continue
+	fi
+	read -r ENTRY_FILES META_FILES <<<"$COUNTS"
+	if (( ENTRY_FILES > SETTLED_ENTRIES || META_FILES > SETTLED_META )); then
+		(( SECONDS < DEADLINE )) ||
+			fail "cache still ${SIZE}B after 330s (cap 1 MiB + one ${ENTRY_BYTES}B entry); ${ENTRY_FILES} entry files / ${META_FILES} metadata files left"
+		sleep 5
+		continue
+	fi
 	(( SIZE <= CAP_BYTES + ENTRY_BYTES )) && break
 	(( SECONDS < DEADLINE )) ||
 		fail "cache still ${SIZE}B after 330s (cap 1 MiB + one ${ENTRY_BYTES}B entry)"
