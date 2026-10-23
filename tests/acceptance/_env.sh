@@ -14,6 +14,8 @@
 #                       repo is always rebuilt so stale binaries never serve the run)
 #   SERVER_EXTRA_FLAGS  extra rffmpeg-server flags, space-separated
 #   HTTP_PORT           port for start_http_fileserver (default PORT+1000)
+#   WAIT_READY_BUDGET_S  registration wait once the server is healthy (default 300;
+#                        a wedged-worker guard, not a performance bound)
 
 set -euo pipefail
 
@@ -22,6 +24,11 @@ REPO_ROOT="$(cd "$ENV_DIR/../.." && pwd)"
 
 PORT="${PORT:-18999}"
 AUTH_TOKEN="${AUTH_TOKEN:-test-token-acceptance}"
+# A worker registers only after a full encoder enumeration and GPU probe. That
+# cost belongs to the host, not to the behaviour under test, and it grows with
+# host load (tens of seconds on a cold host). The budget therefore guards a
+# wedged worker only: while a worker process is alive the wait continues.
+WAIT_READY_BUDGET_S="${WAIT_READY_BUDGET_S:-300}"
 RFFMPEG_BIN_EXPLICIT="${RFFMPEG_BIN:-}"
 RFFMPEG_BIN="${RFFMPEG_BIN:-$REPO_ROOT/bin}"
 
@@ -116,8 +123,31 @@ worker_pid() {
 		"$TMP_ROOT/workers.pids" 2>/dev/null || true
 }
 
+# is_worker_alive reports whether the named worker's process still runs. An
+# unrecorded PID is treated as alive: only positive evidence may fail a wait.
+is_worker_alive() {
+	local pid
+	pid="$(worker_pid "$1")"
+	[[ -z "$pid" ]] || kill -0 "$pid" 2>/dev/null
+}
+
+# is_any_worker_alive reports whether at least one worker started by this run
+# still runs. wait_ready names no worker, and registration can complete only
+# while some worker is alive.
+is_any_worker_alive() {
+	local _name pid
+	[[ -s "$TMP_ROOT/workers.pids" ]] || return 0
+	while read -r _name pid; do
+		[[ -n "$pid" ]] || continue
+		kill -0 "$pid" 2>/dev/null && return 0
+	done < "$TMP_ROOT/workers.pids"
+	return 1
+}
+
 # wait_server_ready blocks until the health endpoint answers. Tests that
-# intentionally run without a Worker use this instead of wait_ready.
+# intentionally run without a Worker use this instead of wait_ready. Server
+# startup has no encoder enumeration and answers in well under a second even
+# with six servers starting at once, so a short budget is safe here.
 wait_server_ready() {
 	local deadline=$((SECONDS + 30))
 	until curl -fsS -o /dev/null "$(acceptance_server_url)/health"; do
@@ -127,23 +157,35 @@ wait_server_ready() {
 }
 
 # wait_ready blocks until the health endpoint answers AND the worker is
-# registered and not offline.
+# registered and not offline. The registration budget starts after the server
+# answers, and inside it the wait fails only on evidence: a worker process that
+# exited before registering, or the wedged-worker ceiling. Host startup cost
+# below the ceiling never fails the case.
 wait_ready() {
 	wait_server_ready
-	local deadline=$((SECONDS + 30))
+	local deadline=$((SECONDS + WAIT_READY_BUDGET_S))
 	local workers
 	until workers="$(curl -fsS -H "Authorization: Bearer $AUTH_TOKEN" "$(acceptance_server_url)/api/v1/workers")" &&
 		grep -q '"status":"online"\|"status":"idle"\|"status":"busy"' <<<"$workers"; do
-		((SECONDS < deadline)) || { echo "worker did not register; see $WORKER_LOG" >&2; return 1; }
+		if ! is_any_worker_alive; then
+			echo "no worker process from this run is alive; see $WORKER_LOG" >&2
+			return 1
+		fi
+		((SECONDS < deadline)) ||
+			{ echo "worker did not register within ${WAIT_READY_BUDGET_S}s; see $WORKER_LOG" >&2; return 1; }
 		sleep 0.2
 	done
 }
 
-# wait_worker blocks until the named worker appears in the workers list.
+# wait_worker blocks until the named worker appears in the workers list, under
+# the same liveness-first rule as wait_ready.
 wait_worker() {
-	local name="$1" deadline=$((SECONDS + 30))
+	local name="$1" deadline=$((SECONDS + WAIT_READY_BUDGET_S))
 	until api_get /api/v1/workers | grep -q "\"name\":\"$name\""; do
-		((SECONDS < deadline)) || { echo "worker $name did not register" >&2; return 1; }
+		is_worker_alive "$name" ||
+			{ echo "worker $name exited before registering" >&2; return 1; }
+		((SECONDS < deadline)) ||
+			{ echo "worker $name did not register within ${WAIT_READY_BUDGET_S}s" >&2; return 1; }
 		sleep 0.2
 	done
 }
