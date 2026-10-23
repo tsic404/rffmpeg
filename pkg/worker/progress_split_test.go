@@ -70,13 +70,17 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 		"frame=  17 fps=0.0 q=16.0 time=00:00:00.68 bitrate=0.6kbits/s speed=1.36x\r" +
 		"frame=  55 fps=27 q=16.0 time=00:00:02.20 bitrate=0.2kbits/s speed=1.10x\r" +
 		"frame= 130 fps=26 q=16.0 time=00:00:05.20 bitrate=0.2kbits/s speed=1.05x\r" +
-		"frame= 200 fps=26 q=-1.0 time=00:00:08.00 Lspeed=1.00x    \n"
+		"frame= 200 fps=26 q=-1.0 time=00:00:08.00 Lspeed=1.00x\r" +
+		"frame= 240 fps=26 q=-1.0 time=00:00:09.50 Lspeed=1.00x\r" +
+		"frame= 320 fps=26 q=-1.0 time=00:00:15.20 Lspeed=1.00x\r" +
+		"frame= 400 fps=26 q=-1.0 time=00:00:20.50 Lspeed=1.00x    \n"
 
 	parser := NewProgressParser()
-	parser.SetDuration(10 * 1_000_000) // what probeInputDurationUs seeds
+	parser.SetDuration(120 * 1_000_000) // what probeInputDurationUs seeds
 
-	// Inject wall-clock time: each stats line arrives 4s apart so the
-	// 4th line (wallElapsed=12s) passes the etaMinWallSeconds threshold.
+	// Inject wall-clock time: each stats line arrives 5s apart. The ETA
+	// needs a full rate window and enough published media to be past the
+	// start-up ramp, which the last line provides.
 	wallSec := 0.0
 	parser.nowFunc = func() time.Time {
 		return time.Unix(0, int64(wallSec*1e9))
@@ -89,7 +93,7 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 			return
 		}
 		f := parser.ParseLine(line)
-		wallSec += 4.0
+		wallSec += 5.0
 		if f == nil || f.Percent < 0 {
 			return
 		}
@@ -110,8 +114,8 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 	// The old ScanLines behavior produced exactly ONE progress push (the
 	// final \n-terminated line). The fix must surface every intermediate
 	// update.
-	if sends < 3 {
-		t.Fatalf("expected >=3 live progress updates from CR stream, got %d — updates are still being swallowed", sends)
+	if sends != 7 {
+		t.Fatalf("expected every one of the 7 stats lines to surface, got %d — updates are still being swallowed", sends)
 	}
 	if lastFrame.Percent <= 0 || lastFrame.Percent > 100 {
 		t.Fatalf("final percent %.1f out of range", lastFrame.Percent)

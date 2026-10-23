@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -217,87 +218,13 @@ func TestProgressParser_ShouldPush(t *testing.T) {
 	}
 }
 
-// TestProgressParser_ETAPrecision_ConstantSpeed verifies ETA precision
-// for a long task with constant encoding speed. In this scenario,
-// the ETA prediction should be exact (0% error) because the speed
-// does not vary.
-func TestProgressParser_ETAPrecision_ConstantSpeed(t *testing.T) {
-	// 1-hour video (3600 seconds) encoded at constant 2.0x speed.
-	// Wall clock time: 3600 / 2.0 = 1800 seconds.
-	durationUs := int64(3600) * 1_000_000
-	const (
-		speed = 2_000_000 // 2.0x encoded as microseconds-per-microsecond integer
-	)
-
-	// Checkpoints every 10% of progress.
-	checkpoints := [][2]int64{
-		{360 * 1_000_000, speed},  // 10%
-		{900 * 1_000_000, speed},  // 25%
-		{1800 * 1_000_000, speed}, // 50%
-		{2700 * 1_000_000, speed}, // 75%
-		{3240 * 1_000_000, speed}, // 90%
-		{3550 * 1_000_000, speed}, // ~98.6%
-	}
-
-	results := VerifyETAPrecision(checkpoints, durationUs, 0.20, 0)
-
-	for _, r := range results {
-		if !r.Passed {
-			t.Errorf("constant-speed checkpoint at %.1f%%: ETA predicted=%ds actual=%ds error=%.1f%% - expected PASS",
-				r.ProgressPercent, r.EtaPredicted, r.EtaActual, r.ErrorPercent)
-		}
-		// With constant speed, error should be essentially 0.
-		if r.ErrorPercent > 1.0 {
-			t.Errorf("constant-speed checkpoint at %.1f%%: error=%.1f%% exceeds 1%% tolerance for constant speed",
-				r.ProgressPercent, r.ErrorPercent)
-		}
-	}
-}
-
-// TestProgressParser_ETAPrecision_VaryingSpeed verifies ETA precision
-// for a long task with naturally varying encoding speed. This simulates
-// a real-world ffmpeg run where speed fluctuates moderately between 1.8x and 2.1x
-// across different sections of the video (e.g., simple vs complex scenes).
-// The ETA error must stay below 20% at all checkpoints (Scene 9.2).
-func TestProgressParser_ETAPrecision_VaryingSpeed(t *testing.T) {
-	// 1-hour video (3600 seconds) with varying speed per segment.
-	durationUs := int64(3600) * 1_000_000
-
-	// Speed encoded as integer (1_000_000 = 1.0x). Segments simulate a
-	// mixed-complexity encoding run (1.8x-2.1x): 0-10% moderate (1.9x),
-	// 10-25% faster (2.1x), 25-50% slower (1.8x), 50-75% fast (2.1x),
-	// 75-90% moderate (1.9x), 90-100% nominal (2.0x).
-	checkpoints := [][2]int64{
-		{360 * 1_000_000, 1_900_000},  // 10% - speed 1.9x
-		{900 * 1_000_000, 2_100_000},  // 25% - speed 2.1x
-		{1800 * 1_000_000, 1_800_000}, // 50% - speed 1.8x
-		{2700 * 1_000_000, 2_100_000}, // 75% - speed 2.1x
-		{3240 * 1_000_000, 1_900_000}, // 90% - speed 1.9x
-	}
-
-	results := VerifyETAPrecision(checkpoints, durationUs, 0.20, 0)
-
-	for _, r := range results {
-		t.Logf("Checkpoint %.1f%%: ETA predicted=%ds actual=%ds error=%.1f%% passed=%v",
-			r.ProgressPercent, r.EtaPredicted, r.EtaActual, r.ErrorPercent, r.Passed)
-
-		if !r.Passed {
-			t.Errorf("varying-speed checkpoint at %.1f%%: ETA predicted=%ds actual=%ds error=%.1f%% - exceeds 20%% tolerance",
-				r.ProgressPercent, r.EtaPredicted, r.EtaActual, r.ErrorPercent)
-		}
-	}
-}
-
 // TestProgressParser_ETAPrecision_BoundaryChecks tests ETA edge cases:
 // start of encoding (time=0), near-completion, and speed=0.
 func TestProgressParser_ETAPrecision_BoundaryChecks(t *testing.T) {
-	// 30-second video.
-	durationUs := int64(30) * 1_000_000
-
 	// Edge case 1: Start of encoding (time=0.00s).
 	// speed=1.0x but time=0, so ETA should not be calculated (timeUs > 0 check).
 	p := NewProgressParser()
-	p.SetDuration(durationUs)
+	p.SetDuration(int64(30) * 1_000_000)
 	frame := p.ParseLine("frame=0 fps=0 q=0.0 size=0kB time=00:00:00.00 bitrate=N/A speed=1.00x")
 	if frame == nil {
 		t.Fatal("expected non-nil frame for time=0 line")
@@ -306,27 +233,7 @@ func TestProgressParser_ETAPrecision_BoundaryChecks(t *testing.T) {
 		t.Errorf("time=0 should produce ETA=0 (or unknown), got %d", frame.EtaSeconds)
 	}
 
-	// Edge case 2: Near-completion (time close to duration).
-	nearEndUs := int64(29) * 1_000_000 // 29 out of 30 seconds
-	checkpoints := [][2]int64{
-		{nearEndUs, 2_000_000}, // 2.0x speed, 1s remaining → 0.5s estimated
-	}
-	results := VerifyETAPrecision(checkpoints, durationUs, 0.20, 0)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	r := results[0]
-	if r.EtaPredicted != 0 {
-		// 1 second remaining at 2.0x → 0.5s, truncated to int = 0s
-		t.Logf("Near-completion ETA: predicted=%ds actual=%ds error=%.1f%%",
-			r.EtaPredicted, r.EtaActual, r.ErrorPercent)
-	}
-	if !r.Passed && r.EtaActual > 0 {
-		t.Errorf("near-completion ETA error should be within 20%%: predicted=%ds actual=%ds error=%.1f%%",
-			r.EtaPredicted, r.EtaActual, r.ErrorPercent)
-	}
-
-	// Edge case 3: speed=0 (no progress, should not crash).
+	// Edge case 2: speed=0 (no progress, should not crash).
 	frame2 := p.ParseLine("frame=100 time=00:00:05.00 bitrate=N/A speed=0.00x")
 	if frame2 == nil {
 		t.Fatal("expected non-nil frame")
@@ -335,194 +242,739 @@ func TestProgressParser_ETAPrecision_BoundaryChecks(t *testing.T) {
 	if frame2.EtaSeconds != 0 {
 		t.Errorf("speed=0 should not produce ETA, got %d", frame2.EtaSeconds)
 	}
-
-	// Edge case 4: Very long task (24 hours).
-	longDurationUs := int64(24*3600) * 1_000_000 // 24 hours
-	longCheckpoints := [][2]int64{
-		{longDurationUs / 4, 1_900_000},     // 25% at 1.9x
-		{longDurationUs / 2, 2_100_000},     // 50% at 2.1x
-		{longDurationUs * 3 / 4, 2_000_000}, // 75% at 2.0x
-	}
-	longResults := VerifyETAPrecision(longCheckpoints, longDurationUs, 0.20, 0)
-	for _, lr := range longResults {
-		t.Logf("Long-task checkpoint %.1f%%: ETA predicted=%ds (%s) actual=%ds (%s) error=%.1f%% passed=%v",
-			lr.ProgressPercent,
-			lr.EtaPredicted, formatDuration(lr.EtaPredicted),
-			lr.EtaActual, formatDuration(lr.EtaActual),
-			lr.ErrorPercent, lr.Passed)
-		if !lr.Passed {
-			t.Errorf("long-task ETA error exceeds 20%% at %.1f%%: predicted=%ds actual=%ds error=%.1f%%",
-				lr.ProgressPercent, lr.EtaPredicted, lr.EtaActual, lr.ErrorPercent)
-		}
-	}
 }
 
-// TestProgressParser_WarmupETASuppressed verifies that ETA is suppressed
-// until etaMinWallSeconds of wall-clock time has elapsed since the first
-// stats line. During encoder warm-up the wall-clock rate is unstable, so
-// reporting nothing is better than reporting a number known to be wrong.
-func TestProgressParser_WarmupETASuppressed(t *testing.T) {
+// encoderTimeline replays the progress stream one ffmpeg attempt produces, so
+// an estimate can be scored against a finish the parser never sees. Every
+// field is the simulation's own: no bound or constant is read from the
+// implementation, which is what makes a wrong estimate visible here.
+type encoderTimeline struct {
+	durationSeconds   float64 // media length
+	rate              float64 // steady-state media seconds per wall second
+	outputLagSeconds  float64 // media encoded but not yet published in time=
+	startDelaySeconds float64 // wall clock before the first stats line
+	finalizeSeconds   float64 // wall clock from the last frame to process exit
+}
+
+// publishedAt is the media time= reports at wall seconds since the attempt
+// started: the pipeline holds outputLagSeconds of output back, and the
+// closing burst releases it.
+func (tl encoderTimeline) publishedAt(wall float64) float64 {
+	published := (wall-tl.startDelaySeconds)*tl.rate - tl.outputLagSeconds
+	if published < 0 {
+		published = 0
+	}
+	if published > tl.durationSeconds {
+		published = tl.durationSeconds
+	}
+	return published
+}
+
+// encodeEndWall is when the last frame is encoded.
+func (tl encoderTimeline) encodeEndWall() float64 {
+	return tl.startDelaySeconds + tl.durationSeconds/tl.rate
+}
+
+// endWall is when the process exits, which is what the CLI's clock measures.
+func (tl encoderTimeline) endWall() float64 {
+	return tl.encodeEndWall() + tl.finalizeSeconds
+}
+
+// timelineSample is one -stats line during a replayed attempt.
+type timelineSample struct {
+	published float64 // media time= reported
+	remaining float64 // true wall clock to process exit
+	eta       int     // ETA the parser rendered, 0 when it certified nothing
+}
+
+// replayTimeline feeds a parser one -stats line per step of wall clock, the
+// way the Worker does, and returns every frame it produced.
+func replayTimeline(t *testing.T, tl encoderTimeline, step float64) []timelineSample {
+	t.Helper()
 	p := NewProgressParser()
-	p.SetDuration(100 * 1_000_000)
-
-	// Inject wall-clock time: samples arrive at t=0, 3s and 7s — all within
-	// the etaMinWallSeconds (10s) suppression window.
-	wallSec := 0.0
+	p.SetDuration(int64(tl.durationSeconds * 1_000_000))
+	wall := 0.0
 	p.nowFunc = func() time.Time {
-		return time.Unix(int64(wallSec), 0)
+		return time.Unix(0, int64(wall*1e9))
 	}
+	p.StartAttempt()
 
-	// Warm-up samples: speed ramps 0.5x → 1.0x → 1.5x before settling.
-	warmup := []struct {
-		timeS int64
-		speed string
-		wallS float64
-	}{
-		{1, "0.50", 0.0}, {2, "1.00", 3.0}, {3, "1.50", 7.0},
-	}
-	for i, w := range warmup {
-		wallSec = w.wallS
-		line := fmt.Sprintf("frame=%d fps=30 q=28.0 size=1024kB time=00:00:%02d.00 bitrate=2045.0kbits/s speed=%sx",
-			w.timeS*30, w.timeS, w.speed)
-		frame := p.ParseLine(line)
+	var samples []timelineSample
+	for wall = tl.startDelaySeconds; wall <= tl.endWall()+1e-9; wall += step {
+		published := tl.publishedAt(wall)
+		if wall >= tl.encodeEndWall() {
+			// The closing stats burst publishes everything the pipeline held.
+			published = tl.durationSeconds
+		}
+		frame := p.ParseLine(buildProgressLine(int64(published*1_000_000), tl.rate))
 		if frame == nil {
-			t.Fatalf("warm-up frame %d: nil", i)
-		}
-		if frame.EtaSeconds != 0 {
-			t.Errorf("warm-up frame %d (speed=%s): ETA should be suppressed, got %ds",
-				i, w.speed, frame.EtaSeconds)
-		}
-	}
-
-	// After the 10s suppression window the ETA appears, computed from the
-	// wall-clock rate (20s media in 10s wall → rate 2.0x → 80s remaining
-	// / 2.0 = 40s).
-	wallSec = 10.0
-	frame := p.ParseLine("frame=600 fps=30 q=28.0 size=1024kB time=00:00:20.00 bitrate=2045.0kbits/s speed=2.00x")
-	if frame == nil || frame.EtaSeconds <= 0 {
-		t.Fatalf("post-warm-up frame must carry an ETA, got %+v", frame)
-	}
-	wantMin, wantMax := 38, 42
-	if frame.EtaSeconds < wantMin || frame.EtaSeconds > wantMax {
-		t.Errorf("ETA = %ds, want wall-clock estimate in [%d,%d]s", frame.EtaSeconds, wantMin, wantMax)
-	}
-}
-
-// TestProgressParser_ResetClearsWallClock verifies Reset drops the
-// firstSampleTime so a reused parser starts its warm-up suppression from
-// scratch.
-func TestProgressParser_ResetClearsWallClock(t *testing.T) {
-	p := NewProgressParser()
-	p.SetDuration(100 * 1_000_000)
-
-	wallSec := 0.0
-	p.nowFunc = func() time.Time {
-		return time.Unix(int64(wallSec), 0)
-	}
-
-	p.Reset()
-	p.SetDuration(100 * 1_000_000)
-	for i := int64(1); i <= 12; i++ {
-		wallSec = float64(i - 1) // 0s … 11s
-		line := fmt.Sprintf("frame=%d fps=30 q=28.0 size=1024kB time=00:00:%02d.00 bitrate=2045.0kbits/s speed=2.00x", i*30, i)
-		f := p.ParseLine(line)
-		if i <= 10 {
-			if f == nil || f.EtaSeconds != 0 {
-				t.Fatalf("frame %d: ETA must be suppressed in warm-up window, got %+v", i, f)
-			}
 			continue
 		}
+		samples = append(samples, timelineSample{
+			published: published,
+			remaining: tl.endWall() - wall,
+			eta:       frame.EtaSeconds,
+		})
+	}
+	return samples
+}
+
+// TestProgressParser_ETACertifiedWithinTolerance is the contract check: every
+// ETA the parser renders must land within 20% of the wall clock the process
+// actually took, across the output-lag and encode-rate range the pipeline
+// produces. The output lag is the simulation's own parameter — a fixed
+// deduction tuned to one of these rows fails the others, which is the point.
+func TestProgressParser_ETACertifiedWithinTolerance(t *testing.T) {
+	base := encoderTimeline{
+		durationSeconds:   120,
+		startDelaySeconds: 1,
+		finalizeSeconds:   0.6,
+	}
+	for _, lag := range []float64{0, 1.4, 2.6} {
+		for _, rate := range []float64{1, 2, 5.68} {
+			tl := base
+			tl.outputLagSeconds, tl.rate = lag, rate
+			name := fmt.Sprintf("lag%.1fs/rate%.2fx", lag, rate)
+
+			rendered := 0
+			for _, s := range replayTimeline(t, tl, 1.0) {
+				if s.eta == 0 || s.remaining < 3 {
+					continue
+				}
+				rendered++
+				errPct := math.Abs(float64(s.eta)-s.remaining) / s.remaining * 100
+				if errPct >= 20 {
+					t.Errorf("%s: ETA %ds with %.2fs actually left is %.1f%% off (bound is 20%%)",
+						name, s.eta, s.remaining, errPct)
+				}
+			}
+			if rendered == 0 {
+				t.Errorf("%s: no ETA rendered at all; the estimator must still report a job it can certify", name)
+			}
+		}
+	}
+}
+
+// TestProgressParser_ETAAvailabilityOnAcceptanceJob pins the other half of the
+// contract: suppression must not swallow the tail so completely that the
+// acceptance script stops asserting anything. At the throughput the QA
+// harness measured, the estimate has to stay available well inside the last
+// ten seconds — the script needs three numeric samples there.
+func TestProgressParser_ETAAvailabilityOnAcceptanceJob(t *testing.T) {
+	tl := encoderTimeline{
+		durationSeconds:   120,
+		rate:              5.68,
+		outputLagSeconds:  2.0,
+		startDelaySeconds: 0.5,
+		finalizeSeconds:   0.6,
+	}
+	rendered := 0
+	for _, s := range replayTimeline(t, tl, 1.0) {
+		if s.eta == 0 || s.remaining < 3 {
+			continue
+		}
+		rendered++
+		if errPct := math.Abs(float64(s.eta)-s.remaining) / s.remaining * 100; errPct >= 20 {
+			t.Errorf("ETA %ds with %.2fs left is %.1f%% off", s.eta, s.remaining, errPct)
+		}
+	}
+	if rendered < 3 {
+		t.Errorf("only %d numeric ETA samples in the last seconds; the acceptance script requires 3", rendered)
+	}
+}
+
+// TestProgressParser_ETACoversObservedRateDrift replays a pace step at each
+// amplitude the acceptance run showed and beyond, in both directions. A step
+// needs about one rate window to cross the sample window, so while the oldest
+// chunks still hold the old rate the estimate must carry that spread as
+// uncertainty; certifying the extremes passed +30% steps at 21.9%. Samples
+// before the change are not judged: no sample-based estimate can know a pace
+// that has not happened yet.
+func TestProgressParser_ETACoversObservedRateDrift(t *testing.T) {
+	const (
+		durationSec = 600
+		baseRate    = 4.56
+		switchSec   = 30.0
+	)
+	for _, factor := range []float64{1.3, 1.5, 0.7, 0.6} {
+		t.Run(fmt.Sprintf("x%.2f", factor), func(t *testing.T) {
+			rate := baseRate * factor
+			mediaAt := func(wall float64) float64 {
+				if wall <= switchSec {
+					return wall * baseRate
+				}
+				return switchSec*baseRate + (wall-switchSec)*rate
+			}
+			totalWallSec := switchSec + (durationSec-switchSec*baseRate)/rate
+
+			p := NewProgressParser()
+			p.SetDuration(durationSec * 1_000_000)
+			wallSec := 0.0
+			p.nowFunc = func() time.Time {
+				return time.Unix(0, int64(wallSec*float64(time.Second)))
+			}
+			p.StartAttempt()
+
+			emitted := 0
+			for wall := 1.0; wall <= totalWallSec; wall++ {
+				wallSec = wall
+				frame := p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), rate))
+				if frame == nil {
+					t.Fatalf("frame at %.0fs: nil", wall)
+				}
+				if frame.EtaSeconds == 0 || wall < switchSec+1 {
+					continue
+				}
+				remaining := totalWallSec - wall
+				if remaining < 3 {
+					continue
+				}
+				emitted++
+				if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+					t.Errorf("ETA %ds at %.0fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+						frame.EtaSeconds, wall, remaining, errPct)
+				}
+			}
+			if emitted < 10 {
+				t.Fatalf("only %d certified samples after the pace change; the rate uncertainty must not swallow the run", emitted)
+			}
+		})
+	}
+}
+
+// TestProgressParser_ETAAvailabilityUnderJitter replays a pace that alternates
+// between two plateaus a ratio of 1.3 apart, the swing the acceptance host
+// shows. Both plateaus are real states of the process, so the estimate is the
+// window mean rather than whichever plateau the newest chunks happen to sit
+// on: a window holding both levels certifies a value between them, not one of
+// them. The phase sweep matters — with 5s plateaus and 2s chunks the newest
+// pair lands on one level for 0-2s at a time, and a pair-only estimate missed
+// the other level by 25% at one phase while the same fixture passed at others.
+func TestProgressParser_ETAAvailabilityUnderJitter(t *testing.T) {
+	const (
+		durationSec = 120.0
+		fastRate    = 5.68
+		ratio       = 1.3
+		plateauSec  = 5.0
+	)
+	for _, offset := range []float64{0, 1, 2, 3, 4} {
+		t.Run(fmt.Sprintf("phase%.0fs", offset), func(t *testing.T) {
+			rateAt := func(wall float64) float64 {
+				if int((wall+offset)/plateauSec)%2 == 0 {
+					return fastRate
+				}
+				return fastRate / ratio
+			}
+			mediaAt := func(wall float64) float64 {
+				media := 0.0
+				for x := 0.0; x < wall; x += 0.01 {
+					media += rateAt(x) * 0.01
+				}
+				return media
+			}
+			timeToFinish := func(wall float64) float64 {
+				remain := durationSec - mediaAt(wall)
+				x := wall
+				for remain > 0 {
+					remain -= rateAt(x) * 0.01
+					x += 0.01
+				}
+				return x - wall
+			}
+
+			p := NewProgressParser()
+			p.SetDuration(int64(durationSec) * 1_000_000)
+			wallSec := 0.0
+			p.nowFunc = func() time.Time {
+				return time.Unix(0, int64(wallSec*float64(time.Second)))
+			}
+			p.StartAttempt()
+
+			rendered := 0
+			for wall := 0.0; wall < 60; wall++ {
+				wallSec = wall
+				frame := p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), rateAt(wall)))
+				if frame == nil {
+					t.Fatalf("frame at %.0fs: nil", wall)
+				}
+				if frame.EtaSeconds == 0 {
+					continue
+				}
+				remaining := timeToFinish(wall)
+				if remaining < 3 {
+					continue
+				}
+				rendered++
+				if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+					t.Errorf("ETA %ds at %.0fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+						frame.EtaSeconds, wall, remaining, errPct)
+				}
+			}
+			if rendered < 3 {
+				t.Fatalf("only %d numeric ETA samples under a 1.3 pace swing; the acceptance script requires 3", rendered)
+			}
+		})
+	}
+}
+
+// TestProgressParser_ETATransientLoadDrop replays the other shape the
+// acceptance host showed: a 4.5s drop to 4.0x that recovers, both edges of it
+// inside one rate window. After the drop lands the newest chunks all agree on
+// the slow level, and certifying it while the window still holds the fast one
+// missed by 40%. The window mean is the pace a finish crossing the dip runs
+// at, so every value rendered must stay inside the bound.
+func TestProgressParser_ETATransientLoadDrop(t *testing.T) {
+	const (
+		durationSec = 120.0
+		fastRate    = 5.68
+		slowRate    = 4.0
+		dipStart    = 12.0
+		dipLen      = 4.5
+	)
+	rateAt := func(wall float64) float64 {
+		if wall >= dipStart && wall < dipStart+dipLen {
+			return slowRate
+		}
+		return fastRate
+	}
+	mediaAt := func(wall float64) float64 {
+		media := 0.0
+		for x := 0.0; x < wall; x += 0.01 {
+			media += rateAt(x) * 0.01
+		}
+		return media
+	}
+	timeToFinish := func(wall float64) float64 {
+		remain := durationSec - mediaAt(wall)
+		x := wall
+		for remain > 0 {
+			remain -= rateAt(x) * 0.01
+			x += 0.01
+		}
+		return x - wall
+	}
+
+	p := NewProgressParser()
+	p.SetDuration(int64(durationSec) * 1_000_000)
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*float64(time.Second)))
+	}
+	p.StartAttempt()
+
+	rendered := 0
+	for wall := 0.0; wall < 60; wall++ {
+		wallSec = wall
+		frame := p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), rateAt(wall)))
+		if frame == nil {
+			t.Fatalf("frame at %.0fs: nil", wall)
+		}
+		if frame.EtaSeconds == 0 {
+			continue
+		}
+		remaining := timeToFinish(wall)
+		if remaining < 3 {
+			continue
+		}
+		rendered++
+		if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+			t.Errorf("ETA %ds at %.0fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+				frame.EtaSeconds, wall, remaining, errPct)
+		}
+	}
+	if rendered == 0 {
+		t.Fatal("no ETA across the whole run; the dip must not silence the estimate forever")
+	}
+}
+
+// TestProgressParser_ETACoversObservedDrift replays a monotonic ramp — the
+// other shape the acceptance host showed (23s of run against 37.7s left, a
+// 39% miss). Adjacent chunks differ by about 1% here, which the settled check
+// cannot see; the drift is projected over the remaining run instead, and
+// whatever is certified must stay inside the bound.
+func TestProgressParser_ETACoversObservedDrift(t *testing.T) {
+	const baseRate = 4.56
+	// A falling ramp cannot outlast the point where its rate reaches zero, so
+	// the two directions get a media length their drift can still finish.
+	for _, tc := range []struct {
+		perTen   float64
+		duration float64
+		atLeast  int
+	}{
+		{0.05, 600, 1}, {0.08, 600, 1}, {-0.05, 280, 1},
+		// The steepest decay certifies nothing: the projection widens the
+		// finish interval as the rate keeps falling, so no integer second
+		// fits inside 20% of both ends on this clip. The row still guards
+		// the bound for any sample it does render.
+		{-0.08, 280, 0},
+	} {
+		perTen, durationSec, wantAtLeast := tc.perTen, tc.duration, tc.atLeast
+		t.Run(fmt.Sprintf("%+.0f%%/10s", perTen*100), func(t *testing.T) {
+			slope := perTen / 10.0 // relative rate change per wall second
+			mediaAt := func(wall float64) float64 {
+				return baseRate*wall + 0.5*baseRate*slope*wall*wall
+			}
+			totalWallSec := 0.0
+			for mediaAt(totalWallSec) < durationSec {
+				totalWallSec += 0.01
+			}
+
+			p := NewProgressParser()
+			p.SetDuration(int64(durationSec) * 1_000_000)
+			wallSec := 0.0
+			p.nowFunc = func() time.Time {
+				return time.Unix(0, int64(wallSec*float64(time.Second)))
+			}
+			p.StartAttempt()
+
+			emitted := 0
+			for wall := 0.0; wall <= totalWallSec; wall++ {
+				wallSec = wall
+				frame := p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), baseRate*(1+slope*wall)))
+				if frame == nil {
+					t.Fatalf("frame at %.0fs: nil", wall)
+				}
+				if frame.EtaSeconds == 0 {
+					continue
+				}
+				remaining := totalWallSec - wall
+				if remaining < 3 {
+					continue
+				}
+				emitted++
+				if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+					t.Errorf("ETA %ds at %.0fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+						frame.EtaSeconds, wall, remaining, errPct)
+				}
+			}
+			if emitted < wantAtLeast {
+				t.Fatalf("only %d ETA samples on the ramp; want at least %d", emitted, wantAtLeast)
+			}
+		})
+	}
+}
+
+// TestProgressParser_ETASuppressedAtUncertifiableTail replays the sample that
+// broke the acceptance run: 18.24s of media still unpublished at a settled
+// 4.56x, with a little over 3s of wall clock actually left. 20% of that is
+// less than a pipeline tail can hide, so no integer second can be certified
+// and the frame must carry no ETA (C-23 renders n/a) instead of a guess. The
+// grid is fine enough to land on the sample itself: at 1s steps the nearest
+// point is 21.68s of media left, where the bound is wide enough to pass and
+// the test would prove nothing.
+func TestProgressParser_ETASuppressedAtUncertifiableTail(t *testing.T) {
+	tl := encoderTimeline{
+		durationSeconds:   120,
+		rate:              4.56,
+		outputLagSeconds:  2.0,
+		startDelaySeconds: 1.0,
+		finalizeSeconds:   0.6,
+	}
+	var atSample *timelineSample
+	samples := replayTimeline(t, tl, 0.05)
+	for i := range samples {
+		if samples[i].published <= 101.76 {
+			atSample = &samples[i]
+		}
+	}
+	if atSample == nil {
+		t.Fatal("timeline never reached the acceptance sample")
+	}
+	if math.Abs(atSample.published-101.76) > 0.05 {
+		t.Fatalf("replay landed on %.2fs of media, want the 18.24s-left sample", 120-atSample.published)
+	}
+	if atSample.eta != 0 {
+		t.Errorf("at %.2fs of media left the samples cannot certify a finish, got ETA %ds",
+			120-atSample.published, atSample.eta)
+	}
+	// The same attempt still reports an ETA earlier on, where the bound fits.
+	reported := 0
+	for _, s := range samples {
+		if s.eta != 0 {
+			reported++
+		}
+	}
+	if reported == 0 {
+		t.Errorf("no ETA anywhere in the attempt")
+	}
+}
+
+// TestProgressParser_StartupRampNotCertified verifies that the start-up ramp
+// never certifies an estimate: nothing is emitted until the attempt has
+// published enough media to be past the ramp and has a full rate window
+// behind it, and everything emitted afterwards stays inside the contract's
+// 20% bound. The 12s case is the falsifier — it is longer than the 8s
+// wall-clock gate the estimator used to have, and that version certified a
+// four-times-too-high value 11s in.
+func TestProgressParser_StartupRampNotCertified(t *testing.T) {
+	const (
+		durationSec  = 120
+		rampSpeed    = 0.5
+		settledSpeed = 2.0
+	)
+	for _, rampSec := range []float64{6, 10, 12, 15} {
+		t.Run(fmt.Sprintf("ramp%.0fs", rampSec), func(t *testing.T) {
+			totalWallSec := rampSec + (durationSec-rampSec*rampSpeed)/settledSpeed
+
+			p := NewProgressParser()
+			p.SetDuration(durationSec * 1_000_000)
+			wallSec := 0.0
+			p.nowFunc = func() time.Time {
+				return time.Unix(0, int64(wallSec*float64(time.Second)))
+			}
+			p.StartAttempt()
+
+			mediaAt := func(wall float64) float64 {
+				if wall <= rampSec {
+					return wall * rampSpeed
+				}
+				return rampSec*rampSpeed + (wall-rampSec)*settledSpeed
+			}
+
+			emitted := 0
+			for wall := 0.0; wall <= totalWallSec; wall++ {
+				wallSec = wall
+				speed := settledSpeed
+				if wall <= rampSec {
+					speed = rampSpeed
+				}
+				frame := p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), speed))
+				if frame == nil {
+					t.Fatalf("frame at %.0fs: nil", wall)
+				}
+				if frame.EtaSeconds == 0 {
+					continue
+				}
+				emitted++
+				if wall <= rampSec {
+					t.Errorf("ETA %ds at %.0fs, inside the %.0fs start-up ramp", frame.EtaSeconds, wall, rampSec)
+					continue
+				}
+				remaining := totalWallSec - wall
+				if remaining < 3 {
+					continue
+				}
+				if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+					t.Errorf("ETA %ds at %.0fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+						frame.EtaSeconds, wall, remaining, errPct)
+				}
+			}
+			if emitted == 0 {
+				t.Fatal("no ETA after the ramp; the estimator must still report a job it can certify")
+			}
+		})
+	}
+}
+
+// TestProgressParser_LowFrameRateFillNotCertified verifies the settle gate is
+// counted in frames as well as in media. At 3fps the 20s media gate is
+// reached while the encoder is still filling its pipeline, and the rate there
+// would extrapolate a finish several times too early; the frame gate holds
+// until the fill is over, and everything emitted after it stays inside the
+// contract's bound.
+func TestProgressParser_LowFrameRateFillNotCertified(t *testing.T) {
+	const (
+		fps          = 3
+		durationSec  = 120.0
+		rampSec      = 45.0
+		rampSpeed    = 0.5
+		settledSpeed = 2.0
+	)
+	totalWallSec := rampSec + (durationSec-rampSec*rampSpeed)/settledSpeed
+
+	p := NewProgressParser()
+	p.SetDuration(int64(durationSec) * 1_000_000)
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*float64(time.Second)))
+	}
+	p.StartAttempt()
+
+	emitted := 0
+	for wall := 0.0; wall <= totalWallSec; wall++ {
+		wallSec = wall
+		media := wall * rampSpeed
+		speed := rampSpeed
+		if wall > rampSec {
+			media = rampSec*rampSpeed + (wall-rampSec)*settledSpeed
+			speed = settledSpeed
+		}
+		frame := p.ParseLine(buildProgressLineFPS(int64(media*1_000_000), speed, fps))
+		if frame == nil {
+			t.Fatalf("frame at %.0fs: nil", wall)
+		}
+		if frame.EtaSeconds == 0 {
+			continue
+		}
+		if wall <= rampSec {
+			t.Errorf("ETA %ds at %.0fs, inside the %.0fs start-up fill", frame.EtaSeconds, wall, rampSec)
+			continue
+		}
+		remaining := totalWallSec - wall
+		if remaining < 3 {
+			continue
+		}
+		emitted++
+		if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+			t.Errorf("ETA %ds at %.0fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+				frame.EtaSeconds, wall, remaining, errPct)
+		}
+	}
+	if emitted == 0 {
+		t.Fatal("no ETA after the start-up fill; the estimator must still report a job it can certify")
+	}
+}
+
+// TestProgressParser_ETAAvailabilityOnShortJobs bounds what the estimator
+// offers a job that ends inside its own guard band: the rate window needs a
+// full window of run and the tail needs a few seconds the bound can certify,
+// so a short clip may legitimately render n/a throughout (C-23's legal value,
+// not a missed bound). What it may never do is render a value that misses.
+// The 40s/2x and 60s/2x runs are long enough to owe one; the shorter clips
+// stay free to improve while wrong values are still caught.
+func TestProgressParser_ETAAvailabilityOnShortJobs(t *testing.T) {
+	cases := []struct {
+		duration    float64
+		rate        float64
+		wantAtLeast int
+	}{
+		{duration: 15, rate: 5.68},
+		{duration: 25, rate: 5.68},
+		{duration: 40, rate: 2.0, wantAtLeast: 1},
+		{duration: 60, rate: 5.68},
+		{duration: 60, rate: 2.0, wantAtLeast: 1},
+	}
+	for _, tc := range cases {
+		tl := encoderTimeline{
+			durationSeconds:   tc.duration,
+			rate:              tc.rate,
+			outputLagSeconds:  2.0,
+			startDelaySeconds: 0.5,
+			finalizeSeconds:   0.6,
+		}
+		rendered := 0
+		for _, s := range replayTimeline(t, tl, 1.0) {
+			if s.eta == 0 || s.remaining < 3 {
+				continue
+			}
+			rendered++
+			if errPct := math.Abs(float64(s.eta)-s.remaining) / s.remaining * 100; errPct >= 20 {
+				t.Errorf("%.0fs@%.2fx: ETA %ds with %.1fs left is %.1f%% off", tc.duration, tc.rate, s.eta, s.remaining, errPct)
+			}
+		}
+		t.Logf("%.0fs@%.2fx: %d numeric samples", tc.duration, tc.rate, rendered)
+		if rendered < tc.wantAtLeast {
+			t.Errorf("%.0fs@%.2fx: %d numeric samples, want at least %d", tc.duration, tc.rate, rendered, tc.wantAtLeast)
+		}
+	}
+}
+
+// TestProgressParser_ETATracksRecentRate verifies the estimate follows the
+// encoder's current pace. A job that starts far faster than its settled rate
+// must not report the start's pace: while the fast and slow chunks share the
+// window the pace has not settled and nothing is emitted; once it has, every
+// value must match the 4x pace within the contract's bound.
+func TestProgressParser_ETATracksRecentRate(t *testing.T) {
+	const durationSec = 120
+	p := NewProgressParser()
+	p.SetDuration(durationSec * 1_000_000)
+
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*float64(time.Second)))
+	}
+	p.StartAttempt()
+
+	// 8x for the first six wall seconds, then a steady 4x.
+	mediaAt := func(wall float64) float64 {
+		if wall <= 6 {
+			return wall * 8
+		}
+		return 48 + (wall-6)*4
+	}
+	totalWallSec := 6 + (durationSec-48)/4.0
+	feed := func(wall float64) *ProgressFrame {
+		wallSec = wall
+		speed := 4.0
+		if wall <= 6 {
+			speed = 8.0
+		}
+		return p.ParseLine(buildProgressLine(int64(mediaAt(wall)*1_000_000), speed))
+	}
+
+	emitted := 0
+	for wall := 1.0; wall <= totalWallSec; wall++ {
+		frame := feed(wall)
+		if frame == nil {
+			t.Fatalf("frame at %.0fs: nil", wall)
+		}
+		if frame.EtaSeconds == 0 {
+			continue
+		}
+		// The 8x start is still one chunk of the window through wall 9; a
+		// value then would be extrapolating the old pace.
+		if wall < 10 {
+			t.Fatalf("ETA %ds at %.0fs emitted while the 8x start still sets the pace", frame.EtaSeconds, wall)
+		}
+		remaining := totalWallSec - wall
+		if remaining < 3 {
+			continue
+		}
+		emitted++
+		if errPct := math.Abs(float64(frame.EtaSeconds)-remaining) / remaining * 100; errPct >= 20 {
+			t.Errorf("ETA %ds at %.0fs with %.1fs actually left is %.1f%% off (bound is 20%%)",
+				frame.EtaSeconds, wall, remaining, errPct)
+		}
+	}
+	if emitted == 0 {
+		t.Fatal("no ETA once the 4x pace settled")
+	}
+}
+
+// TestProgressParser_ResetClearsSampleHistory verifies Reset drops the ETA
+// attempt state: the next job must build its rate from its own samples, not
+// from the previous job's pace.
+func TestProgressParser_ResetClearsSampleHistory(t *testing.T) {
+	p := NewProgressParser()
+	wallSec := 0.0
+	p.nowFunc = func() time.Time {
+		return time.Unix(0, int64(wallSec*1e9))
+	}
+
+	// Job A runs at 1x and settles its estimate around 1x.
+	p.SetDuration(100 * 1_000_000)
+	var last *ProgressFrame
+	for i := int64(1); i <= 30; i++ {
+		wallSec = float64(i - 1)
+		line := fmt.Sprintf("frame=%d fps=30 q=28.0 size=1024kB time=00:00:%02d.00 bitrate=2045.0kbits/s speed=1.00x", i*30, i)
+		last = p.ParseLine(line)
+		if last == nil {
+			t.Fatalf("job A frame %d: dropped", i)
+		}
+	}
+	if last.EtaSeconds < 56 || last.EtaSeconds > 84 {
+		t.Fatalf("job A: ETA %ds with 70s left at 1x", last.EtaSeconds)
+	}
+
+	// Job B is four times faster. Its first estimate must follow that pace:
+	// a leftover sample history would hold the rate range around 1x and push
+	// the value four times too high.
+	p.Reset()
+	p.SetDuration(100 * 1_000_000)
+	for i := int64(1); i <= 45; i++ {
+		wallSec = 30 + float64(i-1)/4
+		line := fmt.Sprintf("frame=%d fps=30 q=28.0 size=1024kB time=00:00:%02d.00 bitrate=2045.0kbits/s speed=4.00x", i*30, i)
+		f := p.ParseLine(line)
 		if f == nil || f.EtaSeconds == 0 {
-			t.Fatalf("frame %d: expected ETA after warm-up, got %+v", i, f)
+			continue
 		}
-	}
-}
-
-// TestProgressParser_ETAPrecision_ErrorCalculation verifies
-// the correctness of ETA math at well-known test points.
-func TestProgressParser_ETAPrecision_ErrorCalculation(t *testing.T) {
-	// Simple case: 100s duration, 50% done at 2.0x speed.
-	durationUs := int64(100) * 1_000_000
-	// At time=50s, speed=2.0x
-	// Remaining: 50s of content
-	// ETA = 50s / 2.0x = 25s
-	checkpoints := [][2]int64{
-		{50 * 1_000_000, 2_000_000},
-	}
-
-	// With actualWallTimeUs provided: total wall time should be 50s.
-	// First 50s at 2.0x = 25s wall time so far.
-	// But remaining 50s at 2.0x = 25s wall time remaining.
-	// So actual remaining = 25s.
-	results := VerifyETAPrecision(checkpoints, durationUs, 0.20, 50_000_000)
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	r := results[0]
-
-	expectedETA := 25 // 50s remaining / 2.0x
-	if r.EtaPredicted != expectedETA {
-		t.Errorf("ETA predicted = %d, want %d", r.EtaPredicted, expectedETA)
-	}
-
-	expectedActual := 25 // wall clock: 50_000_000 total - 25_000_000 elapsed = 25_000_000 us = 25s
-	if r.EtaActual != expectedActual {
-		t.Errorf("ETA actual = %d, want %d", r.EtaActual, expectedActual)
-	}
-
-	if r.ErrorPercent > 0.01 {
-		t.Errorf("error should be ~0%% for simple case, got %.2f%%", r.ErrorPercent)
-	}
-}
-
-// TestProgressParser_ETAPrecision_AllPassed verifies the
-// overall pass/fail determination across a full progress sequence.
-func TestProgressParser_ETAPrecision_AllPassed(t *testing.T) {
-	durationUs := int64(600) * 1_000_000 // 10-minute video
-
-	// Simulate checkpoints every ~20% with moderate speed variation.
-	checkpoints := [][2]int64{
-		{120 * 1_000_000, 2_000_000}, // 20% at 2.0x
-		{240 * 1_000_000, 1_900_000}, // 40% at 1.9x
-		{360 * 1_000_000, 2_100_000}, // 60% at 2.1x
-		{480 * 1_000_000, 1_800_000}, // 80% at 1.8x
-	}
-
-	results := VerifyETAPrecision(checkpoints, durationUs, 0.20, 0)
-
-	allPassed := true
-	for _, r := range results {
-		t.Logf("Checkpoint %.0f%%: predicted=%ds actual=%ds error=%.1f%% passed=%v",
-			r.ProgressPercent, r.EtaPredicted, r.EtaActual, r.ErrorPercent, r.Passed)
-		if !r.Passed {
-			allPassed = false
+		remaining := 100.0 - float64(i)
+		if float64(f.EtaSeconds) < remaining/4*0.8 || float64(f.EtaSeconds) > remaining/4*1.2 {
+			t.Fatalf("job B frame %d: ETA %ds, want about %.0fs at 4x", i, f.EtaSeconds, remaining/4)
 		}
+		return
 	}
-
-	if !allPassed {
-		t.Errorf("not all checkpoints passed ETA precision verification")
-	}
-
-	if len(results) != len(checkpoints) {
-		t.Errorf("expected %d results, got %d", len(checkpoints), len(results))
-	}
-}
-
-// formatDuration formats seconds into a human-readable string.
-func formatDuration(seconds int) string {
-	if seconds < 0 {
-		return "N/A"
-	}
-	h := seconds / 3600
-	m := (seconds % 3600) / 60
-	s := seconds % 60
-	if h > 0 {
-		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
-	}
-	if m > 0 {
-		return fmt.Sprintf("%dm%02ds", m, s)
-	}
-	return fmt.Sprintf("%ds", s)
+	t.Fatal("job B never produced an ETA")
 }
 
 // TestProgressParser_WallClockETA_WarmupOverhead verifies the wall-clock-rate
@@ -571,9 +1023,10 @@ func TestProgressParser_WallClockETA_WarmupOverhead(t *testing.T) {
 		if frame == nil {
 			t.Fatalf("sample %d: nil frame", i)
 		}
-		// After the etaMinWallSeconds (10s) suppression window, ETA should
-		// appear and be progressively more accurate. We only assert for
-		// samples past 28% (the QA failure point).
+		// Once the attempt is past its start-up ramp and has a full rate
+		// window behind it, the ETA appears and is progressively more
+		// accurate. We only assert for samples past 28% (the QA failure
+		// point).
 		pct := frame.Percent
 		if pct >= 28 && frame.EtaSeconds > 0 {
 			// Total wall time = 5 + (120-2.5)/2.0 = 63.75s
@@ -1010,21 +1463,26 @@ func TestProgressParser_AttemptBoundaryRebasesETABaseline(t *testing.T) {
 	run := func(t *testing.T, newAttemptBoundary bool) int {
 		t.Helper()
 		p := NewProgressParser()
-		p.SetDuration(60_000_000)
+		p.SetDuration(600_000_000)
 		wallSec := 0.0
 		p.nowFunc = func() time.Time {
 			return time.Unix(0, int64(wallSec*1e9))
 		}
 
-		// Attempt 1 reaches 70% with a live wall-clock rate.
+		// Attempt 1 advances with a live wall-clock rate. -stats lines
+		// arrive about once a second, so the settled window exists by 18s.
 		p.ParseLine(buildProgressLine(30_000_000, 2.0)) // seeds the baseline at wall 0
-		wallSec = 12
-		if f := p.ParseLine(buildProgressLine(42_000_000, 2.0)); f == nil || f.EtaSeconds <= 0 {
+		for sec := 1; sec <= 17; sec++ {
+			wallSec = float64(sec)
+			p.ParseLine(buildProgressLine(30_000_000+int64(sec)*13_000_000/18, 2.0))
+		}
+		wallSec = 18
+		if f := p.ParseLine(buildProgressLine(43_000_000, 2.0)); f == nil || f.EtaSeconds <= 0 {
 			t.Fatalf("attempt 1 ETA = %v, want > 0", f)
 		}
 
 		// ffmpeg dies; the next attempt re-runs from zero a second later.
-		wallSec = 13
+		wallSec = 19
 		if newAttemptBoundary {
 			p.StartAttempt()
 		}
@@ -1034,8 +1492,8 @@ func TestProgressParser_AttemptBoundaryRebasesETABaseline(t *testing.T) {
 
 		// Past the mark, the retry's ETA is only free of the dead attempt's
 		// clock when the boundary was reported.
-		wallSec = 14
-		f := p.ParseLine(buildProgressLine(43_000_000, 2.0))
+		wallSec = 20
+		f := p.ParseLine(buildProgressLine(43_500_000, 2.0))
 		if f == nil {
 			t.Fatal("retry frame above the mark was dropped")
 		}
@@ -1049,27 +1507,29 @@ func TestProgressParser_AttemptBoundaryRebasesETABaseline(t *testing.T) {
 		t.Errorf("ETA after a bare time= rewind = %ds, want > 0 (a legitimate timeline restart keeps its baseline)", eta)
 	}
 
-	// Ten seconds into a restarted attempt the ETA returns, computed from the
-	// restarted attempt's own rate.
+	// Once the restarted attempt has run past the suppression window the ETA
+	// returns, computed from the restarted attempt's own rate.
 	p := NewProgressParser()
-	p.SetDuration(60_000_000)
+	p.SetDuration(600_000_000)
 	wallSec := 0.0
 	p.nowFunc = func() time.Time {
 		return time.Unix(0, int64(wallSec*1e9))
 	}
 	p.ParseLine(buildProgressLine(30_000_000, 2.0))
-	wallSec = 13
+	wallSec = 18
 	p.StartAttempt()
 	p.ParseLine(buildProgressLine(300_000, 2.0))
-	wallSec = 14
+	wallSec = 19
 	p.ParseLine(buildProgressLine(43_000_000, 2.0))
-	wallSec = 24
-	f := p.ParseLine(buildProgressLine(51_000_000, 2.0))
+	wallSec = 33
+	p.ParseLine(buildProgressLine(51_000_000, 2.0))
+	wallSec = 36
+	f := p.ParseLine(buildProgressLine(57_000_000, 2.0))
 	if f == nil {
 		t.Fatal("retry frame above the mark was dropped")
 	}
 	if f.EtaSeconds <= 0 {
-		t.Errorf("ETA 10s into the restarted attempt = %ds, want > 0", f.EtaSeconds)
+		t.Errorf("ETA 18s into the restarted attempt = %ds, want > 0", f.EtaSeconds)
 	}
 }
 
@@ -1114,4 +1574,29 @@ func TestProgressRouter_HeaderDurationDoesNotWidenSeekWindow(t *testing.T) {
 	if percents[0] < 49.99 || percents[0] > 50.01 {
 		t.Errorf("percent = %v, want ~50 (the 60s output window, not the 5-minute input)", percents[0])
 	}
+}
+
+// buildProgressLine creates a synthetic ffmpeg progress line for testing.
+// buildProgressLineFPS formats the same stats line for a source at the given
+// frame rate: frame= is the 3fps gate's input, so it cannot be hard-coded.
+func buildProgressLineFPS(timeUs int64, speed float64, fps int) string {
+	totalSec := int(timeUs / 1_000_000)
+	h := totalSec / 3600
+	m := (totalSec % 3600) / 60
+	s := totalSec % 60
+	ms := (timeUs % 1_000_000) / 10_000
+	totalKB := timeUs / 1000
+	return fmt.Sprintf("frame=%d fps=%d q=28.0 size=%dkB time=%02d:%02d:%02d.%02d bitrate=2045.0kbits/s speed=%.2fx",
+		int(float64(timeUs)/1e6*float64(fps)), fps, totalKB, h, m, s, ms, speed)
+}
+
+func buildProgressLine(timeUs int64, speed float64) string {
+	totalSec := int(timeUs / 1_000_000)
+	h := totalSec / 3600
+	m := (totalSec % 3600) / 60
+	s := totalSec % 60
+	ms := (timeUs % 1_000_000) / 10_000 // centiseconds for ffmpeg format
+	totalKB := timeUs / 1000            // approximate size
+	return fmt.Sprintf("frame=%d fps=30 q=28.0 size=%dkB time=%02d:%02d:%02d.%02d bitrate=2045.0kbits/s speed=%.2fx",
+		totalSec*30, totalKB, h, m, s, ms, speed)
 }
