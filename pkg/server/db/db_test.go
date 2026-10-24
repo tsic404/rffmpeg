@@ -700,6 +700,11 @@ func TestCreateOrUpdateWorker(t *testing.T) {
 		t.Fatalf("Failed to mark worker offline: %v", err)
 	}
 
+	// Mark the worker as a slow node before re-registration.
+	if err := database.MarkWorkerEvicted(worker1.ID); err != nil {
+		t.Fatalf("Failed to evict worker: %v", err)
+	}
+
 	// Now re-register with updated capabilities
 	updatedCaps := protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264", "h264_nvenc"},
@@ -728,9 +733,10 @@ func TestCreateOrUpdateWorker(t *testing.T) {
 		t.Errorf("Expected ffmpeg version 6.0.0, got %s", worker2.FFmpegVersion)
 	}
 
-	// Evicted flag should be cleared
-	if worker2.Evicted {
-		t.Error("Expected evicted to be false after re-registration")
+	// Re-registration must not clear the eviction: only throughput recovery
+	// returns a slow node to the schedulable pool.
+	if !worker2.Evicted {
+		t.Error("Expected eviction to survive re-registration")
 	}
 
 	// Test creating a brand new worker with CreateOrUpdateWorker

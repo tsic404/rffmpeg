@@ -1271,11 +1271,14 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 		gpuModel = caps.GPUModel
 	}
 
-	// Try UPDATE first (handles re-registration after server restart)
+	// Try UPDATE first (handles re-registration after server restart). The
+	// eviction flag is deliberately left untouched: a slow node that
+	// re-registers must not slip back into scheduling — only throughput
+	// recovery clears the mark.
 	result, err := d.db.Exec(`
 		UPDATE workers SET name=?, status=?, gpu_model=?, encoders=?, decoders=?,
 		video_encoders=?, video_decoders=?, gpu_devices=?, ffmpeg_version=?, max_concurrent=?,
-		evicted=0, evicted_at=NULL, hwaccels=?, codecs=?, filters=?, pix_fmts=?, formats=?,
+		hwaccels=?, codecs=?, filters=?, pix_fmts=?, formats=?,
 		last_heartbeat=? WHERE id=?
 	`, name, protocol.WorkerStatusIdle, gpuModel,
 		string(encodersJSON), string(decodersJSON),

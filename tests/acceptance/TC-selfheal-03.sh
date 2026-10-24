@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # TC-selfheal-03: 慢 Worker 驱逐（AC-45）
-# 判据：比值口径命中后标记驱逐且不再分配新作业；已有作业跑到终态；空闲
-# Worker 不误判；warmup 门槛生效。恢复半段 E2E 不可达（设计已注明），由
-# 实现侧断言覆盖。
+# 判据：比值口径命中后标记驱逐且不再分配新作业；样本池不足两个样本时不构成
+# 判定、标记保持；已有作业跑到终态；空闲 Worker 不误判；warmup 门槛生效。
+# 恢复半段 E2E 不可达（设计已注明），由实现侧断言覆盖。
 #
 # 编排要点：
 # - 最新心跳吞吐为 0 的忙碌 Worker 走 busy-exempt 分支，不产生完成量就永远
@@ -145,9 +145,10 @@ until python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1])["worker
 done
 
 # Phase 5: wait for the idle worker's first pull to deliver its six queued
-# jobs, then let the warmup EWMA decay. With wf idle the sample pool drops
-# below two workers, which clears any earlier ws eviction mark — the eviction
-# asserted below is therefore the one caused by the load of Phase 6.
+# jobs, then let the warmup EWMA decay. The warmup load can already have marked
+# ws evicted; that mark is durable — a median sample pool below two workers
+# freezes judgement and never clears it — so this phase only settles the idle
+# worker. Phase 6 accepts either an existing mark or a new one.
 DEADLINE=$((SECONDS + 120))
 until worker_idle "$(worker_stats)" idle-worker 5; do
 	(( SECONDS < DEADLINE )) || fail "idle worker never completed 5 warmup jobs"
@@ -162,18 +163,22 @@ import json, sys
 s = json.loads(sys.argv[1])
 w = s["workers"]["idle-worker"]
 ok = w["ewma"] < 0.02 and w["jobs_per_sec"] == 0 and w["active"] == 0
-ok = ok and s["workers"].get("ws", {}).get("evicted") is False
 sys.exit(0 if ok else 1)
 ' "$(worker_stats)"; do
-	(( SECONDS < DEADLINE )) || fail "idle worker never settled into the idle range with ws un-evicted"
+	(( SECONDS < DEADLINE )) || fail "idle worker never settled into the idle range"
 	sleep 1
 done
 
 # Phase 6: keep the queue non-empty so wf and ws keep finishing short jobs,
-# then wait for the ratio judgement to evict ws. The idle worker's next pull is
-# far beyond this window, so its completed count cannot grow; past the warmup
-# gate the only protection from the ratio judgement is the idle sample
-# exclusion, and the EWMA assertion proves the worker was inside judging range.
+# then wait for the ratio judgement to hold with a non-zero median. ws may
+# already carry a mark from the warmup load — marks are durable — so the loop
+# accepts an existing mark once the idle worker has been measured against a
+# non-zero median. The idle worker's next pull is far beyond this window, so
+# its completed count cannot grow; past the warmup gate the only protection
+# from the ratio judgement is the idle sample exclusion, and the EWMA
+# assertion proves the worker was inside judging range. A median built only
+# from decayed tails (no pool member reported a completion) is not a
+# measurement and is skipped until wf reports a real throughput sample.
 EVICTED=0
 WS_COMPLETED=0
 MEASURED=0
@@ -197,7 +202,7 @@ assert idle["completed"] >= 5, "idle worker never passed the warmup gate: %r" % 
 assert idle["completed"] == expected, "idle worker was given jobs: %r" % idle
 assert idle["jobs_per_sec"] == 0 and idle["active"] == 0, "idle worker is not idle: %r" % idle
 assert idle["evicted"] is False, "idle worker wrongly evicted: %r" % idle
-if s["median"] <= 0:
+if s["median"] <= 0 or workers.get("wf", {}).get("jobs_per_sec", 0) <= 0:
     sys.exit(3)
 assert idle["ewma"] < s["median"] / 3, (
     "idle worker EWMA %r not below median/3 %r: idle exclusion not exercised"
@@ -220,20 +225,65 @@ done
 (( WS_COMPLETED >= 5 )) || fail "evicted worker had $WS_COMPLETED completed jobs; warmup gate violated"
 [[ "$MEASURED" == "1" ]] || fail "idle worker was never compared against a non-zero cluster median"
 
-# Phase 7: the evicted worker's spare slot must no longer receive work. The
-# queue left above keeps wf busy: the mark is cleared whenever fewer than two
-# workers remain in the median sample pool.
+# require_ws_evicted fails unless the panel still reports ws as evicted. Every
+# no-allocation observation below is gated on it, so a cleared mark can never
+# turn the assertion into a vacuous pass.
+require_ws_evicted() {
+	local stats
+	stats="$(worker_stats)" || fail "worker panel unavailable $1"
+	python3 -c '
+import json, sys
+w = json.loads(sys.argv[1])["workers"].get("ws") or {}
+sys.exit(0 if w.get("evicted") is True else 1)
+' "$stats" || fail "ws eviction mark was cleared $1"
+}
+
+# Phase 7: while ws carries the eviction mark, submitted jobs must not land on
+# it. The mark is only cleared by throughput recovery, so a median sample pool
+# too small to judge freezes it. Every observation is taken with the mark
+# asserted true: a clear fails the run instead of voiding the assertion.
 [[ "$(job_field "$LONG_JOB" status)" == "running" ]] ||
 	fail "parked job finished before the post-eviction phase; extend it"
+
+# Collapse the median sample pool: stop submitting and wait for wf to leave it
+# (two consecutive zero-throughput heartbeats) while ws holds its parked job.
+# The panel then reports a zero median — too few samples to judge — and the
+# mark must survive. Without this window the assertion below would not cover
+# the pool-collapse path that used to clear the mark.
+DEADLINE=$((SECONDS + 60))
+until python3 -c '
+import json, sys
+s = json.loads(sys.argv[1])
+ws = s["workers"].get("ws") or {}
+wf = s["workers"].get("wf") or {}
+ok = (ws.get("evicted") is True
+      and s.get("median") == 0
+      and wf.get("active") == 0
+      and wf.get("jobs_per_sec") == 0)
+sys.exit(0 if ok else 1)
+' "$(worker_stats)"; do
+	(( SECONDS < DEADLINE )) || fail "median sample pool never collapsed below two samples with ws evicted"
+	sleep 0.5
+done
+require_ws_evicted "while the median sample pool was too small to judge"
+
 POST_JOBS=()
-for i in 1 2 3; do POST_JOBS+=("$(submit_job "post-$i" "$FILE_ID")"); done
+for i in 1 2 3; do
+	require_ws_evicted "before submitting post-$i"
+	POST_JOBS+=("$(submit_job "post-$i" "$FILE_ID")")
+done
 for JOB in "${POST_JOBS[@]}"; do
 	DEADLINE=$((SECONDS + 90))
-	until W="$(job_field "$JOB" worker_name 2>/dev/null || true)" && [[ -n "$W" && "$W" != "None" ]]; do
+	W=""
+	until [[ -n "$W" && "$W" != "None" ]]; do
 		(( SECONDS < DEADLINE )) || fail "post-eviction job $JOB was never assigned"
+		W="$(job_field "$JOB" worker_name 2>/dev/null || true)"
+		require_ws_evicted "while post-eviction job $JOB awaited assignment"
+		[[ -n "$W" && "$W" != "None" ]] && break
 		sleep 0.5
 	done
 	[[ "$W" != "ws" ]] || fail "new job $JOB assigned to the evicted worker"
+	require_ws_evicted "after post-eviction job $JOB was assigned"
 done
 
 # Phase 8: eviction must not interrupt in-flight work.
