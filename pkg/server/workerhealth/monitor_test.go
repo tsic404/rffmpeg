@@ -659,7 +659,7 @@ func TestSlowNodeRecoveryViaMonitor(t *testing.T) {
 	}
 }
 
-func TestSlowNodeEvictionClearedWhenClusterShrinks(t *testing.T) {
+func TestSlowNodeEvictionPersistsWhenClusterShrinks(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
@@ -700,18 +700,19 @@ func TestSlowNodeEvictionClearedWhenClusterShrinks(t *testing.T) {
 		t.Fatal("Expected w3 to be evicted in DB")
 	}
 
-	// Cluster shrinks to a single worker: w1 and w2 leave.
+	// Cluster shrinks to a single worker: w1 and w2 leave. The remaining pool
+	// is too small to judge, which is not a recovery: w3 must stay evicted
+	// until its throughput actually recovers.
 	stateTable.RemoveWorker("w1")
 	stateTable.RemoveWorker("w2")
 
-	// Second detection must clear w3's DB eviction so it becomes schedulable.
 	monitor.detectSlowWorkers()
 	evicted, err := database.IsWorkerEvicted("w3")
 	if err != nil {
 		t.Fatalf("Failed to check eviction: %v", err)
 	}
-	if evicted {
-		t.Error("Expected w3 to no longer be evicted in DB after cluster shrink")
+	if !evicted {
+		t.Error("Expected w3 to remain evicted in DB after the cluster shrank below two samples")
 	}
 }
 

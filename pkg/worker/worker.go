@@ -435,9 +435,8 @@ func (w *Worker) pollAndProcess(ctx context.Context) {
 		// worker re-registers immediately so it re-enters the pool on the
 		// next tick instead of waiting out the 30s heartbeat clock (that gap
 		// left a transient worker_unavailable window for CLI submissions).
-		// Evicted is slow-node detection: re-registering would clear the
-		// eviction flag and flap the worker back into scheduling, so the
-		// exponential backoff stays.
+		// Evicted is slow-node detection; C-79 forbids a marked worker from
+		// re-registering, so the exponential backoff stays.
 		if IsPullConflict(err) {
 			if IsWorkerEvicted(err) {
 				w.backoffPullConflict(ctx, err)
@@ -1655,9 +1654,8 @@ func (w *Worker) sendHeartbeat() {
 	cancelledJobs, err := w.client.Heartbeat(status, activeJobIDs, jobsPerSec, completedJobs, gpuMetrics)
 	if err != nil {
 		log.Printf("Failed to send heartbeat: %v", err)
-		// An evicted worker must not re-register: re-registration clears the
-		// eviction flag and flaps a slow node back into scheduling. Other
-		// failures (server restart, network) trigger re-registration.
+		// An evicted worker must not re-register (C-79); other failures
+		// (server restart, network) trigger re-registration.
 		if IsWorkerEvicted(err) {
 			return
 		}
