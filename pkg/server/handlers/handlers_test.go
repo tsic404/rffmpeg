@@ -141,8 +141,8 @@ func registerTestWorkerWithID(t *testing.T, router *chi.Mux, workerID, name stri
 // TestPullWorkerJobs_EvictedPrecedesOffline verifies an evicted worker returns
 // the worker_evicted code even when it is also offline (RecoverState marks
 // every worker offline at startup). Checking offline first would let the
-// client treat it as a plain server restart and clear the eviction flag via
-// re-registration.
+// client treat it as a plain server restart and re-register, which C-79
+// forbids for a marked worker.
 func TestPullWorkerJobs_EvictedPrecedesOffline(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -1634,8 +1634,8 @@ func TestWorkerHeartbeatNonExistent(t *testing.T) {
 
 // TestWorkerHeartbeat_EvictedOfflineWorkerReturnsEvicted verifies a heartbeat
 // from an evicted worker that is also offline (RecoverState marks every worker
-// offline at startup) surfaces as worker_evicted, not 404: the client must skip
-// re-registration rather than clear the eviction flag.
+// offline at startup) surfaces as worker_evicted, not 404: the client must back
+// off rather than re-register, as C-79 requires for a marked worker.
 func TestWorkerHeartbeat_EvictedOfflineWorkerReturnsEvicted(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()

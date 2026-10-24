@@ -53,8 +53,7 @@ func TestPullJobs_Evicted(t *testing.T) {
 
 // TestPullJobs_UnknownConflictCode verifies a 409 pull carrying an
 // unrecognized code is treated conservatively as evicted (backoff), never as
-// offline (immediate re-registration): noise or a future code must not clear
-// an eviction flag.
+// offline (immediate re-registration, which C-79 forbids for a marked worker).
 func TestPullJobs_UnknownConflictCode(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
@@ -236,8 +235,8 @@ func TestPollAndProcess_OfflineConflictFailedReregisterBacksOff(t *testing.T) {
 // TestPollAndProcess_EvictedConflictBacksOffThenReregisters verifies that an
 // evicted (slow-node) 409 pull conflict backs off instead of re-registering
 // immediately, and only re-registers once the conflict persists past the
-// threshold — re-registering on eviction would clear the flag and flap a slow
-// node back into scheduling.
+// threshold; C-79 makes the backoff the canonical response, and the eventual
+// re-registration no longer changes the eviction mark.
 func TestPollAndProcess_EvictedConflictBacksOffThenReregisters(t *testing.T) {
 	var mu sync.Mutex
 	registrations := 0
@@ -365,9 +364,9 @@ func TestPollAndProcess_EvictedConflictResetsOnSuccess(t *testing.T) {
 }
 
 // TestSendHeartbeat_EvictedSkipsReregistration verifies that a heartbeat
-// rejected with worker_evicted does not trigger re-registration: re-registering
-// clears the eviction flag and flaps a slow node back into scheduling, so the
-// heartbeat path must skip it (matching the pull path's backoff).
+// rejected with worker_evicted does not trigger re-registration: C-79 forbids
+// a marked worker from re-registering, so the heartbeat path must skip it
+// (matching the pull path's backoff).
 func TestSendHeartbeat_EvictedSkipsReregistration(t *testing.T) {
 	var mu sync.Mutex
 	registrations := 0

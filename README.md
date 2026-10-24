@@ -1116,9 +1116,9 @@ cluster_median_throughput/3`，`worker_eviction_events` 新增 `event_type=evict
 
 驱逐期间 slow 从可调度池（`GetSchedulableWorkers`，过滤 `evicted=1`）移除：调度不再选中它，其 pull 返回
 409 `worker_evicted`（`GET /api/v1/workers` 仍列出该行，`active_only` 只过滤 offline）。正在执行的作业
-正常跑完——驱逐不强制迁移运行中作业（那是心跳超时迁移的职责）。注意 worker 自身对连续 409 有**有界回退**：
-约 61s（7 次退避）后会 re-register 一次，注册会清掉驱逐标记，因此「不再收到新作业」只在该窗口内成立；
-判定门槛的断言应以审计事件与 `health.ewma_jobs_per_sec` 为准。
+正常跑完——驱逐不强制迁移运行中作业（那是心跳超时迁移的职责）。worker 自身对连续 409 有**有界回退**：
+约 61s（7 次退避）后会 re-register 一次，但重注册不再改变驱逐标记，标记只由吞吐恢复清除，
+因此「不再收到新作业」在整段时间内成立；判定门槛的断言应以审计事件与 `health.ewma_jobs_per_sec` 为准。
 
 #### B. 真实慢编码器（验证测量链路）
 

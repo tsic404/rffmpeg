@@ -243,6 +243,8 @@ func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 // DetectSlowWorkers scans all worker states, computes the cluster median of EWMA-smoothed
 // throughput, and marks workers as evicted if their throughput is below median/SlowNodeThreshold.
 // Previously evicted workers are recovered if their throughput exceeds median/RecoveryThreshold.
+// With fewer than two samples in the median pool no judgement is made and eviction state is left
+// untouched, so a mark is only ever cleared by throughput recovery.
 // A worker with no active jobs and zero throughput in its latest heartbeat is never marked slow:
 // its EWMA is a decay tail of measurement absence, not a current rate. Pool membership is a
 // separate decision made by medianSample — one zero sample stays in the pool, consecutive zeros
@@ -256,18 +258,11 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 	eligibleWorkers, throughputs := medianSample(activeWorkers)
 
 	if len(throughputs) < 2 {
-		// Not enough data to compute a meaningful median; clear eviction on all
-		// active workers. Report previously evicted workers as recovered so the
-		// monitor syncs the DB — otherwise a worker is stuck with its DB eviction
-		// flag set (excluded from scheduling) while showing an idle status.
-		var recovered []string
-		for _, w := range activeWorkers {
-			if st, ok := t.states[w.id]; ok && st.Evicted {
-				st.Evicted = false
-				recovered = append(recovered, w.id)
-			}
-		}
-		return SlowNodeDetectionResult{Recovered: recovered, Median: 0}
+		// Too few samples for a median: no worker can be judged, and eviction
+		// state is frozen. Clearing marks here would return a worker to the
+		// scheduling pool on a sampling gap rather than on a recovered
+		// throughput — the only path allowed to clear a mark.
+		return SlowNodeDetectionResult{Median: 0}
 	}
 
 	// Compute median

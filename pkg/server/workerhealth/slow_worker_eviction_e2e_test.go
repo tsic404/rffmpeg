@@ -337,3 +337,106 @@ func TestSlowWorkerEvictionE2E_IdleClusterKeepsHealthyWorker(t *testing.T) {
 		t.Errorf("ClusterMedian = %f, want %f (idle worker must not seed the median)", got, wantMedian)
 	}
 }
+
+// TestSlowWorkerEvictionE2E_PoolCollapseKeepsEviction pins the exclusivity of
+// the recovery path: an evicted worker stays evicted when the median sample
+// pool drops below two samples. Clearing the mark there would return the
+// worker to scheduling on a sampling gap instead of a throughput recovery.
+func TestSlowWorkerEvictionE2E_PoolCollapseKeepsEviction(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	for _, w := range []struct{ id, name string }{
+		{"worker-fast", "fast-worker"},
+		{"worker-slow", "slow-worker"},
+	} {
+		if _, err := database.CreateWorker(w.id, w.name, protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "n9.0.1",
+			MaxConcurrent: 1,
+		}); err != nil {
+			t.Fatalf("Failed to create worker %s: %v", w.id, err)
+		}
+	}
+
+	stateTable := NewWorkerStateTable(30 * time.Second)
+	for i := 1; i <= 8; i++ {
+		now := time.Now()
+		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "worker-fast", Status: string(protocol.WorkerStatusBusy),
+			JobsPerSec: 1.5, ActiveJobs: []string{"job-fast"}, CompletedJobs: i, Timestamp: now,
+		})
+		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "worker-slow", Status: string(protocol.WorkerStatusBusy),
+			JobsPerSec: 0.1, ActiveJobs: []string{"job-slow"}, CompletedJobs: i, Timestamp: now,
+		})
+	}
+
+	monitor := New(database, Config{
+		HeartbeatTimeout:    30 * time.Second,
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 1 * time.Second,
+		MaxRetryCount:       3,
+	})
+	mockSched := &mockScheduler{}
+	monitor.SetScheduler(mockSched)
+	monitor.SetStateTable(stateTable)
+
+	monitor.detectSlowWorkers()
+	if evicted, err := database.IsWorkerEvicted("worker-slow"); err != nil || !evicted {
+		t.Fatalf("Precondition: worker-slow should be evicted, evicted=%v err=%v", evicted, err)
+	}
+
+	// The healthy worker drains and leaves the median sample pool after two
+	// consecutive zero-throughput heartbeats; the evicted worker still holds
+	// its long job, so it is the pool's only remaining sample.
+	for range MinZeroSamplesForIdle + 1 {
+		now := time.Now()
+		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "worker-fast", Status: "online",
+			JobsPerSec: 0, CompletedJobs: 30, Timestamp: now,
+		})
+		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "worker-slow", Status: string(protocol.WorkerStatusBusy),
+			JobsPerSec: 0, ActiveJobs: []string{"job-slow"}, CompletedJobs: 30, Timestamp: now,
+		})
+	}
+	if median := stateTable.ClusterMedian(); median != 0 {
+		t.Fatalf("Precondition: expected a collapsed sample pool (median 0), got %f", median)
+	}
+
+	mockSched.rescheduleCalled = false
+	monitor.detectSlowWorkers()
+
+	// 1. The mark survives the collapse: no recovery without recovered throughput.
+	if evicted, err := database.IsWorkerEvicted("worker-slow"); err != nil {
+		t.Fatalf("Failed to check eviction after pool collapse: %v", err)
+	} else if !evicted {
+		t.Error("Expected worker-slow to stay evicted while the sample pool is too small to judge")
+	}
+
+	// 2. No recovery audit event was written for the collapsed cycle.
+	events, err := database.GetEvictionEventsByWorker("worker-slow", 10)
+	if err != nil {
+		t.Fatalf("Failed to get eviction events for worker-slow: %v", err)
+	}
+	if len(events) == 0 || events[0].EventType != db.EvictionEventEvicted {
+		t.Errorf("Expected the newest event to remain 'evicted', got %+v", events)
+	}
+
+	// 3. No state change means no reschedule is triggered.
+	if mockSched.rescheduleCalled {
+		t.Error("Expected no reschedule when the eviction state is unchanged")
+	}
+
+	// 4. The evicted worker is still out of the schedulable pool.
+	schedulable, err := database.GetSchedulableWorkers()
+	if err != nil {
+		t.Fatalf("Failed to get schedulable workers: %v", err)
+	}
+	for _, w := range schedulable {
+		if w.ID == "worker-slow" {
+			t.Error("Evicted worker-slow must not re-enter the schedulable pool on pool collapse")
+		}
+	}
+}

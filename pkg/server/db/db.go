@@ -1228,13 +1228,13 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 }
 
 // CreateOrUpdateWorker creates a new worker or updates an existing one on
-// re-registration. If the id exists, it updates capabilities, resets status to
-// idle, and clears eviction flags. If the id is new but the name matches stale
-// residue of the same logical worker (an offline row, or a live row whose
-// heartbeat expired after a crash), that stale row is deleted first so a
-// process restart (fresh UUID, same name) overwrites it instead of forking a
-// duplicate. Live same-name rows with a fresh heartbeat are never deleted.
-// heartbeatTimeout is the freshness window; <=0 deletes only offline residue.
+// re-registration: an existing id gets fresh capabilities and status idle, with
+// any eviction flag preserved — clearing a mark belongs to the throughput
+// recovery path alone (C-79, C-118). A new id whose name matches stale residue
+// of the same logical worker (offline row, or live row with an expired
+// heartbeat) replaces that row instead of forking a duplicate; live same-name
+// rows with a fresh heartbeat are never deleted. heartbeatTimeout is the
+// freshness window; <=0 deletes only offline residue.
 func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCapabilities, heartbeatTimeout time.Duration) (*Worker, error) {
 	// normalize on the write path too, so the same logical UUID
 	// reported in different formats (hyphenated vs. compact, case, whitespace)
@@ -1271,11 +1271,14 @@ func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCap
 		gpuModel = caps.GPUModel
 	}
 
-	// Try UPDATE first (handles re-registration after server restart)
+	// Try UPDATE first (handles re-registration after server restart). The
+	// eviction flag is deliberately left untouched: a slow node that
+	// re-registers must not slip back into scheduling — only throughput
+	// recovery clears the mark.
 	result, err := d.db.Exec(`
 		UPDATE workers SET name=?, status=?, gpu_model=?, encoders=?, decoders=?,
 		video_encoders=?, video_decoders=?, gpu_devices=?, ffmpeg_version=?, max_concurrent=?,
-		evicted=0, evicted_at=NULL, hwaccels=?, codecs=?, filters=?, pix_fmts=?, formats=?,
+		hwaccels=?, codecs=?, filters=?, pix_fmts=?, formats=?,
 		last_heartbeat=? WHERE id=?
 	`, name, protocol.WorkerStatusIdle, gpuModel,
 		string(encodersJSON), string(decodersJSON),

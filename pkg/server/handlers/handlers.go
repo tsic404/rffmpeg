@@ -1179,9 +1179,9 @@ func (h *Handler) WorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, protocol.ErrWorkerNotFound) {
 			// The worker is offline (or gone). RecoverState marks every worker
 			// offline at startup, so an evicted slow node also lands here; its
-			// heartbeat must surface as evicted (not 404) so the client skips
-			// re-registration — re-registration clears the eviction flag and
-			// flaps the slow node back into scheduling.
+			// heartbeat must surface as evicted (not 404) so the client backs
+			// off instead of re-registering, which C-79 forbids for a marked
+			// worker.
 			if worker, gErr := h.db.GetWorker(req.WorkerID); gErr == nil && worker.Evicted {
 				writeError(w, http.StatusConflict, protocol.NewProtocolError(
 					protocol.ErrCodeWorkerEvicted, "Worker is evicted from scheduling", nil,
@@ -1258,8 +1258,7 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 	// (slow-node) worker gets no new work at all. Eviction is checked first:
 	// RecoverState marks every worker offline at startup, so a slow node that
 	// was evicted before the restart must still surface as evicted (not
-	// offline) — otherwise the worker would clear its eviction flag via
-	// re-registration and flap back into scheduling.
+	// offline), because C-79 forbids a marked worker from re-registering.
 	worker, err := h.db.GetWorker(workerID)
 	if err != nil {
 		if errors.Is(err, protocol.ErrWorkerNotFound) {

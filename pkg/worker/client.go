@@ -44,9 +44,8 @@ var ErrPullConflict = errors.New("worker offline or evicted from scheduling")
 func IsPullConflict(err error) bool { return errors.Is(err, ErrPullConflict) }
 
 // ErrWorkerEvicted marks the evicted (slow-node) case reported by the server
-// via the pull or heartbeat endpoints. An evicted worker must not re-register:
-// re-registration clears the eviction flag and flaps a slow node back into
-// scheduling.
+// via the pull or heartbeat endpoints. An evicted worker must not re-register
+// (C-79): the mark is only cleared by throughput recovery.
 var ErrWorkerEvicted = errors.New("worker evicted from scheduling")
 
 // IsWorkerEvicted reports whether err indicates slow-node eviction (as opposed
@@ -249,7 +248,7 @@ func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 			// recover by re-registering) and evicted (slow node — back off). The
 			// response code distinguishes them; an undecodable body or an unknown
 			// code is treated as evicted (conservative backoff) rather than
-			// offline, so noise never clears an eviction flag via re-registration.
+			// offline, since C-79 forbids a marked worker from re-registering.
 			var errResp protocol.ErrorResponse
 			if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
 				return nil, fmt.Errorf("%w: %w: pull jobs failed with status: %d (undecodable body)", ErrPullConflict, ErrWorkerEvicted, resp.StatusCode)

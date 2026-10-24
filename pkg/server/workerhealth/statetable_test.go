@@ -568,7 +568,7 @@ func TestDetectSlowWorkers_SingleWorker(t *testing.T) {
 	}
 }
 
-func TestDetectSlowWorkers_SingleWorkerClearsEviction(t *testing.T) {
+func TestDetectSlowWorkers_PoolCollapseKeepsEviction(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 
 	// Two workers: w2 is slow and gets evicted.
@@ -584,19 +584,21 @@ func TestDetectSlowWorkers_SingleWorkerClearsEviction(t *testing.T) {
 		t.Fatalf("expected w2 to be evicted, got %v", result.NewlyEvicted)
 	}
 
-	// Cluster shrinks to a single worker (w1 leaves).
+	// The median sample pool collapses to a single worker (w1 leaves). Too few
+	// samples to judge means no decision at all: the mark must survive, since
+	// only throughput recovery may clear it.
 	table.RemoveWorker("w1")
 
-	// The single remaining worker must have its eviction cleared and be
-	// reported as recovered so the monitor can sync the DB.
 	result = table.DetectSlowWorkers()
-	if len(result.Recovered) != 1 || result.Recovered[0] != "w2" {
-		t.Fatalf("expected w2 to be reported recovered, got %v", result.Recovered)
+	if len(result.Recovered) != 0 {
+		t.Fatalf("pool collapse must not report recovery, got %v", result.Recovered)
 	}
-
+	if result.Median != 0 {
+		t.Errorf("expected no median with fewer than two samples, got %f", result.Median)
+	}
 	state, _ := table.Get("w2")
-	if state.Evicted {
-		t.Error("w2 should no longer be evicted")
+	if !state.Evicted {
+		t.Error("w2 eviction mark must persist while the sample pool is too small to judge")
 	}
 }
 
