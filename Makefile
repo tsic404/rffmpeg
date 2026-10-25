@@ -43,7 +43,7 @@ build-cli: ## Build CLI component
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_CLI) $(CMD_CLI)
 
 # Test media generation
-.PHONY: generate-test-media setup-testdata
+.PHONY: generate-test-media
 
 generate-test-media: ## Generate test media files for QA testing
 	@echo "Generating test media files..."
@@ -55,9 +55,6 @@ generate-test-media: ## Generate test media files for QA testing
 		-shortest \
 		test_data/test-720p.mp4
 	@echo "test-720p.mp4 generated successfully."
-
-setup-testdata: ## Setup test data directories for QA testing
-	@./scripts/setup-testdata.sh
 
 # QA Test Infrastructure targets (S8.1/S8.2)
 .PHONY: start-http-fileserver start-rtmp-server
