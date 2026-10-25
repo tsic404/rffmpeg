@@ -1622,12 +1622,13 @@ func (d *Database) MarkOfflineWorkers(heartbeatTimeout time.Duration) (int64, er
 }
 
 // RemoveOfflineWorkers removes offline workers whose last_heartbeat predates
-// the cutoff (now - offlineThreshold) and returns their IDs so callers can
-// evict them from in-memory state (the WorkerStateTable) — stale table entries
-// previously kept feeding dead nodes into slow-node median calculations.
-// MarkOfflineWorkers does not reset last_heartbeat, so the threshold is
-// measured from the last heartbeat, not from when the worker was marked
-// offline.
+// the cutoff and returns their IDs so callers can drop them from the
+// in-memory state table (stale entries otherwise feed dead nodes into
+// slow-node medians). MarkOfflineWorkers does not reset last_heartbeat.
+// Evicted records are exempt: a marked worker cannot heartbeat its record
+// fresh, so sweeping it here would drop the mark and let the process
+// re-register as a brand-new worker. The row lives until an operator clears
+// the mark or a new process registers under the same name.
 func (d *Database) RemoveOfflineWorkers(offlineThreshold time.Duration) ([]string, error) {
 	cutoff := time.Now().Add(-offlineThreshold)
 
@@ -1643,7 +1644,7 @@ func (d *Database) RemoveOfflineWorkers(offlineThreshold time.Duration) ([]strin
 
 	rows, err := tx.Query(`
 		SELECT id FROM workers
-		WHERE status = ? AND last_heartbeat < ?
+		WHERE status = ? AND last_heartbeat < ? AND evicted = 0
 	`, protocol.WorkerStatusOffline, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query removed workers: %w", err)
@@ -1666,7 +1667,7 @@ func (d *Database) RemoveOfflineWorkers(offlineThreshold time.Duration) ([]strin
 
 	result, err := tx.Exec(`
 		DELETE FROM workers
-		WHERE status = ? AND last_heartbeat < ?
+		WHERE status = ? AND last_heartbeat < ? AND evicted = 0
 	`, protocol.WorkerStatusOffline, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("failed to remove offline workers: %w", err)
@@ -2187,9 +2188,10 @@ func (d *Database) RecoverState() (jobsReset int64, workersMarkedOffline int64, 
 // Fresh-heartbeat workers (a live process that survived a restart) are
 // preserved — they re-register and are recreated as idle. Deleting only
 // genuinely stale rows is what makes this lazy versus delete-everything.
+// Evicted records are exempt for the reason documented on RemoveOfflineWorkers.
 func (d *Database) RemoveStaleWorkers(staleThreshold time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-staleThreshold)
-	result, err := d.db.Exec(`DELETE FROM workers WHERE last_heartbeat < ?`, cutoff)
+	result, err := d.db.Exec(`DELETE FROM workers WHERE last_heartbeat < ? AND evicted = 0`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("failed to remove stale workers: %w", err)
 	}

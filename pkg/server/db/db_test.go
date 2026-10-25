@@ -300,7 +300,17 @@ func TestRemoveOfflineWorkers(t *testing.T) {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 
-	// Mark worker offline first
+	// An evicted worker whose heartbeat has also gone stale: its record is the
+	// only place the eviction mark lives, so it must outlive the sweep.
+	evicted, err := database.CreateWorker("", "evicted-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create evicted worker: %v", err)
+	}
+	if err := database.MarkWorkerEvicted(evicted.ID); err != nil {
+		t.Fatalf("Failed to mark worker evicted: %v", err)
+	}
+
+	// Mark workers offline first
 	_, err = database.MarkOfflineWorkers(0)
 	if err != nil {
 		t.Fatalf("Failed to mark worker offline: %v", err)
@@ -316,13 +326,23 @@ func TestRemoveOfflineWorkers(t *testing.T) {
 	}
 
 	if len(removedIDs) != 1 {
-		t.Errorf("Expected 1 worker to be removed, got %d", len(removedIDs))
+		t.Errorf("Expected 1 worker to be removed, got %d (%v)", len(removedIDs), removedIDs)
 	}
 
 	// Verify worker is gone
 	_, err = database.GetWorker(worker.ID)
 	if err != protocol.ErrWorkerNotFound {
 		t.Errorf("Expected ErrWorkerNotFound, got %v", err)
+	}
+
+	// The evicted row survives, mark intact: deleting it would erase the mark
+	// without any recovery, and the process would re-register as a new worker.
+	survivor, err := database.GetWorker(evicted.ID)
+	if err != nil {
+		t.Fatalf("Evicted worker record was swept: %v", err)
+	}
+	if !survivor.Evicted {
+		t.Error("Evicted worker record survived the sweep but lost its mark")
 	}
 }
 
@@ -780,10 +800,21 @@ func TestRemoveStaleWorkers(t *testing.T) {
 		t.Fatalf("Failed to create live worker: %v", err)
 	}
 
+	// An evicted worker whose heartbeat is just as stale as the removed rows:
+	// its record carries the only copy of the mark, which a restart longer than
+	// the threshold would otherwise erase.
+	evicted, err := database.CreateWorker("evicted-1", "evicted-worker", caps)
+	if err != nil {
+		t.Fatalf("Failed to create evicted worker: %v", err)
+	}
+	if err := database.MarkWorkerEvicted(evicted.ID); err != nil {
+		t.Fatalf("Failed to mark worker evicted: %v", err)
+	}
+
 	// Backdate the two stale workers' heartbeats past the threshold; the
 	// live worker's heartbeat is fresh.
 	backdated := time.Now().Add(-10 * time.Minute)
-	for _, id := range []string{stale1.ID, stale2.ID} {
+	for _, id := range []string{stale1.ID, stale2.ID, evicted.ID} {
 		if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`, backdated, id); err != nil {
 			t.Fatalf("Failed to backdate %s heartbeat: %v", id, err)
 		}
@@ -807,6 +838,16 @@ func TestRemoveStaleWorkers(t *testing.T) {
 	// Fresh-heartbeat workers are untouched.
 	if _, err := database.GetWorker(live.ID); err != nil {
 		t.Errorf("Expected live worker to survive cleanup, got %v", err)
+	}
+
+	// The evicted record is exempt regardless of heartbeat age: dropping it
+	// lets the process re-register as a new worker and lose the mark.
+	survivor, err := database.GetWorker(evicted.ID)
+	if err != nil {
+		t.Fatalf("Evicted worker record was swept: %v", err)
+	}
+	if !survivor.Evicted {
+		t.Error("Evicted worker record survived the sweep but lost its mark")
 	}
 
 	// Idempotent: a second sweep removes nothing.
