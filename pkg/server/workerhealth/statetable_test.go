@@ -2,6 +2,7 @@ package workerhealth
 
 import (
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -622,38 +623,67 @@ func TestDetectSlowWorkers_Recovery(t *testing.T) {
 		t.Fatalf("expected w3 to be evicted initially, got %v", result.NewlyEvicted)
 	}
 
-	// Now simulate w3 recovering: throughput improves to 80
+	// Now simulate w3 recovering: throughput improves to 80. One EWMA update
+	// lands at 0.4*80 + 0.6*10 = 38 while the cluster median stays at 100, so
+	// w3 is still below median/RecoveryThreshold ≈ 66.7 and must stay evicted:
+	// only reaching that ratio may clear the mark.
 	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 		WorkerID: "w3", Status: "online", JobsPerSec: 80, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 	})
 
-	// After EWMA smoothing: 0.4*80 + 0.6*10 = 32 + 6 = 38 (not enough for recovery yet)
-	// Run detection again
 	result2 := table.DetectSlowWorkers()
-	// EWMA=38, median of [100, 110, 38] = 100, 38 < 100/3=33.3? No, 38 > 33.3 → w3 might recover
-	// Actually wait: 38 < 100/1.5=66.7? Yes. And 38 > 100/3=33.3? Yes.
-	// So w3 is still evicted but hasn't fully recovered
-	_ = result2
+	if result2.Median <= 0 {
+		t.Fatalf("expected a positive median to judge recovery against, got %f", result2.Median)
+	}
+	recoveryThreshold2 := result2.Median / RecoveryThreshold
+	state2, ok := table.Get("w3")
+	if !ok {
+		t.Fatal("expected w3 to exist")
+	}
+	if state2.EWMAJobsPerSec >= recoveryThreshold2 {
+		t.Fatalf("expected w3 EWMA %f below recovery threshold %f (median %f / %.1f)",
+			state2.EWMAJobsPerSec, recoveryThreshold2, result2.Median, RecoveryThreshold)
+	}
+	if !state2.Evicted {
+		t.Errorf("w3 EWMA %f is below median/%.1f = %f; eviction mark must persist",
+			state2.EWMAJobsPerSec, RecoveryThreshold, recoveryThreshold2)
+	}
+	if slices.Contains(result2.Recovered, "w3") {
+		t.Errorf("w3 must not be recovered while EWMA %f is below median/%.1f = %f, got %v",
+			state2.EWMAJobsPerSec, RecoveryThreshold, recoveryThreshold2, result2.Recovered)
+	}
 
 	// Simulate several more heartbeats at 80 to bring EWMA up
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
 			WorkerID: "w3", Status: "online", JobsPerSec: 80, Timestamp: time.Now(), CompletedJobs: MinJobsForEviction,
 		})
 	}
 
-	// Now EWMA should be close to 80
+	// EWMA is now close to 80, which has crossed median/RecoveryThreshold.
 	result3 := table.DetectSlowWorkers()
-	if len(result3.NewlyEvicted) != 0 {
-		t.Errorf("expected w3 to recover, got evicted: %v", result3.NewlyEvicted)
+	if result3.Median <= 0 {
+		t.Fatalf("expected a positive median to judge recovery against, got %f", result3.Median)
 	}
-	if len(result3.Recovered) != 1 || result3.Recovered[0] != "w3" {
-		t.Errorf("expected w3 to be in recovered list, got %v", result3.Recovered)
+	recoveryThreshold3 := result3.Median / RecoveryThreshold
+	state3, ok := table.Get("w3")
+	if !ok {
+		t.Fatal("expected w3 to exist")
 	}
-
-	state3, _ := table.Get("w3")
+	if state3.EWMAJobsPerSec < recoveryThreshold3 {
+		t.Fatalf("expected w3 EWMA %f to have crossed recovery threshold %f (median %f / %.1f)",
+			state3.EWMAJobsPerSec, recoveryThreshold3, result3.Median, RecoveryThreshold)
+	}
+	if !slices.Contains(result3.Recovered, "w3") {
+		t.Errorf("w3 EWMA %f reached median/%.1f = %f; expected it in recovered list, got %v",
+			state3.EWMAJobsPerSec, RecoveryThreshold, recoveryThreshold3, result3.Recovered)
+	}
 	if state3.Evicted {
-		t.Error("w3 should have recovered (no longer evicted)")
+		t.Errorf("w3 EWMA %f reached median/%.1f = %f; eviction mark must be cleared",
+			state3.EWMAJobsPerSec, RecoveryThreshold, recoveryThreshold3)
+	}
+	if slices.Contains(result3.NewlyEvicted, "w3") {
+		t.Errorf("expected w3 to recover, got re-evicted: %v", result3.NewlyEvicted)
 	}
 }
 
