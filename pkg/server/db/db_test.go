@@ -1176,7 +1176,7 @@ func TestHeartbeatAndStatusNormalizeUUID(t *testing.T) {
 	if !evicted {
 		t.Error("Expected worker evicted via compact ID")
 	}
-	if err := database.ClearWorkerEviction(compact); err != nil {
+	if _, err := database.ClearWorkerEviction(compact, 0, 0, db.EvictionReasonManualClear); err != nil {
 		t.Fatalf("Compact-format eviction clear rejected: %v", err)
 	}
 }

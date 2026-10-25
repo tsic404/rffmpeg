@@ -421,7 +421,7 @@ func TestSlowNodeEvictionDB(t *testing.T) {
 	}
 
 	// Clear w2 eviction
-	if err := database.ClearWorkerEviction("w2"); err != nil {
+	if _, err := database.ClearWorkerEviction("w2", 0, 0, db.EvictionReasonManualClear); err != nil {
 		t.Fatalf("Failed to clear eviction: %v", err)
 	}
 

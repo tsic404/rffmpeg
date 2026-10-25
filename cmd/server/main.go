@@ -375,6 +375,9 @@ func main() {
 		r.Get("/config", adminHandler.GetConfig)
 		r.Patch("/config", adminHandler.UpdateConfig)
 		r.Get("/metrics", adminHandler.GetMetrics)
+		// Single-object eviction release: the only exit for a worker whose
+		// throughput recovery is unreachable (post-restart, idle).
+		r.Post("/workers/eviction/clear", adminHandler.ClearWorkerEviction)
 	})
 
 	// Root-level health check for monitoring tools (load balancers, orchestrators)

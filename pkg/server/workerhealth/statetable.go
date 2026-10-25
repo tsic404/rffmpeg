@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
 )
 
 // WorkerStateTable maintains an in-memory map of worker states
@@ -34,17 +35,24 @@ func NewWorkerStateTable(offlineTimeout time.Duration) *WorkerStateTable {
 
 // UpdateFromHeartbeat updates or inserts a worker state from a heartbeat payload.
 // Computes EWMA-smoothed throughput if the worker already has a previous EWMA value.
+//
+// The table is keyed by the canonical worker identity: heartbeats may carry a
+// compact or upper-case UUID for the same worker, while the panel and a manual
+// clear address the database's canonical id. Keying on the raw payload id would
+// file a non-canonical sample under a second key, so a mark cleared for the
+// worker never reaches it and the panel loses that worker's live metrics.
 func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatPayload) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	state, exists := t.states[payload.WorkerID]
+	workerID := db.NormalizeWorkerID(payload.WorkerID)
+	state, exists := t.states[workerID]
 	if !exists {
 		state = &protocol.WorkerState{
-			WorkerID:  payload.WorkerID,
+			WorkerID:  workerID,
 			StartedAt: payload.Timestamp,
 		}
-		t.states[payload.WorkerID] = state
+		t.states[workerID] = state
 	}
 
 	state.Status = payload.Status
@@ -91,12 +99,26 @@ func (t *WorkerStateTable) UpdateFromHeartbeat(payload protocol.WorkerHeartbeatP
 	}
 }
 
-// Get returns the state for a worker.
+// Get returns the state for a worker. The id is canonicalized like the write
+// path, so a compact or upper-case UUID reaches the entry its heartbeat built.
 func (t *WorkerStateTable) Get(workerID string) (*protocol.WorkerState, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	state, ok := t.states[workerID]
+	state, ok := t.states[db.NormalizeWorkerID(workerID)]
 	return state, ok
+}
+
+// ClearEviction drops a worker's in-memory eviction mark after the operator
+// cleared it. Leaving the mark set would freeze the next judgement on the
+// recovery branch, so a worker whose throughput is still below the eviction
+// threshold could never be re-evicted (C-120). The id is canonicalized so the
+// clear reaches the same entry the heartbeats populated.
+func (t *WorkerStateTable) ClearEviction(workerID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if state, ok := t.states[db.NormalizeWorkerID(workerID)]; ok {
+		state.Evicted = false
+	}
 }
 
 // GetAll returns all worker states.
@@ -131,11 +153,12 @@ func (t *WorkerStateTable) ScanOffline() []string {
 	return offlineIDs
 }
 
-// RemoveWorker removes a worker from the table.
+// RemoveWorker removes a worker from the table. The id is canonicalized like
+// every other lookup, so the removal reaches the entry the heartbeats built.
 func (t *WorkerStateTable) RemoveWorker(workerID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.states, workerID)
+	delete(t.states, db.NormalizeWorkerID(workerID))
 }
 
 // SlowNodeThreshold is the factor by which a worker's EWMA throughput must be below
@@ -244,7 +267,7 @@ func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 // throughput, and marks workers as evicted if their throughput is below median/SlowNodeThreshold.
 // Previously evicted workers are recovered if their throughput exceeds median/RecoveryThreshold.
 // With fewer than two samples in the median pool no judgement is made and eviction state is left
-// untouched, so a mark is only ever cleared by throughput recovery.
+// untouched: only throughput recovery or an operator's manual clear releases a mark.
 // A worker with no active jobs and zero throughput in its latest heartbeat is never marked slow:
 // its EWMA is a decay tail of measurement absence, not a current rate. Pool membership is a
 // separate decision made by medianSample — one zero sample stays in the pool, consecutive zeros
@@ -261,7 +284,7 @@ func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 		// Too few samples for a median: no worker can be judged, and eviction
 		// state is frozen. Clearing marks here would return a worker to the
 		// scheduling pool on a sampling gap rather than on a recovered
-		// throughput — the only path allowed to clear a mark.
+		// throughput — a judgement never releases a mark.
 		return SlowNodeDetectionResult{Median: 0}
 	}
 
