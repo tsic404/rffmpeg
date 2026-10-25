@@ -45,7 +45,8 @@ func IsPullConflict(err error) bool { return errors.Is(err, ErrPullConflict) }
 
 // ErrWorkerEvicted marks the evicted (slow-node) case reported by the server
 // via the pull or heartbeat endpoints. An evicted worker must not re-register
-// (C-79): the mark is only cleared by throughput recovery.
+// (C-79): the mark is released by throughput recovery or an operator's manual
+// clear, never by the worker itself.
 var ErrWorkerEvicted = errors.New("worker evicted from scheduling")
 
 // IsWorkerEvicted reports whether err indicates slow-node eviction (as opposed

@@ -212,24 +212,21 @@ func (m *Monitor) detectSlowWorkers() {
 		log.Printf("Worker %s evicted: EWMA=%.2f, median=%.2f", workerID, state.EWMAJobsPerSec, result.Median)
 	}
 
-	// Sync recovery to DB and record audit events
+	// Sync recovery to DB and record the audit event. Both clear paths pass
+	// their own reason: this one is throughput recovery, a manual operator
+	// clear records db.EvictionReasonManualClear (C-90 keeps them apart).
 	for _, workerID := range result.Recovered {
-		if err := m.db.ClearWorkerEviction(workerID); err != nil {
-			log.Printf("Failed to clear eviction for worker %s in DB: %v", workerID, err)
-		}
 		state, ok := m.stateTable.Get(workerID)
 		if !ok {
 			continue
 		}
-		reason := "worker EWMA throughput recovered within cluster median threshold"
-		if _, err := m.db.CreateEvictionEvent(
+		if _, err := m.db.ClearWorkerEviction(
 			workerID,
-			db.EvictionEventRecovered,
 			state.EWMAJobsPerSec,
 			result.Median,
-			reason,
+			db.EvictionReasonThroughputRecovered,
 		); err != nil {
-			log.Printf("Failed to create recovery audit event for worker %s: %v", workerID, err)
+			log.Printf("Failed to clear eviction for worker %s in DB: %v", workerID, err)
 		}
 		log.Printf("Worker %s recovered: EWMA=%.2f, median=%.2f", workerID, state.EWMAJobsPerSec, result.Median)
 	}

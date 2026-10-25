@@ -1229,12 +1229,12 @@ func (d *Database) CreateWorker(id, name string, caps protocol.WorkerCapabilitie
 
 // CreateOrUpdateWorker creates a new worker or updates an existing one on
 // re-registration: an existing id gets fresh capabilities and status idle, with
-// any eviction flag preserved — clearing a mark belongs to the throughput
-// recovery path alone (C-79, C-118). A new id whose name matches stale residue
-// of the same logical worker (offline row, or live row with an expired
-// heartbeat) replaces that row instead of forking a duplicate; live same-name
-// rows with a fresh heartbeat are never deleted. heartbeatTimeout is the
-// freshness window; <=0 deletes only offline residue.
+// any eviction flag preserved — releasing a mark belongs to throughput recovery
+// or an operator's manual clear (C-79, C-118). A new id whose name matches
+// stale residue of the same logical worker (offline row, or live row with an
+// expired heartbeat) replaces that row instead of forking a duplicate; live
+// same-name rows with a fresh heartbeat are never deleted. heartbeatTimeout is
+// the freshness window; <=0 deletes only offline residue.
 func (d *Database) CreateOrUpdateWorker(id, name string, caps protocol.WorkerCapabilities, heartbeatTimeout time.Duration) (*Worker, error) {
 	// normalize on the write path too, so the same logical UUID
 	// reported in different formats (hyphenated vs. compact, case, whitespace)
@@ -3484,23 +3484,94 @@ func (d *Database) MarkWorkerEvicted(workerID string) error {
 	return nil
 }
 
-// ClearWorkerEviction clears the eviction flag on a worker (recovery).
-func (d *Database) ClearWorkerEviction(workerID string) error {
+// ClearWorkerEviction releases a worker's eviction mark and records the
+// matching recovery event in the same transaction, so a cleared mark can never
+// be unrecorded. reason identifies the clearing path in the audit trail
+// (automatic throughput recovery vs. manual operator clear); currentThroughput
+// and clusterMedian are the values at the moment of the decision.
+//
+// Only a set mark is a state change: clearing an already-clear worker returns
+// false and writes no audit row. Returns protocol.ErrWorkerNotFound when the
+// worker does not exist.
+func (d *Database) ClearWorkerEviction(workerID string, currentThroughput, clusterMedian float64, reason string) (bool, error) {
 	workerID = NormalizeWorkerID(workerID)
-	result, err := d.db.Exec(`
-		UPDATE workers SET evicted = 0, evicted_at = NULL WHERE id = ?
+	tx, err := d.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin eviction clear: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(`
+		UPDATE workers SET evicted = 0, evicted_at = NULL WHERE id = ? AND evicted = 1
 	`, workerID)
 	if err != nil {
-		return fmt.Errorf("failed to clear worker eviction: %w", err)
+		return false, fmt.Errorf("failed to clear worker eviction: %w", err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to check rows affected: %w", err)
+		return false, fmt.Errorf("failed to check rows affected: %w", err)
 	}
 	if rows == 0 {
-		return protocol.ErrWorkerNotFound
+		var exists int
+		err := tx.QueryRow(`SELECT COUNT(*) FROM workers WHERE id = ?`, workerID).Scan(&exists)
+		if err != nil {
+			return false, fmt.Errorf("failed to look up worker: %w", err)
+		}
+		if exists == 0 {
+			return false, protocol.ErrWorkerNotFound
+		}
+		return false, nil
 	}
-	return nil
+
+	now := time.Now()
+	if _, err := tx.Exec(evictionEventInsertSQL,
+		uuid.New().String(), now, workerID, string(EvictionEventRecovered),
+		currentThroughput, clusterMedian, reason, now,
+	); err != nil {
+		return false, fmt.Errorf("failed to record eviction recovery event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit eviction clear: %w", err)
+	}
+	return true, nil
+}
+
+// GetWorkerByReference resolves a worker by identifier or registered name.
+// An identifier match wins; names resolve to the most recently registered row
+// when stale duplicates of the same name exist.
+func (d *Database) GetWorkerByReference(ref string) (*Worker, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil, protocol.ErrWorkerNotFound
+	}
+	worker, err := d.GetWorker(ref)
+	if err == nil {
+		return worker, nil
+	}
+	if !errors.Is(err, protocol.ErrWorkerNotFound) {
+		return nil, err
+	}
+
+	worker = &Worker{}
+	err = d.db.QueryRow(`
+		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
+		FROM workers WHERE name = ?
+		ORDER BY created_at DESC, id DESC LIMIT 1
+	`, ref).Scan(
+		&worker.ID, &worker.Name, &worker.Status, &worker.GPUModel,
+		&worker.Encoders, &worker.Decoders, &worker.VideoEncoders, &worker.VideoDecoders, &worker.GPUDevices, &worker.FFmpegVersion,
+		&worker.MaxConcurrent, &worker.Evicted, &worker.EvictedAt,
+		&worker.Hwaccels, &worker.Codecs, &worker.Filters, &worker.PixFmts, &worker.Formats,
+		&worker.LastHeartbeat, &worker.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, protocol.ErrWorkerNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get worker by reference: %w", err)
+	}
+	return worker, nil
 }
 
 // IsWorkerEvicted checks whether a worker is currently evicted.
@@ -3527,6 +3598,21 @@ const (
 	EvictionEventRecovered EvictionEventType = "recovered"
 )
 
+// Eviction recovery reason values recorded in worker_eviction_events.
+// decision_reason. The two clear paths must stay distinguishable in the audit,
+// so each path passes its own value instead of sharing a call-site literal.
+const (
+	EvictionReasonThroughputRecovered = "worker EWMA throughput recovered within cluster median threshold"
+	EvictionReasonManualClear         = "manual eviction clear by operator"
+)
+
+// evictionEventInsertSQL is shared by the direct recorder and the transactional
+// recovery path so both write the same columns.
+const evictionEventInsertSQL = `
+	INSERT INTO worker_eviction_events (id, timestamp, worker_id, event_type, current_throughput, cluster_median, decision_reason, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`
+
 // EvictionEvent represents a recorded eviction or recovery event.
 type EvictionEvent struct {
 	ID                string            `json:"id"`
@@ -3544,10 +3630,8 @@ func (d *Database) CreateEvictionEvent(workerID string, eventType EvictionEventT
 	now := time.Now()
 	id := uuid.New().String()
 
-	_, err := d.db.Exec(`
-		INSERT INTO worker_eviction_events (id, timestamp, worker_id, event_type, current_throughput, cluster_median, decision_reason, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, now, workerID, string(eventType), currentThroughput, clusterMedian, reason, now)
+	_, err := d.db.Exec(evictionEventInsertSQL,
+		id, now, workerID, string(eventType), currentThroughput, clusterMedian, reason, now)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create eviction event: %w", err)
 	}

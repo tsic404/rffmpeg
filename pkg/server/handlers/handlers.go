@@ -126,8 +126,10 @@ func (h *Handler) SetThroughputScaler(scaler *workerhealth.ThroughputScaler) {
 	h.throughputScaler = scaler
 }
 
-// workerStateMap returns the worker state table contents keyed by worker ID.
-// Returns nil when no state table is configured.
+// workerStateMap returns the worker state table contents keyed by canonical
+// worker ID. Returns nil when no state table is configured. The key is
+// canonicalized like the table itself, so a state entry built from a compact or
+// upper-case heartbeat still joins the database row with the same identity.
 func (h *Handler) workerStateMap() map[string]*protocol.WorkerState {
 	if h.stateTable == nil {
 		return nil
@@ -135,7 +137,7 @@ func (h *Handler) workerStateMap() map[string]*protocol.WorkerState {
 	states := make(map[string]*protocol.WorkerState)
 	for _, s := range h.stateTable.GetAll() {
 		state := s // copy for stable pointer
-		states[s.WorkerID] = &state
+		states[db.NormalizeWorkerID(s.WorkerID)] = &state
 	}
 	return states
 }
