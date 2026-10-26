@@ -716,6 +716,83 @@ func TestSlowNodeEvictionPersistsWhenClusterShrinks(t *testing.T) {
 	}
 }
 
+// TestSlowNodeEvictionPersistsWithoutThroughputSample pins the DB side of the
+// same rule: a busy worker with no throughput sample this interval is not
+// judged, so an eviction mark must survive while both its own EWMA and the
+// median are decay tails. The pre-fix decision cleared the mark here and
+// returned a still-zero-throughput worker to scheduling.
+func TestSlowNodeEvictionPersistsWithoutThroughputSample(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	for _, w := range []struct{ id, name string }{
+		{"w-peer", "worker-peer"},
+		{"w-slow", "worker-slow"},
+	} {
+		if _, err := database.CreateWorker(w.id, w.name, protocol.WorkerCapabilities{
+			Encoders:      []string{"libx264"},
+			FFmpegVersion: "6.0",
+		}); err != nil {
+			t.Fatalf("Failed to create worker %s: %v", w.id, err)
+		}
+	}
+
+	stateTable := NewWorkerStateTable(30 * time.Second)
+	for _, w := range []struct {
+		id   string
+		rate float64
+	}{{"w-peer", 100}, {"w-slow", 10}} {
+		stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: w.id, Status: "busy", JobsPerSec: w.rate,
+			ActiveJobs: []string{"job-" + w.id}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+
+	monitor := New(database, Config{
+		HeartbeatTimeout:    30 * time.Second,
+		OfflineThreshold:    10 * time.Minute,
+		HealthCheckInterval: 1 * time.Second,
+		MaxRetryCount:       3,
+	})
+	monitor.SetStateTable(stateTable)
+
+	monitor.detectSlowWorkers()
+	if evicted, _ := database.IsWorkerEvicted("w-slow"); !evicted {
+		t.Fatal("Precondition: w-slow should be evicted in DB")
+	}
+
+	// Both keep their jobs but stop reporting samples; the peer's EWMA decays
+	// past the evicted worker's, so the two tails alone would satisfy the
+	// recovery ratio. No current sample means no judgement.
+	decay := func(id string, beats int) {
+		for range beats {
+			stateTable.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+				WorkerID: id, Status: "busy", JobsPerSec: 0,
+				ActiveJobs: []string{"job-" + id}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+			})
+		}
+	}
+	decay("w-peer", 12)
+	decay("w-slow", 6)
+
+	monitor.detectSlowWorkers()
+
+	if evicted, err := database.IsWorkerEvicted("w-slow"); err != nil {
+		t.Fatalf("Failed to check eviction: %v", err)
+	} else if !evicted {
+		t.Error("Expected w-slow to remain evicted while no throughput sample was reported")
+	}
+	events, err := database.GetEvictionEventsByWorker("w-slow", 10)
+	if err != nil {
+		t.Fatalf("Failed to get eviction events: %v", err)
+	}
+	for _, e := range events {
+		if e.EventType == db.EvictionEventRecovered {
+			t.Errorf("Expected no recovery event without a throughput sample, got %+v", e)
+		}
+	}
+}
+
 // --- Multi-Worker Failover Tests ---
 
 func TestMultiWorkerHeartbeatTimeout(t *testing.T) {
