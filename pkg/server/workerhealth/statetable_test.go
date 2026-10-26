@@ -603,6 +603,126 @@ func TestDetectSlowWorkers_PoolCollapseKeepsEviction(t *testing.T) {
 	}
 }
 
+// TestDetectSlowWorkers_NoRecoveryWithoutThroughputSample pins the judgement
+// exemptions to the recovery branch too: an evicted worker whose job keeps it
+// busy but reports no throughput is "尚无样本" (C-83), so its decayed EWMA must
+// not be compared against a median that is itself composed of decayed EWMAs.
+// The peer's last real sample can be older than the evicted worker's, which
+// inverts the two tails and makes a tail-versus-tail comparison look like a
+// throughput recovery.
+func TestDetectSlowWorkers_NoRecoveryWithoutThroughputSample(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	// Two busy workers with real samples: the slow one is evicted on the ratio.
+	for _, w := range []struct {
+		id   string
+		rate float64
+	}{{"w-peer", 100}, {"w-slow", 10}} {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: w.id, Status: "busy", JobsPerSec: w.rate,
+			ActiveJobs: []string{"job-" + w.id}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+	result := table.DetectSlowWorkers()
+	if len(result.NewlyEvicted) != 1 || result.NewlyEvicted[0] != "w-slow" {
+		t.Fatalf("precondition: expected only w-slow evicted, got %v", result.NewlyEvicted)
+	}
+
+	// Both workers keep their jobs and stop producing: a long-running job
+	// reports zero on every heartbeat, so each EWMA decays toward zero. The
+	// peer decays for longer, ending up below the evicted worker's tail.
+	decay := func(id string, beats int) {
+		for range beats {
+			table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+				WorkerID: id, Status: "busy", JobsPerSec: 0,
+				ActiveJobs: []string{"job-" + id}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+			})
+		}
+	}
+	decay("w-peer", 12)
+	decay("w-slow", 6)
+
+	peer, _ := table.Get("w-peer")
+	slow, _ := table.Get("w-slow")
+	if slow.EWMAJobsPerSec < peer.EWMAJobsPerSec {
+		t.Fatalf("precondition: expected the evicted worker's decayed EWMA (%f) above the peer's (%f)",
+			slow.EWMAJobsPerSec, peer.EWMAJobsPerSec)
+	}
+
+	result = table.DetectSlowWorkers()
+
+	if len(result.Recovered) != 0 {
+		t.Fatalf("no throughput sample was reported, yet recovery was reported: %v", result.Recovered)
+	}
+	if !slow.Evicted {
+		t.Errorf("eviction mark was cleared on a decayed EWMA (slow=%f peer=%f median=%f)",
+			slow.EWMAJobsPerSec, peer.EWMAJobsPerSec, result.Median)
+	}
+}
+
+// TestDetectSlowWorkers_IdleEvictionPersistsWithoutThroughputSample pins the
+// C-82 idle half of the same rule. An evicted worker whose job has ended
+// reports zero with no active jobs on its next heartbeat; that single zero
+// keeps it inside the median sample pool (zeroStreak == 1), but it is idle and
+// must not be judged. Before the fix the recovery branch ran first and
+// compared its decayed EWMA against a median whose other half was the peer's
+// deeper decay tail, clearing the mark.
+func TestDetectSlowWorkers_IdleEvictionPersistsWithoutThroughputSample(t *testing.T) {
+	table := NewWorkerStateTable(30 * time.Second)
+
+	// Two busy workers with real samples: the slow one is evicted on the ratio.
+	for _, w := range []struct {
+		id   string
+		rate float64
+	}{{"w-peer", 100}, {"w-slow", 10}} {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: w.id, Status: "busy", JobsPerSec: w.rate,
+			ActiveJobs: []string{"job-" + w.id}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+	result := table.DetectSlowWorkers()
+	if len(result.NewlyEvicted) != 1 || result.NewlyEvicted[0] != "w-slow" {
+		t.Fatalf("precondition: expected only w-slow evicted, got %v", result.NewlyEvicted)
+	}
+
+	// The evicted worker's job ends: no active jobs, one zero-throughput
+	// heartbeat. The single zero keeps it in the pool, but it is idle now.
+	table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+		WorkerID: "w-slow", Status: "idle", JobsPerSec: 0,
+		CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+	})
+	slow, _ := table.Get("w-slow")
+	if slow.ZeroSampleStreak != MinZeroSamplesForIdle-1 {
+		t.Fatalf("precondition: zero-sample streak = %d, want %d",
+			slow.ZeroSampleStreak, MinZeroSamplesForIdle-1)
+	}
+
+	// The peer keeps its job and reports nothing, so its EWMA decays past the
+	// evicted worker's decayed EWMA. The pool still holds two members; the
+	// median is therefore the mean of two decay tails.
+	for range 12 {
+		table.UpdateFromHeartbeat(protocol.WorkerHeartbeatPayload{
+			WorkerID: "w-peer", Status: "busy", JobsPerSec: 0,
+			ActiveJobs: []string{"job-w-peer"}, CompletedJobs: MinJobsForEviction, Timestamp: time.Now(),
+		})
+	}
+	peer, _ := table.Get("w-peer")
+	if slow.EWMAJobsPerSec < peer.EWMAJobsPerSec {
+		t.Fatalf("precondition: expected the evicted worker's decayed EWMA (%f) above the peer's (%f)",
+			slow.EWMAJobsPerSec, peer.EWMAJobsPerSec)
+	}
+
+	result = table.DetectSlowWorkers()
+
+	if len(result.Recovered) != 0 {
+		t.Fatalf("idle worker reported no throughput, yet recovery was reported: %v", result.Recovered)
+	}
+	if !slow.Evicted {
+		t.Errorf("eviction mark was cleared on an idle worker's decayed EWMA (slow=%f peer=%f median=%f)",
+			slow.EWMAJobsPerSec, peer.EWMAJobsPerSec, result.Median)
+	}
+}
+
 func TestDetectSlowWorkers_Recovery(t *testing.T) {
 	table := NewWorkerStateTable(30 * time.Second)
 
