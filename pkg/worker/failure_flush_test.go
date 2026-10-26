@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -60,11 +59,10 @@ func TestStderrBatcherFlushAndWaitDeliversPendingChunks(t *testing.T) {
 func TestReportFailureFlushesStderrBeforeTerminalStatus(t *testing.T) {
 	tmpDir := t.TempDir()
 	failingFFmpeg := filepath.Join(tmpDir, "fail-ffmpeg")
-	script := `#!/bin/bash
-echo "No space left on device" >&2
+	script := `echo "No space left on device" >&2
 exit 1
 `
-	if err := os.WriteFile(failingFFmpeg, []byte(script), 0755); err != nil {
+	if err := writeShellFixture(failingFFmpeg, script); err != nil {
 		t.Fatalf("write failing ffmpeg: %v", err)
 	}
 
@@ -79,7 +77,7 @@ exit 1
 		switch r.Method {
 		case http.MethodGet:
 			wr.WriteHeader(http.StatusOK)
-			wr.Write([]byte("fake input"))
+			wr.Write(testMediaBytes())
 		case http.MethodPatch:
 			var req protocol.JobUpdateRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err == nil {

@@ -25,14 +25,12 @@ import (
 // (`-vn -c:a libmp3lame` into a nonexistent directory).
 func writeMockFFmpegOutputOpenFail(dir string) (string, error) {
 	scriptPath := filepath.Join(dir, "mock-ffmpeg-output-open")
-	script := `#!/bin/bash
-# Mock ffmpeg n9 output-open failure: stderr error, no output file, exit 0.
-echo "[out#0/mp3 @ 0x55be9305cc00] Error opening output /nonexistent_dir/out.mp3: No such file or directory" >&2
+	script := `echo "[out#0/mp3 @ 0x55be9305cc00] Error opening output /nonexistent_dir/out.mp3: No such file or directory" >&2
 echo "Error opening output file /nonexistent_dir/out.mp3." >&2
 echo "Error opening output files: No such file or directory" >&2
 exit 0
 `
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+	if err := writeShellFixture(scriptPath, script); err != nil {
 		return "", err
 	}
 	return scriptPath, nil
@@ -53,7 +51,7 @@ func newOutputOpenMockServer() *outputOpenMockServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("mock input data"))
+		w.Write(testMediaBytes())
 	})
 	mux.HandleFunc("/api/v1/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch {

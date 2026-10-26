@@ -19,8 +19,8 @@ import (
 // the only observable the test needs.
 func writeArgRecordingFFmpeg(dir, recordFile string) (string, error) {
 	scriptPath := filepath.Join(dir, "mock-ffmpeg-args")
-	script := "#!/bin/bash\nprintf '%s\\n' \"$@\" > '" + recordFile + "'\nexit 0\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+	script := "printf '%s\\n' \"$@\" > '" + recordFile + "'\nexit 0\n"
+	if err := writeShellFixture(scriptPath, script); err != nil {
 		return "", err
 	}
 	return scriptPath, nil

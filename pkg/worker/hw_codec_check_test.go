@@ -64,7 +64,6 @@ func writeMockProbeFFmpeg(t *testing.T, dir, logPath string, probeExit int, stde
 	t.Helper()
 
 	var script strings.Builder
-	script.WriteString("#!/bin/bash\n")
 	fmt.Fprintf(&script, "printf '%%s\\n' \"$*\" >> %s\n", shellSingleQuote(logPath))
 	script.WriteString("case \"$*\" in\n")
 	script.WriteString("  *nullsrc*)\n")
@@ -77,7 +76,7 @@ func writeMockProbeFFmpeg(t *testing.T, dir, logPath string, probeExit int, stde
 	script.WriteString("exit 0\n")
 
 	path := filepath.Join(dir, "mock-ffmpeg")
-	if err := os.WriteFile(path, []byte(script.String()), 0755); err != nil {
+	if err := writeShellFixture(path, script.String()); err != nil {
 		t.Fatalf("write mock ffmpeg: %v", err)
 	}
 	return path
@@ -93,7 +92,6 @@ func writeStatefulProbeFFmpeg(t *testing.T, dir, logPath string, exits []int, st
 	}
 
 	var script strings.Builder
-	script.WriteString("#!/bin/bash\n")
 	fmt.Fprintf(&script, "LOG=%s\n", shellSingleQuote(logPath))
 	script.WriteString("n=0; [ -f \"$LOG\" ] && n=$(wc -l < \"$LOG\")\n")
 	script.WriteString("printf '%s\\n' \"$*\" >> \"$LOG\"\n")
@@ -110,7 +108,7 @@ func writeStatefulProbeFFmpeg(t *testing.T, dir, logPath string, exits []int, st
 	script.WriteString("esac\n")
 
 	path := filepath.Join(dir, "mock-ffmpeg")
-	if err := os.WriteFile(path, []byte(script.String()), 0755); err != nil {
+	if err := writeShellFixture(path, script.String()); err != nil {
 		t.Fatalf("write mock ffmpeg: %v", err)
 	}
 	return path

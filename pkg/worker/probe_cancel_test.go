@@ -25,7 +25,7 @@ func TestProcessProbeJob_CancelDuringInputDownload(t *testing.T) {
 	tmp := t.TempDir()
 	marker := filepath.Join(tmp, "ffprobe-ran")
 	fakeProbe := filepath.Join(tmp, "ffprobe")
-	if err := os.WriteFile(fakeProbe, []byte("#!/bin/bash\ntouch '"+marker+"'\nexit 1\n"), 0o755); err != nil {
+	if err := writeShellFixture(fakeProbe, "touch '"+marker+"'\nexit 1\n"); err != nil {
 		t.Fatalf("write fake ffprobe: %v", err)
 	}
 	// processProbeJob resolves ffprobe from PATH at first use.

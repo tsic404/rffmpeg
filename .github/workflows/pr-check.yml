@@ -17,7 +17,10 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned on purpose: the test suite runs the real ffprobe and shell
+    # fixtures, so a silently rolled runner image is a test input change.
+    # Bump this only together with the ffmpeg pin below.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -31,9 +34,23 @@ jobs:
       # 使用 Jellyfin 发行版 ffmpeg；锁定 8.x/8.1.2-4 而非滚动 latest-8.x 目录，避免 CI 随上游发布漂移
       - name: Install ffmpeg (>= 8)
         run: |
-          curl -sL https://repo.jellyfin.org/files/ffmpeg/linux/8.x/8.1.2-4/amd64/jellyfin-ffmpeg_8.1.2-4_portable_linux64-gpl.tar.xz -o /tmp/ffmpeg.tar.xz
+          curl -fsSL https://repo.jellyfin.org/files/ffmpeg/linux/8.x/8.1.2-4/amd64/jellyfin-ffmpeg_8.1.2-4_portable_linux64-gpl.tar.xz -o /tmp/ffmpeg.tar.xz
           mkdir /tmp/ff && tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ff
           sudo mv /tmp/ff/ffmpeg /tmp/ff/ffprobe /usr/local/bin/
+
+      # Guard: fail once, with the actual version, when the runner image or the
+      # pinned ffmpeg archive drifts. Without this the drift shows up as
+      # scattered test failures instead of an environment error.
+      - name: Guard pinned toolchain
+        run: |
+          . /etc/os-release
+          if [ "$ID" != "ubuntu" ] || [ "$VERSION_ID" != "24.04" ]; then
+            echo "unexpected runner image: ${PRETTY_NAME:-unknown}"; exit 1
+          fi
+          ffmpeg -version | head -n1
+          ffmpeg -version | head -n1 | grep -q '^ffmpeg version 8\.1\.2' || {
+            echo "ffmpeg drifted from the pinned 8.1.2-4 portable build"; exit 1; }
+          ffprobe -version | head -n1
 
       - name: Download deps
         run: go mod download

@@ -32,7 +32,7 @@ type mockJobServer struct {
 
 func newMockJobServer() *mockJobServer {
 	m := &mockJobServer{
-		inputData: []byte("mock input video data for testing"),
+		inputData: testMediaBytes(),
 	}
 
 	mux := http.NewServeMux()
@@ -80,15 +80,14 @@ func (m *mockJobServer) UpdateCount() int32   { return atomic.LoadInt32(&m.updat
 // writeMockFFmpeg creates an executable shell script that simulates ffmpeg.
 func writeMockFFmpeg(dir string) (string, error) {
 	scriptPath := filepath.Join(dir, "mock-ffmpeg")
-	script := `#!/bin/bash
-# Mock ffmpeg for testing — writes a fake output file.
+	script := `# Mock ffmpeg for testing — writes a fake output file.
 output=""
 for arg in "$@"; do output="$arg"; done
 mkdir -p "$(dirname "$output")" 2>/dev/null
-echo "mock_transcoded_data_$(date +%s%N)" > "$output"
+echo "mock_transcoded_data_$$" > "$output"
 exit 0
 `
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+	if err := writeShellFixture(scriptPath, script); err != nil {
 		return "", fmt.Errorf("write mock ffmpeg: %w", err)
 	}
 	return scriptPath, nil
