@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -376,8 +377,8 @@ func TestExecutor_LowersFFmpegPriority(t *testing.T) {
 	if err != nil {
 		t.Skip("sh not installed")
 	}
-	if _, err := exec.LookPath("ps"); err != nil {
-		t.Skip("ps not installed")
+	if _, err := os.ReadFile("/proc/self/stat"); err != nil {
+		t.Skipf("procfs unavailable; the child nice value cannot be observed: %v", err)
 	}
 
 	selfBefore, err := syscall.Getpriority(syscall.PRIO_PROCESS, 0)
@@ -389,10 +390,13 @@ func TestExecutor_LowersFFmpegPriority(t *testing.T) {
 	// The child polls its own nice value instead of sampling it once: the
 	// executor lowers the priority in the parent *after* Start() returns, so an
 	// immediate sample can win the race on a loaded machine and read the
-	// inherited nice. The poll is bounded so a missing setpriority still fails
-	// the assertion below rather than hanging past the executor timeout.
-	pollNice := `i=0; while [ "$(ps -o ni= -p $$ | tr -d ' ')" != ` + strconv.Itoa(ffmpegNice) +
-		` ] && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done; ps -o ni= -p $$`
+	// inherited nice. The value comes from /proc/<pid>/stat field 19 (nice),
+	// which every Linux sh can read — GNU ps is not part of the contract and
+	// BusyBox ps rejects `-p`. The poll is bounded so a missing setpriority
+	// still fails the assertion below rather than hanging past the executor
+	// timeout.
+	pollNice := `i=0; while [ "$(cut -d' ' -f19 /proc/$$/stat)" != ` + strconv.Itoa(ffmpegNice) +
+		` ] && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done; cut -d' ' -f19 /proc/$$/stat`
 	result := ex.Execute(context.Background(), []string{"-c", pollNice})
 	if result.Error != nil {
 		t.Fatalf("Execute() failed: %v (stderr=%q)", result.Error, result.Stderr)

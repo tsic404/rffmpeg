@@ -17,8 +17,7 @@ import (
 // writes a fake output and exits 0.
 func writeMockFFmpegRefuseOverwrite(dir string) (string, error) {
 	scriptPath := filepath.Join(dir, "mock-ffmpeg-refuse-overwrite")
-	script := `#!/bin/bash
-output=""
+	script := `output=""
 for arg in "$@"; do output="$arg"; done
 if [ -e "$output" ]; then
   echo "File '$output' already exists. Overwrite? [y/N] Not overwriting - exiting" >&2
@@ -28,7 +27,7 @@ mkdir -p "$(dirname "$output")" 2>/dev/null
 echo "mock_transcoded_data" > "$output"
 exit 0
 `
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+	if err := writeShellFixture(scriptPath, script); err != nil {
 		return "", err
 	}
 	return scriptPath, nil

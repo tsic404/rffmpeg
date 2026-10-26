@@ -28,7 +28,7 @@ func TestProcessJob_CancelDuringInputDownload(t *testing.T) {
 	tmp := t.TempDir()
 	marker := filepath.Join(tmp, "ffmpeg-ran")
 	script := filepath.Join(tmp, "ffmpeg")
-	if err := os.WriteFile(script, []byte("#!/bin/bash\ntouch '"+marker+"'\nexit 0\n"), 0o755); err != nil {
+	if err := writeShellFixture(script, "touch '"+marker+"'\nexit 0\n"); err != nil {
 		t.Fatalf("write mock ffmpeg: %v", err)
 	}
 	w.executor = NewExecutor(script, 30*time.Second)

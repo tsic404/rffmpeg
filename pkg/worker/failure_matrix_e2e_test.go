@@ -29,7 +29,6 @@ func shellSingleQuote(s string) string {
 // kills it mid-run), prints the given stderr lines, and exits with exitCode.
 func writeMockFFmpegFailure(dir, name string, exitCode, sleepSeconds int, stderrLines ...string) (string, error) {
 	var script strings.Builder
-	script.WriteString("#!/bin/bash\n")
 	if sleepSeconds > 0 {
 		fmt.Fprintf(&script, "sleep %d\n", sleepSeconds)
 	}
@@ -39,7 +38,7 @@ func writeMockFFmpegFailure(dir, name string, exitCode, sleepSeconds int, stderr
 	fmt.Fprintf(&script, "exit %d\n", exitCode)
 
 	scriptPath := filepath.Join(dir, name)
-	if err := os.WriteFile(scriptPath, []byte(script.String()), 0755); err != nil {
+	if err := writeShellFixture(scriptPath, script.String()); err != nil {
 		return "", err
 	}
 	return scriptPath, nil
@@ -69,7 +68,7 @@ func newFailureMatrixServer(failInputDownload, failOutputUpload bool) *failureMa
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("mock input video data"))
+		_, _ = w.Write(testMediaBytes())
 	})
 	mux.HandleFunc("/api/v1/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/output") {

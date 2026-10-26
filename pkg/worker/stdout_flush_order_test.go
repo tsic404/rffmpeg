@@ -21,8 +21,8 @@ import (
 // produces output on ffmpeg's stdout pipe.
 func writeStdoutMockFFmpeg(dir string) (string, error) {
 	scriptPath := filepath.Join(dir, "mock-ffmpeg-stdout")
-	script := "#!/bin/bash\nprintf 'mock-video-output-data'\nexit 0\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+	script := "printf 'mock-video-output-data'\nexit 0\n"
+	if err := writeShellFixture(scriptPath, script); err != nil {
 		return "", err
 	}
 	return scriptPath, nil
@@ -41,7 +41,7 @@ func newStdoutOrderMockServer() *stdoutOrderMockServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/files/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("mock input data"))
+		w.Write(testMediaBytes())
 	})
 	mux.HandleFunc("/api/v1/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPatch {
