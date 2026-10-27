@@ -730,6 +730,10 @@ components:
         updated_at:
           type: string
           format: date-time
+        claimed_at:
+          type: string
+          format: date-time
+          description: When a worker claimed the job (pending -> queued). Cleared on requeue, so a pending job omits it.
         started_at:
           type: string
           format: date-time

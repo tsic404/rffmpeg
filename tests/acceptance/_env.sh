@@ -96,9 +96,27 @@ stop_server() {
 	fi
 }
 
+# wait_server_api blocks until the authenticated API answers. /health only
+# proves the HTTP listener is up; registration goes through auth, the handler
+# and the database. A worker that cannot register exits by design, so starting
+# one before the server accepts API calls turns a startup race into a missing
+# worker. Budget matches wait_server_ready's: startup is sub-second even with
+# several servers starting at once.
+wait_server_api() {
+	local deadline=$((SECONDS + 30)) body
+	until body="$(api_get /api/v1/workers 2>/dev/null)" && grep -q '"workers"' <<<"$body"; do
+		((SECONDS < deadline)) || {
+			echo "server API did not answer before starting a worker; see $SERVER_LOG" >&2
+			return 1
+		}
+		sleep 0.1
+	done
+}
+
 start_worker() {
 	local name="${1:-acceptance-worker-$PORT}"
 	shift || true
+	wait_server_api
 	local workdir="$WORK_DIR" log="$WORKER_LOG"
 	if [[ "$name" != "acceptance-worker-$PORT" ]]; then
 		workdir="$TMP_ROOT/worker-$name"
