@@ -337,7 +337,7 @@ Usage of ./bin/rffmpeg-server:
 - **未设置 `--auth-token` / `RFFMPEG_SERVER_TOKEN` 时，Server 拒绝全部 API 请求**（返回 401），包括 worker 注册（`/api/v1/workers/register`）和心跳（`/api/v1/workers/heartbeat`），仅日志输出 `WARNING: No auth token configured. All API requests will be rejected (401). Set --auth-token to enable access.`。
 - 因此部署时**必须同时配置 server 与 worker 凭证**：Server 设置 `--auth-token <token>`，Worker 通过配置文件 `"token": "<token>"`、环境变量 `RFFMPEG_TOKEN` 或命令行 `--token <token>` 提供相同令牌；CLI 同样需要设置 `RFFMPEG_TOKEN`。
 - **Worker 注册与心跳必须认证**：`/api/v1/workers/register` 与 `/api/v1/workers/heartbeat` 不再豁免鉴权，未携带正确 token 的请求返回 401。这防止未认证攻击者注入"幽灵 worker"并持续心跳保活、诱导调度器把任务派给其控制的节点。
-- 例外路径：仅 `/health` 与 `/api/v1/health` 健康检查无需认证（包括 tokenless 部署），便于负载均衡探活。
+- 例外路径：仅 `/health` 与 `/api/v1/health` 健康检查在不携带凭据时免认证（tokenless 部署同样可探活），便于负载均衡探活；一旦请求携带凭据，仍按 Bearer 校验，无效即 401。
 
 ### Worker 配置
 
@@ -1163,16 +1163,17 @@ curl -sS -X POST http://localhost:8080/admin/workers/eviction/clear \
 
 ### 健康检查
 
-```
-GET /api/v1/health
+健康探针挂在 `/health` 与 `/api/v1/health` 两条路径上，二者同实现、同形。应答面按请求是否携带凭据分层，判定只按「键是否存在」，不比较键值：
 
-Response:
-{
-  "status": "ok",
-  "timestamp": "2024-01-01T00:00:00Z",
-  "version": "1.0.0"
-}
-```
+| 请求 | 状态码 | 响应体 |
+|---|---|---|
+| 不携带凭据 | 200 | `{"status":"healthy"}` |
+| 携带有效凭据 | 200 | `{"status":"healthy","version":"1.0.0","auth_enabled":true}` |
+| 携带无效凭据 | 401 | `{"code":"unauthorized","message":"..."}`（C-52 错误体，不含健康字段） |
+
+- 未配置 `--auth-token` 时，不携带凭据的探针照常返回最小面；携带任何凭据的探针按无效凭据处理，返回 401。
+- `version` 与 `auth_enabled` 是持凭据读者才可见的诊断信息。携带有效凭据时三键恒在——`--version` 为空也照常输出空的 `version` 键。
+- 允许集合之外的键出现即违约，集合内的键缺失同样违约；两条路径在状态码、键集合与错误体上逐项同形。
 
 **并发下的探活隔离**：该端点只读进程内状态（版本、鉴权是否启用），不查数据库、不碰存储，因此不与业务端点争用连接池——13 个客户端并发上传/提交不会通过共享资源把它挤掉。响应的写出路径同样不耦合日志目的地：access log 写入有界队列、由后台 goroutine 落盘，目的地阻塞（stdout 管道写满、文件系统压力）时丢弃并计数（目的地恢复后输出 `[accesslog] lost N access log line(s)`，分别报告队列满丢弃数与写入失败数），而不是让响应等待日志写完。这一点必须有：chi 默认的 access log 写在响应 flush 之前，一次阻塞的日志写会让**所有**在途响应一起等待，表现为「服务端日志里 200/µs、客户端却等了几十秒」的全端点延迟尖刺。
 

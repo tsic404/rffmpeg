@@ -1075,11 +1075,17 @@ func (h *Handler) DownloadOutput(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, file)
 }
 
-// Health handles health check
+// Health handles health check. An anonymous probe receives the minimal public
+// surface; the diagnostic keys are added only when the middleware validated a
+// presented credential. Both the root and the /api/v1 path share this handler,
+// so their answers cannot diverge.
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, protocol.HealthResponse{
+	if auth.GetClientID(r) == "" {
+		writeJSON(w, http.StatusOK, protocol.HealthResponse{Status: "healthy"})
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.AuthenticatedHealthResponse{
 		Status:      "healthy",
-		Timestamp:   time.Now(),
 		Version:     h.version,
 		AuthEnabled: h.authToken != "",
 	})

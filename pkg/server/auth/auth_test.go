@@ -155,6 +155,108 @@ func TestMiddleware_TokenlessHealthProbe(t *testing.T) {
 	}
 }
 
+// TestMiddleware_HealthValidCredential tests that a health probe presenting
+// the configured token reaches the handler with the client ID attached; the
+// handler needs it to decide the diagnostic key set.
+func TestMiddleware_HealthValidCredential(t *testing.T) {
+	token := "secret-token"
+	var gotClientID string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClientID = GetClientID(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	protectedHandler := Middleware(token)(handler)
+
+	for _, path := range []string{"/health", "/api/v1/health"} {
+		t.Run(path, func(t *testing.T) {
+			gotClientID = ""
+			req := httptest.NewRequest("GET", path, nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			protectedHandler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s with correct token: expected 200, got %d", path, rec.Code)
+			}
+			if want := GenerateClientID(token); gotClientID != want {
+				t.Errorf("%s client ID = %q, want %q", path, gotClientID, want)
+			}
+		})
+	}
+}
+
+// TestMiddleware_HealthInvalidCredential tests that a health probe presenting
+// a bad credential is rejected with 401 instead of receiving the anonymous
+// answer: an unvalidated credential must not buy the diagnostic keys.
+func TestMiddleware_HealthInvalidCredential(t *testing.T) {
+	handlerReached := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	protectedHandler := Middleware("secret-token")(handler)
+
+	headers := []struct{ name, value string }{
+		{"wrong token", "Bearer wrong-token"},
+		{"empty bearer", "Bearer "},
+		{"wrong scheme", "Basic secret-token"},
+	}
+	for _, path := range []string{"/health", "/api/v1/health"} {
+		for _, hd := range headers {
+			t.Run(path+" "+hd.name, func(t *testing.T) {
+				handlerReached = false
+				req := httptest.NewRequest("GET", path, nil)
+				req.Header.Set("Authorization", hd.value)
+				rec := httptest.NewRecorder()
+				protectedHandler.ServeHTTP(rec, req)
+
+				if rec.Code != http.StatusUnauthorized {
+					t.Errorf("%s with %s: expected 401, got %d", path, hd.name, rec.Code)
+				}
+				if handlerReached {
+					t.Errorf("%s with %s must not reach handler", path, hd.name)
+				}
+				var resp map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("decode 401 body: %v", err)
+				}
+				if resp["code"] != "unauthorized" {
+					t.Errorf("%s with %s: code = %q, want unauthorized", path, hd.name, resp["code"])
+				}
+			})
+		}
+	}
+}
+
+// TestMiddleware_TokenlessHealthCredential tests the tokenless deployment: a
+// credential-free probe still answers, but a probe that presents any
+// credential is rejected (there is no token it could match).
+func TestMiddleware_TokenlessHealthCredential(t *testing.T) {
+	handlerReached := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerReached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	protectedHandler := Middleware("")(handler)
+
+	for _, path := range []string{"/health", "/api/v1/health"} {
+		t.Run(path, func(t *testing.T) {
+			handlerReached = false
+			req := httptest.NewRequest("GET", path, nil)
+			req.Header.Set("Authorization", "Bearer anything")
+			rec := httptest.NewRecorder()
+			protectedHandler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("%s with credential on tokenless server: expected 401, got %d", path, rec.Code)
+			}
+			if handlerReached {
+				t.Errorf("%s with credential on tokenless server must not reach handler", path)
+			}
+		})
+	}
+}
+
 // TestMiddleware_MissingAuthHeader tests 401 response when auth header is missing
 func TestMiddleware_MissingAuthHeader(t *testing.T) {
 	token := "test-token-123"

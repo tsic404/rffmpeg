@@ -281,11 +281,20 @@ type JobOutputUploadResponse struct {
 	Message string `json:"message"`
 }
 
+// HealthResponse is the health probe body for an anonymous probe: status is
+// the entire public surface. The diagnostic keys are reserved for
+// AuthenticatedHealthResponse, which only a validated credential unlocks.
 type HealthResponse struct {
-	Status      string    `json:"status"`
-	Timestamp   time.Time `json:"timestamp"`
-	Version     string    `json:"version,omitempty"`
-	AuthEnabled bool      `json:"auth_enabled"`
+	Status string `json:"status"`
+}
+
+// AuthenticatedHealthResponse is the health probe body for a caller that
+// presented a valid credential. Version and AuthEnabled are emitted
+// unconditionally: an unset version is still a present, empty key.
+type AuthenticatedHealthResponse struct {
+	Status      string `json:"status"`
+	Version     string `json:"version"`
+	AuthEnabled bool   `json:"auth_enabled"`
 }
 
 type ErrorResponse struct {

@@ -545,9 +545,12 @@ paths:
       tags: [health]
       summary: Health check
       description: >-
-        Check server health status. This endpoint is exempt from
-        authentication and rate limiting so load balancers and monitoring
-        probes can call it without credentials.
+        Check server health status. A probe without credentials is exempt from
+        authentication and rate limiting, and receives `status` alone. A probe
+        that presents a bearer token is validated: a valid one adds `version`
+        and `auth_enabled`, an invalid one (or any credential on a server
+        without a configured token) is rejected with 401. The same contract
+        applies to `/api/v1/health`.
       operationId: healthCheck
       responses:
         '200':
@@ -556,6 +559,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /migrations:
     get:
       tags: [migrations]
@@ -1127,13 +1132,14 @@ components:
 
     HealthResponse:
       type: object
-      required: [status, timestamp]
+      description: >-
+        Anonymous probes receive `status` alone. `version` and `auth_enabled`
+        are added only when the request presents a valid bearer token, and are
+        then always present. Judged by key existence, not by value.
+      required: [status]
       properties:
         status:
           type: string
-        timestamp:
-          type: string
-          format: date-time
         version:
           type: string
         auth_enabled:
