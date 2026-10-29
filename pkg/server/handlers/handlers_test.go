@@ -12,12 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/handlers"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
@@ -174,27 +176,59 @@ func TestPullWorkerJobs_EvictedPrecedesOffline(t *testing.T) {
 	}
 }
 
+// TestHealthEndpoint pins the credential-tiered key sets: an anonymous probe
+// gets status alone, an authenticated one gets the three diagnostic keys.
+// Judged by key existence, never by value.
 func TestHealthEndpoint(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	req := httptest.NewRequest("GET", "/api/v1/health", nil)
-	req.Header.Set("Authorization", "Bearer test-token")
-	w := httptest.NewRecorder()
+	anon := httptest.NewRequest("GET", "/api/v1/health", nil)
+	anonRec := httptest.NewRecorder()
+	router.ServeHTTP(anonRec, anon)
+	assertHealthKeys(t, anonRec, "status")
 
-	router.ServeHTTP(w, req)
+	// This router installs no auth middleware, so the credential the
+	// middleware would have validated is injected directly.
+	authed := httptest.NewRequest("GET", "/api/v1/health", nil)
+	authed = authed.WithContext(context.WithValue(authed.Context(), auth.ClientIDKey, "test-client"))
+	authedRec := httptest.NewRecorder()
+	router.ServeHTTP(authedRec, authed)
+	assertHealthKeys(t, authedRec, "auth_enabled", "status", "version")
+}
 
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
+// TestHealthEndpointEmptyVersionKeepsDiagnosticKeys covers the default
+// deployment: --version defaults to empty, yet the authenticated body must
+// still carry the version key.
+func TestHealthEndpointEmptyVersionKeepsDiagnosticKeys(t *testing.T) {
+	h := handlers.New(nil, nil, "", nil)
+	req := httptest.NewRequest("GET", "/health", nil)
+	req = req.WithContext(context.WithValue(req.Context(), auth.ClientIDKey, "test-client"))
+	rec := httptest.NewRecorder()
+
+	h.Health(rec, req)
+
+	assertHealthKeys(t, rec, "auth_enabled", "status", "version")
+}
+
+// assertHealthKeys asserts the health body carries exactly the given keys.
+func assertHealthKeys(t *testing.T, rec *httptest.ResponseRecorder, want ...string) {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-
-	var resp protocol.HealthResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Errorf("Failed to decode response: %v", err)
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health body: %v", err)
 	}
-
-	if resp.Status != "healthy" {
-		t.Errorf("Expected status 'healthy', got '%s'", resp.Status)
+	got := make([]string, 0, len(body))
+	for key := range body {
+		got = append(got, key)
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("health keys = %v, want %v", got, want)
 	}
 }
 

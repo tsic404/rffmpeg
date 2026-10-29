@@ -18,10 +18,10 @@ type contextKey string
 // ClientIDKey is the context key for the client ID
 const ClientIDKey contextKey = "client_id"
 
-// exemptPaths are paths that don't require authentication.
-// Only health probe endpoints are exempt. Worker registration and heartbeat
-// require authentication: an unauthenticated register/heartbeat lets any
-// attacker inject ghost workers and poison the scheduler.
+// exemptPaths are paths that don't require authentication. Only health probe
+// endpoints are exempt. Worker registration and heartbeat require
+// authentication: an unauthenticated register/heartbeat lets any attacker
+// inject ghost workers and poison the scheduler.
 var exemptPaths = map[string]bool{
 	"/health":        true,
 	"/api/v1/health": true,
@@ -36,10 +36,13 @@ var exemptPaths = map[string]bool{
 func Middleware(authToken string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Check if path is exempt from authentication. This runs BEFORE
-			// the fail-closed check so tokenless deployments can still serve
-			// load-balancer health probes on /health.
-			if exemptPaths[r.URL.Path] {
+			// An exempt path skips authentication only when the request carries
+			// no credential. A probe that does present one is validated like any
+			// other request: an invalid credential must not buy the anonymous
+			// answer (contract C-121). This check runs BEFORE the fail-closed
+			// one so tokenless deployments can still serve credential-free
+			// load-balancer probes.
+			if exemptPaths[r.URL.Path] && r.Header.Get("Authorization") == "" {
 				next.ServeHTTP(w, r)
 				return
 			}
