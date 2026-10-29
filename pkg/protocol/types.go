@@ -65,10 +65,13 @@ type JobInfo struct {
 	DirectPaths      []string   `json:"direct_paths,omitempty"` // Direct output paths for pass-through mode
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	FinishedAt       *time.Time `json:"finished_at,omitempty"`
-	ProgressPercent  float64    `json:"progress_percent,omitempty"` // Current progress 0-100
-	EtaSeconds       int        `json:"eta_seconds,omitempty"`      // Estimated time remaining in seconds
+	// ClaimedAt is when the job was claimed by a worker (pending -> queued).
+	// Cleared on every requeue, so a pending job carries no claim time.
+	ClaimedAt       *time.Time `json:"claimed_at,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	ProgressPercent float64    `json:"progress_percent,omitempty"` // Current progress 0-100
+	EtaSeconds      int        `json:"eta_seconds,omitempty"`      // Estimated time remaining in seconds
 }
 
 type JobStatusResponse struct {

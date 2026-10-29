@@ -1888,6 +1888,9 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map
 	if job.Error.Valid {
 		info.Error = job.Error.String
 	}
+	if job.ClaimedAt.Valid {
+		info.ClaimedAt = &job.ClaimedAt.Time
+	}
 	if job.StartedAt.Valid {
 		info.StartedAt = &job.StartedAt.Time
 	}
