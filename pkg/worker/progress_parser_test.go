@@ -249,11 +249,17 @@ func TestProgressParser_ETAPrecision_BoundaryChecks(t *testing.T) {
 // field is the simulation's own: no bound or constant is read from the
 // implementation, which is what makes a wrong estimate visible here.
 type encoderTimeline struct {
-	durationSeconds   float64 // media length
+	durationSeconds   float64 // media length (the span time= counts through)
 	rate              float64 // steady-state media seconds per wall second
 	outputLagSeconds  float64 // media encoded but not yet published in time=
 	startDelaySeconds float64 // wall clock before the first stats line
 	finalizeSeconds   float64 // wall clock from the last frame to process exit
+	// inputDurationSeconds is the probed input length when it is longer than
+	// the written span (a trimmed job); zero means the input is the span.
+	inputDurationSeconds float64
+	// window is the trim the command line carries. The zero value writes the
+	// whole input.
+	window SeekWindow
 }
 
 // publishedAt is the media time= reports at wall seconds since the attempt
@@ -284,6 +290,7 @@ func (tl encoderTimeline) endWall() float64 {
 type timelineSample struct {
 	published float64 // media time= reported
 	remaining float64 // true wall clock to process exit
+	percent   float64 // percent the parser rendered
 	eta       int     // ETA the parser rendered, 0 when it certified nothing
 }
 
@@ -291,8 +298,13 @@ type timelineSample struct {
 // way the Worker does, and returns every frame it produced.
 func replayTimeline(t *testing.T, tl encoderTimeline, step float64) []timelineSample {
 	t.Helper()
+	inputSeconds := tl.inputDurationSeconds
+	if inputSeconds == 0 {
+		inputSeconds = tl.durationSeconds
+	}
 	p := NewProgressParser()
-	p.SetDuration(int64(tl.durationSeconds * 1_000_000))
+	p.SetDuration(int64(inputSeconds * 1_000_000))
+	p.SetSeekWindow(int64(inputSeconds*1_000_000), tl.window)
 	wall := 0.0
 	p.nowFunc = func() time.Time {
 		return time.Unix(0, int64(wall*1e9))
@@ -313,6 +325,7 @@ func replayTimeline(t *testing.T, tl encoderTimeline, step float64) []timelineSa
 		samples = append(samples, timelineSample{
 			published: published,
 			remaining: tl.endWall() - wall,
+			percent:   frame.Percent,
 			eta:       frame.EtaSeconds,
 		})
 	}
@@ -350,6 +363,57 @@ func TestProgressParser_ETACertifiedWithinTolerance(t *testing.T) {
 			}
 			if rendered == 0 {
 				t.Errorf("%s: no ETA rendered at all; the estimator must still report a job it can certify", name)
+			}
+		}
+	}
+}
+
+// TestProgressParser_ETACertifiedForInputSideTrim replays a job whose -ss/-t
+// sit before -i. ffmpeg seeks the input and still counts time= from zero
+// through the written span, so the probed full duration is the wrong
+// denominator: dividing by it caps the run at the window's share of the input
+// (half, here) and inflates every ETA by the same factor.
+func TestProgressParser_ETACertifiedForInputSideTrim(t *testing.T) {
+	// A 300s input trimmed to a 120s window: at every rate the run is long
+	// enough for the estimator's rate window, so an absent ETA is a defect.
+	base := encoderTimeline{
+		durationSeconds:      120, // -t 120
+		inputDurationSeconds: 300,
+		window:               SeekWindow{InSeekUs: 60_000_000, InTus: 120_000_000},
+		startDelaySeconds:    0.5,
+		finalizeSeconds:      0.6,
+	}
+	for _, lag := range []float64{0, 1.4} {
+		for _, rate := range []float64{1, 2, 5.68} {
+			tl := base
+			tl.outputLagSeconds, tl.rate = lag, rate
+			name := fmt.Sprintf("lag%.1fs/rate%.2fx", lag, rate)
+
+			rendered := 0
+			lastPercent := 0.0
+			for _, s := range replayTimeline(t, tl, 1.0) {
+				if s.percent > lastPercent {
+					lastPercent = s.percent
+				}
+				if s.eta == 0 || s.remaining < 3 {
+					continue
+				}
+				rendered++
+				errPct := math.Abs(float64(s.eta)-s.remaining) / s.remaining * 100
+				if errPct >= 20 {
+					t.Errorf("%s: ETA %ds with %.2fs actually left is %.1f%% off (bound is 20%%)",
+						name, s.eta, s.remaining, errPct)
+				}
+			}
+			if rendered == 0 {
+				t.Errorf("%s: no ETA rendered at all for a trimmed job", name)
+			}
+			// A full-input denominator caps the run at the window's share of
+			// the input; exceeding it is only possible on the written span.
+			ceiling := 100 * tl.durationSeconds / tl.inputDurationSeconds
+			if lastPercent <= ceiling {
+				t.Errorf("%s: trimmed job peaked at %.1f%%, at most the %.1f%% a full-input denominator allows",
+					name, lastPercent, ceiling)
 			}
 		}
 	}
@@ -1255,8 +1319,10 @@ func TestParseFFmpegDurationUs(t *testing.T) {
 	}
 }
 
-// TestParseSeekWindow verifies that output-side -ss/-t/-to are extracted
-// from ffmpeg args while input-side -ss (before -i) is ignored.
+// TestParseSeekWindow verifies that input-side and output-side -ss/-t/-to
+// are extracted into their own fields. The two sections are not
+// interchangeable: an input-side -ss seeks the input, while the output still
+// counts time= from zero, so the progress window is the composed span.
 func TestParseSeekWindow(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1284,9 +1350,49 @@ func TestParseSeekWindow(t *testing.T) {
 			want: SeekWindow{SeekUs: 10_000_000, ToUs: 40_000_000},
 		},
 		{
-			name: "input-side -ss ignored",
+			name: "input-side -ss and -t",
+			args: []string{"-y", "-ss", "10", "-t", "30", "-i", "input.mp4", "out.mp4"},
+			want: SeekWindow{InSeekUs: 10_000_000, InTus: 30_000_000},
+		},
+		{
+			name: "input-side -ss",
 			args: []string{"-y", "-ss", "10", "-i", "input.mp4", "out.mp4"},
-			want: SeekWindow{},
+			want: SeekWindow{InSeekUs: 10_000_000},
+		},
+		{
+			name: "input-side -t only",
+			args: []string{"-y", "-t", "30", "-i", "input.mp4", "out.mp4"},
+			want: SeekWindow{InTus: 30_000_000},
+		},
+		{
+			name: "input-side -ss and -to",
+			args: []string{"-y", "-ss", "10", "-to", "40", "-i", "input.mp4", "out.mp4"},
+			want: SeekWindow{InSeekUs: 10_000_000, InToUs: 40_000_000},
+		},
+		{
+			name: "same-section -to before -t keeps both",
+			args: []string{"-y", "-i", "input.mp4", "-to", "25", "-t", "100", "out.mp4"},
+			want: SeekWindow{ToUs: 25_000_000, Tus: 100_000_000},
+		},
+		{
+			name: "input and output trims are kept apart",
+			args: []string{"-ss", "10", "-t", "30", "-i", "input.mp4", "-ss", "5", "-t", "10", "out.mp4"},
+			want: SeekWindow{InSeekUs: 10_000_000, InTus: 30_000_000, SeekUs: 5_000_000, Tus: 10_000_000},
+		},
+		{
+			name: "only the last input's section applies",
+			args: []string{"-ss", "5", "-i", "a.mp4", "-ss", "10", "-i", "b.mp4", "-t", "30", "out.mp4"},
+			want: SeekWindow{InSeekUs: 10_000_000, Tus: 30_000_000},
+		},
+		{
+			name: "input inline = form",
+			args: []string{"-ss=10", "-t=30", "-i", "input.mp4", "out.mp4"},
+			want: SeekWindow{InSeekUs: 10_000_000, InTus: 30_000_000},
+		},
+		{
+			name: "input stream specifier form -ss:0",
+			args: []string{"-ss:0", "10", "-i", "input.mp4", "out.mp4"},
+			want: SeekWindow{InSeekUs: 10_000_000},
 		},
 		{
 			name: "inline = form",
@@ -1329,6 +1435,53 @@ func TestParseSeekWindow(t *testing.T) {
 	}
 }
 
+// TestSeekWindow_WindowUs pins the span the two sections compose into. It is
+// the denominator percent and ETA divide by, and ffmpeg counts time= through
+// it from zero for every trim combination.
+func TestSeekWindow_WindowUs(t *testing.T) {
+	const input = int64(120) * 1_000_000
+	cases := []struct {
+		name   string
+		span   int64 // input duration; 0 means the 120s default
+		window SeekWindow
+		want   int64
+	}{
+		{"no trim", 0, SeekWindow{}, input},
+		{"output -ss and -t", 0, SeekWindow{SeekUs: 10_000_000, Tus: 30_000_000}, 30_000_000},
+		{"output -ss and -to", 0, SeekWindow{SeekUs: 10_000_000, ToUs: 40_000_000}, 30_000_000},
+		{"input -ss alone", 0, SeekWindow{InSeekUs: 20_000_000}, 100_000_000},
+		{"input -t alone", 0, SeekWindow{InTus: 45_000_000}, 45_000_000},
+		{"input -ss and -t", 0, SeekWindow{InSeekUs: 20_000_000, InTus: 60_000_000}, 60_000_000},
+		{"input -ss and -to", 0, SeekWindow{InSeekUs: 20_000_000, InToUs: 50_000_000}, 30_000_000},
+		{"input -t clamps to the remaining input", 0, SeekWindow{InSeekUs: 100_000_000, InTus: 500_000_000}, 20_000_000},
+		{"input and output trims compose", 0, SeekWindow{InSeekUs: 20_000_000, InTus: 60_000_000, SeekUs: 5_000_000, Tus: 20_000_000}, 20_000_000},
+		{"output -ss narrows the input span", 0, SeekWindow{InSeekUs: 20_000_000, InTus: 60_000_000, SeekUs: 10_000_000}, 50_000_000},
+		{"output -to inside the input span", 0, SeekWindow{InSeekUs: 20_000_000, InTus: 60_000_000, ToUs: 40_000_000}, 40_000_000},
+		{"input seek beyond the input", 0, SeekWindow{InSeekUs: 200_000_000}, 0},
+		{"empty input span stays empty", 0, SeekWindow{InSeekUs: 200_000_000, Tus: 30_000_000}, 0},
+		// -t and -to are mutually exclusive and -t wins: a 60s source
+		// writes 50s for -ss 10 -to 25 -t 100, not the 15s -to would give.
+		{"same-section -t beats -to (output)", 60_000_000, SeekWindow{SeekUs: 10_000_000, ToUs: 25_000_000, Tus: 100_000_000}, 50_000_000},
+		{"same-section -t beats -to (input)", 60_000_000, SeekWindow{InSeekUs: 10_000_000, InToUs: 25_000_000, InTus: 100_000_000}, 50_000_000},
+		{"same-section -to still applies without -t", 60_000_000, SeekWindow{SeekUs: 10_000_000, ToUs: 25_000_000}, 15_000_000},
+		// A seek past the end leaves nothing to write; -t must not reopen it.
+		{"seek past the end stays empty under -t (input)", 300_000_000, SeekWindow{InSeekUs: 500_000_000, InTus: 30_000_000}, 0},
+		{"seek past the end stays empty under -t (output)", 0, SeekWindow{SeekUs: 500_000_000, Tus: 30_000_000}, 0},
+		{"seek past the end stays empty under -t with -to", 60_000_000, SeekWindow{InSeekUs: 70_000_000, InToUs: 25_000_000, InTus: 30_000_000}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			span := tc.span
+			if span == 0 {
+				span = input
+			}
+			if got := tc.window.WindowUs(span); got != tc.want {
+				t.Errorf("WindowUs(%d) = %d, want %d", span, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestProgressParser_SeekWindow_Percent verifies that percent reaches 100%
 // for a trimmed job when time= matches the output window.
 func TestProgressParser_SeekWindow_Percent(t *testing.T) {
@@ -1336,7 +1489,7 @@ func TestProgressParser_SeekWindow_Percent(t *testing.T) {
 	inputDur := int64(120) * 1_000_000
 	p := NewProgressParser()
 	p.SetDuration(inputDur)
-	p.SetSeekWindow(inputDur, 10_000_000, 30_000_000, 0)
+	p.SetSeekWindow(inputDur, SeekWindow{SeekUs: 10_000_000, Tus: 30_000_000})
 
 	// At time=00:00:15 (15s into the 30s segment) → 50%.
 	frame := p.ParseLine("frame=100 fps=30 q=28.0 time=00:00:15.00 speed=1.0x")
@@ -1357,6 +1510,36 @@ func TestProgressParser_SeekWindow_Percent(t *testing.T) {
 	}
 }
 
+// TestProgressParser_SeekWindow_InputSidePercent verifies that an input-side
+// -ss/-t trim divides by the written span: time= restarts at zero after the
+// seek, so 30s into a 60s segment from a 120s input is 50%, and the window's
+// end is 100%.
+func TestProgressParser_SeekWindow_InputSidePercent(t *testing.T) {
+	inputDur := int64(120) * 1_000_000
+	p := NewProgressParser()
+	p.SetDuration(inputDur)
+	p.SetSeekWindow(inputDur, SeekWindow{InSeekUs: 20_000_000, InTus: 60_000_000})
+
+	if got := p.DurationUs(); got != 60_000_000 {
+		t.Fatalf("DurationUs() = %d, want the 60s window", got)
+	}
+	frame := p.ParseLine("frame=100 fps=30 q=28.0 time=00:00:30.00 speed=1.0x")
+	if frame == nil {
+		t.Fatal("expected non-nil frame")
+	}
+	if frame.Percent < 49 || frame.Percent > 51 {
+		t.Errorf("at 30s/60s window: percent=%.1f, want ~50", frame.Percent)
+	}
+
+	frame = p.ParseLine("frame=200 fps=30 q=28.0 time=00:01:00.00 speed=1.0x")
+	if frame == nil {
+		t.Fatal("expected non-nil frame")
+	}
+	if frame.Percent != 100 {
+		t.Errorf("at 60s/60s window: percent=%.1f, want 100", frame.Percent)
+	}
+}
+
 // TestProgressParser_SeekWindow_NoTrim_Reaches100 verifies that without
 // trim options the parser still reaches 100% (regression: SetSeekWindow
 // with all-zero args must not break the full-duration path).
@@ -1364,7 +1547,7 @@ func TestProgressParser_SeekWindow_NoTrim_Reaches100(t *testing.T) {
 	inputDur := int64(120) * 1_000_000
 	p := NewProgressParser()
 	p.SetDuration(inputDur)
-	p.SetSeekWindow(inputDur, 0, 0, 0)
+	p.SetSeekWindow(inputDur, SeekWindow{})
 
 	frame := p.ParseLine("frame=200 fps=30 q=28.0 time=00:02:00.00 speed=1.0x")
 	if frame == nil {
@@ -1382,7 +1565,7 @@ func TestProgressParser_SeekWindow_ToAndSs(t *testing.T) {
 	inputDur := int64(120) * 1_000_000
 	p := NewProgressParser()
 	p.SetDuration(inputDur)
-	p.SetSeekWindow(inputDur, 10_000_000, 0, 40_000_000)
+	p.SetSeekWindow(inputDur, SeekWindow{SeekUs: 10_000_000, ToUs: 40_000_000})
 
 	// At time=00:00:15 → 50% of the 30s window.
 	frame := p.ParseLine("frame=100 fps=30 q=28.0 time=00:00:15.00 speed=1.0x")
@@ -1401,7 +1584,7 @@ func TestProgressParser_SeekWindow_TClampsToInput(t *testing.T) {
 	inputDur := int64(120) * 1_000_000
 	p := NewProgressParser()
 	p.SetDuration(inputDur)
-	p.SetSeekWindow(inputDur, 100_000_000, 500_000_000, 0)
+	p.SetSeekWindow(inputDur, SeekWindow{SeekUs: 100_000_000, Tus: 500_000_000})
 
 	frame := p.ParseLine("frame=100 fps=30 q=28.0 time=00:00:10.00 speed=1.0x")
 	if frame == nil {
@@ -1420,7 +1603,7 @@ func TestProgressParser_SeekWindow_Degenerate(t *testing.T) {
 	inputDur := int64(120) * 1_000_000
 	p := NewProgressParser()
 	p.SetDuration(inputDur)
-	p.SetSeekWindow(inputDur, 50_000_000, 0, 40_000_000)
+	p.SetSeekWindow(inputDur, SeekWindow{SeekUs: 50_000_000, ToUs: 40_000_000})
 
 	if got := p.DurationUs(); got != 0 {
 		t.Errorf("degenerate window: DurationUs() = %d, want 0", got)
@@ -1735,7 +1918,7 @@ func TestProgressRouter_HeaderDurationDoesNotWidenSeekWindow(t *testing.T) {
 
 	// -ss 240 -t 60 over a 5-minute input: a 60s output window.
 	router.SetDuration(300_000_000)
-	router.SetSeekWindow(300_000_000, 240_000_000, 60_000_000, 0)
+	router.SetSeekWindow(300_000_000, SeekWindow{SeekUs: 240_000_000, Tus: 60_000_000})
 
 	h := router.Handler()
 	h("  Duration: 00:05:00.00, start: 0.000000, bitrate: 1000 kb/s\n")

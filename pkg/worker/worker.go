@@ -959,12 +959,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// header-derived duration path in place.
 	if durationUs := w.probeInputDurationUs(jobCtx, inputPaths); durationUs > 0 {
 		progressRouter.SetDuration(durationUs)
-		// For trimmed jobs (-ss/-t/-to) progress must be anchored to the
-		// output window, not the full input duration: ffmpeg's time= counts
-		// from zero within the segment, so dividing by the full duration
-		// never reaches 100% and ETA is off by orders of magnitude.
-		sw := ParseSeekWindow(args)
-		progressRouter.SetSeekWindow(durationUs, sw.SeekUs, sw.Tus, sw.ToUs)
+		// For trimmed jobs (-ss/-t/-to on either side of -i) progress must be
+		// anchored to the span ffmpeg writes, not the full input duration:
+		// time= counts from zero within the output, so dividing by the input
+		// duration never reaches 100% and ETA is off by orders of magnitude.
+		progressRouter.SetSeekWindow(durationUs, ParseSeekWindow(args))
 	}
 
 	// Rewrite args based on hardware capabilities and auto_hw setting

@@ -40,10 +40,10 @@ func (r *ProgressRouter) SetDuration(durationUs int64) {
 	r.parser.SetDuration(durationUs)
 }
 
-// SetSeekWindow narrows the progress denominator to an output window derived
-// from -ss/-t/-to so percent/ETA reflect the trimmed segment.
-func (r *ProgressRouter) SetSeekWindow(inputDurationUs, seekUs, tUs, toUs int64) {
-	r.parser.SetSeekWindow(inputDurationUs, seekUs, tUs, toUs)
+// SetSeekWindow narrows the progress denominator to the span the job's trim
+// options select, so percent/ETA reflect the written media.
+func (r *ProgressRouter) SetSeekWindow(inputDurationUs int64, sw SeekWindow) {
+	r.parser.SetSeekWindow(inputDurationUs, sw)
 }
 
 // StartAttempt tells the parser that a new ffmpeg process is starting for the
