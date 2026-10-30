@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
 )
 
 // ProgressFrame represents a parsed progress update from ffmpeg stderr.
@@ -200,41 +198,18 @@ func (p *ProgressParser) DurationUs() int64 {
 	return p.durationUs
 }
 
-// SetSeekWindow narrows the progress denominator to an output window
-// derived from -ss/-t/-to so percent and ETA reflect the trimmed segment,
-// not the full input. It must be called after SetDuration (which seeded the
-// full input duration): if seekUs/tUs is zero or negative the window is
-// left unchanged, and an explicit -t/-to that exceeds the input is clamped.
-func (p *ProgressParser) SetSeekWindow(inputDurationUs, seekUs, tUs, toUs int64) {
+// SetSeekWindow narrows the progress denominator to the span the job's trim
+// options select, so percent and ETA reflect the written media, not the full
+// input. It must be called after SetDuration (which seeded the full input
+// duration): the window is derived from that duration, and a degenerate one
+// (a seek beyond the input's end) stays 0 so percent reports unknown rather
+// than a meaningless ratio against the full input.
+func (p *ProgressParser) SetSeekWindow(inputDurationUs int64, sw SeekWindow) {
 	if inputDurationUs <= 0 {
 		return
 	}
-	windowUs := inputDurationUs
-	// -to is an absolute timestamp within the input; convert to a duration.
-	if toUs > 0 {
-		windowUs = toUs
-		if windowUs > inputDurationUs {
-			windowUs = inputDurationUs
-		}
-	}
-	if seekUs > 0 {
-		if seekUs >= windowUs {
-			// -ss beyond the window leaves nothing to encode; set the
-			// denominator to 0 so percent reports -1 (unknown) rather than
-			// dividing by zero or silently keeping the full input duration.
-			windowUs = 0
-		} else {
-			windowUs -= seekUs
-		}
-	}
-	if tUs > 0 && (windowUs == 0 || tUs < windowUs) {
-		windowUs = tUs
-	}
-	// Always overwrite: a degenerate window (0) must clear the full-input
-	// duration that SetDuration seeded, so percent falls back to -1 instead
-	// of reporting a meaningless ratio against the full input.
 	p.hasSeekWindow = true
-	p.setDurationUs(windowUs)
+	p.setDurationUs(sw.WindowUs(inputDurationUs))
 }
 
 // ParseDurationLine attempts to extract Duration from an ffmpeg header line.
@@ -874,60 +849,100 @@ func parseFFmpegDurationUs(s string) int64 {
 	return int64(secs * 1_000_000)
 }
 
-// SeekWindow captures the -ss/-t/-to values extracted from ffmpeg args.
-// Each field is in microseconds; a zero value means the option was absent.
+// SeekWindow captures the -ss/-t/-to trims around an ffmpeg command line.
+// Input-side and output-side values are kept apart because they apply to
+// different timelines: -ss before -i moves the input start, while ffmpeg
+// rewrites the output timestamps to start at zero either way, so the two
+// sections compose into the span time= counts through. Each field is in
+// microseconds; a zero value means the option was absent.
 type SeekWindow struct {
-	SeekUs int64 // -ss start offset
-	Tus    int64 // -t output duration
-	ToUs   int64 // -to absolute end timestamp
+	InSeekUs int64 // input-side -ss: seek point inside the input
+	InTus    int64 // input-side -t: media read from the seek point
+	InToUs   int64 // input-side -to: absolute stop position inside the input
+	SeekUs   int64 // output-side -ss: seek point inside the input window
+	Tus      int64 // output-side -t: media written
+	ToUs     int64 // output-side -to: absolute stop position inside the input window
 }
 
-// ParseSeekWindow scans ffmpeg-style args for output-side -ss/-t/-to values
-// and returns them in microseconds. An option may appear as "-ss value",
-// "-ss=value", or "-ss:value" (stream-specifier form). Only output-side
-// options (after the last -i) affect the progress window — input-side -ss is
-// a demuxer hint and is ignored. The args slice is the full ffmpeg command
-// line; boolean/arity decisions use the generated ffmpegopts table so
-// -ss/-t/-to are never mistaken for switches.
+// WindowUs returns the media span the output covers, given the full input
+// duration: the input section's span narrowed by the output section's trim.
+// time= counts through this span from zero in every -ss/-t/-to combination,
+// so it is what percent and ETA must be measured against.
+func (sw SeekWindow) WindowUs(inputDurationUs int64) int64 {
+	windowUs := trimWindowUs(inputDurationUs, sw.InSeekUs, sw.InTus, sw.InToUs)
+	if windowUs == 0 {
+		// An empty input span leaves nothing to write, and the output
+		// section's -t must not resurrect it.
+		return 0
+	}
+	return trimWindowUs(windowUs, sw.SeekUs, sw.Tus, sw.ToUs)
+}
+
+// trimWindowUs narrows durationUs by one section's -ss/-t/-to. -to is an
+// absolute timestamp clamped to the section, -ss moves the start forward, and
+// -t caps the remainder. -t and -to are mutually exclusive and -t wins: a
+// present -t makes -to inert, as ffmpeg does. A -ss past the section's end
+// leaves an empty span that -t cannot reopen.
+func trimWindowUs(durationUs, seekUs, tUs, toUs int64) int64 {
+	windowUs := durationUs
+	if tUs == 0 && toUs > 0 {
+		windowUs = toUs
+		if windowUs > durationUs {
+			windowUs = durationUs
+		}
+	}
+	if seekUs > 0 {
+		if seekUs >= windowUs {
+			windowUs = 0
+		} else {
+			windowUs -= seekUs
+		}
+	}
+	if tUs > 0 && tUs < windowUs {
+		windowUs = tUs
+	}
+	return windowUs
+}
+
+// ParseSeekWindow extracts the input-side and output-side -ss/-t/-to values
+// from an ffmpeg command line. An option may appear as "-ss value",
+// "-ss=value", or "-ss:value" (stream-specifier form). Input options bind to
+// the input they precede, so only the section between the previous input's
+// URL and the last -i applies to this output. Only the exact token "-i"
+// declares an input — "-i"-prefixed options like -init_hw_device,
+// -ignore_unknown and -id3v2_version are output-section options.
 func ParseSeekWindow(args []string) SeekWindow {
 	var sw SeekWindow
-	// Find the index after the last -i (output section starts there).
-	// Anything before the last -i is an input/global option; -ss there is a
-	// demuxer seek hint, not an output trim, and must not narrow the
-	// progress window. Only the exact token "-i" declares an input —
-	// "-i"-prefixed options like -init_hw_device, -ignore_unknown, and
-	// -id3v2_version are legitimate output-section options.
-	outputStart := 0
-	skipNext := false
-	for i := range len(args) {
-		if skipNext {
-			skipNext = false
+	lastI, prevI := -1, -1
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-i" {
 			continue
 		}
-		arg := args[i]
-		if arg == "-i" {
-			// -i and its value (next arg) belong to the input section.
-			outputStart = i + 2
-			skipNext = true
-			continue
-		}
-		// Value-taking option before the last -i: its value is part of the
-		// input section, so advance outputStart past the value. This
-		// prevents the value (e.g. a filename) from being mistaken for an
-		// output option later. Boolean flags and inline "=value" forms
-		// don't consume a separate value arg.
-		if i < outputStart && !ffmpegopts.IsBoolean(arg) && !strings.Contains(arg, "=") && i+1 < len(args) {
-			outputStart = i + 2
-			skipNext = true
-		}
+		prevI = lastI
+		lastI = i
+		i++ // the input URL follows -i and is never an option
 	}
-	if outputStart > len(args) {
-		outputStart = len(args)
+	if lastI < 0 {
+		// No input declared: everything on the line is an output option.
+		scanSeekOptions(args, &sw, false)
+		return sw
 	}
+	inputStart := 0
+	if prevI >= 0 {
+		inputStart = prevI + 2
+	}
+	scanSeekOptions(args[inputStart:lastI], &sw, true)
+	outputStart := lastI + 2
+	if outputStart < len(args) {
+		scanSeekOptions(args[outputStart:], &sw, false)
+	}
+	return sw
+}
 
-	// Walk the output section; for each target flag, grab its value from the
-	// next arg or from an inline = / : form.
-	for i := outputStart; i < len(args); i++ {
+// scanSeekOptions records the -ss/-t/-to options of one section of the
+// command line, as input-side or output-side values.
+func scanSeekOptions(args []string, sw *SeekWindow, inputSide bool) {
+	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		// Strip leading "-" or "--".
 		name := strings.TrimLeft(arg, "-")
@@ -964,17 +979,22 @@ func ParseSeekWindow(args []string) SeekWindow {
 				i++ // consume the value
 			}
 			us := parseFFmpegDurationUs(val)
-			switch base {
-			case "ss":
+			switch {
+			case base == "ss" && inputSide:
+				sw.InSeekUs = us
+			case base == "t" && inputSide:
+				sw.InTus = us
+			case base == "to" && inputSide:
+				sw.InToUs = us
+			case base == "ss":
 				sw.SeekUs = us
-			case "t":
+			case base == "t":
 				sw.Tus = us
-			case "to":
+			case base == "to":
 				sw.ToUs = us
 			}
 		}
 	}
-	return sw
 }
 
 // FilterProgressLine returns true if a line contains progress information.
