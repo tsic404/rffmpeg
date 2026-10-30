@@ -64,6 +64,38 @@ func TestMiddleware_ExemptPath(t *testing.T) {
 	}
 }
 
+// TestMiddleware_HealthEmptyCredentialField tests that the exemption is decided
+// by the field value, not by the field's presence: an Authorization field that
+// exists with an empty value carries no credential, so the health probe takes
+// the anonymous path with no client ID attached. The whitespace-only variant
+// parses to the same empty value on the wire and is exercised end-to-end by
+// tests/acceptance/TC-security-07.sh.
+func TestMiddleware_HealthEmptyCredentialField(t *testing.T) {
+	var gotClientID string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClientID = GetClientID(r)
+		w.WriteHeader(http.StatusOK)
+	})
+	protectedHandler := Middleware("secret-token")(handler)
+
+	for _, path := range []string{"/health", "/api/v1/health"} {
+		t.Run(path, func(t *testing.T) {
+			gotClientID = "unset"
+			req := httptest.NewRequest("GET", path, nil)
+			req.Header["Authorization"] = []string{""}
+			rec := httptest.NewRecorder()
+			protectedHandler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s with an empty credential field: expected 200, got %d", path, rec.Code)
+			}
+			if gotClientID != "" {
+				t.Errorf("%s client ID = %q, want empty (anonymous)", path, gotClientID)
+			}
+		})
+	}
+}
+
 // TestMiddleware_WorkerEndpointsRequireAuth tests that worker registration and
 // heartbeat are authenticated even when a token is configured.
 // Without this, an attacker can inject ghost workers and keep them alive via
