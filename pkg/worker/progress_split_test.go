@@ -84,11 +84,15 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 		"frame= 330 fps=26 q=-1.0 time=00:00:20.90 Lspeed=1.00x    \n"
 
 	parser := NewProgressParser()
-	parser.SetDuration(120 * 1_000_000) // what probeInputDurationUs seeds
+	// What probeInputDurationUs seeds. The stats lines arrive two seconds
+	// apart, so the attempt is past the estimator's start-up horizon by the
+	// last line and its projection is unrestricted.
+	parser.SetDuration(120 * 1_000_000)
 
-	// Inject wall-clock time: each stats line arrives one second apart. The
-	// ETA needs a rate window and enough published media to be past the
-	// start-up ramp, which the last line provides.
+	// Inject wall-clock time: each stats line arrives two seconds apart. The
+	// ETA needs a rate window, enough published media to be past the start-up
+	// ramp and enough elapsed time to cover the projection, which the last
+	// line provides.
 	wallSec := 0.0
 	parser.nowFunc = func() time.Time {
 		return time.Unix(0, int64(wallSec*1e9))
@@ -101,7 +105,7 @@ func TestProgressRouterLiveUpdatesFromCRStream(t *testing.T) {
 			return
 		}
 		f := parser.ParseLine(line)
-		wallSec += 1.0
+		wallSec += 2.0
 		if f == nil || f.Percent < 0 {
 			return
 		}
