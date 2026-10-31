@@ -56,6 +56,11 @@ type ProgressParser struct {
 	// It is the settle gate's fps-invariant half: the encoder's start-up fill
 	// is a frame count, so a low-fps source must not open the gate early.
 	attemptFrames int64
+	// startupStepSeen records that the pace has left its start-up level. The
+	// start-up gate then stops applying: the fill is over, and the rows the
+	// samples describe after the step may certify without waiting out the
+	// fixed bound.
+	startupStepSeen bool
 	// etaSamples is the rolling (wall, media) history the throughput rate is
 	// measured over. Each frame appended here is a real ffmpeg progress line;
 	// the attempt start is seeded so the first estimate includes the start-up
@@ -119,6 +124,14 @@ const (
 	// couple of seconds; longer ones would average the change away, and
 	// per-stats-line quotients are too noisy to bound anything.
 	etaRateChunkSeconds = 2.0
+	// etaStartUpSeconds is how long a cold pipeline takes to fill before it
+	// runs at the pace the rest of the attempt holds. It is the measured
+	// start-up of the pipeline, not a sampling parameter: the captured real
+	// 4K runs leave their start-up level at 17-20s. A run that steps earlier
+	// ends the wait at the step, and etaStartUpFraction caps it for short
+	// jobs so they still report.
+	etaStartUpSeconds  = 18.0
+	etaStartUpFraction = 1.0 / 3
 )
 
 // The interval below describes what the sample stream cannot pin down about
@@ -146,10 +159,17 @@ const etaFinalizeBoundSeconds = 0.75
 // rendered second is within tolerance of every finish the samples permit.
 const etaTolerance = 0.20
 
-// etaSample is one (wall clock, media time) observation of encode progress.
+// etaRateTolerance is the relative pace change that keeps two progress lines
+// in one steady segment. It is a different quantity from the finish-time
+// tolerance above: the contract names both and forbids sharing one number.
+const etaRateTolerance = 0.25
+
+// etaSample is one progress observation: the wall clock and the percentage
+// at the rendered grid (one decimal), so the rate judged is the rate a reader
+// of the progress line sees (C-122).
 type etaSample struct {
-	wall    time.Time
-	mediaUs int64
+	wall time.Time
+	pct  float64
 }
 
 func NewProgressParser() *ProgressParser {
@@ -299,7 +319,7 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		if p.attemptStartTime.IsZero() {
 			p.attemptStartTime = now
 		}
-		p.recordETASample(now, timeUs)
+		p.recordETASample(now, frame.Percent)
 		if float64(timeUs) >= etaSettleMediaSeconds*1_000_000 && p.attemptFrames >= etaSettleFrames {
 			frame.EtaSeconds = p.etaEstimate(now, timeUs, durationUs)
 		}
@@ -332,12 +352,14 @@ func (p *ProgressParser) ShouldPush() bool {
 	return false
 }
 
-// recordETASample appends one progress observation and drops history that is
-// too old to serve as the rate window's base. At least two samples are kept:
-// a sparse stream still needs the previous observation to measure a span.
-func (p *ProgressParser) recordETASample(now time.Time, mediaUs int64) {
-	p.etaSamples = append(p.etaSamples, etaSample{wall: now, mediaUs: mediaUs})
-	cutoff := now.Add(-time.Duration(2 * etaRateWindowSeconds * float64(time.Second)))
+// recordETASample appends one progress observation and drops history older
+// than the rate window plus one block edge: nothing older can enter a block.
+// At least two samples are kept: a sparse stream still needs a span.
+func (p *ProgressParser) recordETASample(now time.Time, pct float64) {
+	rendered := math.Round(pct*10) / 10
+	p.etaSamples = append(p.etaSamples, etaSample{wall: now, pct: rendered})
+	keep := etaRateWindowSeconds + etaRateChunkSeconds
+	cutoff := now.Add(-time.Duration(keep * float64(time.Second)))
 	for len(p.etaSamples) > 2 && p.etaSamples[0].wall.Before(cutoff) {
 		p.etaSamples = p.etaSamples[1:]
 	}
@@ -345,13 +367,10 @@ func (p *ProgressParser) recordETASample(now time.Time, mediaUs int64) {
 
 // etaRates is the throughput evidence one sample window supports.
 type etaRates struct {
-	pace       float64 // rate the finish is projected from
-	rateLo     float64 // slowest rate the samples can vouch for
-	rateHi     float64 // fastest rate the samples can vouch for
-	newest     float64 // rate over the newest chunk
-	oldest     float64 // rate over the oldest chunk: where the window started
-	isTrending bool    // chunk rates drift in one direction without a level step
-	settled    bool    // one pace describes the window, or a swing's mean does
+	pace    float64 // rate the finish is projected from
+	rateLo  float64 // slowest rate the samples can vouch for
+	rateHi  float64 // fastest rate the samples can vouch for
+	settled bool    // no step shares the window
 }
 
 // etaRateRange returns the throughput evidence the recent samples support.
@@ -365,297 +384,135 @@ type etaRates struct {
 // finish; a single departure is a burst that may already be over, and no
 // finish is certifiable until its old level slides out. A stream too sparse to
 // fill two chunks has no dispersion evidence at all.
-func (p *ProgressParser) etaRateRange(now time.Time, mediaUs int64) (etaRates, bool) {
+func (p *ProgressParser) etaRateRange(now time.Time) (etaRates, bool) {
 	window := time.Duration(etaRateWindowSeconds * float64(time.Second))
 	minSpan := time.Duration(etaRateMinSpanSeconds * float64(time.Second))
+	duration := float64(p.durationUs) / 1_000_000.0
+	if duration <= 0 {
+		return etaRates{}, false
+	}
 	// A rate is only meaningful over the window it claims to describe: an
 	// attempt younger than one window can still be inside a transient that
 	// the samples have not yet revealed.
 	if now.Sub(p.attemptStartTime) < window {
 		return etaRates{}, false
 	}
-
 	base := len(p.etaSamples) - 1
 	for base > 0 && now.Sub(p.etaSamples[base-1].wall) <= window {
 		base--
 	}
-	// Widen to older samples until the window spans enough wall time and
-	// actually advanced the media timeline.
-	for base > 0 &&
-		(now.Sub(p.etaSamples[base].wall) < minSpan || p.etaSamples[base].mediaUs >= mediaUs) {
-		base--
+	if len(p.etaSamples)-base < 2 {
+		return etaRates{}, false
 	}
-	baseWall := p.etaSamples[base].wall
-	span := now.Sub(baseWall)
+	span := now.Sub(p.etaSamples[base].wall)
 	if span < minSpan {
 		return etaRates{}, false
 	}
-	chunkRates := p.chunkRatesFrom(base, now)
-	// One rate measurement carries no dispersion, so it can bound neither the
-	// rate nor the finish: render n/a rather than certify a slope whose error
-	// is unknown.
-	if len(chunkRates) < 2 {
+	// One rate per row: the row's own block. A window with fewer than two
+	// measurable blocks carries no dispersion, so it certifies nothing
+	// (C-122 threshold clause).
+	blockRates := p.blockRatesFrom(base)
+	positive, low, high := 0, 0.0, 0.0
+	stepped := false
+	lastRate := 0.0
+	for _, r := range blockRates {
+		if r <= 0 {
+			continue
+		}
+		positive++
+		if low == 0 || r < low {
+			low = r
+		}
+		if r > high {
+			high = r
+		}
+		// A block without progress produces no rate and is not a rate
+		// block, so it does not break the adjacency: the step is judged
+		// between the consecutive measurable blocks on either side of it.
+		if lastRate > 0 && math.Abs(r/lastRate-1) > etaRateTolerance {
+			stepped = true
+		}
+		lastRate = r
+	}
+	if positive < 2 {
 		return etaRates{}, false
 	}
-	// The chunk rates cover only the stretches that produced a measurable
-	// rate: rateBetween drops a chunk whose media stalled or rewound. The
-	// window as a whole still counts that time, so its throughput is the
-	// floor a future that repeats the stall would run at. A window that
-	// advanced no media bounds nothing.
-	windowRate := float64(mediaUs-p.etaSamples[base].mediaUs) / 1_000_000.0 / span.Seconds()
+	// The window's whole throughput counts the time the measurable blocks
+	// skipped (a stall). It is the floor a future that repeats the stall
+	// would run at; a window that advanced no media bounds nothing.
+	windowRate := (p.etaSamples[len(p.etaSamples)-1].pct - p.etaSamples[base].pct) / 100.0 * duration / span.Seconds()
 	if windowRate <= 0 {
 		return etaRates{}, false
 	}
-
+	if stepped && now.Sub(p.attemptStartTime) <= time.Duration(etaStartUpSeconds*float64(time.Second)) {
+		// The fill ends at the first pace step; waiting out the fixed bound
+		// after the step has been observed would silence rows the samples
+		// already describe.
+		p.startupStepSeen = true
+	}
+	sum := 0.0
+	for _, r := range blockRates {
+		if r > 0 {
+			sum += r
+		}
+	}
 	rates := etaRates{
-		pace:   meanRate(chunkRates),
-		newest: chunkRates[0],
-		oldest: chunkRates[len(chunkRates)-1],
+		pace:    sum / float64(positive),
+		rateLo:  low,
+		rateHi:  high,
+		settled: !stepped,
 	}
-
-	changed, low, high := rateLevelChange(chunkRates)
-	if changed {
-		// A mean predicts the finish only when the levels alternate: each
-		// level must have left and returned, once on each side of the window.
-		// A single departure is a burst that may already be over, and the
-		// mixed mean then undershoots the rate the finish actually runs at —
-		// a preemption that just ended showed a 25% high ETA. Until the old
-		// level slides out of the window, no finish is certifiable.
-		if !p.rateLevelAlternates(now) {
-			return rates, true
-		}
-		se := rateStdDev(chunkRates, rates.pace) / math.Sqrt(float64(len(chunkRates)))
-		rates.rateLo = rates.pace - se
-		if windowRate < rates.rateLo {
-			rates.rateLo = windowRate
-		}
-		rates.rateHi = rates.pace + se
-		rates.settled = true
-		return rates, true
-	}
-
-	// One level: every chunk rate the window measured bounds the pace, not
-	// just the newest pair. A window whose observed range is wider than the
-	// tolerance cannot certify an integer and renders n/a below.
-	rates.rateLo = low
 	if windowRate < rates.rateLo {
 		rates.rateLo = windowRate
 	}
-	rates.rateHi = high
-	rates.settled = true
-	// The newest chunk is compared with the mean of the preceding three, not
-	// with one neighbour: a single chunk straddling a level boundary would
-	// otherwise read as a change still arriving and swallow half the samples
-	// of a 5s swing.
-	recent, count := 0.0, 0
-	for i := 1; i < len(chunkRates) && count < 3; i++ {
-		recent += chunkRates[i]
-		count++
-	}
-	recent /= float64(count)
-	if math.Abs(rates.newest-recent) > recent*etaTolerance/2 {
-		rates.settled = false
-	}
-	// A drift is monotonic and moves in small steps; a level change moves in
-	// one large step and is not projected forward. rateLevelChange already
-	// ruled out a level change here, so a window of three or more chunks whose
-	// steps keep one sign is a drift; alternating noise is not.
-	rates.isTrending = len(chunkRates) >= 3
-	flips, lastSign := 0, 0
-	for i := 0; i+1 < len(chunkRates); i++ {
-		newer, older := chunkRates[i], chunkRates[i+1]
-		if math.Abs(newer-older) > older*etaTolerance/2 {
-			rates.isTrending = false
-		}
-		sign := 0
-		switch {
-		case newer > older:
-			sign = 1
-		case newer < older:
-			sign = -1
-		}
-		if sign != 0 {
-			if lastSign != 0 && sign != lastSign {
-				flips++
-			}
-			lastSign = sign
-		}
-	}
-	rates.isTrending = rates.isTrending && flips == 0
 	return rates, true
 }
 
-// chunkRatesFrom measures one rate per etaRateChunkSeconds chunk between
-// sample index base and end, newest first. Chunks straddling a media rewind
-// are dropped: their quotient mixes two timelines.
-func (p *ProgressParser) chunkRatesFrom(base int, end time.Time) []float64 {
+// blockRatesFrom returns the block rate of every progress row in [base, last],
+// in row order. A row's block ends at that row and starts etaRateChunkSeconds
+// earlier; its first row is the sample nearest that start, which may fall
+// before the start by one sampling interval (C-122). A block without progress,
+// with fewer than two rows, or shorter than 1s of measured wall time produces
+// no rate (zero); a zero is not a rate block, so a step is judged between the
+// consecutive measurable blocks on either side of it.
+func (p *ProgressParser) blockRatesFrom(base int) []float64 {
+	last := len(p.etaSamples) - 1
+	rates := make([]float64, last-base+1)
+	duration := float64(p.durationUs) / 1_000_000.0
+	if duration <= 0 {
+		return nil
+	}
 	chunk := time.Duration(etaRateChunkSeconds * float64(time.Second))
-	minSpan := time.Duration(etaRateMinSpanSeconds * float64(time.Second))
-	baseWall := p.etaSamples[base].wall
-	rewindWall, rewound := p.rewindWall(base, len(p.etaSamples)-1)
-	var rates []float64
-	for chunkEnd := end; chunkEnd.After(baseWall); chunkEnd = chunkEnd.Add(-chunk) {
-		start := chunkEnd.Add(-chunk)
-		if start.Before(baseWall) {
-			start = baseWall
-			if chunkEnd.Sub(start) < minSpan {
-				break
-			}
-		}
-		if rewound && !start.After(rewindWall) && chunkEnd.After(rewindWall) {
+	minSpan := time.Duration(etaRateChunkSeconds / 2 * float64(time.Second))
+	for i := base; i <= last; i++ {
+		if i == 0 {
 			continue
 		}
-		if r, ok := p.rateBetween(start, chunkEnd); ok {
-			rates = append(rates, r)
+		start := p.etaSamples[i].wall.Add(-chunk)
+		// The window's first block is truncated at the window start: a
+		// block never reaches past the rows the window claims (C-122).
+		j := base
+		for k := base + 1; k < i; k++ {
+			if absDuration(p.etaSamples[k].wall.Sub(start)) < absDuration(p.etaSamples[j].wall.Sub(start)) {
+				j = k
+			}
 		}
+		span := p.etaSamples[i].wall.Sub(p.etaSamples[j].wall)
+		dp := p.etaSamples[i].pct - p.etaSamples[j].pct
+		if span < minSpan || dp <= 0 {
+			continue
+		}
+		rates[i-base] = dp / 100.0 * duration / span.Seconds()
 	}
 	return rates
 }
 
-// rewindWall reports the last wall clock at which media time went backwards
-// between sample indexes first and last.
-func (p *ProgressParser) rewindWall(first, last int) (time.Time, bool) {
-	var wall time.Time
-	rewound := false
-	for i := first + 1; i <= last && i < len(p.etaSamples); i++ {
-		if p.etaSamples[i].mediaUs < p.etaSamples[i-1].mediaUs {
-			rewound = true
-			wall = p.etaSamples[i-1].wall
-		}
+// absDuration is time.Duration's absolute value.
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
 	}
-	return wall, rewound
-}
-
-// rateLevelChange reports whether adjacent chunk rates inside one window
-// disagree by more than half the error budget, and the window's low and high
-// rate.
-func rateLevelChange(rates []float64) (bool, float64, float64) {
-	low, high := rates[0], rates[0]
-	changed := false
-	for i, r := range rates {
-		if r < low {
-			low = r
-		}
-		if r > high {
-			high = r
-		}
-		if i > 0 && math.Abs(r-rates[i-1]) > rates[i-1]*etaTolerance/2 {
-			changed = true
-		}
-	}
-	return changed, low, high
-}
-
-// rateStdDev is the sample deviation of the chunk rates around the window
-// mean.
-func rateStdDev(rates []float64, mean float64) float64 {
-	sum := 0.0
-	for _, r := range rates {
-		sum += (r - mean) * (r - mean)
-	}
-	return math.Sqrt(sum / float64(len(rates)))
-}
-
-// meanRate is the arithmetic mean of the chunk rates.
-func meanRate(rates []float64) float64 {
-	sum := 0.0
-	for _, r := range rates {
-		sum += r
-	}
-	return sum / float64(len(rates))
-}
-
-// rateLevelAlternates reports whether the two-window history holds at least
-// two separate runs at each of its fastest and slowest rate. A run is a
-// maximal stretch of chunks within half the error budget of that extreme; a
-// chunk outside both bands (a boundary average, or a third level) carries no
-// alternation evidence and is skipped, so it does not split a run of the same
-// extreme. highRuns and lowRuns count those runs after the skip: two high
-// runs means the high level was seen again after the low level intervened.
-// One departure and return is a burst that may already be over; a level
-// observed again after leaving is the oscillation whose mean predicts a
-// finish. Three-level alternation that keeps revisiting both extremes also
-// qualifies — that is deliberate: the extremes are repeatedly confirmed, and
-// the standard error band carries the intermediate rates' dispersion.
-func (p *ProgressParser) rateLevelAlternates(now time.Time) bool {
-	span := 2 * time.Duration(etaRateWindowSeconds*float64(time.Second))
-	base := len(p.etaSamples) - 1
-	for base > 0 && now.Sub(p.etaSamples[base-1].wall) <= span {
-		base--
-	}
-	history := p.chunkRatesFrom(base, now)
-	if len(history) < 4 {
-		return false
-	}
-	low, high := history[0], history[0]
-	for _, r := range history {
-		if r < low {
-			low = r
-		}
-		if r > high {
-			high = r
-		}
-	}
-	if high <= low*(1+etaTolerance/2) {
-		return false
-	}
-	level := func(r float64) int {
-		switch {
-		case math.Abs(r-high) <= high*etaTolerance/2:
-			return 1
-		case math.Abs(r-low) <= low*etaTolerance/2:
-			return -1
-		}
-		return 0
-	}
-	highRuns, lowRuns := 0, 0
-	last := 0
-	for _, r := range history {
-		at := level(r)
-		if at == 0 || at == last {
-			continue
-		}
-		if at > 0 {
-			highRuns++
-		} else {
-			lowRuns++
-		}
-		last = at
-	}
-	return lowRuns >= 2 && highRuns >= 2
-}
-
-// rateBetween measures the throughput between the first sample at or after
-// start and the last at or before end. It reports false when the samples span
-// too little wall time or the media went backwards inside the chunk.
-func (p *ProgressParser) rateBetween(start, end time.Time) (float64, bool) {
-	first, last := -1, -1
-	for i := range p.etaSamples {
-		wall := p.etaSamples[i].wall
-		if first < 0 && !wall.Before(start) && !wall.After(end) {
-			first = i
-		}
-		if !wall.After(end) {
-			last = i
-		}
-	}
-	if first < 0 || last <= first {
-		return 0, false
-	}
-	for i := first + 1; i <= last; i++ {
-		if p.etaSamples[i].mediaUs < p.etaSamples[i-1].mediaUs {
-			return 0, false
-		}
-	}
-	span := p.etaSamples[last].wall.Sub(p.etaSamples[first].wall)
-	if span < time.Duration(etaRateChunkSeconds/2*float64(time.Second)) {
-		return 0, false
-	}
-	mediaSec := float64(p.etaSamples[last].mediaUs-p.etaSamples[first].mediaUs) / 1_000_000.0
-	if mediaSec <= 0 {
-		return 0, false
-	}
-	return mediaSec / span.Seconds(), true
+	return d
 }
 
 // etaEstimate returns the remaining wall-clock seconds for the current
@@ -671,12 +528,12 @@ func (p *ProgressParser) rateBetween(start, end time.Time) (float64, bool) {
 // (remaining-lag)/rateHi. The muxer adds at most etaFinalizeBoundSeconds after
 // the last frame, and at the slowest rate the finish cannot be later than
 // remaining/rateLo + finalize. Those terms bound the true remaining time to
-// [lo, hi]; the estimate is emitted only when the rounded second sits within
+// [lo, hi]; the estimate is emitted only when an integer second lies within
 // etaTolerance of both ends, otherwise the frame carries no ETA and the CLI
 // renders n/a (C-23). A number the samples cannot certify is worse than none:
 // on the display it is indistinguishable from a correct one.
 func (p *ProgressParser) etaEstimate(now time.Time, mediaUs, durationUs int64) int {
-	rates, ok := p.etaRateRange(now, mediaUs)
+	rates, ok := p.etaRateRange(now)
 	if !ok {
 		return 0
 	}
@@ -688,6 +545,20 @@ func (p *ProgressParser) etaEstimate(now time.Time, mediaUs, durationUs int64) i
 	if !rates.settled {
 		return 0
 	}
+	// Start-up: the pipeline fills before it runs at the pace the attempt
+	// will hold, and the fill ends at a step — the pace leaving its start-up
+	// level by more than the rate tolerance. Once that step has been observed
+	// the wait is over; a run that never steps is bounded by the pipeline's
+	// measured start-up. The bound is scaled for short jobs so they still
+	// report (C-122).
+	if rates.pace > 0 && !p.startupStepSeen {
+		age := now.Sub(p.attemptStartTime).Seconds()
+		if remaining := float64(durationUs-mediaUs) / 1_000_000.0; remaining > 0 {
+			if projected := age + remaining/rates.pace; age < math.Min(etaStartUpSeconds, etaStartUpFraction*projected) {
+				return 0
+			}
+		}
+	}
 	remaining := float64(durationUs-mediaUs) / 1_000_000.0
 	if remaining <= 0 {
 		return 0
@@ -696,39 +567,32 @@ func (p *ProgressParser) etaEstimate(now time.Time, mediaUs, durationUs int64) i
 	if rateLo <= 0 {
 		return 0
 	}
-	// A pace that keeps moving the same way will not be at its current value
-	// for the rest of the run. Project the observed drift over the remaining
-	// time: the finish lies between "the drift stops now" and "it continues",
-	// and that spread is what the interval has to cover.
-	if rates.isTrending && rates.oldest > 0 {
-		relative := (rates.newest - rates.oldest) / rates.oldest
-		projected := rates.pace * (1 + relative*(remaining/rates.pace)/etaRateWindowSeconds)
-		if projected > rateHi {
-			rateHi = projected
-		}
-		if projected < rateLo {
-			rateLo = projected
-		}
-	}
-	if rateLo <= 0 {
-		return 0
-	}
 	lo := (remaining - etaOutputLagBoundSeconds) / rateHi
 	if lo < 0 {
 		lo = 0
 	}
 	hi := remaining/rateLo + etaFinalizeBoundSeconds
-	// The midpoint is the least-wrong second to show when the finish lies
-	// anywhere in [lo, hi]: it minimises the worst-case relative error, and
-	// it certifies the widest stretch of the run.
+	// C-122 item 1: any integer second within the tolerance of both ends
+	// certifies the row. Pick the feasible integer closest to the midpoint
+	// (the minimax choice), and render n/a only when the feasible set is
+	// empty. Requiring the midpoint itself to sit in the band rejects rows
+	// that do hold a certifying integer, which is a stricter rule than the
+	// contract and turns available ETAs into n/a.
+	// AC-40's bound is strict (<20%), so the ends themselves do not
+	// certify: the feasible integers lie strictly inside the band.
+	feaLo := int(math.Floor((1-etaTolerance)*hi)) + 1
+	feaHi := int(math.Ceil((1+etaTolerance)*lo)) - 1
+	if feaLo > feaHi {
+		return 0
+	}
 	rendered := int(math.Round((lo + hi) / 2))
+	if rendered < feaLo {
+		rendered = feaLo
+	}
+	if rendered > feaHi {
+		rendered = feaHi
+	}
 	if rendered <= 0 {
-		return 0
-	}
-	if float64(rendered) > (1+etaTolerance)*lo {
-		return 0
-	}
-	if float64(rendered) < (1-etaTolerance)*hi {
 		return 0
 	}
 	return rendered
@@ -747,6 +611,7 @@ func (p *ProgressParser) etaEstimate(now time.Time, mediaUs, durationUs int64) i
 func (p *ProgressParser) StartAttempt() {
 	p.attemptStartTime = p.now()
 	p.attemptFrames = 0
+	p.startupStepSeen = false
 	p.etaSamples = append(p.etaSamples[:0], etaSample{wall: p.attemptStartTime})
 	p.ewmaSpeed = 0
 }
@@ -758,6 +623,7 @@ func (p *ProgressParser) Reset() {
 	p.setDurationUs(0)
 	p.attemptStartTime = time.Time{}
 	p.attemptFrames = 0
+	p.startupStepSeen = false
 	p.etaSamples = nil
 	p.ewmaSpeed = 0
 	p.maxPercent = -1
