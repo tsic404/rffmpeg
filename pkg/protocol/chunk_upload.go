@@ -73,6 +73,10 @@ type UploadSessionStatus string
 
 const (
 	UploadSessionStatusInProgress UploadSessionStatus = "in_progress"
+	// UploadSessionStatusAssembling is the transient state a session is
+	// claimed into while its chunks are being assembled, so a concurrent or
+	// repeated completion cannot assemble the same session twice.
+	UploadSessionStatusAssembling UploadSessionStatus = "assembling"
 	UploadSessionStatusCompleted  UploadSessionStatus = "completed"
 	UploadSessionStatusExpired    UploadSessionStatus = "expired"
 	UploadSessionStatusCancelled  UploadSessionStatus = "cancelled"

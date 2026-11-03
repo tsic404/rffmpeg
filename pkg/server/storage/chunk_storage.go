@@ -3,19 +3,47 @@ package storage
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 )
 
-// SaveChunk saves a single chunk to temporary storage
+// Errors reported by AssembleChunks when the session's chunks on disk do not
+// form the file the session declared. They describe a client-correctable
+// condition (resend the gap, fix the declared sizes), so callers map them to
+// 400 instead of a 5xx storage failure.
+var (
+	// ErrChunkMissing means an index in [0, totalChunks) has no chunk file.
+	ErrChunkMissing = errors.New("chunk missing")
+	// ErrChunkSizeMismatch means a chunk's byte count differs from the size
+	// the session's chunk_size/file_size imply.
+	ErrChunkSizeMismatch = errors.New("chunk size mismatch")
+	// ErrAssembledSizeMismatch means the chunk set cannot add up to file_size
+	// at all (the session's chunking is inconsistent).
+	ErrAssembledSizeMismatch = errors.New("assembled size mismatch")
+)
+
+// ChunkPath returns the canonical on-disk path of a chunk. Chunk files are
+// addressed by index, never by directory enumeration, so assembly cannot
+// silently skip or reorder a chunk.
+func (s *Storage) ChunkPath(uploadID string, chunkIndex int) string {
+	return filepath.Join(s.baseDir, "chunks", uploadID, fmt.Sprintf("chunk_%d", chunkIndex))
+}
+
+// SaveChunk stores one chunk atomically and returns its path, size and SHA256
+// checksum.
+//
+// The bytes are written to a temporary file in the chunk directory, fsynced,
+// and only then renamed onto the canonical chunk path. A crash mid-write
+// therefore leaves either the previous chunk or no chunk at all — never a
+// truncated chunk_N that a later retry would mistake for a completed upload.
 func (s *Storage) SaveChunk(uploadID string, chunkIndex int, reader io.Reader) (string, int64, string, error) {
-	// A chunk body is read from the network while the lock is held, so it must
-	// be the session-local lock: holding the files/ lock here blocked every
-	// download for the duration of a slow chunk transfer.
+	// The chunk body is read from the network while the lock is held, so it
+	// must be the session-local lock: the files/ lock would block downloads
+	// for the length of a slow transfer.
 	defer s.lockUpload(uploadID)()
 
 	chunkDir := filepath.Join(s.baseDir, "chunks", uploadID)
@@ -23,41 +51,73 @@ func (s *Storage) SaveChunk(uploadID string, chunkIndex int, reader io.Reader) (
 		return "", 0, "", fmt.Errorf("failed to create chunk directory: %w", err)
 	}
 
-	chunkPath := filepath.Join(chunkDir, fmt.Sprintf("chunk_%d", chunkIndex))
-	file, err := os.Create(chunkPath)
+	tmpFile, err := os.CreateTemp(chunkDir, fmt.Sprintf(".chunk_%d.tmp-", chunkIndex))
 	if err != nil {
 		return "", 0, "", fmt.Errorf("failed to create chunk file: %w", err)
 	}
+	tmpPath := tmpFile.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			os.Remove(tmpPath)
+		}
+	}()
 
 	// Calculate checksum while copying
 	hash := sha256.New()
-	writer := io.MultiWriter(file, hash)
-	size, err := io.Copy(writer, reader)
+	size, err := io.Copy(io.MultiWriter(tmpFile, hash), reader)
 	if err != nil {
-		file.Close()
-		os.Remove(chunkPath)
+		tmpFile.Close()
 		return "", 0, "", fmt.Errorf("failed to write chunk: %w", err)
 	}
 
-	// Close explicitly rather than via defer: on delayed-allocation filesystems
-	// (ext4 delalloc) and NFS, ENOSPC can surface only at close/flush, after
-	// io.Copy has returned success. Swallowing the close error would mark a
-	// truncated chunk as uploaded, so it is surfaced and the file removed.
-	if err := file.Close(); err != nil {
-		os.Remove(chunkPath)
+	// fsync before the rename: renaming an unsynced file can leave a
+	// zero-length chunk_N after a power loss, which is exactly the "looks
+	// uploaded, is truncated" state this path exists to prevent.
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		return "", 0, "", fmt.Errorf("failed to sync chunk file: %w", err)
+	}
+	// Close explicitly rather than via defer: on delayed-allocation
+	// filesystems (ext4 delalloc) and NFS, ENOSPC can surface only at
+	// close/flush, after io.Copy has returned success. Swallowing the close
+	// error would mark a truncated chunk as uploaded.
+	if err := tmpFile.Close(); err != nil {
 		return "", 0, "", fmt.Errorf("failed to close chunk file: %w", err)
+	}
+
+	chunkPath := s.ChunkPath(uploadID, chunkIndex)
+	if err := os.Rename(tmpPath, chunkPath); err != nil {
+		return "", 0, "", fmt.Errorf("failed to commit chunk file: %w", err)
+	}
+	committed = true
+
+	// Make the rename itself durable. Without this a crash can lose the
+	// directory entry while the data is already on disk — the upload then
+	// reads as a missing chunk, which is safe but forces a needless resend.
+	if err := syncDir(chunkDir); err != nil {
+		return "", 0, "", fmt.Errorf("failed to sync chunk directory: %w", err)
 	}
 
 	checksum := hex.EncodeToString(hash.Sum(nil))
 	return chunkPath, size, checksum, nil
 }
 
+// syncDir fsyncs a directory so a completed rename survives a crash.
+func syncDir(dir string) error {
+	handle, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	return handle.Sync()
+}
+
 // OpenChunk opens a chunk file for reading
 func (s *Storage) OpenChunk(uploadID string, chunkIndex int) (*os.File, error) {
 	defer s.lockUpload(uploadID)()
 
-	chunkPath := filepath.Join(s.baseDir, "chunks", uploadID, fmt.Sprintf("chunk_%d", chunkIndex))
-	file, err := os.Open(chunkPath)
+	file, err := os.Open(s.ChunkPath(uploadID, chunkIndex))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open chunk: %w", err)
 	}
@@ -68,8 +128,7 @@ func (s *Storage) OpenChunk(uploadID string, chunkIndex int) (*os.File, error) {
 func (s *Storage) DeleteChunk(uploadID string, chunkIndex int) error {
 	defer s.lockUpload(uploadID)()
 
-	chunkPath := filepath.Join(s.baseDir, "chunks", uploadID, fmt.Sprintf("chunk_%d", chunkIndex))
-	return os.Remove(chunkPath)
+	return os.Remove(s.ChunkPath(uploadID, chunkIndex))
 }
 
 // DeleteChunkDirectory deletes all chunks for an upload session
@@ -80,41 +139,109 @@ func (s *Storage) DeleteChunkDirectory(uploadID string) error {
 	return os.RemoveAll(chunkDir)
 }
 
-// AssembleChunks combines all chunks into a single file
-func (s *Storage) AssembleChunks(uploadID string, fileID string, chunkPaths []string) (string, int64, string, error) {
-	// Assembly copies the whole session into files/: it only needs the session
-	// lock, so downloads and unrelated uploads keep running meanwhile.
+// chunkSource is one input of an assembly: the chunk file and the byte count
+// the session says it must hold.
+type chunkSource struct {
+	path string
+	size int64
+}
+
+// AssembleChunks combines the session's chunks into a single file in the files
+// directory and returns its temporary path, size and SHA256 checksum. The
+// caller owns the result and publishes it only after verifying any declared
+// checksum against the measured one.
+//
+// Chunks are read by explicit index and must carry exactly the size the
+// session's chunk_size/file_size imply; a missing or truncated chunk fails the
+// assembly instead of yielding a short file that looks like a successful upload.
+func (s *Storage) AssembleChunks(uploadID string, totalChunks int, chunkSize, fileSize int64) (string, int64, string, error) {
+	// Assembly only touches this session's chunks, so the session lock keeps
+	// downloads and other uploads running while a large file is copied.
 	defer s.lockUpload(uploadID)()
 
-	// Sort chunk paths by their index to ensure correct order
-	sort.Slice(chunkPaths, func(i, j int) bool {
-		// Extract chunk index from filename
-		var idxI, idxJ int
-		fmt.Sscanf(filepath.Base(chunkPaths[i]), "chunk_%d", &idxI)
-		fmt.Sscanf(filepath.Base(chunkPaths[j]), "chunk_%d", &idxJ)
-		return idxI < idxJ
-	})
+	if totalChunks <= 0 || chunkSize <= 0 || fileSize <= 0 {
+		return "", 0, "", fmt.Errorf("%w: session declares file_size=%d chunk_size=%d total_chunks=%d",
+			ErrAssembledSizeMismatch, fileSize, chunkSize, totalChunks)
+	}
 
-	// Create the final file
+	// The last chunk holds fileSize-(totalChunks-1)*chunkSize bytes. Check the
+	// multiplication against fileSize before performing it: totalChunks comes
+	// from the client, and an overflowing product would wrap into a bogus
+	// "valid" session.
+	if int64(totalChunks-1) > (fileSize-1)/chunkSize {
+		return "", 0, "", fmt.Errorf("%w: session declares file_size=%d chunk_size=%d total_chunks=%d",
+			ErrAssembledSizeMismatch, fileSize, chunkSize, totalChunks)
+	}
+	lastChunkSize := fileSize - chunkSize*int64(totalChunks-1)
+	if lastChunkSize <= 0 || lastChunkSize > chunkSize {
+		return "", 0, "", fmt.Errorf("%w: session declares file_size=%d chunk_size=%d total_chunks=%d",
+			ErrAssembledSizeMismatch, fileSize, chunkSize, totalChunks)
+	}
+
+	// Verify the whole chunk set before copying anything, so a missing or
+	// short chunk fails fast instead of after a near-full assembly.
+	// Capacity is capped: totalChunks is client-declared, and reserving a slot
+	// per declared chunk would let one init+complete allocate terabytes.
+	const maxChunkSourceCapacity = 1024
+	sources := make([]chunkSource, 0, min(totalChunks, maxChunkSourceCapacity))
+	var expectedTotal int64
+	for i := range totalChunks {
+		expected := chunkSize
+		if i == totalChunks-1 {
+			expected = lastChunkSize
+		}
+		expectedTotal += expected
+
+		path := s.ChunkPath(uploadID, i)
+		info, err := os.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", 0, "", fmt.Errorf("%w: chunk %d", ErrChunkMissing, i)
+			}
+			return "", 0, "", fmt.Errorf("failed to stat chunk %d: %w", i, err)
+		}
+		if !info.Mode().IsRegular() || info.Size() != expected {
+			return "", 0, "", fmt.Errorf("%w: chunk %d has %d bytes, want %d",
+				ErrChunkSizeMismatch, i, info.Size(), expected)
+		}
+		sources = append(sources, chunkSource{path: path, size: expected})
+	}
+	if expectedTotal != fileSize {
+		return "", 0, "", fmt.Errorf("%w: chunks add up to %d bytes, want %d",
+			ErrAssembledSizeMismatch, expectedTotal, fileSize)
+	}
+
 	fileDir := filepath.Join(s.baseDir, "files")
 	if err := os.MkdirAll(fileDir, 0755); err != nil {
 		return "", 0, "", fmt.Errorf("failed to create files directory: %w", err)
 	}
 
-	filePath := filepath.Join(fileDir, fileID)
-	finalFile, err := os.Create(filePath)
+	// Assemble inside files/: the final rename must stay on the same
+	// filesystem to be atomic. The temporary name never matches a content
+	// hash, so no reader can address a half-written file.
+	tmpFile, err := os.CreateTemp(fileDir, ".assemble-*")
 	if err != nil {
 		return "", 0, "", fmt.Errorf("failed to create final file: %w", err)
 	}
+	tmpPath := tmpFile.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			os.Remove(tmpPath)
+		}
+	}()
 
-	totalSize, checksum, err := assembleChunksInto(finalFile, chunkPaths)
+	totalSize, checksum, err := assembleChunksInto(tmpFile, sources)
 	if err != nil {
-		// Remove the partial output so no truncated file is left behind.
-		os.Remove(filePath)
 		return "", 0, "", err
 	}
+	if totalSize != fileSize {
+		return "", 0, "", fmt.Errorf("%w: assembled %d bytes, want %d",
+			ErrAssembledSizeMismatch, totalSize, fileSize)
+	}
 
-	return filePath, totalSize, checksum, nil
+	committed = true
+	return tmpPath, totalSize, checksum, nil
 }
 
 // assembleChunksInto copies the ordered chunk files into dst and closes it,
@@ -122,23 +249,30 @@ func (s *Storage) AssembleChunks(uploadID string, fileID string, chunkPaths []st
 // explicitly (not deferred) because delayed-allocation and NFS filesystems can
 // report ENOSPC only at flush/close time; discarding it would return success
 // on a truncated file.
-func assembleChunksInto(dst io.WriteCloser, chunkPaths []string) (int64, string, error) {
+func assembleChunksInto(dst io.WriteCloser, sources []chunkSource) (int64, string, error) {
 	hash := sha256.New()
 	writer := io.MultiWriter(dst, hash)
 	var totalSize int64
 
-	for _, chunkPath := range chunkPaths {
-		chunkFile, err := os.Open(chunkPath)
+	for _, src := range sources {
+		chunkFile, err := os.Open(src.path)
 		if err != nil {
 			dst.Close()
-			return 0, "", fmt.Errorf("failed to open chunk %s: %w", chunkPath, err)
+			return 0, "", fmt.Errorf("failed to open chunk %s: %w", src.path, err)
 		}
 
 		size, err := io.Copy(writer, chunkFile)
 		chunkFile.Close()
 		if err != nil {
 			dst.Close()
-			return 0, "", fmt.Errorf("failed to copy chunk %s: %w", chunkPath, err)
+			return 0, "", fmt.Errorf("failed to copy chunk %s: %w", src.path, err)
+		}
+		// The stat pass above validated the size; re-check the copied count
+		// because the chunk could have been replaced between stat and copy.
+		if size != src.size {
+			dst.Close()
+			return 0, "", fmt.Errorf("%w: chunk %s changed during assembly (%d bytes, want %d)",
+				ErrChunkSizeMismatch, src.path, size, src.size)
 		}
 		totalSize += size
 	}
@@ -165,33 +299,17 @@ func (s *Storage) CalculateChunkChecksum(uploadID string, chunkIndex int) (strin
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// ChunkExists checks if a chunk file exists
-func (s *Storage) ChunkExists(uploadID string, chunkIndex int) bool {
+// ChunkExists reports whether the chunk is stored *complete*: the file must
+// exist and hold exactly expectedSize bytes. A truncated chunk left by a
+// crash therefore reads as missing, and the retry rewrites it.
+func (s *Storage) ChunkExists(uploadID string, chunkIndex int, expectedSize int64) bool {
 	defer s.lockUpload(uploadID)()
 
-	chunkPath := filepath.Join(s.baseDir, "chunks", uploadID, fmt.Sprintf("chunk_%d", chunkIndex))
-	_, err := os.Stat(chunkPath)
-	return err == nil
-}
-
-// GetChunkPaths returns all chunk paths for an upload session
-func (s *Storage) GetChunkPaths(uploadID string) ([]string, error) {
-	defer s.lockUpload(uploadID)()
-
-	chunkDir := filepath.Join(s.baseDir, "chunks", uploadID)
-	entries, err := os.ReadDir(chunkDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read chunk directory: %w", err)
+	info, err := os.Stat(s.ChunkPath(uploadID, chunkIndex))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
 	}
-
-	var paths []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			paths = append(paths, filepath.Join(chunkDir, entry.Name()))
-		}
-	}
-
-	return paths, nil
+	return info.Size() == expectedSize
 }
 
 // ChunkStorage manages temporary chunk storage with cleanup

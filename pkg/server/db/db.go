@@ -251,7 +251,7 @@ var requiredTables = []tableSpec{
 	}},
 	{name: "upload_sessions", pk: "id", core: true, columns: []string{
 		"id", "filename", "file_size", "chunk_size", "total_chunks",
-		"uploaded_chunks", "file_checksum", "status", "created_at",
+		"uploaded_chunks", "file_checksum", "file_id", "status", "created_at",
 		"updated_at", "expires_at",
 	}},
 	{name: "upload_chunks", pk: "id", core: true, columns: []string{
@@ -502,6 +502,7 @@ func (d *Database) initTables() error {
 			total_chunks INTEGER NOT NULL,
 			uploaded_chunks TEXT DEFAULT '[]',
 			file_checksum TEXT,
+			file_id TEXT,
 			status TEXT NOT NULL,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
@@ -621,6 +622,7 @@ func (d *Database) initTables() error {
 		`ALTER TABLE workers ADD COLUMN pix_fmts TEXT DEFAULT ''`,
 		`ALTER TABLE workers ADD COLUMN formats TEXT DEFAULT ''`,
 		`ALTER TABLE job_redistributions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE upload_sessions ADD COLUMN file_id TEXT`,
 	} {
 		if _, err := d.db.Exec(stmt); err != nil {
 			errStr := err.Error()
