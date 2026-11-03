@@ -289,14 +289,8 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 			onAttemptStart()
 		}
 
-		// Idempotency: a failed attempt may have left a partial output file
-		// behind. A later attempt that exits 0 without producing output would
-		// otherwise be misjudged as successful by the os.Stat validation.
-		if !networkOutput && outputPath != "" && outputPath != "-" {
-			if err := os.Remove(outputPath); err == nil {
-				log.Printf("Removed stale output from previous attempt: %s", outputPath)
-			}
-		}
+		clearStaleOutput(outputPath, networkOutput)
+
 		// Execute
 		var execResult ExecResult
 		if stderrHandler != nil {
@@ -445,6 +439,7 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 			if onAttemptStart != nil {
 				onAttemptStart()
 			}
+			clearStaleOutput(outputPath, networkOutput)
 			var execResult ExecResult
 			if stderrHandler != nil {
 				execResult = e.executor.ExecuteWithHandlers(ctx, fallbackArgs, stdoutHandler, stderrHandler)
@@ -538,6 +533,21 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 	}
 
 	return result
+}
+
+// clearStaleOutput removes the output left by a previous ffmpeg process before
+// the next attempt launches. ffmpeg's native no -y semantics refuse to
+// overwrite an existing file, and a failed attempt can leave a 0-byte or
+// partial output behind, so both the retry loop and the final software
+// fallback must start from nothing. Network outputs and "-" (stdout) write no
+// local file and are skipped.
+func clearStaleOutput(outputPath string, networkOutput bool) {
+	if networkOutput || outputPath == "" || outputPath == "-" {
+		return
+	}
+	if err := os.Remove(outputPath); err == nil {
+		log.Printf("Removed stale output from previous attempt: %s", outputPath)
+	}
 }
 
 // determineStage determines the retry stage based on attempt number.
