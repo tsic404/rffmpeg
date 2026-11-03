@@ -45,6 +45,11 @@ func TestParseDurationLine(t *testing.T) {
 		{"  Duration: 00:00:00.00, start: 0.000000", 0},
 		{"No duration here", 0},
 		{"Duration: 02:00:00.000000", 7200_000_000},
+		// A Metadata block prints the same token with padding before the
+		// colon; it is container metadata, not the stream's length.
+		{"    Duration        : 00:00:05.00", 0},
+		{"    Duration: 00:00:05.00", 0},
+		{"creation_time   : 2024-01-01T00:00:00.000000Z", 0},
 	}
 
 	for _, tt := range tests {

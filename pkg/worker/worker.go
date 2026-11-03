@@ -1485,14 +1485,23 @@ func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failu
 	}
 }
 
-// probeInputDurationUs returns the duration of the first local input that
-// yields one via ffprobe, in microseconds, or 0 when none can be determined
-// (missing tool, unreadable, non-local). Used to seed the progress parser so
-// percent/ETA work even when ffmpeg reports "Duration: N/A" (pipes, some
-// network inputs). Inputs that fail to probe are skipped rather than
-// aborting; for concat the first segment's duration is an intentional
-// under-estimate so progress appears early instead of never at all.
+// probeInputDurationUs returns the longest duration among the job's local
+// inputs, in microseconds, or 0 when none can be determined (missing tool,
+// unreadable, non-local). Used to seed the progress parser so percent/ETA work
+// even when ffmpeg reports "Duration: N/A" (pipes, some network inputs).
+// The longest input, not the first, is the denominator: a still-image cover
+// input such as `-loop 1 -i cover.jpg -i audio.mp3` probes as a single frame,
+// and measuring progress against it reports 100% at the first stats line.
+// Inputs that fail to probe are skipped rather than aborting.
 func (w *Worker) probeInputDurationUs(ctx context.Context, inputPaths []string) int64 {
+	return longestProbedDurationUs(ctx, inputPaths, w.ffprobeExecutor.Probe)
+}
+
+// longestProbedDurationUs is the selection half of probeInputDurationUs: every
+// probeable input is probed and the longest duration wins. probe is a seam so
+// the selection can be tested without an ffprobe binary.
+func longestProbedDurationUs(ctx context.Context, inputPaths []string, probe func(context.Context, string) (*FFprobeResult, error)) int64 {
+	var longest int64
 	for _, p := range inputPaths {
 		if p == "" || strings.HasPrefix(p, "-") {
 			continue // skip placeholders and option-like args
@@ -1500,26 +1509,30 @@ func (w *Worker) probeInputDurationUs(ctx context.Context, inputPaths []string) 
 		if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		result, err := w.ffprobeExecutor.Probe(ctx, p)
+		result, err := probe(ctx, p)
 		if err != nil {
 			log.Printf("Progress duration probe failed for %s, trying next input: %v", p, err)
 			continue
 		}
-		if result.Format == nil {
+		if result == nil || result.Format == nil {
 			continue
 		}
 		switch d := result.Format["duration"].(type) {
 		case string:
 			if secs, err := strconv.ParseFloat(d, 64); err == nil && secs > 0 {
-				return int64(secs * 1_000_000)
+				if us := int64(secs * 1_000_000); us > longest {
+					longest = us
+				}
 			}
 		case float64:
 			if d > 0 {
-				return int64(d * 1_000_000)
+				if us := int64(d * 1_000_000); us > longest {
+					longest = us
+				}
 			}
 		}
 	}
-	return 0
+	return longest
 }
 
 // processProbeJob handles a probe job (args[0] == "__rffmpeg_probe__").
