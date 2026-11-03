@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -65,6 +66,7 @@ func main() {
 	}
 
 	log.Printf("Configuration: %s", cfg)
+	warnInsecureTransport(cfg)
 
 	// Bind before the expensive initialization so the port is in LISTEN within
 	// milliseconds of process start; see bindListener for the probe contract.
@@ -445,6 +447,21 @@ func main() {
 	}
 
 	log.Println("Server stopped")
+}
+
+// warnInsecureTransport makes the transport posture explicit at startup. TLS
+// is off by default for local development, and a minimum version below 1.2 is
+// still accepted for compatibility, but neither may pass silently: credentials
+// and media traverse the network unprotected, and every operator who reads the
+// startup log should see that.
+func warnInsecureTransport(cfg *config.ServerConfig) {
+	if cfg.TLS == nil || !cfg.TLS.Enabled {
+		log.Printf("WARNING: TLS is disabled; the API is served over plaintext HTTP. Auth tokens and job payloads are not protected in transit.")
+		return
+	}
+	if cfg.TLS.MinVersion != 0 && cfg.TLS.MinVersion < tls.VersionTLS12 {
+		log.Printf("WARNING: TLS minimum version is %s; versions below TLS 1.2 are deprecated and should not be used on an untrusted network.", tls.VersionName(cfg.TLS.MinVersion))
+	}
 }
 
 // stopper is the shutdown half of a background component.

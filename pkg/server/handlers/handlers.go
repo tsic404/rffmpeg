@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -1332,22 +1331,20 @@ func (h *Handler) PullWorkerJobs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// inputExists reports whether a probe input resolves on the server. A
-// well-formed storage file ID (64-hex SHA256) is resolved through storage;
-// anything else — a direct shared-FS path or a relative filename — is
-// checked directly against the server's filesystem.
+// inputExists reports whether a probe input resolves to a registered storage
+// file. Only registered inputs are probed: a bare path or arbitrary string must
+// not turn the endpoint into a filesystem existence oracle on the server host.
+// Remote URLs and shared-FS paths return true and are resolved by the Worker.
 func inputExists(store *storage.Storage, input string) bool {
 	if storage.ValidateFileID(input) {
 		return store.FileExists(input)
 	}
-	// Reject a direct path containing a ".." component before os.Stat resolves
-	// it. A bare API call can otherwise bypass the worker-side traversal guard
-	// The check lives in pathutil so both sides share one semantic.
+	// Reject ".." without touching the filesystem: the guard is shared with
+	// the worker, and a rejected path reveals nothing about what exists.
 	if pathutil.ContainsPathTraversal(input) {
 		return false
 	}
-	_, err := os.Stat(input)
-	return err == nil
+	return true
 }
 
 // Probe handles ffprobe requests via job dispatch to workers.
@@ -1375,12 +1372,10 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate the input exists (skip for remote URLs). Two input semantics:
-	// a storage file ID (64-hex content hash, resolved under the server's
-	// storage dir) vs. a direct local path (shared-FS passthrough, resolved
-	// against the server's own filesystem). FileExists can only resolve the
-	// former; feeding it a direct path always 404s.
-	if !strings.Contains(req.Input, "://") && !inputExists(h.storage, req.Input) {
+	// Validate registered inputs exist. A storage file ID that is not on disk
+	// is a 404 before any job is created; URLs and shared-FS paths are left to
+	// the Worker, which is the only side that can resolve them.
+	if !inputExists(h.storage, req.Input) {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeNotFound, "Input file not found: "+req.Input, nil,
 		))

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -581,6 +583,9 @@ func run() (code int) {
 		fmt.Fprintf(os.Stderr, "rffmpeg %s - Remote FFmpeg Client\n", version)
 		fmt.Fprintf(os.Stderr, "Server: %s (%s)\n", cfg.ServerURL, cfg.ServerURLSource)
 	}
+	if warning := plaintextRemoteServerWarning(cfg.ServerURL); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 
 	// Check server health
 	if err := cli.HealthCheck(); err != nil {
@@ -602,6 +607,24 @@ func run() (code int) {
 	}
 
 	return runTranscode(cli, cfg, opts, ffmpegArgs, sharedFS, tee)
+}
+
+// plaintextRemoteServerWarning returns a one-line warning when the CLI would
+// send its auth token and media to a non-loopback server over plaintext HTTP.
+// Loopback endpoints do not leave the host and stay silent.
+func plaintextRemoteServerWarning(serverURL string) string {
+	u, err := url.Parse(strings.TrimSpace(serverURL))
+	if err != nil || !strings.EqualFold(u.Scheme, "http") {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return ""
+	}
+	return fmt.Sprintf("Warning: server %s uses plaintext HTTP; the auth token and media are sent unencrypted. Use https:// for a remote server.", serverURL)
 }
 
 // unconfiguredServerURLHint is the one line printed after a failed health check

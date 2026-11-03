@@ -3872,9 +3872,10 @@ func TestProbeDirectPathExistsPassesInputValidation(t *testing.T) {
 	}
 }
 
-// a direct path that does not exist on the server filesystem must
-// still be rejected with 404 before worker dispatch.
-func TestProbeDirectPathMissingRejected(t *testing.T) {
+// a direct path is not stat'ed on the server: a missing path must reach the
+// worker-availability guard instead of answering from the server host's
+// filesystem, which would turn the endpoint into an existence oracle.
+func TestProbeDirectPathNotStatOnServer(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
@@ -3886,15 +3887,17 @@ func TestProbeDirectPathMissingRejected(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("Expected 400 for missing direct path, got %d. Body: %s", w.Code, w.Body.String())
+	// No worker is registered, so reaching 503 proves input validation did
+	// not consult the server filesystem.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Expected 503 worker_unavailable (no server-side stat), got %d. Body: %s", w.Code, w.Body.String())
 	}
 	var errResp protocol.ErrorResponse
 	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
 		t.Fatalf("Failed to decode error response: %v", err)
 	}
-	if errResp.Code != protocol.ErrCodeNotFound {
-		t.Errorf("Expected error code 'not_found', got '%s'", errResp.Code)
+	if errResp.Code != protocol.ErrCodeWorkerUnavailable {
+		t.Errorf("Expected error code 'worker_unavailable', got '%s'", errResp.Code)
 	}
 }
 
