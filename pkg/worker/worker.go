@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -602,6 +603,13 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		if wgTracked {
 			w.jobsWG.Done()
 		}
+		// activeJobs only holds the cancel func, so deleting the entry does
+		// not release the job context. Cancel it on every exit path — a
+		// long-lived worker otherwise accumulates one live context per
+		// completed job together with whatever it spawned.
+		if cancel != nil {
+			cancel()
+		}
 	}()
 
 	// Detect probe jobs: args[0] == "__rffmpeg_probe__". Probes are health
@@ -933,8 +941,65 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	}
 
+	// Direct mode writes into a shared-FS target a client may read at any
+	// moment. ffmpeg creates and grows the output while it encodes, so a
+	// crash, timeout or cancel would leave a truncated file at the final path.
+	// Run ffmpeg in a staging directory beside the target and publish the
+	// result only on success. The staged output keeps its original basename
+	// because ffmpeg derives sibling artifacts from it: an HLS playlist
+	// references "out0.ts" next to "out.m3u8", so publishing unchanged names
+	// keeps the directory layout the client observes.
+	executionOutputPath := outputPath
+	var stagingDir string
+	if directMode && outputPath != "" && outputPath != "-" && !pathutil.IsRemoteURL(outputPath) {
+		// The final path is no longer visible to ffmpeg, so its own overwrite
+		// refusal cannot fire. Reproduce it here for -n and for the default
+		// (no -y): the existing output is the user's data and must not be
+		// replaced by a run that only reaches the publish step on success.
+		if policy != ffmpegopts.OverwriteForce && policy != ffmpegopts.OverwriteConflict {
+			if _, err := os.Stat(outputPath); err == nil {
+				jobFailed = true
+				w.reportFailure(job.ID, 1,
+					fmt.Sprintf("File %s already exists. Exiting.", outputPath), false, flushStderr)
+				return
+			}
+		}
+		stagingDir = directStagingDir(job.ID, outputPath)
+		// A previous attempt of this job (same worker, interrupted before its
+		// deferred cleanup) may have left the staging directory behind. A stale
+		// staging directory or an unwritable output directory is the same
+		// client-visible failure ffmpeg reports for an unopenable output, so
+		// it keeps the FFMPEG_ERROR classification.
+		if err := os.RemoveAll(stagingDir); err != nil {
+			jobFailed = true
+			w.reportFailureWithType(job.ID, 1,
+				fmt.Sprintf("failed to clear output staging directory %s: %v", stagingDir, err),
+				string(protocol.FailureFFmpegError), "output path not writable", flushStderr)
+			return
+		}
+		if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+			jobFailed = true
+			w.reportFailureWithType(job.ID, 1,
+				fmt.Sprintf("failed to create output staging directory %s: %v", stagingDir, err),
+				string(protocol.FailureFFmpegError), "output path not writable", flushStderr)
+			return
+		}
+		defer func() {
+			if stagingDir == "" {
+				return
+			}
+			// Failure, timeout or cancel: the partial encode must never reach
+			// the shared target and must not linger next to it either.
+			if err := os.RemoveAll(stagingDir); err != nil {
+				log.Printf("Job %s: failed to remove output staging directory %s: %v", job.ID, stagingDir, err)
+			}
+		}()
+		executionOutputPath = filepath.Join(stagingDir, filepath.Base(outputPath))
+		log.Printf("Job %s: direct output staged in %s", job.ID, stagingDir)
+	}
+
 	// Build initial args
-	args := BuildArgs(job.Args, inputPaths, outputPath)
+	args := BuildArgs(job.Args, inputPaths, executionOutputPath)
 
 	// Apply encoder rewrite based on job.AutoHW flag. The flag is passed per
 	// RewriteArgs call — the shared adapter config must not be mutated per job
@@ -1179,13 +1244,13 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// codec which cannot be muxed, resulting in silent failure).
 	// Skip for network outputs (RTMP, RTSP, UDP, etc.) — no local file is produced.
 	if !networkOutput && !job.StreamingOutput && result.Error == nil && result.ExitCode == 0 {
-		if info, err := os.Stat(outputPath); err != nil {
-			log.Printf("Job %s: output file not found after exit code 0: %s: %v", job.ID, outputPath, err)
+		if info, err := os.Stat(executionOutputPath); err != nil {
+			log.Printf("Job %s: output file not found after exit code 0: %s: %v", job.ID, executionOutputPath, err)
 			result.Error = fmt.Errorf("output file not found: %s", outputPath)
 			result.ExitCode = 1
 			result.Stderr = "Output file not found: " + outputPath + "\n" + result.Stderr
 		} else if info.Size() == 0 {
-			log.Printf("Job %s: output file is 0 bytes after exit code 0: %s", job.ID, outputPath)
+			log.Printf("Job %s: output file is 0 bytes after exit code 0: %s", job.ID, executionOutputPath)
 			result.Error = fmt.Errorf("output file is empty (0 bytes): %s", outputPath)
 			result.ExitCode = 1
 			result.Stderr = "Output file is empty (0 bytes): " + outputPath + "\n" + result.Stderr
@@ -1204,12 +1269,13 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	}
 
-	// Validate ffmpeg stderr for critical errors that indicate failed transcoding
-	// even when ffmpeg exits with code 0 (e.g., corrupted input files).
+	// ffmpeg's own verdict wins: exit code 0 with warnings still produced the
+	// requested output. The one exception is the muxer refusing to open or
+	// initialize the output, which ffmpeg n9 reports with exit code 0.
 	if result.Error == nil && result.ExitCode == 0 {
-		if ffmpegStderrIndicatesCriticalError(result.Stderr) {
-			log.Printf("Job %s: ffmpeg reported critical error in stderr (exit code 0)", job.ID)
-			result.Error = fmt.Errorf("ffmpeg reported critical error: corrupted or invalid input data")
+		if ffmpegStderrIndicatesUnwrittenOutput(result.Stderr) {
+			log.Printf("Job %s: ffmpeg could not write the output (exit code 0)", job.ID)
+			result.Error = fmt.Errorf("ffmpeg could not open or initialize the output file")
 			result.ExitCode = 1
 		}
 	}
@@ -1238,8 +1304,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			log.Printf("%s", notification)
 			progressRouter.Handler()(notification + "\n")
 
-			// Use RetryExecutor for multi-stage retry:
-			retryResult := w.retryExecutor.ExecuteWithRetry(execCtx, args, outputPath, networkOutput, stdoutHandler, progressRouter.Handler(), progressRouter.StartAttempt)
+			// Use RetryExecutor for multi-stage retry. It validates and clears
+			// the same path the retry attempts write to — the staged path —
+			// so on success the publish step below moves the final artifacts
+			// into place exactly once.
+			retryResult := w.retryExecutor.ExecuteWithRetry(execCtx, args, executionOutputPath, networkOutput, stdoutHandler, progressRouter.Handler(), progressRouter.StartAttempt)
 
 			if retryResult.Success {
 				// Retry succeeded — use the final result
@@ -1296,6 +1365,19 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	}
 
 uploadOutput:
+
+	// The staged direct-mode output becomes visible only now, after ffmpeg
+	// exited 0 and the staged file passed the output checks.
+	if stagingDir != "" {
+		if err := publishStagedOutput(stagingDir, filepath.Dir(outputPath), filepath.Base(outputPath)); err != nil {
+			jobFailed = true
+			w.reportInfraFailure(job.ID, result.ExitCode,
+				fmt.Sprintf("failed to publish staged output %s: %v", outputPath, err))
+			return
+		}
+		// The deferred cleanup removes the now-empty staging directory.
+		log.Printf("Job %s: staged output published to %s", job.ID, outputPath)
+	}
 
 	// Upload output file (skip for streaming output, direct mode jobs, and network URL outputs)
 	isNetOutput = pathutil.IsRemoteURL(outputPath)
@@ -1967,44 +2049,80 @@ func ffmpegStderrIndicatesEmptyOutput(stderr string) bool {
 	return false
 }
 
-// ffmpegStderrIndicatesCriticalError checks ffmpeg stderr for critical errors
-// that indicate a failed transcoding even when ffmpeg exits with code 0.
-// This catches cases like corrupted input files where ffmpeg may exit 0
-// but still report errors like "Invalid data" in stderr.
-func ffmpegStderrIndicatesCriticalError(stderr string) bool {
-	// Case-insensitive check for critical ffmpeg error messages.
-	stderrLower := strings.ToLower(stderr)
-	criticalErrorIndicators := []string{
-		"invalid data found when reading input",
-		"invalid data found",
-		"invalid nal unit size",
-		"header missing",
-		"corrupted file",
-		"corrupted input",
-		"error while decoding",
-		"decode_slice_header error",
-		"concealing errors",
-		"error while processing",
-		"unable to decode",
-		"decode failed",
-		"error decoding",
-		// Encoder-related errors that may occur with exit code 0
-		"unknown encoder",
-		"requested encoder",
-		"no such encoder",
-		"encoder not found",
-		// Output-open failures: ffmpeg n9 exits 0 when it cannot open or
-		// initialize the output muxer (bad path, missing directory, unknown
-		// container), so stderr is the only signal.
-		"error opening output file",
-		"error opening output files",
-		"error initializing the muxer",
-		"unable to choose an output format",
-		"could not open file",
-		"could not open output",
+// directStagingDir returns the job-private directory beside a direct-mode
+// output where ffmpeg writes before the result is published. Keeping it a
+// directory rather than a renamed file preserves the names ffmpeg derives for
+// sibling artifacts (HLS segments, DASH chunks).
+func directStagingDir(jobID, outputPath string) string {
+	token := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, jobID)
+	if token == "" {
+		token = "job"
 	}
-	for _, indicator := range criticalErrorIndicators {
-		if strings.Contains(stderrLower, indicator) {
+	return filepath.Join(filepath.Dir(outputPath), ".rffmpeg-staging-"+token)
+}
+
+// publishStagedOutput moves every file ffmpeg produced from the staging
+// directory into the target directory, keeping the names ffmpeg chose so a
+// playlist keeps referencing its segments. The main output moves last: until
+// then a client sees either the previous complete result or no playlist at
+// all, never one that points at files still staged.
+func publishStagedOutput(stagingDir, targetDir, mainName string) error {
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return fmt.Errorf("staged output contains unexpected directory %q", entry.Name())
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Slice(names, func(i, j int) bool {
+		return names[i] != mainName && names[j] == mainName
+	})
+	for _, name := range names {
+		if err := os.Rename(filepath.Join(stagingDir, name), filepath.Join(targetDir, name)); err != nil {
+			return fmt.Errorf("move %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// ffmpegStderrIndicatesUnwrittenOutput reports whether ffmpeg failed to open or
+// initialize the output even though it exited 0. ffmpeg n9 returns 0 for some
+// output-open failures and for its own overwrite refusal, so the exit code
+// alone cannot separate those from a completed transcode.
+//
+// Only the muxer's own error lines count: decoding warnings, stream info and
+// metadata values (a title literally named "header missing", for example) are
+// not failures. Anything broader turns a successful job into FFMPEG_ERROR.
+func ffmpegStderrIndicatesUnwrittenOutput(stderr string) bool {
+	for _, raw := range strings.Split(stderr, "\n") {
+		line := strings.TrimSpace(raw)
+		// Component messages carry an "[out#0/mp4 @ 0x...] " context tag.
+		if strings.HasPrefix(line, "[") {
+			if end := strings.Index(line, "] "); end != -1 {
+				line = strings.TrimSpace(line[end+2:])
+			}
+		}
+		switch {
+		case strings.HasPrefix(line, "Error opening output"),
+			strings.HasPrefix(line, "Error initializing the muxer"),
+			strings.HasPrefix(line, "Unable to choose an output format"):
+			return true
+		case strings.HasPrefix(line, "File ") && strings.Contains(line, "already exists"):
+			// -n refusal: "File 'out.mp4' already exists. Exiting." The
+			// interactive variant embeds the same sentence in the overwrite
+			// prompt, so the prompt's "Not overwriting" tail needs no separate
+			// match — a metadata value carrying that phrase is not a refusal.
 			return true
 		}
 	}
