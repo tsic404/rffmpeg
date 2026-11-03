@@ -16,6 +16,25 @@ import (
 // never blocks the heartbeat loop (which also carries job cancellation).
 const metricCmdTimeout = 3 * time.Second
 
+// bindProcessGroup makes context cancellation kill the command's whole process
+// group: a wrapper script forks a child that survives a bare ctx kill and keeps
+// the output pipes open, blocking cmd.Output forever. Pdeathsig reaps the child
+// if the worker itself dies.
+func bindProcessGroup(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
+	}
+	cmd.Cancel = func() error {
+		// ctx timeout can fire before Start() sets cmd.Process (start vs
+		// cancel race window); dereferencing nil would panic the caller.
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
 // Metrics holds point-in-time GPU utilization metrics.
 // On multi-GPU hosts the values are summed across all GPUs, so UtilPct is an
 // aggregate busyness (two GPUs at 50% report 100), not a per-device average.
@@ -59,23 +78,7 @@ func (d *Detector) sampleNVIDIAMetrics() (m Metrics, ok bool) {
 	cmd := exec.CommandContext(ctx, "nvidia-smi",
 		"--query-gpu=utilization.gpu,memory.used",
 		"--format=csv,noheader,nounits")
-	// Kill the whole process group: a bare `sleep`-style script forks a
-	// child that survives a plain ctx kill and keeps the output pipes open,
-	// blocking cmd.Output forever.
-	// Pdeathsig ensures the metrics subprocess is reaped if the worker
-	// itself dies, preventing orphaned nvidia-smi/intel_gpu_top processes.
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid:   true,
-		Pdeathsig: syscall.SIGKILL,
-	}
-	cmd.Cancel = func() error {
-		// ctx timeout can fire before Start() sets cmd.Process (start vs
-		// cancel race window); dereferencing nil would panic the caller.
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	bindProcessGroup(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return Metrics{}, false
@@ -121,16 +124,7 @@ func (d *Detector) sampleIntelMetrics() (m Metrics, ok bool) {
 		"-o", "-", // stdout
 		"-s", "1000", // 1s refresh
 		"-n", "1") // single sample then exit
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid:   true,
-		Pdeathsig: syscall.SIGKILL,
-	}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	bindProcessGroup(cmd)
 	output, err := cmd.Output()
 	if err != nil {
 		return Metrics{}, false

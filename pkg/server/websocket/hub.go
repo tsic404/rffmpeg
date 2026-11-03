@@ -102,13 +102,18 @@ func NewHubWithSeqStore(store SeqStore) *Hub {
 // Run starts the hub's main loop
 func (h *Hub) Run() {
 	h.started.Store(true)
+	// closeCh is local so the shutdown case can be disarmed after it fires:
+	// a closed channel is always ready, and leaving it in the select would
+	// spin the loop at 100% CPU for the rest of the process lifetime.
+	closeCh := h.closeCh
 	for {
 		select {
-		case <-h.closeCh:
+		case <-closeCh:
 			// Close every live connection (hijacked sockets that
 			// http.Server.Shutdown does not track) and clear the map so no
 			// later broadcast can touch a closed send channel. The loop keeps
-			// draining register/unregister so their senders never block.
+			// draining register/unregister so their senders never block and a
+			// late registration is closed instead of leaked.
 			h.mu.Lock()
 			for jobID, clients := range h.clients {
 				for client := range clients {
@@ -118,6 +123,7 @@ func (h *Hub) Run() {
 			}
 			h.mu.Unlock()
 			h.doneOnce.Do(func() { close(h.closedDone) })
+			closeCh = nil
 
 		case client := <-h.register:
 			if h.closed.Load() {
@@ -548,6 +554,11 @@ func (c *Client) nextQueued() ([]byte, bool) {
 // been removed from h.clients: closing c.send while a broadcast could still
 // reach it makes the Run loop panic ("send on closed channel") — the exact
 // silent-server-death crash this invariant prevents.
+//
+// The normal-closure frame goes out first: closing the socket alone gives the
+// peer an abnormal close (C-104 requires a normal close frame on server
+// shutdown). WriteControl may be used concurrently with the write pump, so
+// this does not race an in-flight data frame.
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -555,6 +566,9 @@ func (c *Client) Close() {
 		return
 	}
 	c.closed = true
+	_ = c.conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second))
 	c.conn.Close()
 	close(c.send)
 }

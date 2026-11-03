@@ -210,6 +210,16 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 			pollDone, pollErr)
 	}()
 
+	// The server's own shutdown closes the log stream with 1000/1001 (C-104).
+	// Treat that as a server restart, not the end of the job: reconnect and
+	// keep streaming. A one-shot HTTP fallback would fail on the first
+	// connection-refused while the job keeps running server-side.
+	maxNormalCloseReconnects := c.maxRetries + 1
+	if maxNormalCloseReconnects < 1 {
+		maxNormalCloseReconnects = 1
+	}
+	normalCloseReconnects := 0
+
 	for {
 		select {
 		case job := <-pollDone:
@@ -246,18 +256,29 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 				return c.WaitForJob(ctx, jobID, !quiet)
 			}
 
-			if _, err := c.WaitForJob(ctx, jobID, !quiet); err != nil {
-				return nil, err
-			}
-			job, err := c.GetJob(jobID)
-			if err != nil {
-				return nil, err
+			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+				if wsClient.HasGap() {
+					fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+				}
+				return job, nil
 			}
 
-			if wsClient.HasGap() {
-				fmt.Fprintln(os.Stderr, "Warning: log stream incomplete: sequence gap detected (log lines lost during reconnect); output file is unaffected")
+			normalCloseReconnects++
+			if normalCloseReconnects > maxNormalCloseReconnects {
+				return nil, &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("server closed the log stream %d times without completing the job", normalCloseReconnects)}
 			}
-			return job, nil
+			fmt.Fprintln(os.Stderr, "Warning: server closed the log stream; reconnecting...")
+			if reconnectErr := wsClient.ConnectWithReconnect(ctx); reconnectErr != nil {
+				if errors.Is(reconnectErr, ErrRetriesExhausted) {
+					return nil, &RetriesExhaustedError{JobID: jobID, Cause: reconnectErr}
+				}
+				return nil, reconnectErr
+			}
+			nextListen := make(chan error, 1)
+			listenDone = nextListen
+			go func() {
+				nextListen <- wsClient.Listen(ctx)
+			}()
 		case <-ctx.Done():
 
 			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
@@ -388,40 +409,72 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 			pollDone, pollErr)
 	}()
 
-	// Wait for completion, error, or context cancellation
+	// Wait for completion, error, or context cancellation.
 	var finalJob *protocol.JobInfo
-	select {
-	case job := <-pollDone:
-		finalJob = job
-
-		drainStreamingOutput(ctx, terminalSeen, listenDone)
-	case err := <-pollErr:
-
-		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+	maxNormalCloseReconnects := c.maxRetries + 1
+	if maxNormalCloseReconnects < 1 {
+		maxNormalCloseReconnects = 1
+	}
+	normalCloseReconnects := 0
+waitLoop:
+	for {
+		select {
+		case job := <-pollDone:
 			finalJob = job
-		} else {
-			return nil, err
-		}
-	case err := <-listenDone:
-		if err != nil {
 
-			if errors.Is(err, ErrRetriesExhausted) {
-				return nil, &RetriesExhaustedError{JobID: jobID, Cause: err}
+			drainStreamingOutput(ctx, terminalSeen, listenDone)
+			break waitLoop
+		case err := <-pollErr:
+
+			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+				finalJob = job
+			} else {
+				return nil, err
+			}
+			break waitLoop
+		case err := <-listenDone:
+			if err != nil {
+
+				if errors.Is(err, ErrRetriesExhausted) {
+					return nil, &RetriesExhaustedError{JobID: jobID, Cause: err}
+				}
+
+				return fallbackToPolling()
 			}
 
-			return fallbackToPolling()
-		}
-
-		return fallbackToPolling()
-	case <-ctx.Done():
-
-		if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
-			finalJob = job
-		} else {
-			if e := integrityErr(nil); e != nil {
-				return nil, e
+			// A normal close is the server's own shutdown (C-104). The job
+			// keeps running; reconnect rather than abandoning the stream.
+			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+				finalJob = job
+				break waitLoop
 			}
-			return nil, ctx.Err()
+			normalCloseReconnects++
+			if normalCloseReconnects > maxNormalCloseReconnects {
+				return nil, &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("server closed the log stream %d times without completing the job", normalCloseReconnects)}
+			}
+			fmt.Fprintln(os.Stderr, "Warning: server closed the log stream; reconnecting...")
+			if reconnectErr := wsClient.ConnectWithReconnect(ctx); reconnectErr != nil {
+				if errors.Is(reconnectErr, ErrRetriesExhausted) {
+					return nil, &RetriesExhaustedError{JobID: jobID, Cause: reconnectErr}
+				}
+				return fallbackToPolling()
+			}
+			nextListen := make(chan error, 1)
+			listenDone = nextListen
+			go func() {
+				nextListen <- wsClient.Listen(ctx)
+			}()
+		case <-ctx.Done():
+
+			if job, getErr := c.GetJob(jobID); getErr == nil && protocol.IsTerminalStatus(job.Status) {
+				finalJob = job
+			} else {
+				if e := integrityErr(nil); e != nil {
+					return nil, e
+				}
+				return nil, ctx.Err()
+			}
+			break waitLoop
 		}
 	}
 

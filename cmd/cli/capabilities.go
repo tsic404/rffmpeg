@@ -581,6 +581,12 @@ func setupClient(serverURL, token string) (*client.Client, error) {
 	if token != "" {
 		cfg.Token = token
 	}
+	// Capability queries return before the transcode path's banner, so the
+	// transport warning must be emitted here too: these requests carry the
+	// same token over the same connection.
+	if warning := plaintextRemoteServerWarning(cfg.ServerURL); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	c := client.New(cfg.ServerURL, cfg.Token)
 	if err := c.HealthCheck(); err != nil {
 		return nil, fmt.Errorf("server health check failed: %w", err)

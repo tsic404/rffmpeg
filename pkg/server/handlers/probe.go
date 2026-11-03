@@ -14,19 +14,34 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
 )
 
-// inputExists reports whether a probe input resolves to a registered storage
-// file. Only registered inputs are probed: a bare path or arbitrary string must
-// not turn the endpoint into a filesystem existence oracle on the server host.
-// Remote URLs and shared-FS paths return true and are resolved by the Worker.
-func inputExists(store *storage.Storage, input string) bool {
-	if storage.ValidateFileID(input) {
-		return store.FileExists(input)
-	}
+// probeInputClass identifies how a probe input is resolved.
+type probeInputClass int
 
-	if pathutil.ContainsPathTraversal(input) {
-		return false
+const (
+	probeInputFileID probeInputClass = iota
+	probeInputRemoteURL
+	probeInputPath
+)
+
+// classifyProbeInput closes the probe input taxonomy: a valid storage file ID,
+// a remote URL, or a path. Anything else non-empty is a path. Traversal is
+// rejected for paths only — a URL's path segments are resolved by the remote
+// server, not against the server's filesystem — and the rejection is a形态
+// error, hence invalid_request, while a well-formed ID with no stored file is
+// not_found.
+func classifyProbeInput(input string) (probeInputClass, *protocol.ProtocolError) {
+	switch {
+	case storage.ValidateFileID(input):
+		return probeInputFileID, nil
+	case pathutil.IsRemoteURL(input):
+		return probeInputRemoteURL, nil
+	case pathutil.ContainsPathTraversal(input):
+		return probeInputPath, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "input path contains a '..' component", nil,
+		)
+	default:
+		return probeInputPath, nil
 	}
-	return true
 }
 
 // Probe handles ffprobe requests via job dispatch to workers.
@@ -52,7 +67,15 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !inputExists(h.storage, req.Input) {
+	// Registered IDs are checked before any job is created; URLs and paths are
+	// left to the Worker, which is the only side that can resolve them.
+	// Traversal is a malformed path, not a missing object.
+	inputClass, inputErr := classifyProbeInput(req.Input)
+	if inputErr != nil {
+		writeError(w, http.StatusBadRequest, inputErr)
+		return
+	}
+	if inputClass == probeInputFileID && !h.storage.FileExists(req.Input) {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeNotFound, "Input file not found: "+req.Input, nil,
 		))
@@ -91,7 +114,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	directPathsJSON := "[]"
-	if !strings.Contains(req.Input, "://") && !storage.ValidateFileID(req.Input) {
+	if inputClass == probeInputPath {
 		dp, err := json.Marshal([]string{req.Input})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(

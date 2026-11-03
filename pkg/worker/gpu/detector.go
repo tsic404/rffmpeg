@@ -281,6 +281,7 @@ func (d *Detector) getNVIDIASMIInfo() (name, driver string) {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu="+field, "--format=csv,noheader,nounits")
+		bindProcessGroup(cmd)
 		output, err := cmd.Output()
 		if err != nil {
 			return ""

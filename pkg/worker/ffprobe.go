@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sync"
 	"time"
 )
 
-// FFprobeExecutor runs ffprobe commands for media file analysis.
+// FFprobeExecutor runs ffprobe commands for media file analysis. It is shared
+// by concurrent jobs (and by the parallel duration probe), so its mutable
+// state is guarded.
 type FFprobeExecutor struct {
+	mu          sync.Mutex
 	ffprobePath string
 	timeout     time.Duration
 	validated   bool // set true after ValidatePath succeeds
@@ -28,11 +32,19 @@ func NewFFprobeExecutor(ffprobePath string) *FFprobeExecutor {
 
 // SetTimeout sets the execution timeout.
 func (e *FFprobeExecutor) SetTimeout(d time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.timeout = d
 }
 
 // ValidatePath checks if the ffprobe executable exists and is executable.
 func (e *FFprobeExecutor) ValidatePath() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.validatePathLocked()
+}
+
+func (e *FFprobeExecutor) validatePathLocked() error {
 	path, err := exec.LookPath(e.ffprobePath)
 	if err != nil {
 		return fmt.Errorf("ffprobe executable not found: %q: %w", e.ffprobePath, err)
@@ -50,13 +62,18 @@ type FFprobeResult struct {
 
 // Probe runs ffprobe against the given input and returns structured results.
 func (e *FFprobeExecutor) Probe(ctx context.Context, input string) (*FFprobeResult, error) {
+	e.mu.Lock()
 	if !e.validated {
-		if err := e.ValidatePath(); err != nil {
+		if err := e.validatePathLocked(); err != nil {
+			e.mu.Unlock()
 			return nil, err
 		}
 	}
+	ffprobePath := e.ffprobePath
+	timeout := e.timeout
+	e.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, e.timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	args := []string{
@@ -66,7 +83,7 @@ func (e *FFprobeExecutor) Probe(ctx context.Context, input string) (*FFprobeResu
 		input,
 	}
 
-	cmd := exec.CommandContext(ctx, e.ffprobePath, args...)
+	cmd := exec.CommandContext(ctx, ffprobePath, args...)
 	output, err := cmd.Output()
 	if err != nil {
 		// Try to capture stderr
@@ -75,7 +92,7 @@ func (e *FFprobeExecutor) Probe(ctx context.Context, input string) (*FFprobeResu
 			stderr = string(exitErr.Stderr)
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("ffprobe timed out after %v", e.timeout)
+			return nil, fmt.Errorf("ffprobe timed out after %v", timeout)
 		}
 		return nil, fmt.Errorf("ffprobe failed: %w (stderr: %s)", err, stderr)
 	}

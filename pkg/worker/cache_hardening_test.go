@@ -62,22 +62,16 @@ func TestCacheShardDirIsPrivate(t *testing.T) {
 	}
 }
 
-// TestNewCacheRejectsForeignOwnedDir covers the ownership half of the directory
-// check. It needs root to hand a directory to another uid.
-func TestNewCacheRejectsForeignOwnedDir(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("requires root to chown a directory to a foreign uid")
-	}
+// TestEnsureCacheDirRejectsForeignOwner covers the ownership half of the
+// directory check without requiring root: the expected owner is injected, so
+// a directory owned by this process is "foreign" for the call under test.
+func TestEnsureCacheDirRejectsForeignOwner(t *testing.T) {
 	cacheDir := filepath.Join(t.TempDir(), "cache")
-	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-		t.Fatal(err)
+	if err := ensureCacheDirAs(cacheDir, os.Geteuid()); err != nil {
+		t.Fatalf("owner-matching validation failed: %v", err)
 	}
-	if err := os.Chown(cacheDir, 65534, 65534); err != nil {
-		t.Fatalf("chown: %v", err)
-	}
-
-	if _, err := NewCache(CacheConfig{Enabled: true, Dir: cacheDir}); err == nil {
-		t.Fatal("NewCache accepted a cache directory owned by another uid")
+	if err := ensureCacheDirAs(cacheDir, os.Geteuid()+1); err == nil {
+		t.Fatal("foreign owner accepted")
 	}
 }
 
@@ -216,5 +210,92 @@ func TestCacheRejectsNonHexKey(t *testing.T) {
 	}
 	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
 		t.Errorf("metadata with non-hex key survived the scan: err=%v", err)
+	}
+}
+
+// TestEvictExpiredReclaimsStaleTempFiles covers a crashed Put after startup:
+// the periodic TTL scan must reclaim the stale .tmp and release its budget,
+// not only the startup scan.
+func TestEvictExpiredReclaimsStaleTempFiles(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	shard := filepath.Join(cacheDir, "ef")
+	if err := os.MkdirAll(shard, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(shard, "crashed.tmp")
+	if err := os.WriteFile(tmp, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cache, err := NewCache(CacheConfig{Enabled: true, Dir: cacheDir})
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	defer cache.Stop()
+	if got := cache.Stats().CurrentSizeBytes; got != 32 {
+		t.Fatalf("fresh .tmp size = %d, want 32", got)
+	}
+
+	// Age it past the in-flight window, then run the periodic scan.
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(tmp, old, old); err != nil {
+		t.Fatal(err)
+	}
+	cache.evictExpired()
+
+	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+		t.Fatalf("stale .tmp survived the periodic scan: err=%v", err)
+	}
+	if got := cache.Stats().CurrentSizeBytes; got != 0 {
+		t.Fatalf("CurrentSizeBytes = %d, want 0 after reclaim", got)
+	}
+}
+
+// TestPutReleasesScanCountedTempBytes covers the crash-recovery sequence:
+// a fresh .tmp is counted by the startup scan, then the same key's Put reuses
+// that path and renames it into a real entry. Accounting must end at the
+// entry's real size, not the sum of both, or the ghost bytes live until the
+// next restart.
+func TestPutReleasesScanCountedTempBytes(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+	cache, err := NewCache(CacheConfig{Enabled: true, Dir: cacheDir})
+	if err != nil {
+		t.Fatalf("NewCache: %v", err)
+	}
+	defer cache.Stop()
+
+	key := GenerateCacheKey([]string{"crash-recovery"}, []string{"-c:v", "libx264"}, false, "", "")
+	tmpPath := cache.keyPath(key) + ".tmp"
+	if err := os.MkdirAll(filepath.Dir(tmpPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmpPath, make([]byte, 120), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.scanExisting(); err != nil {
+		t.Fatalf("scanExisting: %v", err)
+	}
+	if got := cache.Stats().CurrentSizeBytes; got != 120 {
+		t.Fatalf("scan counted = %d, want 120", got)
+	}
+
+	src := filepath.Join(dir, "out.bin")
+	if err := os.WriteFile(src, make([]byte, 50), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Put(key, src); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	info, err := os.Stat(cache.keyPath(key))
+	if err != nil {
+		t.Fatalf("stat entry: %v", err)
+	}
+	if got := cache.Stats().CurrentSizeBytes; got != info.Size() {
+		t.Fatalf("CurrentSizeBytes = %d, disk = %d: scan-counted .tmp bytes were not released", got, info.Size())
+	}
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Fatalf(".tmp survived the rename: err=%v", err)
 	}
 }

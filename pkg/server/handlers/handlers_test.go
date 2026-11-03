@@ -3901,9 +3901,9 @@ func TestProbeDirectPathNotStatOnServer(t *testing.T) {
 	}
 }
 
-// a bare-API probe input containing a ".." component must be
-// rejected server-side (same shared pathutil.ContainsPathTraversal the worker
-// uses), even when the cleaned path would stat to an existing file.
+// a bare-API probe input containing a ".." component is a malformed path:
+// rejected server-side before any job, with invalid_request (not not_found,
+// which is reserved for a well-formed identifier with no stored file).
 func TestProbeDirectPathTraversalRejected(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
@@ -3937,8 +3937,48 @@ func TestProbeDirectPathTraversalRejected(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
 		t.Fatalf("Failed to decode error response: %v", err)
 	}
-	if errResp.Code != protocol.ErrCodeNotFound {
-		t.Errorf("Expected error code 'not_found', got '%s'", errResp.Code)
+	if errResp.Code != protocol.ErrCodeInvalidRequest {
+		t.Errorf("Expected error code 'invalid_request', got '%s'", errResp.Code)
+	}
+}
+
+// A URL's path segments are resolved by the remote endpoint, not against the
+// server's filesystem, so a ".." inside a URL is not a traversal attempt.
+func TestProbeURLWithDotDotPassesValidation(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	probeReq := protocol.ProbeRequest{Input: "https://example.test/a/../b.mp4"}
+	body, _ := json.Marshal(probeReq)
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// No worker is registered: reaching the worker-availability guard proves
+	// the URL was not rejected by the path-traversal check.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("URL with dotdot must pass input validation, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// A "://" later in an absolute path is a filename character, not a scheme: the
+// input stays a shared-FS path (and is not treated as a remote URL).
+func TestProbePathWithSchemeMarkerPassesValidation(t *testing.T) {
+	_, router, cleanup := setupTest(t)
+	defer cleanup()
+
+	probeReq := protocol.ProbeRequest{Input: "/data/media/x://y.mp4"}
+	body, _ := json.Marshal(probeReq)
+	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("absolute path with :// must pass input validation as a path, got %d. Body: %s", w.Code, w.Body.String())
 	}
 }
 

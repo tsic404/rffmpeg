@@ -553,20 +553,22 @@ func run() (code int) {
 
 // plaintextRemoteServerWarning returns a one-line warning when the CLI would
 // send its auth token and media to a non-loopback server over plaintext HTTP.
-// Loopback endpoints do not leave the host and stay silent.
+// Loopback endpoints (including a trailing-dot "localhost.") do not leave the
+// host and stay silent. The message names only the host: echoing the raw URL
+// would print any userinfo embedded in it.
 func plaintextRemoteServerWarning(serverURL string) string {
 	u, err := url.Parse(strings.TrimSpace(serverURL))
 	if err != nil || !strings.EqualFold(u.Scheme, "http") {
 		return ""
 	}
-	host := u.Hostname()
+	host := strings.TrimSuffix(u.Hostname(), ".")
 	if host == "" || strings.EqualFold(host, "localhost") {
 		return ""
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return ""
 	}
-	return fmt.Sprintf("Warning: server %s uses plaintext HTTP; the auth token and media are sent unencrypted. Use https:// for a remote server.", serverURL)
+	return fmt.Sprintf("Warning: server host %s uses plaintext HTTP; the auth token and media are sent unencrypted. Use https:// for a remote server.", host)
 }
 
 // unconfiguredServerURLHint is the one line printed after a failed health check

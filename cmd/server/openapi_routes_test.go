@@ -94,8 +94,15 @@ func readOpenAPIRoutes(t *testing.T, path string) map[string]bool {
 		"head": true, "options": true, "trace": true,
 	}
 
-	routes := map[string]bool{}
+	type specOperation struct {
+		path       string
+		method     string
+		hasServers bool
+	}
+
+	var pending []specOperation
 	var current string
+	currentHasServers := false
 	inPaths := false
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -113,19 +120,32 @@ func readOpenAPIRoutes(t *testing.T, path string) map[string]bool {
 		switch {
 		case strings.HasPrefix(line, "  /") && strings.HasSuffix(line, ":"):
 			current = strings.TrimSuffix(strings.TrimSpace(line), ":")
-			if !strings.HasPrefix(current, "/admin") {
-				current = "/api/v1" + current
-			}
+			currentHasServers = false
+		case line == "    servers:":
+			// A path-level server override means the path is NOT relative to
+			// the document's /api/v1 server. The spec marks the /admin family
+			// this way; inferring it from a literal path prefix would hide a
+			// real mismatch if the prefix changed.
+			currentHasServers = true
 		case strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "     ") && strings.HasSuffix(line, ":"):
 			method := strings.TrimSuffix(strings.TrimSpace(line), ":")
 			if current == "" || !known[method] {
 				continue
 			}
-			routes[strings.ToUpper(method)+" "+current] = true
+			pending = append(pending, specOperation{path: current, method: strings.ToUpper(method), hasServers: currentHasServers})
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("read spec: %v", err)
+	}
+
+	routes := map[string]bool{}
+	for _, op := range pending {
+		full := op.path
+		if !op.hasServers {
+			full = "/api/v1" + full
+		}
+		routes[op.method+" "+full] = true
 	}
 	return routes
 }

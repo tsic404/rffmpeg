@@ -229,6 +229,13 @@ const cacheDirMode = os.FileMode(0o700)
 // an error, because writing cache entries into it would hand that user the
 // transcoded outputs.
 func ensureCacheDir(dir string) error {
+	return ensureCacheDirAs(dir, os.Geteuid())
+}
+
+// ensureCacheDirAs is ensureCacheDir with the expected owner injected, so the
+// ownership branch is testable without root (and therefore actually runs in
+// CI).
+func ensureCacheDirAs(dir string, euid int) error {
 	if err := os.MkdirAll(dir, cacheDirMode); err != nil {
 		return fmt.Errorf("failed to create cache directory %s: %w", dir, err)
 	}
@@ -240,8 +247,8 @@ func ensureCacheDir(dir string) error {
 		return fmt.Errorf("cache path %s is not a directory", dir)
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		if uid := os.Geteuid(); uid >= 0 && int(st.Uid) != uid {
-			return fmt.Errorf("cache directory %s is owned by uid %d, want %d", dir, st.Uid, uid)
+		if euid >= 0 && int(st.Uid) != euid {
+			return fmt.Errorf("cache directory %s is owned by uid %d, want %d", dir, st.Uid, euid)
 		}
 	}
 	if info.Mode().Perm()&0o077 != 0 {
@@ -524,6 +531,17 @@ func (c *Cache) Put(key string, srcPath string, ttlOverride ...time.Duration) er
 		return fmt.Errorf("failed to create shard directory: %w", err)
 	}
 
+	// A fresh .tmp at this path (left by a crashed copy, counted by
+	// scanExisting but absent from the LRU list) is truncated and reused by
+	// copyFile below. Release its accounted bytes first, or the renamed entry
+	// is counted twice and the ghost survives until the next restart.
+	if fi, err := os.Stat(tmpPath); err == nil {
+		c.stats.CurrentSizeBytes -= fi.Size()
+		if c.stats.CurrentSizeBytes < 0 {
+			c.stats.CurrentSizeBytes = 0
+		}
+	}
+
 	// Copy source file to temp path first for atomicity
 	if err := copyFile(srcPath, tmpPath); err != nil {
 		os.Remove(tmpPath)
@@ -748,6 +766,38 @@ func (c *Cache) evictExpired() {
 
 	if len(expiredKeys) > 0 {
 		log.Printf("TTL eviction: removed %d expired entries", len(expiredKeys))
+	}
+
+	// Leftover ".tmp" files count toward the size budget but are not in the
+	// LRU list, so a crashed Put would otherwise hold budget forever and push
+	// real entries out. The periodic TTL scan reclaims those older than the
+	// in-flight window.
+	tmpCutoff := time.Now().Add(-staleTempFileAge)
+	var removedTmp int
+	var reclaimed int64
+	walkErr := filepath.Walk(c.cfg.Dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".tmp") {
+			return nil
+		}
+		if info.ModTime().After(tmpCutoff) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil {
+			return nil
+		}
+		removedTmp++
+		reclaimed += info.Size()
+		return nil
+	})
+	if walkErr != nil {
+		log.Printf("Cache temp scan error: %v", walkErr)
+	}
+	if reclaimed > 0 {
+		c.stats.CurrentSizeBytes -= reclaimed
+		if c.stats.CurrentSizeBytes < 0 {
+			c.stats.CurrentSizeBytes = 0
+		}
+		log.Printf("TTL cleanup: removed %d stale temp file(s), reclaimed %d bytes", removedTmp, reclaimed)
 	}
 }
 

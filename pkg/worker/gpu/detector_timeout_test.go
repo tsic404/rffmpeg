@@ -33,6 +33,32 @@ func TestNVIDIASMIProbeTimesOut(t *testing.T) {
 	}
 }
 
+// TestNVIDIASMIProbeKillsForkedChildren covers a wrapper that forks a child
+// holding stdout: killing only the direct child leaves the pipe open, so the
+// probe must kill the whole process group to stay bounded.
+func TestNVIDIASMIProbeKillsForkedChildren(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "nvidia-smi")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n/bin/sleep 10 &\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	d := NewDetector()
+	d.nvidiaSMITimeout = 100 * time.Millisecond
+
+	start := time.Now()
+	name, driver := d.getNVIDIASMIInfo()
+	elapsed := time.Since(start)
+
+	if name != "" || driver != "" {
+		t.Errorf("timed-out probe returned name=%q driver=%q, want empty", name, driver)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("probe took %v; a forked child kept the output pipe open", elapsed)
+	}
+}
+
 // TestNVIDIASMIProbeReadsFirstGPU covers the success path: the first line of
 // the CSV output is the device name and the driver version.
 func TestNVIDIASMIProbeReadsFirstGPU(t *testing.T) {
