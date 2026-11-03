@@ -62,8 +62,11 @@ jobs:
           test -z "$(gofmt -l .)" || { echo "gofmt needed"; exit 1; }
 
       # === Test ===
+      # Race detector on by default: the wait paths run a WebSocket reader and a
+      # backup poll concurrently with the caller, and a leaked goroutine or an
+      # unsynchronised field there is invisible to a non-race run.
       - name: Test (Go)
-        run: go test -v ./...
+        run: go test -race ./...
 
       # === Build (验证可构建) ===
       - name: Build (Go)

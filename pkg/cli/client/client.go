@@ -55,15 +55,19 @@ func renderProgressLine(p protocol.WSProgressPayload) string {
 }
 
 const (
-	UploadEndpoint  = "/api/v1/upload"
-	JobsEndpoint    = "/api/v1/jobs"
-	JobEndpoint     = "/api/v1/jobs/%s"
-	OutputEndpoint  = "/api/v1/output/%s"
-	ProbeEndpoint   = "/api/v1/probe"
-	HealthEndpoint  = "/api/v1/health"
-	DefaultTimeout  = 30 * time.Second
-	UploadTimeout   = 10 * time.Minute
-	DownloadTimeout = 10 * time.Minute
+	UploadEndpoint = "/api/v1/upload"
+	JobsEndpoint   = "/api/v1/jobs"
+	JobEndpoint    = "/api/v1/jobs/%s"
+	OutputEndpoint = "/api/v1/output/%s"
+	ProbeEndpoint  = "/api/v1/probe"
+	HealthEndpoint = "/api/v1/health"
+	DefaultTimeout = 30 * time.Second
+	UploadTimeout  = 10 * time.Minute
+	// DownloadIdleTimeout bounds a download by inactivity, not by total
+	// duration: a multi-gigabyte output that keeps delivering bytes is never
+	// cut off, while a stream that stops moving fails within one minute. There
+	// is deliberately no overall transfer deadline.
+	DownloadIdleTimeout = 60 * time.Second
 	// HealthProbeTimeout bounds a single health probe attempt. The probe is a
 	// readiness gate, not a data transfer: a server that accepts the connection
 	// but cannot answer within this budget is stalled, and a fresh attempt is
@@ -129,6 +133,19 @@ const (
 // PollInterval. Internal tests swap this to a short duration to exercise
 // timing-sensitive code paths without 2s waits.
 var pollInterval = PollInterval
+
+// downloadIdleTimeout is the effective download inactivity bound; a var so
+// tests can shrink the stall window instead of waiting out a real minute.
+var downloadIdleTimeout = DownloadIdleTimeout
+
+// downloadTempSuffix names the sibling staging file a download is written to
+// before it is renamed onto the target; a pre-existing entry at that name moves
+// the download to a pid-suffixed variant.
+const downloadTempSuffix = ".part"
+
+// maxDownloadSymlinkDepth bounds link chains when resolving the output path; a
+// cycle keeps yielding dangling hops, so the depth has to be capped as well.
+const maxDownloadSymlinkDepth = 40
 
 // probeTimeout is the effective per-request timeout for the probe endpoint.
 // A var (rather than a direct const reference) so regression tests can stub
@@ -653,11 +670,18 @@ func rateLimitBackoff(retryIn, attempt int) time.Duration {
 	return delay
 }
 
-// GetJob gets job status
+// GetJob gets job status.
 func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
+	return c.getJob(context.Background(), jobID)
+}
+
+// getJob is GetJob tied to ctx, so a wait that is ending can abandon an
+// in-flight status request instead of holding its helper goroutine open for
+// the transport timeout after the caller already returned.
+func (c *Client) getJob(ctx context.Context, jobID string) (*protocol.JobInfo, error) {
 	url := fmt.Sprintf(c.serverURL+JobEndpoint, jobID)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -671,7 +695,9 @@ func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("job not found: %s", jobID)
+		// A 404 is the server's verdict, not a lost request: the job does not
+		// exist, and no amount of retrying changes that.
+		return nil, fmt.Errorf("%w: %s", protocol.ErrJobNotFound, jobID)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -699,47 +725,73 @@ func isServerSilence(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
+// statusPollBudget bounds one run of failed status polls. Two failure runs are
+// tracked separately: continuous silence — requests the server never answered
+// — by silenceBudget, and any run of failures by failBudget, so a server that
+// answers with errors still gives up eventually instead of polling forever. A
+// zero budget means "no retries": the first failure of that kind is final.
+type statusPollBudget struct {
+	silenceBudget time.Duration
+	failBudget    time.Duration
+	failStart     time.Time // first failure of the current run, any cause
+	silenceStart  time.Time // first unanswered failure of the current run
+}
+
+// failure records one failed poll and returns the give-up verdict once a
+// budget is spent; nil means the caller keeps polling.
+func (b *statusPollBudget) failure(jobID string, err error, now time.Time) error {
+	if b.failStart.IsZero() {
+		b.failStart = now
+	}
+	if isServerSilence(err) {
+		if b.silenceStart.IsZero() {
+			b.silenceStart = now
+		}
+	} else {
+		// The server answered: it is reachable, so this failure cannot count
+		// as contact loss.
+		b.silenceStart = time.Time{}
+	}
+	if !b.silenceStart.IsZero() && now.Sub(b.silenceStart) >= b.silenceBudget {
+		return &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling lost contact with server for %s: %w", now.Sub(b.silenceStart).Round(time.Second), err)}
+	}
+	if now.Sub(b.failStart) >= b.failBudget {
+		return &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling failed for %s: %w", now.Sub(b.failStart).Round(time.Second), err)}
+	}
+	return nil
+}
+
+// reset starts a fresh failure run after a successful poll.
+func (b *statusPollBudget) reset() {
+	b.failStart = time.Time{}
+	b.silenceStart = time.Time{}
+}
+
 // backupPoll polls GetJob as a backup to the WebSocket stream, reporting the
-// terminal job on pollDone or the give-up verdict on pollErr. Two failure runs
-// are bounded separately: continuous silence — requests the server never
-// answered — by silenceBudget, and any run of failures by failBudget, so a
-// server that answers with errors still gives up eventually instead of polling
-// forever. A zero failBudget means "no retries": the first failure is final.
+// terminal job on pollDone or the give-up verdict on pollErr.
 func (c *Client) backupPoll(ctx context.Context, jobID string, silenceBudget, failBudget time.Duration, pollDone chan<- *protocol.JobInfo, pollErr chan<- error) {
-	var failStart time.Time    // first failure of the current run, any cause
-	var silenceStart time.Time // first unanswered failure of the current run
+	budget := statusPollBudget{silenceBudget: silenceBudget, failBudget: failBudget}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(pollInterval):
-			job, err := c.GetJob(jobID)
+			job, err := c.getJob(ctx, jobID)
 			if err != nil {
-				now := time.Now()
-				if failStart.IsZero() {
-					failStart = now
-				}
-				if isServerSilence(err) {
-					if silenceStart.IsZero() {
-						silenceStart = now
-					}
-				} else {
-					// The server answered: it is reachable, so this failure
-					// cannot count as contact loss.
-					silenceStart = time.Time{}
-				}
-				if !silenceStart.IsZero() && now.Sub(silenceStart) >= silenceBudget {
-					pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling lost contact with server for %s: %w", now.Sub(silenceStart).Round(time.Second), err)}
+				if ctx.Err() != nil {
 					return
 				}
-				if now.Sub(failStart) >= failBudget {
-					pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling failed for %s: %w", now.Sub(failStart).Round(time.Second), err)}
+				if errors.Is(err, protocol.ErrJobNotFound) {
+					pollErr <- err
+					return
+				}
+				if giveUp := budget.failure(jobID, err, time.Now()); giveUp != nil {
+					pollErr <- giveUp
 					return
 				}
 				continue
 			}
-			failStart = time.Time{}
-			silenceStart = time.Time{}
+			budget.reset()
 			if protocol.IsTerminalStatus(job.Status) {
 				pollDone <- job
 				return
@@ -750,15 +802,41 @@ func (c *Client) backupPoll(ctx context.Context, jobID string, silenceBudget, fa
 
 // WaitForJob waits for job completion and returns exit code.
 // It polls until the job reaches a terminal status or ctx is cancelled.
+//
+// A single failed poll is not fatal: this is the fallback channel for a job
+// that was already submitted, so one transient error must not turn a running
+// job into a client-side failure and leave the user without its output. The
+// same failure budgets as the WebSocket backup poll bound the retry run, and
+// spending them is reported as RetriesExhaustedError — the distinct "the job
+// is still running server-side" verdict — rather than as an ordinary error.
 func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool) (*protocol.JobInfo, error) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	budget := statusPollBudget{
+		silenceBudget: serverLossBudget(c.maxRetries, c.serverLossTimeout),
+		failBudget:    retryBudget(c.maxRetries),
+	}
 
 	for {
-		job, err := c.GetJob(jobID)
+		job, err := c.getJob(ctx, jobID)
 		if err != nil {
-			return nil, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if errors.Is(err, protocol.ErrJobNotFound) {
+				return nil, err
+			}
+			if giveUp := budget.failure(jobID, err, time.Now()); giveUp != nil {
+				return nil, giveUp
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+			continue
 		}
+		budget.reset()
 
 		if showProgress {
 			fmt.Fprintf(os.Stderr, "Job %s: %s\n", jobID, job.Status)
@@ -778,6 +856,18 @@ func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool
 
 // WaitForJobWithLogs waits for job completion with real-time log streaming via WebSocket
 func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	// The helper goroutines below (WS reader, backup poll) must not outlive
+	// this call: the caller's ctx can be a long-lived one, so returning while
+	// it is still open would leave them reading package state and calling
+	// handlers after the CLI moved on. A cancel of our own stops them, and the
+	// join makes the return mean "nothing of this wait is still running".
+	// Deferred in this order so wsClient.Close (registered later) runs first,
+	// then the cancel, then the join.
+	ctx, cancel := context.WithCancel(ctx)
+	var helpers sync.WaitGroup
+	defer helpers.Wait()
+	defer cancel()
+
 	// terminalSeen is closed once the WebSocket delivers a terminal status or
 	// complete event. The backup HTTP poll runs on a 2s tick, so without this
 	// the CLI would linger up to a full poll interval after the worker's
@@ -838,7 +928,9 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 
 	// Start listening in a goroutine
 	listenDone := make(chan error, 1)
+	helpers.Add(1)
 	go func() {
+		defer helpers.Done()
 		listenDone <- wsClient.Listen(ctx)
 	}()
 
@@ -849,9 +941,13 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	// misreported as lost contact.
 	pollDone := make(chan *protocol.JobInfo, 1)
 	pollErr := make(chan error, 1)
-	go c.backupPoll(ctx, jobID,
-		serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
-		pollDone, pollErr)
+	helpers.Add(1)
+	go func() {
+		defer helpers.Done()
+		c.backupPoll(ctx, jobID,
+			serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
+			pollDone, pollErr)
+	}()
 
 	// Wait for completion, error, or context cancellation. In non-streaming
 	// mode (file output), stderr is display-only: a detected sequence gap
@@ -942,6 +1038,15 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 // WaitForJobWithStreamingOutput waits for job completion with streaming output to stdout.
 // This is used when the output file is "-" to stream transcoded data directly to stdout.
 func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+	// Same helper ownership as WaitForJobWithLogs: stop and join the WS
+	// reader and the backup poll before returning, whatever the caller's ctx
+	// lifetime is. wsClient.Close is deferred below and therefore runs before
+	// the cancel and the join.
+	ctx, cancel := context.WithCancel(ctx)
+	var helpers sync.WaitGroup
+	defer helpers.Wait()
+	defer cancel()
+
 	// stdoutBytes counts bytes actually written to stdout (partial writes and
 	// failures excluded); stdoutErr records the first write failure. A completed
 	// streaming job that delivered zero bytes — or whose stdout write failed —
@@ -1055,7 +1160,9 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 
 	// Start listening in a goroutine
 	listenDone := make(chan error, 1)
+	helpers.Add(1)
 	go func() {
+		defer helpers.Done()
 		listenDone <- wsClient.Listen(ctx)
 	}()
 
@@ -1064,9 +1171,13 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	// failures by the retry budget.
 	pollDone := make(chan *protocol.JobInfo, 1)
 	pollErr := make(chan error, 1)
-	go c.backupPoll(ctx, jobID,
-		serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
-		pollDone, pollErr)
+	helpers.Add(1)
+	go func() {
+		defer helpers.Done()
+		c.backupPoll(ctx, jobID,
+			serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
+			pollDone, pollErr)
+	}()
 
 	// Wait for completion, error, or context cancellation
 	var finalJob *protocol.JobInfo
@@ -1142,51 +1253,274 @@ func drainStreamingOutput(ctx context.Context, terminalSeen <-chan struct{}, lis
 	}
 }
 
-// DownloadOutput downloads an output file
+// DownloadOutput downloads an output file.
+//
+// The transfer is single-shot (a failed download is retried as a whole, never
+// resumed), so it is bounded by inactivity rather than by total duration: a
+// large output that keeps arriving is never cut off by a wall-clock cap, while
+// a stream that stops moving fails within DownloadIdleTimeout. The bytes go to
+// a sibling temp file that is renamed into place only after the copy and the
+// final flush succeed, so an interrupted download neither truncates an
+// existing output nor leaves a partial file under the target name.
 func (c *Client) DownloadOutput(fileID, outputPath string) error {
 	url := fmt.Sprintf(c.serverURL+OutputEndpoint, fileID)
 
-	req, err := http.NewRequest("GET", url, nil)
+	// The idle watchdog cancels the request when the body stops delivering
+	// bytes; there is no client-wide Timeout, whose wall-clock bound would
+	// abort exactly the slow-but-live transfers this path must serve.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	c.setAuthHeader(req)
 
-	client := &http.Client{Timeout: DownloadTimeout}
+	// Connect and response-header bounds stay wall-clock: a server that never
+	// answers is not a slow download, and the idle watchdog cannot fire before
+	// the first byte exists.
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: DefaultTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   DefaultTimeout,
+		ResponseHeaderTimeout: DefaultTimeout,
+		ForceAttemptHTTP2:     true,
+	}}
+	defer client.CloseIdleConnections()
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download request failed: %w", err)
 	}
-	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
+		DrainAndClose(resp.Body)
 		return fmt.Errorf("output file not found: %s", fileID)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		DrainAndClose(resp.Body)
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 
+	// Resolve an existing symlink before anything is written: the rename below
+	// replaces a directory entry, which would silently turn the link into a
+	// regular file. Writing the file the link names keeps the link intact.
+	target, err := downloadTarget(outputPath)
+	if err != nil {
+		DrainAndClose(resp.Body)
+		return err
+	}
+
 	// Create output directory if needed
-	dir := filepath.Dir(outputPath)
+	dir := filepath.Dir(target)
 	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
+			DrainAndClose(resp.Body)
 			return fmt.Errorf("failed to create output directory: %w", err)
 		}
 	}
 
-	file, err := os.Create(outputPath)
+	body := newIdleWatchdogBody(resp.Body, downloadIdleTimeout, cancel)
+	defer body.Close()
+
+	// The staging file lives beside the target so the rename below stays a
+	// same-filesystem operation. It is created with 0666 (the umask decides
+	// its mode) and immediately takes the existing target's mode, before the
+	// first byte is written.
+	tmpPath, tmp, err := createDownloadStaging(target)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
-	defer file.Close()
+	placed := false
+	defer func() {
+		if placed {
+			return
+		}
+		tmp.Close()
+		os.Remove(tmpPath)
+	}()
 
-	if _, err := io.Copy(file, resp.Body); err != nil {
-		return fmt.Errorf("failed to write output file: %w", err)
+	// The rename below replaces the target's directory entry, so the existing
+	// mode has to be carried over explicitly. Doing it before the copy keeps a
+	// restrictive target (0600) from being exposed through the staging file
+	// while the transfer runs, and keeps the final file at the target's mode
+	// instead of 0666&^umask. Ownership is not restorable without privilege.
+	if mode, ok, err := existingFileMode(target); err != nil {
+		return err
+	} else if ok {
+		if err := tmp.Chmod(mode); err != nil {
+			return fmt.Errorf("failed to preserve output file mode: %w", err)
+		}
 	}
 
+	if _, err := io.Copy(tmp, body); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("download stalled: no data received for %s: %w", downloadIdleTimeout, err)
+		}
+		return fmt.Errorf("failed to write output file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to write output file: %w", err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		return fmt.Errorf("failed to move downloaded file into place: %w", err)
+	}
+	placed = true
+
 	return nil
+}
+
+// downloadTarget returns the path the download must write. A symlink is
+// followed the way os.Create follows it, so the link itself survives and the
+// file it names is what gets replaced. A dangling link resolves to the path it
+// names — the download creates that file and leaves the link in place; a
+// missing parent directory, a link loop or a permission problem is reported
+// instead of falling back to replacing the link entry.
+func downloadTarget(outputPath string) (string, error) {
+	path := outputPath
+	for depth := 0; depth < maxDownloadSymlinkDepth; depth++ {
+		info, err := os.Lstat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return path, nil
+			}
+			return "", fmt.Errorf("failed to inspect output file: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return path, nil
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			return resolved, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			// A loop or a permission problem is not a dangling link: report it
+			// rather than writing over the link entry.
+			return "", fmt.Errorf("failed to resolve output file: %w", err)
+		}
+		// The link names a path that does not exist yet. Resolve one link step
+		// and continue from there, keeping the anchor of a relative link.
+		dest, err := os.Readlink(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve output file: %w", err)
+		}
+		if !filepath.IsAbs(dest) {
+			dest = filepath.Join(filepath.Dir(path), dest)
+		}
+		// A missing parent is not dangling: the file cannot be created there.
+		if _, err := os.Stat(filepath.Dir(dest)); err != nil {
+			return "", fmt.Errorf("failed to resolve output file: %w", err)
+		}
+		path = dest
+	}
+	return "", fmt.Errorf("failed to resolve output file %s: too many levels of symbolic links", outputPath)
+}
+
+// existingFileMode reports the mode a rename would replace. A missing target
+// has no mode to carry, and a symlink's perm bits say nothing about the file
+// it names, so both read as "no mode". Any other stat failure is returned: a
+// permission problem must not silently drop the target's mode.
+func existingFileMode(target string) (os.FileMode, bool, error) {
+	info, err := os.Lstat(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("failed to inspect output file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return 0, false, nil
+	}
+	return info.Mode().Perm(), true, nil
+}
+
+// createDownloadStaging opens the staging file beside target. The name is
+// predictable, so the open is exclusive: an entry that already exists there —
+// a symlink planted in a shared output directory included — is never followed
+// or truncated, it only moves the download to the pid-suffixed name.
+func createDownloadStaging(target string) (string, *os.File, error) {
+	names := []string{
+		target + downloadTempSuffix,
+		fmt.Sprintf("%s%s.%d", target, downloadTempSuffix, os.Getpid()),
+	}
+	var lastErr error
+	for _, name := range names {
+		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+		if err == nil {
+			return name, f, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", nil, err
+		}
+		lastErr = err
+	}
+	return "", nil, lastErr
+}
+
+// downloadIdleWatchdogBody cancels the transfer once the body delivers no
+// bytes for idle. It records the time of the last received chunk and arms a
+// timer for the remainder of the window, so the stall verdict lands at idle
+// itself rather than at whatever a polling tick happens to be. Close joins the
+// watchdog, so none outlives the download.
+type downloadIdleWatchdogBody struct {
+	body         io.ReadCloser
+	idle         time.Duration
+	cancel       context.CancelFunc
+	lastProgress atomic.Int64 // unix nanoseconds of the latest received chunk
+	done         chan struct{}
+	wg           sync.WaitGroup
+}
+
+func newIdleWatchdogBody(body io.ReadCloser, idle time.Duration, cancel context.CancelFunc) *downloadIdleWatchdogBody {
+	b := &downloadIdleWatchdogBody{
+		body:   body,
+		idle:   idle,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	b.lastProgress.Store(time.Now().UnixNano())
+	if idle > 0 {
+		b.wg.Add(1)
+		go b.watch()
+	}
+	return b
+}
+
+func (b *downloadIdleWatchdogBody) watch() {
+	defer b.wg.Done()
+	for {
+		elapsed := time.Since(time.Unix(0, b.lastProgress.Load()))
+		if elapsed >= b.idle {
+			b.cancel()
+			return
+		}
+		timer := time.NewTimer(b.idle - elapsed)
+		select {
+		case <-b.done:
+			timer.Stop()
+			return
+		case <-timer.C:
+			// Progress may have arrived while the timer ran; recompute the
+			// remaining window from the fresh timestamp.
+		}
+	}
+}
+
+func (b *downloadIdleWatchdogBody) Read(p []byte) (int, error) {
+	n, err := b.body.Read(p)
+	if n > 0 {
+		b.lastProgress.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (b *downloadIdleWatchdogBody) Close() error {
+	close(b.done)
+	b.wg.Wait()
+	return b.body.Close()
 }
 
 // HealthCheck reports whether the server answers a health probe.
