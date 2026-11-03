@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 func setupTestDB(t *testing.T) *Database {
@@ -20,43 +22,47 @@ func setupTestDB(t *testing.T) *Database {
 	return db
 }
 
-func TestCreateMigrationEvent(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	jobIDs := []string{"job-1", "job-2", "job-3"}
-	// First migration: retry_count is the cumulative count after this event (1).
-	event, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", string(protocol.WorkerStatusOffline), 1, jobIDs, 3)
+// insertMigrationEventForTest writes a migration_events row directly. The
+// production writer is MigrateJobsFromWorker (which commits the audit rows and
+// the requeue together); these fixtures need arbitrary worker/job/reason
+// combinations, including job IDs without a jobs row, without driving a full
+// failover.
+func insertMigrationEventForTest(t *testing.T, d *Database, workerID, workerName, reason string, retryCount int, jobIDs []string, jobsMigrated int) *MigrationEvent {
+	t.Helper()
+	id := uuid.New().String()
+	jobIDsJSON, err := json.Marshal(jobIDs)
 	if err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
+		t.Fatalf("marshal job ids: %v", err)
 	}
+	var workerNameVal any
+	if workerName != "" {
+		workerNameVal = workerName
+	}
+	now := time.Now()
+	if _, err := d.db.Exec(`
+		INSERT INTO migration_events (id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, now, workerID, workerNameVal, reason, retryCount, string(jobIDsJSON), jobsMigrated, now); err != nil {
+		t.Fatalf("insert migration event: %v", err)
+	}
+	event, err := d.GetMigrationEvent(id)
+	if err != nil {
+		t.Fatalf("read back migration event: %v", err)
+	}
+	return event
+}
 
-	if event.ID == "" {
-		t.Error("Expected non-empty event ID")
-	}
-	if event.WorkerID != "worker-1" {
-		t.Errorf("Expected worker ID 'worker-1', got '%s'", event.WorkerID)
-	}
-	if !event.WorkerName.Valid || event.WorkerName.String != "gpu-worker-1" {
-		t.Errorf("Expected worker name 'gpu-worker-1', got '%v'", event.WorkerName)
-	}
-	if event.Reason != string(protocol.WorkerStatusOffline) {
-		t.Errorf("Expected reason 'offline', got '%s'", event.Reason)
-	}
-	if event.RetryCount != 1 {
-		t.Errorf("Expected retry count 1, got %d", event.RetryCount)
-	}
-	if event.JobsMigrated != 3 {
-		t.Errorf("Expected 3 jobs migrated, got %d", event.JobsMigrated)
-	}
-
-	// Verify job IDs are stored as JSON
-	var storedJobIDs []string
-	if err := json.Unmarshal([]byte(event.JobIDs), &storedJobIDs); err != nil {
-		t.Fatalf("Failed to unmarshal job IDs: %v", err)
-	}
-	if len(storedJobIDs) != 3 {
-		t.Errorf("Expected 3 job IDs, got %d", len(storedJobIDs))
+// insertRedistributionsForTest writes the per-job placeholder rows for an event.
+func insertRedistributionsForTest(t *testing.T, d *Database, eventID string, retryCounts map[string]int) {
+	t.Helper()
+	now := time.Now()
+	for jobID, retryCount := range retryCounts {
+		if _, err := d.db.Exec(`
+			INSERT INTO job_redistributions (id, migration_event_id, job_id, retry_count, target_worker_id, target_worker_name, created_at)
+			VALUES (?, ?, ?, ?, NULL, NULL, ?)
+		`, uuid.New().String(), eventID, jobID, retryCount, now); err != nil {
+			t.Fatalf("insert redistribution for %s: %v", jobID, err)
+		}
 	}
 }
 
@@ -64,11 +70,7 @@ func TestGetMigrationEvent(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	// Create event
-	event, err := db.CreateMigrationEvent("worker-1", "worker-name", "heartbeat_timeout", 1, []string{"job-1"}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
-	}
+	event := insertMigrationEventForTest(t, db, "worker-1", "worker-name", "heartbeat_timeout", 1, []string{"job-1"}, 1)
 
 	// Retrieve event
 	retrieved, err := db.GetMigrationEvent(event.ID)
@@ -109,13 +111,8 @@ func TestRecordMigrationTarget(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
-	event, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
-	}
-	if err := db.CreateJobRedistributions(event.ID, map[string]int{"job-1": 1}); err != nil {
-		t.Fatalf("CreateJobRedistributions: %v", err)
-	}
+	event := insertMigrationEventForTest(t, db, "worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
+	insertRedistributionsForTest(t, db, event.ID, map[string]int{"job-1": 1})
 
 	if err := db.RecordMigrationTarget("job-1", "worker-2", "gpu-worker-2"); err != nil {
 		t.Fatalf("RecordMigrationTarget: %v", err)
@@ -143,13 +140,8 @@ func TestRecordMigrationTargetMultiJobFanout(t *testing.T) {
 
 	// One worker goes offline carrying three jobs; the jobs fan out to
 	// different workers on reassignment. Each job must record its own target.
-	event, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1", "job-2", "job-3"}, 3)
-	if err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
-	}
-	if err := db.CreateJobRedistributions(event.ID, map[string]int{"job-1": 1, "job-2": 1, "job-3": 1}); err != nil {
-		t.Fatalf("CreateJobRedistributions: %v", err)
-	}
+	event := insertMigrationEventForTest(t, db, "worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1", "job-2", "job-3"}, 3)
+	insertRedistributionsForTest(t, db, event.ID, map[string]int{"job-1": 1, "job-2": 1, "job-3": 1})
 
 	if err := db.RecordMigrationTarget("job-1", "worker-A", "gpu-worker-A"); err != nil {
 		t.Fatalf("RecordMigrationTarget(job-1): %v", err)
@@ -183,25 +175,15 @@ func TestRecordMigrationTargetMultiHop(t *testing.T) {
 	defer db.Close()
 
 	// First hop: worker-1 -> worker-2.
-	first, err := db.CreateMigrationEvent("worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create first event: %v", err)
-	}
-	if err := db.CreateJobRedistributions(first.ID, map[string]int{"job-1": 1}); err != nil {
-		t.Fatalf("CreateJobRedistributions (first): %v", err)
-	}
+	first := insertMigrationEventForTest(t, db, "worker-1", "gpu-worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
+	insertRedistributionsForTest(t, db, first.ID, map[string]int{"job-1": 1})
 	if err := db.RecordMigrationTarget("job-1", "worker-2", "gpu-worker-2"); err != nil {
 		t.Fatalf("RecordMigrationTarget (first): %v", err)
 	}
 
 	// Second hop: worker-2 -> worker-3.
-	second, err := db.CreateMigrationEvent("worker-2", "gpu-worker-2", "heartbeat_timeout", 1, []string{"job-1"}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create second event: %v", err)
-	}
-	if err := db.CreateJobRedistributions(second.ID, map[string]int{"job-1": 2}); err != nil {
-		t.Fatalf("CreateJobRedistributions (second): %v", err)
-	}
+	second := insertMigrationEventForTest(t, db, "worker-2", "gpu-worker-2", "heartbeat_timeout", 1, []string{"job-1"}, 1)
+	insertRedistributionsForTest(t, db, second.ID, map[string]int{"job-1": 2})
 	if err := db.RecordMigrationTarget("job-1", "worker-3", "gpu-worker-3"); err != nil {
 		t.Fatalf("RecordMigrationTarget (second): %v", err)
 	}
@@ -247,15 +229,8 @@ func TestGetMigrationEvents(t *testing.T) {
 	defer db.Close()
 
 	// Create multiple events
-	_, err := db.CreateMigrationEvent("worker-1", "worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create first event: %v", err)
-	}
-
-	_, err = db.CreateMigrationEvent("worker-2", "worker-2", "heartbeat_timeout", 1, []string{"job-2", "job-3"}, 2)
-	if err != nil {
-		t.Fatalf("Failed to create second event: %v", err)
-	}
+	insertMigrationEventForTest(t, db, "worker-1", "worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
+	insertMigrationEventForTest(t, db, "worker-2", "worker-2", "heartbeat_timeout", 1, []string{"job-2", "job-3"}, 2)
 
 	// Retrieve events
 	events, err := db.GetMigrationEvents(10, 0)
@@ -278,9 +253,9 @@ func TestGetMigrationEventsByWorker(t *testing.T) {
 	defer db.Close()
 
 	// Create events for different workers
-	_, _ = db.CreateMigrationEvent("worker-1", "worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
-	_, _ = db.CreateMigrationEvent("worker-2", "worker-2", "heartbeat_timeout", 0, []string{"job-2"}, 1)
-	_, _ = db.CreateMigrationEvent("worker-1", "worker-1", "heartbeat_timeout", 1, []string{"job-3"}, 1)
+	insertMigrationEventForTest(t, db, "worker-1", "worker-1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
+	insertMigrationEventForTest(t, db, "worker-2", "worker-2", "heartbeat_timeout", 0, []string{"job-2"}, 1)
+	insertMigrationEventForTest(t, db, "worker-1", "worker-1", "heartbeat_timeout", 1, []string{"job-3"}, 1)
 
 	// Retrieve events for worker-1
 	events, err := db.GetMigrationEventsByWorker("worker-1", 10)
@@ -290,50 +265,6 @@ func TestGetMigrationEventsByWorker(t *testing.T) {
 
 	if len(events) != 2 {
 		t.Errorf("Expected 2 events for worker-1, got %d", len(events))
-	}
-}
-
-func TestGetRunningJobsByWorker(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	// Create a worker
-	_, err := db.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
-		Encoders:      []string{"libx264"},
-		FFmpegVersion: "6.0",
-	})
-	if err != nil {
-		t.Fatalf("Failed to create worker: %v", err)
-	}
-
-	// Create and assign jobs
-	job1, err := db.CreateJob(`["input1.mkv"]`, `["-c:v","libx264"]`, "output1.mkv", false)
-	if err != nil {
-		t.Fatalf("Failed to create job1: %v", err)
-	}
-
-	job2, err := db.CreateJob(`["input2.mkv"]`, `["-c:v","libx264"]`, "output2.mkv", false)
-	if err != nil {
-		t.Fatalf("Failed to create job2: %v", err)
-	}
-
-	// Assign job1 to worker and set to running
-	_ = db.AssignJobToWorker(job1.ID, "worker-1")
-	_ = db.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
-	_ = db.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
-
-	// Assign job2 to worker and set to queued
-	_ = db.AssignJobToWorker(job2.ID, "worker-1")
-	_ = db.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
-
-	// Get running jobs
-	jobs, err := db.GetRunningJobsByWorker("worker-1")
-	if err != nil {
-		t.Fatalf("Failed to get running jobs by worker: %v", err)
-	}
-
-	if len(jobs) != 2 {
-		t.Errorf("Expected 2 running jobs, got %d", len(jobs))
 	}
 }
 
@@ -363,10 +294,10 @@ func TestMigrateJobsFromWorker(t *testing.T) {
 
 	// Assign jobs to worker and set to running/queued
 	_ = db.AssignJobToWorker(job1.ID, "worker-1")
-	_ = db.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	_ = dbtest.SetJobStatus(t, db, job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	_ = db.AssignJobToWorker(job2.ID, "worker-1")
-	_ = db.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	_ = dbtest.SetJobStatus(t, db, job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Backdate job1's created_at so the refresh is observable:
 	// MigrateJobsFromWorker is the same re-queue = re-submit semantic, so the
@@ -376,14 +307,24 @@ func TestMigrateJobsFromWorker(t *testing.T) {
 		t.Fatalf("Failed to backdate job1 created_at: %v", err)
 	}
 
+	// Migration runs only for a worker the health tick already flipped
+	// offline.
+	if err := db.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+
 	// Migrate jobs
-	migratedJobIDs, err := db.MigrateJobsFromWorker("worker-1")
+	migration, err := db.MigrateJobsFromWorker("worker-1", "heartbeat_timeout", 3)
 	if err != nil {
 		t.Fatalf("Failed to migrate jobs: %v", err)
 	}
+	migratedJobIDs := migration.Migrated
 
 	if len(migratedJobIDs) != 2 {
 		t.Fatalf("Expected 2 migrated job IDs, got %d", len(migratedJobIDs))
+	}
+	if migration.EventID == "" {
+		t.Error("Expected a migration event to be written")
 	}
 
 	// Verify jobs are now pending
@@ -420,14 +361,18 @@ func TestMigrateJobsFromWorkerNoJobs(t *testing.T) {
 		t.Fatalf("Failed to create worker: %v", err)
 	}
 
-	// Migrate jobs (should return nil, nil)
-	migratedJobIDs, err := db.MigrateJobsFromWorker("worker-1")
+	if err := db.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+
+	// Migrate jobs (should report nothing migrated)
+	migration, err := db.MigrateJobsFromWorker("worker-1", "heartbeat_timeout", 3)
 	if err != nil {
 		t.Fatalf("Failed to migrate jobs: %v", err)
 	}
 
-	if migratedJobIDs != nil {
-		t.Errorf("Expected nil migrated job IDs, got %v", migratedJobIDs)
+	if len(migration.Migrated) != 0 || migration.EventID != "" {
+		t.Errorf("Expected no migration, got %+v", migration)
 	}
 }
 
@@ -517,91 +462,15 @@ func TestMarkOfflineWorkersWithMigrationNoOffline(t *testing.T) {
 	}
 }
 
-func TestGetJobRetryCount(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	jobID := "test-job-retry"
-
-	// Initially should be 0
-	count, err := db.GetJobRetryCount(jobID)
-	if err != nil {
-		t.Fatalf("Failed to get job retry count: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("Expected retry count 0, got %d", count)
-	}
-
-	// Create a migration event with this job
-	_, err = db.CreateMigrationEvent("worker-1", "worker-1", "heartbeat_timeout", 0, []string{jobID}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
-	}
-
-	// Should now be 1
-	count, err = db.GetJobRetryCount(jobID)
-	if err != nil {
-		t.Fatalf("Failed to get job retry count: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("Expected retry count 1, got %d", count)
-	}
-
-	// Create another migration event with this job
-	_, err = db.CreateMigrationEvent("worker-2", "worker-2", "heartbeat_timeout", 1, []string{jobID}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create second migration event: %v", err)
-	}
-
-	// Should now be 2
-	count, err = db.GetJobRetryCount(jobID)
-	if err != nil {
-		t.Fatalf("Failed to get job retry count: %v", err)
-	}
-	if count != 2 {
-		t.Errorf("Expected retry count 2, got %d", count)
-	}
-
-	// A timeout-driven requeue is a separate budget: it must NOT increment the
-	// worker-failure migration count. Otherwise a job rescheduled by
-	// the scheduler's MaxTimeoutRetries budget would burn MaxRetryCount.
-	_, err = db.CreateMigrationEvent("worker-2", "worker-2", "job_timeout", 2, []string{jobID}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create job_timeout migration event: %v", err)
-	}
-
-	count, err = db.GetJobRetryCount(jobID)
-	if err != nil {
-		t.Fatalf("Failed to get job retry count after job_timeout event: %v", err)
-	}
-	if count != 2 {
-		t.Errorf("Expected worker-failure retry count to stay 2 after job_timeout event, got %d", count)
-	}
-
-	timeoutCount, err := db.GetJobTimeoutRetryCount(jobID)
-	if err != nil {
-		t.Fatalf("Failed to get job timeout retry count: %v", err)
-	}
-	if timeoutCount != 1 {
-		t.Errorf("Expected timeout retry count 1 after job_timeout event, got %d", timeoutCount)
-	}
-}
-
 func TestGetJobRetryCounts(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
 
 	// Seed: job-a migrated twice, job-b once, job-c zero, job-d only via a
 	// job_timeout requeue (which must not count as a worker-failure migration).
-	if _, err := db.CreateMigrationEvent("w1", "w1", "heartbeat_timeout", 0, []string{"job-a"}, 1); err != nil {
-		t.Fatalf("seed job-a #1: %v", err)
-	}
-	if _, err := db.CreateMigrationEvent("w2", "w2", "heartbeat_timeout", 1, []string{"job-a", "job-b"}, 2); err != nil {
-		t.Fatalf("seed job-a #2 + job-b: %v", err)
-	}
-	if _, err := db.CreateMigrationEvent("w2", "w2", "job_timeout", 1, []string{"job-d"}, 1); err != nil {
-		t.Fatalf("seed job-d timeout: %v", err)
-	}
+	insertMigrationEventForTest(t, db, "w1", "w1", "heartbeat_timeout", 0, []string{"job-a"}, 1)
+	insertMigrationEventForTest(t, db, "w2", "w2", "heartbeat_timeout", 1, []string{"job-a", "job-b"}, 2)
+	insertMigrationEventForTest(t, db, "w2", "w2", "job_timeout", 1, []string{"job-d"}, 1)
 
 	counts, err := db.GetJobRetryCounts([]string{"job-a", "job-b", "job-c", "job-d"})
 	if err != nil {
@@ -650,7 +519,7 @@ func TestRecordJobTimeoutMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, db, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -756,7 +625,7 @@ func TestTerminalTimeoutDoesNotWriteMigrationEvent(t *testing.T) {
 	if err := db.AssignJobToWorker(job.ID, "worker-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, db, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -798,20 +667,6 @@ func TestTerminalTimeoutDoesNotWriteMigrationEvent(t *testing.T) {
 	}
 }
 
-func TestCreateMigrationEventEmptyWorkerName(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	event, err := db.CreateMigrationEvent("worker-1", "", "heartbeat_timeout", 0, []string{"job-1"}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
-	}
-
-	if event.WorkerName.Valid {
-		t.Errorf("Expected worker name to be NULL, got '%s'", event.WorkerName.String)
-	}
-}
-
 func TestFailJob(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
@@ -832,7 +687,7 @@ func TestFailJob(t *testing.T) {
 
 	// Assign and set running
 	_ = db.AssignJobToWorker(job.ID, "worker-1")
-	_ = db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	_ = dbtest.SetJobStatus(t, db, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Fail the job
 	err = db.FailJob(job.ID, "test failure reason", string(protocol.FailureWorkerCrash))
@@ -873,58 +728,6 @@ func TestFailJobNotFound(t *testing.T) {
 	}
 }
 
-func TestResetJobToPending(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	// Create a worker and job
-	_, err := db.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
-		Encoders:      []string{"libx264"},
-		FFmpegVersion: "6.0",
-	})
-	if err != nil {
-		t.Fatalf("Failed to create worker: %v", err)
-	}
-
-	job, err := db.CreateJob(`["input.mkv"]`, `["-c:v","libx264"]`, "output.mkv", false)
-	if err != nil {
-		t.Fatalf("Failed to create job: %v", err)
-	}
-
-	// Backdate created_at so the refresh is observable: after a
-	// failover reset the starvation/NoWorkerDeadline clock must restart from
-	// the migration moment, not the original submission.
-	backdated := time.Now().Add(-1 * time.Hour)
-	if _, err := db.GetDB().Exec(`UPDATE jobs SET created_at = ? WHERE id = ?`, backdated, job.ID); err != nil {
-		t.Fatalf("Failed to backdate job created_at: %v", err)
-	}
-
-	// Assign and set running
-	_ = db.AssignJobToWorker(job.ID, "worker-1")
-	_ = db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
-
-	// Reset to pending
-	err = db.ResetJobToPending(job.ID)
-	if err != nil {
-		t.Fatalf("Failed to reset job to pending: %v", err)
-	}
-
-	// Verify job is pending
-	updatedJob, err := db.GetJob(job.ID)
-	if err != nil {
-		t.Fatalf("Failed to get job: %v", err)
-	}
-	if updatedJob.Status != protocol.JobStatusPending {
-		t.Errorf("Expected status 'pending', got '%s'", updatedJob.Status)
-	}
-	if updatedJob.WorkerID.Valid {
-		t.Errorf("Expected worker_id to be NULL, got '%s'", updatedJob.WorkerID.String)
-	}
-	if !updatedJob.CreatedAt.After(backdated) {
-		t.Errorf("Expected created_at to be refreshed past backdated time %v, got %v", backdated, updatedJob.CreatedAt)
-	}
-}
-
 func TestRescheduleJobRefreshesCreatedAt(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
@@ -944,7 +747,7 @@ func TestRescheduleJobRefreshesCreatedAt(t *testing.T) {
 
 	// Set running so RescheduleJob's running-only guard passes. jobs.worker_id
 	// has no FK, so a worker row is not required for this transition.
-	_ = db.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	_ = dbtest.SetJobStatus(t, db, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	err = db.RescheduleJob(job.ID)
 	if err != nil {
@@ -963,16 +766,6 @@ func TestRescheduleJobRefreshesCreatedAt(t *testing.T) {
 	}
 	if !updatedJob.CreatedAt.After(backdated) {
 		t.Errorf("Expected created_at to be refreshed past backdated time %v, got %v", backdated, updatedJob.CreatedAt)
-	}
-}
-
-func TestResetJobToPendingNotFound(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-
-	err := db.ResetJobToPending("non-existent")
-	if err == nil {
-		t.Error("Expected error for non-existent job")
 	}
 }
 
@@ -1237,10 +1030,11 @@ func TestMigrationBackfillsRetryableColumn(t *testing.T) {
 	}
 }
 
-// TestCachedFlagPersistedOnTerminalUpdate guards the DB contract:
-// a terminal completion recorded with the cached flag returns Cached=true
-// from GetJob; a non-cached completion stays false; non-terminal updates do
-// not set it.
+// TestCachedFlagPersistedOnTerminalUpdate guards the DB contract on the
+// ownership-guarded terminal writer: a completion recorded with cached=true
+// returns Cached=true from GetJob, a non-cached completion stays false, and a
+// non-completed terminal status coerces the flag to false (the flag records
+// cache hits only).
 func TestCachedFlagPersistedOnTerminalUpdate(t *testing.T) {
 	d := setupTestDB(t)
 	defer d.Close()
@@ -1280,42 +1074,6 @@ func TestCachedFlagPersistedOnTerminalUpdate(t *testing.T) {
 	}
 	if gotPlain.Cached {
 		t.Errorf("expected Cached=false after non-cache completion, got true")
-	}
-
-	// The unguarded path (backward-compat: no WorkerID in the report) must
-	// persist the flag identically.
-	unguardedJob, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
-	if err != nil {
-		t.Fatalf("create unguarded job: %v", err)
-	}
-	if err := d.UpdateJobStatusWithFailureAndCache(unguardedJob.ID, protocol.JobStatusCompleted, nil, nil, nil, nil, true); err != nil {
-		t.Fatalf("complete unguarded job: %v", err)
-	}
-	gotUnguarded, err := d.GetJob(unguardedJob.ID)
-	if err != nil {
-		t.Fatalf("get unguarded job: %v", err)
-	}
-	if !gotUnguarded.Cached {
-		t.Errorf("expected Cached=true after unguarded cache-hit completion, got false")
-	}
-
-	// cached is only meaningful for completed results.
-	// A failed/cancelled/timeout report with cached=true must persist false,
-	// since PATCH /api/v1/jobs/{id} is public and clients could otherwise
-	// fabricate cache hits for non-completed outcomes.
-	failedUnguarded, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
-	if err != nil {
-		t.Fatalf("create failed unguarded job: %v", err)
-	}
-	if err := d.UpdateJobStatusWithFailureAndCache(failedUnguarded.ID, protocol.JobStatusFailed, nil, nil, nil, nil, true); err != nil {
-		t.Fatalf("fail unguarded job: %v", err)
-	}
-	gotFailedUnguarded, err := d.GetJob(failedUnguarded.ID)
-	if err != nil {
-		t.Fatalf("get failed unguarded job: %v", err)
-	}
-	if gotFailedUnguarded.Cached {
-		t.Errorf("expected Cached=false after failed completion with cached=true, got true")
 	}
 
 	failedGuarded, err := d.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)

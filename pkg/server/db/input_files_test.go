@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 func inputFilesJSON(t *testing.T, ids []string) string {
@@ -31,7 +32,7 @@ func TestActiveInputFileIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create running job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(running.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, running.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
 
@@ -40,7 +41,7 @@ func TestActiveInputFileIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create completed job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(done.ID, protocol.JobStatusCompleted, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, done.ID, protocol.JobStatusCompleted, nil, nil, nil, nil); err != nil {
 		t.Fatalf("set completed: %v", err)
 	}
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 // registerTestWorkerWithCaps registers a worker with an explicit MaxConcurrent,
@@ -145,7 +146,7 @@ func TestPullWorkerJobsRunningJobBlocksCapacity(t *testing.T) {
 
 	// Report the claimed job as running: it consumes the full MaxConcurrent=1
 	// budget but, unlike a queued job, the pull path does not re-deliver it.
-	if err := h.GetDB().UpdateJobStatusWithFailure(first.Jobs[0].ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, h.GetDB(), first.Jobs[0].ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("mark job running: %v", err)
 	}
 

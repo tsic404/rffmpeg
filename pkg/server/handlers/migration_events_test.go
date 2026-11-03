@@ -18,12 +18,8 @@ func TestListMigrationEvents(t *testing.T) {
 
 	r.Get("/api/v1/migrations", h.ListMigrationEvents)
 
-	if _, err := h.GetDB().CreateMigrationEvent("worker-1", "w1", "heartbeat_timeout", 0, []string{"job-1"}, 1); err != nil {
-		t.Fatalf("seed event 1: %v", err)
-	}
-	if _, err := h.GetDB().CreateMigrationEvent("worker-2", "w2", "worker_offline", 1, []string{"job-2", "job-3"}, 2); err != nil {
-		t.Fatalf("seed event 2: %v", err)
-	}
+	insertMigrationEventForTest(t, h.GetDB(), "worker-1", "w1", "heartbeat_timeout", 0, []string{"job-1"})
+	insertMigrationEventForTest(t, h.GetDB(), "worker-2", "w2", "worker_offline", 1, []string{"job-2", "job-3"})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/migrations", nil)
 	rec := httptest.NewRecorder()
@@ -57,8 +53,8 @@ func TestGetMigrationEventMalformedJobIDs(t *testing.T) {
 
 	r.Get("/api/v1/migrations/{eventId}", h.GetMigrationEvent)
 
-	// Seed a row whose job_ids column is not valid JSON, bypassing
-	// CreateMigrationEvent which always marshals to valid JSON.
+	// Seed a row whose job_ids column is not valid JSON, bypassing the
+	// migration writer which always marshals to valid JSON.
 	if _, err := h.GetDB().GetDB().Exec(
 		`INSERT INTO migration_events (id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at)
 		 VALUES (?, datetime('now'), ?, NULL, ?, ?, ?, ?, datetime('now'))`,
@@ -110,12 +106,9 @@ func TestGetMigrationEvent(t *testing.T) {
 
 	r.Get("/api/v1/migrations/{eventId}", h.GetMigrationEvent)
 
-	event, err := h.GetDB().CreateMigrationEvent("worker-1", "w1", "heartbeat_timeout", 0, []string{"job-1"}, 1)
-	if err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
+	eventID := insertMigrationEventForTest(t, h.GetDB(), "worker-1", "w1", "heartbeat_timeout", 0, []string{"job-1"})
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/migrations/"+event.ID, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/migrations/"+eventID, nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -129,7 +122,7 @@ func TestGetMigrationEvent(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Event.ID != event.ID || resp.Event.WorkerID != "worker-1" {
+	if resp.Event.ID != eventID || resp.Event.WorkerID != "worker-1" {
 		t.Errorf("event mismatch: %+v", resp.Event)
 	}
 	if resp.Event.Reason != migration.ReasonHeartbeatTimeout {
@@ -143,13 +136,8 @@ func TestGetMigrationEventTargets(t *testing.T) {
 
 	r.Get("/api/v1/migrations/{eventId}", h.GetMigrationEvent)
 
-	event, err := h.GetDB().CreateMigrationEvent("worker-1", "w1", "heartbeat_timeout", 0, []string{"job-1", "job-2"}, 2)
-	if err != nil {
-		t.Fatalf("seed event: %v", err)
-	}
-	if err := h.GetDB().CreateJobRedistributions(event.ID, map[string]int{"job-1": 1, "job-2": 1}); err != nil {
-		t.Fatalf("seed redistributions: %v", err)
-	}
+	eventID := insertMigrationEventForTest(t, h.GetDB(), "worker-1", "w1", "heartbeat_timeout", 0, []string{"job-1", "job-2"})
+	insertRedistributionsForTest(t, h.GetDB(), eventID, map[string]int{"job-1": 1, "job-2": 1})
 	if err := h.GetDB().RecordMigrationTarget("job-1", "worker-A", "gpu-A"); err != nil {
 		t.Fatalf("record target job-1: %v", err)
 	}
@@ -157,7 +145,7 @@ func TestGetMigrationEventTargets(t *testing.T) {
 		t.Fatalf("record target job-2: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/migrations/"+event.ID, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/migrations/"+eventID, nil)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 

@@ -63,6 +63,13 @@ type Config struct {
 	// MaxTimeoutRetries bounds how many times checkTimeouts may requeue the
 	// same job before failing it as TIMEOUT (0 = fail on first timeout).
 	MaxTimeoutRetries int
+
+	// StuckJobTimeout is how long an active job may sit without progress
+	// before the orphan sweep fails it: any job stuck in queued that long, and
+	// any active job left on an offline or deleted worker. 0 disables the
+	// sweep. It is the last-resort net behind the offline-migration path, not
+	// a normal queue wait — assignments happen only when a worker has capacity.
+	StuckJobTimeout time.Duration
 }
 
 // DefaultConfig returns the default scheduler configuration
@@ -83,6 +90,8 @@ func DefaultConfig() Config {
 		// ffmpeg with healthy heartbeats was rescheduled every JobTimeout
 		// forever — each retry also double-executing against the stuck worker.
 		MaxTimeoutRetries: 2,
+
+		StuckJobTimeout: 5 * time.Minute,
 	}
 }
 
@@ -92,6 +101,11 @@ func DefaultConfig() Config {
 // the hub package.
 type JobBroadcaster interface {
 	BroadcastStatus(jobID string, status protocol.JobStatus, exitCode int, err string) error
+	// ReleaseJobStream drops the job's per-job WebSocket sequence bookkeeping.
+	// The handler path ends a stream with a complete frame, which already
+	// releases it; out-of-band terminal verdicts have no such frame, so they
+	// must release explicitly or the counter leaks for the process lifetime.
+	ReleaseJobStream(jobID string)
 }
 
 // SetJobNotifier wires the WS broadcaster for out-of-band job failures.
@@ -118,6 +132,12 @@ type Scheduler struct {
 	// verdict. Tests use it to pin which path judged without parsing logs;
 	// production leaves it nil. Set before Start.
 	starvationObserver func(starvationTrigger)
+
+	// beforeStarvationFail, when set, runs between the starved-job scan and the
+	// bulk fail UPDATE. Tests use it to interleave a claim and prove that
+	// notifications follow the RETURNING set, not the stale scan; production
+	// leaves it nil.
+	beforeStarvationFail func()
 
 	// noWorkerEnabled mirrors config.NoWorkerJobTimeout > 0; captured at
 	// construction so the loop never sees a torn config read.
@@ -197,6 +217,7 @@ func (s *Scheduler) run() {
 			s.armStarvationWake(starvationWake)
 		case <-timeoutTicker.C:
 			s.checkTimeouts()
+			s.sweepStuckJobs()
 			s.checkNoWorkerStarvation(starvationTriggerTick)
 			s.armStarvationWake(starvationWake)
 		case <-starvationWake.C:
@@ -313,7 +334,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 
 	if requestedEncoder != "" {
 		// Capability-aware scheduling: find workers with the requested encoder
-		workers, err := s.db.GetIdleWorkersByEncoderWithJobCount(requestedEncoder)
+		workers, err := s.db.GetIdleWorkersByEncoderWithJobCount(requestedEncoder, s.config.HeartbeatFreshness)
 		if err != nil {
 			log.Printf("Scheduler: Failed to get workers by encoder %s: %v", requestedEncoder, err)
 			// Fall back to regular scheduling
@@ -345,7 +366,7 @@ func (s *Scheduler) scheduleJob(job *db.Job) bool {
 	// failure, and the old behavior also made such jobs schedule-eligible,
 	// masking capability gaps.
 	if bestWorker == nil && requestedEncoder == "" {
-		workers, err := s.db.GetIdleWorkersWithJobCount()
+		workers, err := s.db.GetIdleWorkersWithJobCount(s.config.HeartbeatFreshness)
 		if err != nil {
 			log.Printf("Scheduler: Failed to get idle workers: %v", err)
 			return false
@@ -447,7 +468,7 @@ func (s *Scheduler) tryEncoderFallback(jobID, requestedEncoder string) (*db.Work
 		}
 
 		// Check if any idle worker has this encoder
-		workers, err := s.db.GetIdleWorkersByEncoderWithJobCount(fallbackEncoder)
+		workers, err := s.db.GetIdleWorkersByEncoderWithJobCount(fallbackEncoder, s.config.HeartbeatFreshness)
 		if err != nil {
 			log.Printf("Scheduler: Failed to get workers for fallback encoder %s: %v", fallbackEncoder, err)
 			continue
@@ -498,6 +519,9 @@ func (s *Scheduler) checkTimeouts() {
 				log.Printf("Scheduler: Failed to fail timed-out job %s: %v", job.ID, err)
 				continue
 			}
+			if s.jobNotifier != nil {
+				s.jobNotifier.ReleaseJobStream(job.ID)
+			}
 			log.Printf("Scheduler: Job %s failed after %d timeout retries", job.ID, retries)
 		} else {
 			// Record the migration event + per-job redistribution placeholder
@@ -516,6 +540,74 @@ func (s *Scheduler) checkTimeouts() {
 			}
 			log.Printf("Scheduler: Job %s rescheduled (timeout retry %d/%d)", job.ID, retries+1, s.config.MaxTimeoutRetries)
 		}
+	}
+}
+
+// sweepStuckJobs is the last-resort net for active jobs that can no longer
+// make progress: a job left in queued past StuckJobTimeout (its worker never
+// picked it up), or a queued/running job whose worker went offline or was
+// deleted before the migration path could requeue it. Without it such a job
+// sits in queued forever — checkTimeouts only looks at running jobs, and the
+// starvation sweep only looks at pending ones.
+//
+// Each verdict releases the per-client quota and broadcasts the terminal
+// status, mirroring the starvation sweep: both bypass the HTTP handler that
+// normally does it.
+func (s *Scheduler) sweepStuckJobs() {
+	if s.config.StuckJobTimeout <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stuck, err := s.db.GetStuckActiveJobs(s.config.StuckJobTimeout)
+	if err != nil {
+		log.Printf("Scheduler: Failed to list stuck active jobs: %v", err)
+		return
+	}
+	if len(stuck) == 0 {
+		return
+	}
+
+	infraMsg := fmt.Sprintf("job stuck in queued for over %s without being picked up by its worker",
+		s.config.StuckJobTimeout)
+	crashMsg := "worker went offline or disappeared before finishing the job and no surviving worker took over"
+
+	failedIDs, err := s.db.FailStuckActiveJobs(s.config.StuckJobTimeout, stuck, infraMsg, crashMsg)
+	if err != nil {
+		log.Printf("Scheduler: Failed to sweep stuck active jobs: %v", err)
+		return
+	}
+	if len(failedIDs) == 0 {
+		return
+	}
+	log.Printf("Scheduler: stuck-job sweep failed %d job(s) (queued for over %s, or owned by an offline/missing worker)",
+		len(failedIDs), s.config.StuckJobTimeout)
+
+	// Only the IDs the sweep actually failed are notified: a job that
+	// recovered between the scan and the update (its worker came back, another
+	// path claimed it) must keep its quota slot and its stream.
+	crashed := make(map[string]bool, len(stuck))
+	for _, sj := range stuck {
+		crashed[sj.ID] = sj.Crashed
+	}
+	for _, jobID := range failedIDs {
+		msg := infraMsg
+		if crashed[jobID] {
+			msg = crashMsg
+		}
+		if s.jobNotifier != nil {
+			if err := s.jobNotifier.BroadcastStatus(jobID, protocol.JobStatusFailed, -1, msg); err != nil {
+				log.Printf("Scheduler: Failed to broadcast stuck-job failure for job %s: %v", jobID, err)
+			}
+			// No complete frame follows this out-of-band verdict; release the
+			// sequence bookkeeping the progress broadcasts created.
+			s.jobNotifier.ReleaseJobStream(jobID)
+		}
+		// Releases the client's quota slot through the database terminal hook
+		// (idempotent) and wakes probe waiters; this sweep bypasses the
+		// per-job terminal writers that normally notify.
+		s.db.NotifyTerminal(jobID)
 	}
 }
 
@@ -578,32 +670,47 @@ func (s *Scheduler) checkNoWorkerStarvation(trigger starvationTrigger) {
 		return
 	}
 
-	failed, err := s.db.FailStarvedPendingJobs(cutoff, starved, errMsg, crashStarvationErrMsg)
+	if s.beforeStarvationFail != nil {
+		s.beforeStarvationFail()
+	}
+
+	failedIDs, err := s.db.FailStarvedPendingJobs(cutoff, starved, errMsg, crashStarvationErrMsg)
 	if err != nil {
 		log.Printf("Scheduler: Failed to fail starved pending jobs: %v", err)
 		return
 	}
-	if failed > 0 {
-		log.Printf("Scheduler: starvation verdict via %s: failed %d job(s) after waiting %s with no schedulable worker (judged_at=%s)",
-			trigger, failed, s.config.NoWorkerJobTimeout, time.Now().Format(time.RFC3339Nano))
-		if s.starvationObserver != nil {
-			s.starvationObserver(trigger)
-		}
+	if len(failedIDs) == 0 {
+		return
+	}
+	log.Printf("Scheduler: starvation verdict via %s: failed %d job(s) after waiting %s with no schedulable worker (judged_at=%s)",
+		trigger, len(failedIDs), s.config.NoWorkerJobTimeout, time.Now().Format(time.RFC3339Nano))
+	if s.starvationObserver != nil {
+		s.starvationObserver(trigger)
+	}
 
-		for _, sj := range starved {
-			msg := errMsg
-			if sj.Crashed {
-				msg = crashStarvationErrMsg
-			}
-			if s.jobNotifier != nil {
-				if err := s.jobNotifier.BroadcastStatus(sj.ID, protocol.JobStatusFailed, -1, msg); err != nil {
-					log.Printf("Scheduler: Failed to broadcast starvation failure for job %s: %v", sj.ID, err)
-				}
-			}
-			// The bulk UPDATE bypasses the terminal-status writers, so the
-			// terminal notification must run here: it releases the quota slot
-			// and wakes in-process DB waiters (probe handler).
-			s.db.NotifyTerminal(sj.ID)
+	// Only the IDs the UPDATE actually changed are terminal. A job a worker
+	// claimed after the scan is still running: it must not receive a failed
+	// frame, lose its WS sequence, or have its quota slot released.
+	crashed := make(map[string]bool, len(starved))
+	for _, sj := range starved {
+		crashed[sj.ID] = sj.Crashed
+	}
+	for _, jobID := range failedIDs {
+		msg := errMsg
+		if crashed[jobID] {
+			msg = crashStarvationErrMsg
 		}
+		if s.jobNotifier != nil {
+			if err := s.jobNotifier.BroadcastStatus(jobID, protocol.JobStatusFailed, -1, msg); err != nil {
+				log.Printf("Scheduler: Failed to broadcast starvation failure for job %s: %v", jobID, err)
+			}
+			// No complete frame follows this out-of-band verdict; release the
+			// sequence bookkeeping its progress broadcasts created.
+			s.jobNotifier.ReleaseJobStream(jobID)
+		}
+		// The bulk UPDATE bypasses the terminal-status writers, so the
+		// terminal notification must run here: it releases the quota slot and
+		// wakes in-process DB waiters (probe handler).
+		s.db.NotifyTerminal(jobID)
 	}
 }

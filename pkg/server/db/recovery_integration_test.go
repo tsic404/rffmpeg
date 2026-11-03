@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 // TestServerRestartRecovery_FullFlow simulates server restart and verifies:
@@ -56,7 +57,7 @@ func TestServerRestartRecovery_FullFlow(t *testing.T) {
 	if err := database.AssignJobToWorker(job2.ID, worker1.ID); err != nil {
 		t.Fatalf("Failed to assign job2: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job2 running: %v", err)
 	}
 
@@ -68,7 +69,7 @@ func TestServerRestartRecovery_FullFlow(t *testing.T) {
 	if err := database.AssignJobToWorker(job3.ID, worker2.ID); err != nil {
 		t.Fatalf("Failed to assign job3: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job3.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job3.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job3 running: %v", err)
 	}
 
@@ -80,7 +81,7 @@ func TestServerRestartRecovery_FullFlow(t *testing.T) {
 	if err := database.AssignJobToWorker(job4.ID, worker1.ID); err != nil {
 		t.Fatalf("Failed to assign job4: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job4.ID, protocol.JobStatusQueued, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job4.ID, protocol.JobStatusQueued, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job4 queued: %v", err)
 	}
 
@@ -92,7 +93,7 @@ func TestServerRestartRecovery_FullFlow(t *testing.T) {
 	if err := database.AssignJobToWorker(job5.ID, worker1.ID); err != nil {
 		t.Fatalf("Failed to assign job5: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job5.ID, protocol.JobStatusCompleted, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job5.ID, protocol.JobStatusCompleted, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job5 completed: %v", err)
 	}
 
@@ -104,7 +105,7 @@ func TestServerRestartRecovery_FullFlow(t *testing.T) {
 	if err := database.AssignJobToWorker(job6.ID, worker2.ID); err != nil {
 		t.Fatalf("Failed to assign job6: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job6.ID, protocol.JobStatusFailed, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job6.ID, protocol.JobStatusFailed, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job6 failed: %v", err)
 	}
 
@@ -113,7 +114,7 @@ func TestServerRestartRecovery_FullFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create job7: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job7.ID, protocol.JobStatusCancelled, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job7.ID, protocol.JobStatusCancelled, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job7 cancelled: %v", err)
 	}
 
@@ -227,7 +228,7 @@ func TestServerRestartRecovery_WorkerReRegistration(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, workerID); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
 
@@ -270,7 +271,7 @@ func TestServerRestartRecovery_WorkerReRegistration(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, workerID); err != nil {
 		t.Fatalf("Failed to re-assign job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusQueued, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusQueued, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job queued: %v", err)
 	}
 
@@ -322,7 +323,7 @@ func TestServerRestartRecovery_WithStreamingJobs(t *testing.T) {
 	if err := database.AssignJobToWorker(streamingJob.ID, worker.ID); err != nil {
 		t.Fatalf("Failed to assign streaming job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(streamingJob.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, streamingJob.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set streaming job running: %v", err)
 	}
 
@@ -383,7 +384,7 @@ func TestServerRestartRecovery_DirectPathJobs(t *testing.T) {
 	if err := database.AssignJobToWorker(directJob.ID, worker.ID); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(directJob.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, directJob.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
 

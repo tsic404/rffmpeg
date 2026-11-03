@@ -7,6 +7,7 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
@@ -99,10 +100,10 @@ func TestMonitorJobMigration(t *testing.T) {
 
 	// Assign jobs to worker and set to running/queued
 	_ = database.AssignJobToWorker(job1.ID, "worker-1")
-	_ = database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	_ = dbtest.SetJobStatus(t, database, job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	_ = database.AssignJobToWorker(job2.ID, "worker-1")
-	_ = database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	_ = dbtest.SetJobStatus(t, database, job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Make the worker's heartbeat stale
 	_, err = database.GetDB().Exec(`
@@ -247,13 +248,10 @@ func TestMonitorRetryCount(t *testing.T) {
 
 	// Assign job to worker and set to running
 	_ = database.AssignJobToWorker(job1.ID, "worker-1")
-	_ = database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	_ = dbtest.SetJobStatus(t, database, job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Create a previous migration event for this job (simulating previous retry)
-	_, err = database.CreateMigrationEvent("worker-old", "old-worker", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create previous migration event: %v", err)
-	}
+	insertMigrationEventForTest(t, database, "worker-old", "old-worker", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID})
 
 	// Make the worker's heartbeat stale
 	_, err = database.GetDB().Exec(`
@@ -294,8 +292,8 @@ func TestGetMigrationEvents(t *testing.T) {
 	defer database.Close()
 
 	// Create migration events
-	_, _ = database.CreateMigrationEvent("worker-1", "worker-1", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-1"}, 1)
-	_, _ = database.CreateMigrationEvent("worker-2", "worker-2", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-2"}, 1)
+	insertMigrationEventForTest(t, database, "worker-1", "worker-1", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-1"})
+	insertMigrationEventForTest(t, database, "worker-2", "worker-2", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-2"})
 
 	// Create monitor
 	monitor := New(database, Config{
@@ -328,9 +326,9 @@ func TestGetMigrationEventsByWorker(t *testing.T) {
 	defer database.Close()
 
 	// Create migration events for different workers
-	_, _ = database.CreateMigrationEvent("worker-1", "worker-1", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-1"}, 1)
-	_, _ = database.CreateMigrationEvent("worker-2", "worker-2", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-2"}, 1)
-	_, _ = database.CreateMigrationEvent("worker-1", "worker-1", string(migration.ReasonHeartbeatTimeout), 1, []string{"job-3"}, 1)
+	insertMigrationEventForTest(t, database, "worker-1", "worker-1", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-1"})
+	insertMigrationEventForTest(t, database, "worker-2", "worker-2", string(migration.ReasonHeartbeatTimeout), 0, []string{"job-2"})
+	insertMigrationEventForTest(t, database, "worker-1", "worker-1", string(migration.ReasonHeartbeatTimeout), 1, []string{"job-3"})
 
 	// Create monitor
 	monitor := New(database, Config{
@@ -410,7 +408,7 @@ func TestSlowNodeEvictionDB(t *testing.T) {
 	_ = database.UpdateWorkerStatus("w2", protocol.WorkerStatusIdle)
 	_ = database.UpdateWorkerStatus("w1", protocol.WorkerStatusIdle)
 
-	idleWorkers, err := database.GetIdleWorkers()
+	idleWorkers, err := database.GetIdleWorkers(0)
 	if err != nil {
 		t.Fatalf("Failed to get idle workers: %v", err)
 	}
@@ -883,16 +881,16 @@ func TestMultiWorkerJobMigration(t *testing.T) {
 	job2, _ := database.CreateJob(`["input_1b.mkv"]`, `["-c:v","libx264"]`, "output_1b.mkv", false)
 	database.AssignJobToWorker(job1.ID, "worker-1")
 	database.AssignJobToWorker(job2.ID, "worker-1")
-	database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
-	database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, job2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	job3, _ := database.CreateJob(`["input_2a.mkv"]`, `["-c:v","libx264"]`, "output_2a.mkv", false)
 	database.AssignJobToWorker(job3.ID, "worker-2")
-	database.UpdateJobStatusWithFailure(job3.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, job3.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	job4, _ := database.CreateJob(`["input_3a.mkv"]`, `["-c:v","libx264"]`, "output_3a.mkv", false)
 	database.AssignJobToWorker(job4.ID, "worker-3")
-	database.UpdateJobStatusWithFailure(job4.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, job4.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Make all 3 workers' heartbeats stale
 	for _, wid := range []string{"worker-1", "worker-2", "worker-3"} {
@@ -977,7 +975,7 @@ func TestMultiWorkerPartialFailure(t *testing.T) {
 			t.Fatalf("Failed to create job for %s: %v", wid, err)
 		}
 		database.AssignJobToWorker(job.ID, wid)
-		database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+		dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 		jobs[i] = job
 	}
 
@@ -1066,14 +1064,14 @@ func TestMultiWorkerMixedJobStates(t *testing.T) {
 	database.AssignJobToWorker(jobRun.ID, "worker-A")
 	database.AssignJobToWorker(jobQueue.ID, "worker-A")
 	database.AssignJobToWorker(jobDone.ID, "worker-A")
-	database.UpdateJobStatusWithFailure(jobRun.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
-	database.UpdateJobStatusWithFailure(jobQueue.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
-	database.UpdateJobStatusWithFailure(jobDone.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, jobRun.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, jobQueue.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, jobDone.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
 
 	// worker-B: one queued job
 	jobQ2, _ := database.CreateJob(`["q2.mkv"]`, `["-c:v","libx264"]`, "out_q2.mkv", false)
 	database.AssignJobToWorker(jobQ2.ID, "worker-B")
-	database.UpdateJobStatusWithFailure(jobQ2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, jobQ2.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 
 	// Both workers go offline
 	for _, wid := range []string{"worker-A", "worker-B"} {
@@ -1139,15 +1137,15 @@ func TestMultiWorkerRetryCountTracking(t *testing.T) {
 	// worker-A: job with 2 previous migrations
 	job1, _ := database.CreateJob(`["retry.mkv"]`, `["-c:v","libx264"]`, "out_retry.mkv", false)
 	database.AssignJobToWorker(job1.ID, "worker-A")
-	database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
-	database.CreateMigrationEvent("old-w1", "old-1", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID}, 1)
-	database.CreateMigrationEvent("old-w2", "old-2", string(migration.ReasonHeartbeatTimeout), 2, []string{job1.ID}, 1)
+	insertMigrationEventForTest(t, database, "old-w1", "old-1", string(migration.ReasonHeartbeatTimeout), 1, []string{job1.ID})
+	insertMigrationEventForTest(t, database, "old-w2", "old-2", string(migration.ReasonHeartbeatTimeout), 2, []string{job1.ID})
 
 	// worker-B: fresh job, no prior migrations
 	job2, _ := database.CreateJob(`["fresh.mkv"]`, `["-c:v","libx264"]`, "out_fresh.mkv", false)
 	database.AssignJobToWorker(job2.ID, "worker-B")
-	database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	dbtest.SetJobStatus(t, database, job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 
 	// Both workers go offline
 	for _, wid := range []string{"worker-A", "worker-B"} {
@@ -1227,7 +1225,7 @@ func TestWorkerFailoverE2E(t *testing.T) {
 		t.Fatalf("Failed to assign job to worker-A: %v", err)
 	}
 
-	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
@@ -1300,7 +1298,7 @@ func TestWorkerFailoverE2E(t *testing.T) {
 	}
 
 	// Get idle workers (should be only worker-B, since worker-A is offline)
-	idleWorkers, err := database.GetIdleWorkers()
+	idleWorkers, err := database.GetIdleWorkers(0)
 	if err != nil {
 		t.Fatalf("Failed to get idle workers: %v", err)
 	}
@@ -1317,7 +1315,7 @@ func TestWorkerFailoverE2E(t *testing.T) {
 		t.Fatalf("Failed to assign job to worker-B: %v", err)
 	}
 
-	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job queued: %v", err)
 	}
@@ -1380,33 +1378,25 @@ func TestWorkerFailoverRetryLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to assign job to worker-A: %v", err)
 	}
-	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
 
 	// Create 3 previous migration events (simulating MaxRetryCount reached)
-	for i := 0; i < 3; i++ {
-		_, err = database.CreateMigrationEvent(
-			"old-w"+string(rune('0'+i)),
-			"old-worker",
-			string(migration.ReasonHeartbeatTimeout),
-			i,
-			[]string{job.ID},
-			1,
-		)
-		if err != nil {
-			t.Fatalf("Failed to create previous migration event %d: %v", i, err)
-		}
+	for i := range 3 {
+		insertMigrationEventForTest(t, database,
+			"old-w"+string(rune('0'+i)), "old-worker",
+			string(migration.ReasonHeartbeatTimeout), i, []string{job.ID})
 	}
 
 	// Verify retry count is 3
-	count, err := database.GetJobRetryCount(job.ID)
+	retryCounts, err := database.GetJobRetryCounts([]string{job.ID})
 	if err != nil {
 		t.Fatalf("Failed to get retry count: %v", err)
 	}
-	if count != 3 {
-		t.Fatalf("Expected retry count 3, got %d", count)
+	if retryCounts[job.ID] != 3 {
+		t.Fatalf("Expected retry count 3, got %d", retryCounts[job.ID])
 	}
 
 	// Make worker-A's heartbeat stale

@@ -212,10 +212,21 @@ func TestUploadJobOutputRemovesMultipartSpill(t *testing.T) {
 		t.Fatalf("CreateJob: %v", err)
 	}
 
+	// Output upload is ownership-guarded: the job needs a live owner.
+	if _, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
+		Encoders:      []string{"libx264"},
+		FFmpegVersion: "5.1",
+	}); err != nil {
+		t.Fatalf("CreateWorker: %v", err)
+	}
+	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+		t.Fatalf("AssignJobToWorker: %v", err)
+	}
+
 	r := chi.NewRouter()
 	r.Post("/api/v1/jobs/{jobId}/output", h.UploadJobOutput)
 
-	req := newSpillingMultipartRequest(t, "/api/v1/jobs/"+job.ID+"/output", "file", "out.mp4", multipartSpillThreshold+1024)
+	req := newSpillingMultipartRequest(t, "/api/v1/jobs/"+job.ID+"/output?worker_id=worker-1", "file", "out.mp4", multipartSpillThreshold+1024)
 	req.Header.Set("Authorization", "Bearer test-token")
 
 	rec := httptest.NewRecorder()

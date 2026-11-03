@@ -6,6 +6,7 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
@@ -50,7 +51,7 @@ func TestSchedulerIdleWorkerPrioritization(t *testing.T) {
 	}
 
 	// Verify worker is idle
-	idleWorkers, err := database.GetIdleWorkers()
+	idleWorkers, err := database.GetIdleWorkers(0)
 	if err != nil {
 		t.Fatalf("Failed to get idle workers: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestSchedulerActiveJobCount(t *testing.T) {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
 
-	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status: %v", err)
 	}
@@ -145,7 +146,7 @@ func TestSchedulerJobTimeout(t *testing.T) {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
 
-	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestSchedulerNoJobAssignmentWhenBusy(t *testing.T) {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
 
-	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status: %v", err)
 	}
@@ -436,7 +437,7 @@ func TestSchedulerCapabilityAwareScheduling(t *testing.T) {
 	}
 
 	// Verify that GetIdleWorkersByEncoder returns only worker1
-	workers, err := database.GetIdleWorkersByEncoder("h264_nvenc")
+	workers, err := database.GetIdleWorkersByEncoder("h264_nvenc", 0)
 	if err != nil {
 		t.Fatalf("Failed to get workers by encoder: %v", err)
 	}
@@ -448,7 +449,7 @@ func TestSchedulerCapabilityAwareScheduling(t *testing.T) {
 	}
 
 	// Verify that GetIdleWorkers returns both workers
-	allWorkers, err := database.GetIdleWorkers()
+	allWorkers, err := database.GetIdleWorkers(0)
 	if err != nil {
 		t.Fatalf("Failed to get idle workers: %v", err)
 	}
@@ -1049,18 +1050,11 @@ func TestSchedulerNoWorkerStarvation_PreservesWorkerCrash(t *testing.T) {
 	}
 
 	// Recreate the state the health monitor leaves behind when the worker's
-	// heartbeat timed out: a heartbeat_timeout migration event plus the job
-	// reset back to pending (no surviving worker to take it over).
-	if _, err := database.CreateMigrationEvent("worker-1", "test-worker",
-		string(migration.ReasonHeartbeatTimeout), 1, []string{job.ID}, 1); err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
-	}
-	if err := database.ResetJobToPending(job.ID); err != nil {
-		t.Fatalf("Failed to reset job to pending: %v", err)
-	}
-
-	// ResetJobToPending refreshed created_at to now; backdate it past the
-	// grace period so the sweep fires.
+	// heartbeat timed out: a heartbeat_timeout migration event on a job that
+	// is already back in pending (no surviving worker to take it over).
+	insertMigrationEventForTest(t, database, "worker-1", "test-worker",
+		string(migration.ReasonHeartbeatTimeout), 1, []string{job.ID})
+	// Backdate created_at past the grace period so the sweep fires.
 	if _, err := database.GetDB().Exec(`
 		UPDATE jobs SET created_at = ? WHERE id = ?
 	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {
@@ -1133,32 +1127,23 @@ func TestSchedulerNoWorkerStarvation_TimeoutRequeueNotCrash(t *testing.T) {
 
 	// A worker-crash migration (heartbeat_timeout), then a later job_timeout
 	// requeue — the timeout is what put the job back in pending.
-	crashEvent, err := database.CreateMigrationEvent("worker-1", "test-worker",
-		string(migration.ReasonHeartbeatTimeout), 1, []string{job.ID}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create crash migration event: %v", err)
-	}
-	timeoutEvent, err := database.CreateMigrationEvent("worker-1", "test-worker",
-		string(migration.ReasonJobTimeout), 1, []string{job.ID}, 1)
-	if err != nil {
-		t.Fatalf("Failed to create timeout migration event: %v", err)
-	}
+	crashEventID := insertMigrationEventForTest(t, database, "worker-1", "test-worker",
+		string(migration.ReasonHeartbeatTimeout), 1, []string{job.ID})
+	timeoutEventID := insertMigrationEventForTest(t, database, "worker-1", "test-worker",
+		string(migration.ReasonJobTimeout), 1, []string{job.ID})
 
 	// Pin a deterministic chronological order: crash first, job_timeout last.
 	if _, err := database.GetDB().Exec(
 		`UPDATE migration_events SET timestamp = ? WHERE id = ?`,
-		time.Now().Add(-2*time.Hour), crashEvent.ID); err != nil {
+		time.Now().Add(-2*time.Hour), crashEventID); err != nil {
 		t.Fatalf("Failed to backdate crash event: %v", err)
 	}
 	if _, err := database.GetDB().Exec(
 		`UPDATE migration_events SET timestamp = ? WHERE id = ?`,
-		time.Now().Add(-1*time.Hour), timeoutEvent.ID); err != nil {
+		time.Now().Add(-1*time.Hour), timeoutEventID); err != nil {
 		t.Fatalf("Failed to backdate timeout event: %v", err)
 	}
 
-	if err := database.ResetJobToPending(job.ID); err != nil {
-		t.Fatalf("Failed to reset job to pending: %v", err)
-	}
 	if _, err := database.GetDB().Exec(`
 		UPDATE jobs SET created_at = ? WHERE id = ?
 	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {
@@ -1416,7 +1401,7 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// Backdate started_at so GetTimedOutJobs picks it up.
@@ -1429,6 +1414,8 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxTimeoutRetries = maxRetries
 	s := New(database, cfg)
+	broadcaster := &fakeBroadcaster{}
+	s.SetJobNotifier(broadcaster)
 
 	// First pass: retries available → back to pending.
 	s.checkTimeouts()
@@ -1442,7 +1429,7 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 		if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
 			t.Fatal(err)
 		}
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := database.GetDB().Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
@@ -1456,7 +1443,7 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.GetDB().Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,
@@ -1471,6 +1458,11 @@ func TestCheckTimeoutsRetryBudget(t *testing.T) {
 	}
 	if got.FailureType != string(protocol.FailureTimeout) {
 		t.Fatalf("expected failure_type TIMEOUT, got %q", got.FailureType)
+	}
+	// The terminal verdict is out of band (no complete frame): the job's WS
+	// sequence bookkeeping must be released, and requeues must not release it.
+	if len(broadcaster.released) != 1 || broadcaster.released[0] != job.ID {
+		t.Fatalf("released = %v, want [%s]", broadcaster.released, job.ID)
 	}
 }
 
@@ -1498,7 +1490,7 @@ func TestCheckTimeoutsRecordsRedistribution(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.GetDB().Exec(`UPDATE jobs SET started_at = ? WHERE id = ?`,

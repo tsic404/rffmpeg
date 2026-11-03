@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 // TestConcurrentPullRespectsCapacity verifies the capacity guard: a worker
@@ -31,8 +32,8 @@ func TestConcurrentPullRespectsCapacity(t *testing.T) {
 	if _, err := database.AssignPendingJobsToWorker("w1", 1); err != nil {
 		t.Fatalf("AssignPendingJobsToWorker (pre-set): %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(running.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
-		t.Fatalf("UpdateJobStatusWithFailure (pre-set running): %v", err)
+	if err := dbtest.SetJobStatus(t, database, running.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		t.Fatalf("SetJobStatus (pre-set running): %v", err)
 	}
 
 	pending := createNJobs(t, database, 16)

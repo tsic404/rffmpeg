@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 func createStateTestDB(t *testing.T) *Database {
@@ -35,7 +36,7 @@ func mustRunningJob(t *testing.T, d *Database, jobID, workerID string) {
 	if err := d.AssignJobToWorker(jobID, workerID); err != nil {
 		t.Fatalf("AssignJobToWorker: %v", err)
 	}
-	if err := d.UpdateJobStatusWithFailure(jobID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, d, jobID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Set running: %v", err)
 	}
 }
@@ -53,9 +54,13 @@ func TestStaleTerminalReportRejectedAfterFailover(t *testing.T) {
 	}
 	mustRunningJob(t, database, job.ID, "worker-old")
 
-	// Failover: job migrates to the new owner and runs there.
-	if err := database.ResetJobToPending(job.ID); err != nil {
-		t.Fatalf("ResetJobToPending: %v", err)
+	// Failover: the old worker goes offline and the job migrates back to
+	// pending before the new owner claims it.
+	if err := database.UpdateWorkerStatus("worker-old", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("UpdateWorkerStatus: %v", err)
+	}
+	if _, err := database.MigrateJobsFromWorker("worker-old", "heartbeat_timeout", 3); err != nil {
+		t.Fatalf("MigrateJobsFromWorker: %v", err)
 	}
 	mustRunningJob(t, database, job.ID, "worker-new")
 
@@ -203,11 +208,11 @@ func TestAtomicAssignNoOrphanState(t *testing.T) {
 	}
 
 	// Starvation fallback only sees genuinely unassigned jobs.
-	n, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []StarvedJob{{ID: job.ID}}, "x", "crash")
+	failedIDs, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []StarvedJob{{ID: job.ID}}, "x", "crash")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("starvation fallback consumed assigned job: %d", n)
+	if len(failedIDs) != 0 {
+		t.Fatalf("starvation fallback consumed assigned job: %v", failedIDs)
 	}
 }

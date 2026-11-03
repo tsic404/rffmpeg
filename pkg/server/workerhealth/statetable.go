@@ -108,17 +108,26 @@ func (t *WorkerStateTable) Get(workerID string) (*protocol.WorkerState, bool) {
 	return state, ok
 }
 
+// SetEviction reconciles a worker's in-memory eviction mark with the
+// persistent one. The database is authoritative: DetectSlowWorkers applies its
+// decisions optimistically, and the monitor calls this to undo a decision whose
+// persistent write failed, so the panel and the next judgement never run on a
+// mark the DB does not carry. The id is canonicalized like every other lookup.
+func (t *WorkerStateTable) SetEviction(workerID string, evicted bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if state, ok := t.states[db.NormalizeWorkerID(workerID)]; ok {
+		state.Evicted = evicted
+	}
+}
+
 // ClearEviction drops a worker's in-memory eviction mark after the operator
 // cleared it. Leaving the mark set would freeze the next judgement on the
 // recovery branch, so a worker whose throughput is still below the eviction
 // threshold could never be re-evicted (C-120). The id is canonicalized so the
 // clear reaches the same entry the heartbeats populated.
 func (t *WorkerStateTable) ClearEviction(workerID string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if state, ok := t.states[db.NormalizeWorkerID(workerID)]; ok {
-		state.Evicted = false
-	}
+	t.SetEviction(workerID, false)
 }
 
 // GetAll returns all worker states.
@@ -271,6 +280,9 @@ func medianSample(workers []workerInfo) ([]workerInfo, []float64) {
 // judged in either direction — idle (C-82) or busy inside its busy-exemption window (C-83) — since
 // its EWMA is a decay tail of measurement absence, not a current rate. Pool membership stays
 // medianSample's decision; workers below MinJobsForEviction never enter evaluation or the pool.
+// The returned decisions are applied to the in-memory marks immediately; the
+// monitor performs the matching persistent write and reverts a mark whose write
+// failed, so the persistent state wins any disagreement.
 func (t *WorkerStateTable) DetectSlowWorkers() SlowNodeDetectionResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()

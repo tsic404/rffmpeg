@@ -50,8 +50,15 @@ func TestJobClaimTimeRecordsPendingToQueued(t *testing.T) {
 		t.Fatalf("claimed_at = %v, want within [%v, now]", claimed.ClaimedAt.Time, before)
 	}
 
-	if err := database.ResetJobToPending(job.ID); err != nil {
-		t.Fatalf("ResetJobToPending: %v", err)
+	// Requestion through the real failover path (the worker goes offline).
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatalf("UpdateWorkerStatus: %v", err)
+	}
+	if _, err := database.MigrateJobsFromWorker("worker-1", "heartbeat_timeout", 3); err != nil {
+		t.Fatalf("MigrateJobsFromWorker: %v", err)
+	}
+	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusIdle); err != nil {
+		t.Fatalf("UpdateWorkerStatus(idle): %v", err)
 	}
 	reset, err := database.GetJob(job.ID)
 	if err != nil {
