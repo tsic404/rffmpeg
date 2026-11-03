@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,10 +20,6 @@ import (
 func TestCacheHit_OverwritePolicyDegradesToMiss(t *testing.T) {
 	w, mockSrv := setupTestWorker(t, 24*time.Hour)
 
-	ctx := context.Background()
-	jobCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	// Prime the cache: a miss run caches the output under key derived from
 	// input files + args + output extension.
 	prime := protocol.JobInfo{
@@ -33,7 +28,7 @@ func TestCacheHit_OverwritePolicyDegradesToMiss(t *testing.T) {
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 		OutputFilename: "out.mp4",
 	}
-	w.processJob(jobCtx, prime, cancel, false)
+	runJob(t, w, prime)
 	if w.cache.Stats().EntryCount != 1 {
 		t.Fatalf("expected 1 cache entry after prime run, got %d", w.cache.Stats().EntryCount)
 	}
@@ -54,7 +49,7 @@ func TestCacheHit_OverwritePolicyDegradesToMiss(t *testing.T) {
 	}
 
 	beforeDownloads := mockSrv.DownloadCount()
-	w.processJob(jobCtx, job, cancel, false)
+	runJob(t, w, job)
 
 	if mockSrv.DownloadCount() == beforeDownloads {
 		t.Errorf("expected cache hit to degrade to a miss (input re-downloaded) when output exists and overwrite not allowed")

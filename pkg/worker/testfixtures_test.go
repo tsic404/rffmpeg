@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -9,7 +10,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
+
+// runJob processes one job the way the poll loop does: with a dedicated
+// cancellable context whose lifetime ends with the job. Contexts must not be
+// shared across jobs — the worker releases the job's context on return.
+func runJob(t *testing.T, w *Worker, job protocol.JobInfo) {
+	t.Helper()
+	jobCtx, cancel := context.WithCancel(context.Background())
+	w.processJob(jobCtx, job, cancel, false)
+}
 
 // testMediaMP4 is a genuine MP4 (H.264, 64x64, two frames, 0.2s) generated
 // with ffmpeg's lavfi testsrc. Worker fixtures serve it as the job input so

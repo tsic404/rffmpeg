@@ -279,7 +279,7 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
-	w.processJob(jobCtx, job2, cancel, false)
+	runJob(t, w, job2)
 
 	if mockSrv.DownloadCount() <= beforeDownloads2 {
 		t.Error("Expected downloads on second run (TTL expired → miss)")
@@ -303,10 +303,6 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 	w, mockSrv := setupTestWorker(t, 24*time.Hour)
 
-	ctx := context.Background()
-	jobCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	jobA := protocol.JobInfo{
 		ID:         "test-job-a",
 		InputFiles: []string{"input-a"},
@@ -318,8 +314,8 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx265"},
 	}
 
-	w.processJob(jobCtx, jobA, cancel, false)
-	w.processJob(jobCtx, jobB, cancel, false)
+	runJob(t, w, jobA)
+	runJob(t, w, jobB)
 
 	stats := w.cache.Stats()
 	if stats.Misses < 2 {
@@ -336,7 +332,7 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 		InputFiles: []string{"input-a"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
-	w.processJob(jobCtx, jobA2, cancel, false)
+	runJob(t, w, jobA2)
 	if mockSrv.DownloadCount() != beforeDownloads {
 		t.Error("Expected no downloads on cache hit for job A re-run")
 	}
@@ -348,7 +344,7 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 		InputFiles: []string{"input-a"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx265"},
 	}
-	w.processJob(jobCtx, jobB2, cancel, false)
+	runJob(t, w, jobB2)
 	if mockSrv.DownloadCount() != beforeDownloads {
 		t.Error("Expected no downloads on cache hit for job B re-run")
 	}
@@ -366,16 +362,12 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 func TestCacheIntegration_OrderSensitivity(t *testing.T) {
 	w, mockSrv := setupTestWorker(t, 24*time.Hour)
 
-	ctx := context.Background()
-	jobCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
 	job1 := protocol.JobInfo{
 		ID:         "test-job-order-1",
 		InputFiles: []string{"input-order"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
-	w.processJob(jobCtx, job1, cancel, false)
+	runJob(t, w, job1)
 
 	beforeDownloads := mockSrv.DownloadCount()
 	job2 := protocol.JobInfo{
@@ -383,7 +375,7 @@ func TestCacheIntegration_OrderSensitivity(t *testing.T) {
 		InputFiles: []string{"input-order"},
 		Args:       []string{"-i", "<INPUT_FILE>", "-preset", "fast", "-c:v", "libx264"},
 	}
-	w.processJob(jobCtx, job2, cancel, false)
+	runJob(t, w, job2)
 
 	// Different flag order should produce different cache keys, so second run
 	// should still download inputs (cache miss for the new key)

@@ -262,27 +262,12 @@ func TestFfmpegStderrIndicatesEmptyOutput(t *testing.T) {
 	}
 }
 
-func TestFFmpegStderrIndicatesCriticalError(t *testing.T) {
+func TestFFmpegStderrIndicatesUnwrittenOutput(t *testing.T) {
 	tests := []struct {
 		name   string
 		stderr string
 		want   bool
 	}{
-		{
-			name:   "invalid data found",
-			stderr: "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55b5e8d8c700] Invalid data found when reading input\n",
-			want:   true,
-		},
-		{
-			name:   "invalid nal unit size",
-			stderr: "[h264 @ 0x55b5e8d8c700] Invalid NAL unit size\n",
-			want:   true,
-		},
-		{
-			name:   "header missing",
-			stderr: "[h264 @ 0x55b5e8d8c700] header missing\n",
-			want:   true,
-		},
 		{
 			name:   "error opening output file - missing directory",
 			stderr: "[out#0/mp3 @ 0x55be9305cc00] Error opening output /nonexistent_dir/out.mp3: No such file or directory\nError opening output file /nonexistent_dir/out.mp3.\nError opening output files: No such file or directory\n",
@@ -299,24 +284,19 @@ func TestFFmpegStderrIndicatesCriticalError(t *testing.T) {
 			want:   true,
 		},
 		{
-			name:   "could not open output lowercase",
-			stderr: "could not open output file /tmp/jobs/job-1/output.mp3\n",
-			want:   true,
+			name:   "metadata value that reads like an error",
+			stderr: "  Metadata:\n    title           : header missing\n    encoder         : Lavf61.7.100\n",
+			want:   false,
 		},
 		{
-			name:   "corrupted file",
-			stderr: "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x55b5e8d8c700] corrupted file\n",
-			want:   true,
+			name:   "metadata value carrying the refusal phrase",
+			stderr: "  Metadata:\n    title           : Not overwriting - exiting\n",
+			want:   false,
 		},
 		{
-			name:   "error while decoding",
-			stderr: "[h264 @ 0x55b5e8d8c700] error while decoding MB 123\n",
-			want:   true,
-		},
-		{
-			name:   "concealing errors",
-			stderr: "[h264 @ 0x55b5e8d8c700] concealing errors\n",
-			want:   true,
+			name:   "decoder warnings are not output failures",
+			stderr: "[h264 @ 0x55b5e8d8c700] header missing\n[h264 @ 0x55b5e8d8c700] Invalid NAL unit size\n[h264 @ 0x55b5e8d8c700] error while decoding MB 123\n",
+			want:   false,
 		},
 		{
 			name:   "normal stderr",
@@ -328,23 +308,13 @@ func TestFFmpegStderrIndicatesCriticalError(t *testing.T) {
 			stderr: "",
 			want:   false,
 		},
-		{
-			name:   "mixed case invalid data",
-			stderr: "[h264 @ 0x55b5e8d8c700] INVALID DATA FOUND WHEN READING INPUT\n",
-			want:   true,
-		},
-		{
-			name:   "decode_slice_header error",
-			stderr: "[h264 @ 0x55b5e8d8c700] decode_slice_header error\n",
-			want:   true,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ffmpegStderrIndicatesCriticalError(tt.stderr)
+			got := ffmpegStderrIndicatesUnwrittenOutput(tt.stderr)
 			if got != tt.want {
-				t.Errorf("ffmpegStderrIndicatesCriticalError(%q) = %v, want %v", tt.stderr, got, tt.want)
+				t.Errorf("ffmpegStderrIndicatesUnwrittenOutput(%q) = %v, want %v", tt.stderr, got, tt.want)
 			}
 		})
 	}
