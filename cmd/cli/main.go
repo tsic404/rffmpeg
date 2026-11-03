@@ -693,6 +693,16 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// Stop notifying and join the handler before returning: the handler reads
+	// the process-wide os.Stderr at start, so leaving it behind would let that
+	// read land after the run (and, in tests, after the global was restored)
+	// and keep a goroutine alive past the command.
+	var sigHandler sync.WaitGroup
+	defer func() {
+		signal.Stop(sigChan)
+		close(sigChan)
+		sigHandler.Wait()
+	}()
 	var (
 		sigMu      sync.Mutex
 		jobID      string
@@ -700,7 +710,9 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 		submitting bool
 	)
 
+	sigHandler.Add(1)
 	go func() {
+		defer sigHandler.Done()
 		// Capture the real stderr once: the tee swaps the os.Stderr global and
 		// closes its pipe on stop, so reading os.Stderr here would race those
 		// writes and, after a successful submit, write to a closed fd. The real
