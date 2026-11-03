@@ -80,6 +80,15 @@ func (a *RewriteAdapter) SetHardwareCapabilities(caps *protocol.WorkerCapabiliti
 	a.hwCaps = a.convertCapabilities(caps)
 }
 
+// HardwareCapabilities returns the converted worker capabilities used by the
+// rewrite path. Callers that parse encoder arguments elsewhere use it to keep
+// the parser's known-encoder set identical.
+func (a *RewriteAdapter) HardwareCapabilities() *rewrite.HardwareCapabilities {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.hwCaps
+}
+
 // convertCapabilities converts protocol.WorkerCapabilities to rewrite.HardwareCapabilities.
 func (a *RewriteAdapter) convertCapabilities(caps *protocol.WorkerCapabilities) *rewrite.HardwareCapabilities {
 	if caps == nil {
@@ -175,13 +184,16 @@ func (a *RewriteAdapter) RewriteArgs(ctx context.Context, originalArgs []string,
 	}
 
 	// Parse encoder from args
-	specifiedEncoder := a.parseEncoderFromArgs(originalArgs)
+	specifiedEncoder := a.parseEncoderFromArgs(originalArgs, hwCaps)
 
 	// If -vn (no video) flag is present, video encoding is disabled entirely.
 	// Skip rewriting unconditionally — we must not inject a video encoder (-c:v),
 	// attempt auto-HW upgrade, or modify any video codec params, as that would
 	// conflict with -vn and cause audio extraction (or other non-video tasks) to fail.
-	if a.hasNoVideoFlag(originalArgs) {
+	// An inline "=" encoder option is invalid ffmpeg syntax: it is not a
+	// selection and must not trigger auto-selection, so the command is left
+	// unchanged for ffmpeg to reject.
+	if rewrite.HasNoVideoOutput(originalArgs) || rewrite.HasInlineVideoEncoderSyntax(originalArgs) {
 		return originalArgs, &RewriteResult{Performed: false}, nil
 	}
 
@@ -196,7 +208,7 @@ func (a *RewriteAdapter) RewriteArgs(ctx context.Context, originalArgs []string,
 		OriginalArgs:         originalArgs,
 		HardwareCapabilities: *hwCaps,
 		AutoHW:               autoHW,
-		EncoderParams:        a.parseEncoderParamsFromArgs(originalArgs),
+		EncoderParams:        a.parseEncoderParamsFromArgs(originalArgs, hwCaps),
 	}
 
 	// Set parsed encoder
@@ -245,7 +257,7 @@ func (a *RewriteAdapter) RewriteArgs(ctx context.Context, originalArgs []string,
 			if fallbackErr == nil {
 				result.FallbackUsed = true
 				// Generate notification for the fallback
-				fallbackEncoder := a.parseEncoderFromArgs(fallbackArgs)
+				fallbackEncoder := a.parseEncoderFromArgs(fallbackArgs, hwCaps)
 				if fallbackEncoder != "" {
 					notification := fmt.Sprintf("[rffmpeg] %s unavailable, fallback to %s", specifiedEncoder, fallbackEncoder)
 					result.Notifications = append(result.Notifications, notification)
@@ -274,8 +286,8 @@ func (a *RewriteAdapter) ResolveTargetEncoder(args []string, autoHW bool) string
 		return ""
 	}
 
-	specifiedEncoder := a.parseEncoderFromArgs(args)
-	if a.hasNoVideoFlag(args) || a.isPassthroughEncoder(specifiedEncoder) {
+	specifiedEncoder := a.parseEncoderFromArgs(args, hwCaps)
+	if rewrite.HasNoVideoOutput(args) || rewrite.HasInlineVideoEncoderSyntax(args) || a.isPassthroughEncoder(specifiedEncoder) {
 		return ""
 	}
 
@@ -283,7 +295,7 @@ func (a *RewriteAdapter) ResolveTargetEncoder(args []string, autoHW bool) string
 		OriginalArgs:         args,
 		HardwareCapabilities: *hwCaps,
 		AutoHW:               autoHW,
-		EncoderParams:        a.parseEncoderParamsFromArgs(args),
+		EncoderParams:        a.parseEncoderParamsFromArgs(args, hwCaps),
 		SpecifiedEncoder:     specifiedEncoder,
 	}
 
@@ -380,44 +392,18 @@ func (a *RewriteAdapter) buildDecisionReason(response *rewrite.EncoderRewriteRes
 
 // parseEncoderFromArgs extracts the video encoder from FFmpeg arguments.
 //
-// An explicit video codec flag (-c:v/-codec:v/-vcodec, separate or inline)
-// takes precedence over the general -c/-codec flag, which also sets the video
-// codec. Only "copy" is lifted from the general flag (a stream-copy directive
-// that must pass through unchanged); other general values are codec names the
-// auto-selection path already handles. ffmpeg resolves these flags
-// positionally (later wins); this parser prefers the explicit video flag.
-func (a *RewriteAdapter) parseEncoderFromArgs(args []string) encoder.EncoderFamily {
-	for i, arg := range args {
-		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
-			if i+1 < len(args) {
-				return encoder.EncoderFamily(args[i+1])
-			}
-		}
-		// Inline forms: -c:v=libx264, -codec:v=copy, -vcodec=h264_qsv.
-		switch {
-		case strings.HasPrefix(arg, "-c:v="):
-			return encoder.EncoderFamily(arg[5:])
-		case strings.HasPrefix(arg, "-codec:v="):
-			return encoder.EncoderFamily(arg[9:])
-		case strings.HasPrefix(arg, "-vcodec="):
-			return encoder.EncoderFamily(arg[8:])
-		}
+// Recognized spellings: -c:v / -codec:v with an optional stream specifier,
+// -vcodec, and the general -c / -codec when its value names a known video
+// encoder. An explicit video flag takes precedence over the general flag;
+// the last declaration wins. "copy" is returned so the caller can pass it
+// through unchanged. Inline "=" forms are invalid ffmpeg syntax and are not
+// selections. Flags after "--" are ignored.
+func (a *RewriteAdapter) parseEncoderFromArgs(args []string, hwCaps *rewrite.HardwareCapabilities) encoder.EncoderFamily {
+	flag, ok := rewrite.PrimaryVideoEncoderFlag(rewrite.ParseVideoEncoderFlags(args, hwCaps))
+	if !ok {
+		return ""
 	}
-
-	// General codec flag: bare "-c copy" sets every stream (video included)
-	// to stream-copy. Treat it as the "copy" passthrough encoder so the
-	// rewrite engine never injects a lossy re-encode.
-	for i, arg := range args {
-		if arg == "-c" || arg == "-codec" {
-			if i+1 < len(args) && args[i+1] == "copy" {
-				return encoder.EncoderFamily("copy")
-			}
-		}
-		if arg == "-c=copy" || arg == "-codec=copy" {
-			return encoder.EncoderFamily("copy")
-		}
-	}
-	return ""
+	return encoder.EncoderFamily(flag.Value)
 }
 
 // isPassthroughEncoder returns true if the encoder is a passthrough encoder
@@ -430,8 +416,16 @@ func (a *RewriteAdapter) isPassthroughEncoder(enc encoder.EncoderFamily) bool {
 
 // parseEncoderParamsFromArgs extracts encoder-specific parameters from FFmpeg arguments.
 // This includes parameters like -crf, -preset, -b:v, -cq, etc.
-func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]string {
+func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string, hwCaps *rewrite.HardwareCapabilities) map[string]string {
 	params := make(map[string]string)
+
+	// Encoder selections (every recognized spelling) are handled by the
+	// rewrite path, never as parameters.
+	encoderArgs := make(map[int]bool)
+	for _, flag := range rewrite.ParseVideoEncoderFlags(args, hwCaps) {
+		encoderArgs[flag.Index] = true
+		encoderArgs[flag.Index+1] = true
+	}
 
 	// FFmpeg flags that take a value but are NOT encoder-specific params
 	// These should be skipped when parsing for encoder params
@@ -471,15 +465,10 @@ func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]st
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Skip encoder specification
-		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
-			i++ // Skip value too
-			continue
+		if arg == "--" {
+			break
 		}
-
-		// Handle inline encoder syntax (-c:v=, -codec:v=, -vcodec=).
-		if strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
+		if encoderArgs[i] {
 			continue
 		}
 
@@ -534,25 +523,13 @@ func findEqual(s string) int {
 	return -1
 }
 
-// hasNoVideoFlag checks if the original args contain -vn (no video) flag.
-// When -vn is present, video encoding is disabled entirely, so we must not
-// inject any video encoder (-c:v) or attempt auto-HW upgrade.
-func (a *RewriteAdapter) hasNoVideoFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "-vn" {
-			return true
-		}
-	}
-	return false
-}
-
 // fallbackToSoftware attempts to fallback to software encoding.
 // It returns an error if the specified encoder is completely unknown
 // (i.e., its codec format cannot be determined).
 func (a *RewriteAdapter) fallbackToSoftware(ctx context.Context, originalArgs []string, hwCaps *rewrite.HardwareCapabilities) ([]string, error) {
 	// If -vn flag is present, video encoding is disabled — don't inject
 	// a video encoder during fallback either.
-	if a.hasNoVideoFlag(originalArgs) {
+	if rewrite.HasNoVideoOutput(originalArgs) || rewrite.HasInlineVideoEncoderSyntax(originalArgs) {
 		return originalArgs, nil
 	}
 
@@ -560,7 +537,7 @@ func (a *RewriteAdapter) fallbackToSoftware(ctx context.Context, originalArgs []
 	codec := encoder.CodecH264 // Default to H.264
 
 	// Try to detect codec from original args
-	originalEncoder := a.parseEncoderFromArgs(originalArgs)
+	originalEncoder := a.parseEncoderFromArgs(originalArgs, hwCaps)
 	if originalEncoder != "" {
 		if detected := originalEncoder.CodecFormat(); detected != "" {
 			codec = detected
@@ -582,40 +559,11 @@ func (a *RewriteAdapter) fallbackToSoftware(ctx context.Context, originalArgs []
 		return nil, fmt.Errorf("no software encoder available for codec %s", codec)
 	}
 
-	// Replace encoder in args
-	result := make([]string, 0, len(originalArgs))
-	skipNext := false
-	encoderReplaced := false
-
-	for _, arg := range originalArgs {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-
-		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
-			skipNext = true
-			if !encoderReplaced {
-				result = append(result, "-c:v", string(swEncoder))
-				encoderReplaced = true
-			}
-			continue
-		}
-
-		// Handle inline encoder syntax (-c:v=, -codec:v=, -vcodec=).
-		if strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
-			if !encoderReplaced {
-				result = append(result, fmt.Sprintf("-c:v=%s", swEncoder))
-				encoderReplaced = true
-			}
-			continue
-		}
-
-		result = append(result, arg)
-	}
-
-	// Add encoder if not present
-	if !encoderReplaced {
+	// Replace encoder in args through the shared in-place rewriter so the
+	// copy guard and spelling preservation cannot drift from the other paths.
+	_, hasPrimary := rewrite.PrimaryVideoEncoderFlag(rewrite.ParseVideoEncoderFlags(originalArgs, hwCaps))
+	result := rewrite.ReplacePrimaryVideoEncoder(originalArgs, swEncoder, hwCaps)
+	if !hasPrimary {
 		result = append(result, "-c:v", string(swEncoder))
 	}
 
@@ -626,20 +574,24 @@ func (a *RewriteAdapter) fallbackToSoftware(ctx context.Context, originalArgs []
 // ShouldRewrite checks if rewriting should be performed for the given args.
 func (a *RewriteAdapter) ShouldRewrite(args []string, autoHW bool) bool {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
+	enabled := a.config.Enabled
+	hwCaps := a.hwCaps
+	a.mu.RUnlock()
 
-	if !a.config.Enabled {
+	if !enabled {
 		return false
 	}
 
 	// If -vn (no video) flag is present, video encoding is disabled entirely.
 	// We must NOT rewrite — no video encoder should be injected or modified.
-	if a.hasNoVideoFlag(args) {
+	// An inline "=" encoder option is invalid ffmpeg syntax and is not a
+	// selection, so it must not trigger auto-selection either.
+	if rewrite.HasNoVideoOutput(args) || rewrite.HasInlineVideoEncoderSyntax(args) {
 		return false
 	}
 
 	// Check if encoder is specified
-	enc := a.parseEncoderFromArgs(args)
+	enc := a.parseEncoderFromArgs(args, hwCaps)
 
 	// If no encoder specified, we should rewrite to add one
 	if enc == "" {
@@ -652,12 +604,12 @@ func (a *RewriteAdapter) ShouldRewrite(args []string, autoHW bool) bool {
 	}
 
 	// If encoder is specified but not available locally, we should rewrite
-	if a.hwCaps != nil && !a.hwCaps.HasEncoder(enc) {
+	if hwCaps != nil && !hwCaps.HasEncoder(enc) {
 		return true
 	}
 
 	// If auto-hw is enabled and we have hardware encoders, consider upgrade
-	if autoHW && a.hwCaps != nil && a.hwCaps.HasHardwareEncoder() {
+	if autoHW && hwCaps != nil && hwCaps.HasHardwareEncoder() {
 		// Check if current encoder is software
 		if !enc.IsHardware() {
 			return true

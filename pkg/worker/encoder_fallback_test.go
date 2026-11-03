@@ -6,6 +6,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/tsic404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder/rewrite"
 )
 
 func TestDefaultSoftwareFallbackChain(t *testing.T) {
@@ -369,5 +372,120 @@ func TestEncoderFallback_UnknownFormatChainEntryLogged(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "unknown_encoder") {
 		t.Errorf("expected warning to name unknown encoder, got log output: %q", buf.String())
+	}
+}
+
+// TestEncoderFallback_SpellingFallback covers the retry/fallback path for the
+// spellings the rewrite path recognizes: each must resolve to the same-family
+// software encoder, never a cross-format substitute.
+func TestEncoderFallback_SpellingFallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		outputPath string
+		wantEnc    string
+		wantFamily string
+	}{
+		{
+			name:       "stream specifier -c:v:0",
+			args:       []string{"-i", "in.mp4", "-c:v:0", "h264_vaapi", "out.mp4"},
+			outputPath: "out.mp4",
+			wantEnc:    "libx264",
+			wantFamily: "h264",
+		},
+		{
+			name:       "stream specifier -codec:v:0",
+			args:       []string{"-i", "in.mp4", "-codec:v:0", "h264_vaapi", "out.mp4"},
+			outputPath: "out.mp4",
+			wantEnc:    "libx264",
+			wantFamily: "h264",
+		},
+		{
+			name:       "general -c",
+			args:       []string{"-i", "in.mp4", "-c", "h264_vaapi", "out.mp4"},
+			outputPath: "out.mp4",
+			wantEnc:    "libx264",
+			wantFamily: "h264",
+		},
+		{
+			name:       "duplicate declarations use the last one",
+			args:       []string{"-i", "in.mkv", "-c:v", "libvpx-vp9", "-c:v", "vp9_qsv", "out.webm"},
+			outputPath: "out.webm",
+			wantEnc:    "libvpx-vp9",
+			wantFamily: "vpx",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fallback := NewEncoderFallback()
+			original := extractEncoderFromArgs(tt.args)
+			if original == "" {
+				t.Fatalf("test args do not declare an encoder: %v", tt.args)
+			}
+
+			got := fallback.PrepareFallbackArgs(tt.args, tt.outputPath, true)
+			if got == nil {
+				t.Fatalf("PrepareFallbackArgs(%v) returned nil", tt.args)
+			}
+			encoder := extractEncoderFromArgs(got)
+			if encoder != tt.wantEnc {
+				t.Errorf("fallback encoder = %q, want %q in %v", encoder, tt.wantEnc, got)
+			}
+			if from, to := fallback.GetEncoderFamily(original), fallback.GetEncoderFamily(encoder); from != to {
+				t.Errorf("cross-format fallback %s (%s) -> %s (%s)", original, from, encoder, to)
+			}
+			if to := fallback.GetEncoderFamily(encoder); to != tt.wantFamily {
+				t.Errorf("fallback family = %q, want %q", to, tt.wantFamily)
+			}
+			for _, arg := range got {
+				if arg == original {
+					t.Errorf("hardware encoder %q survived the fallback: %v", original, got)
+				}
+			}
+		})
+	}
+}
+
+// TestEncoderFallback_CopyIsNotUnspecified pins that copy never enters the
+// infer-from-extension branch: it is a stream-copy directive, not an encoder.
+func TestEncoderFallback_CopyIsNotUnspecified(t *testing.T) {
+	fallback := NewEncoderFallback()
+	for _, args := range [][]string{
+		{"-i", "in.mp4", "-c", "copy", "out.mp4"},
+		{"-i", "in.mp4", "-c:v", "copy", "out.mp4"},
+		{"-i", "in.mp4", "-c:v:0", "copy", "out.mkv"},
+		{"-i", "in.mp4", "-c:v=copy", "out.mp4"},
+	} {
+		if got := fallback.PrepareFallbackArgs(args, "out.mp4", true); got != nil {
+			t.Errorf("copy must not fall back to software: %v -> %v", args, got)
+		}
+	}
+}
+
+// TestEncoderFallback_WorkerReportedEncoderGenericC pins the caps wiring: a
+// generic -c value that is ffmpeg-known but not a built-in family is only a
+// video selection when the worker-reported encoder set is supplied.
+func TestEncoderFallback_WorkerReportedEncoderGenericC(t *testing.T) {
+	caps := &rewrite.HardwareCapabilities{
+		AvailableEncoders: []encoder.EncoderFamily{encoder.EncoderFamily("av1_amf")},
+	}
+	args := []string{"-i", "in.mp4", "-c", "av1_amf", "out.mkv"}
+
+	if got := extractEncoderFromArgsWithCaps(args, caps); got != "av1_amf" {
+		t.Fatalf("caps-aware extraction = %q, want av1_amf", got)
+	}
+	if got := extractEncoderFromArgsWithCaps(args, nil); got != "" {
+		t.Errorf("built-in-only extraction = %q, want empty (non-built-in value)", got)
+	}
+
+	fallback := NewEncoderFallback()
+	fallback.SetHardwareCapabilities(caps)
+	got := fallback.PrepareFallbackArgs(args, "out.mkv", true)
+	if got == nil {
+		t.Fatal("PrepareFallbackArgs returned nil for a worker-reported encoder")
+	}
+	if encoder := extractEncoderFromArgsWithCaps(got, caps); encoder != "libaom-av1" {
+		t.Errorf("fallback encoder = %q, want libaom-av1 in %v", encoder, got)
 	}
 }

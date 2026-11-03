@@ -299,8 +299,10 @@ func (w *Worker) register(caps protocol.WorkerCapabilities, firstRegistration bo
 
 	log.Printf("Worker registered with ID: %s", workerID)
 
-	// Set hardware capabilities on the rewrite adapter
+	// Set hardware capabilities on the rewrite adapter and the retry/fallback
+	// parser so every path knows the same encoder set.
 	w.rewriteAdapter.SetHardwareCapabilities(&caps)
+	w.retryExecutor.SetHardwareCapabilities(w.rewriteAdapter.HardwareCapabilities())
 
 	return nil
 }
@@ -1123,7 +1125,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Pre-flight pixel format check for VAAPI encoders
 	// VAAPI has limited support for yuv444p and other high-chroma pixel formats
 	// Probe input to detect incompatible pixel format and proactively fallback
-	encoder := extractEncoderFromArgs(args)
+	encoder := extractEncoderFromArgsWithCaps(args, w.rewriteAdapter.HardwareCapabilities())
 	if w.pixelFormatChecker != nil && isVAAPIEncoder(encoder) {
 		pixelFormatResult := w.pixelFormatChecker.CheckInputsForPixelFormatIncompatibility(jobCtx, inputPaths, encoder)
 		if pixelFormatResult != nil && pixelFormatResult.NeedsFallback {
@@ -1134,10 +1136,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 
 			// Apply software encoder fallback
 			fallback := NewEncoderFallback()
+			fallback.SetHardwareCapabilities(w.rewriteAdapter.HardwareCapabilities())
 			fallbackArgs := fallback.PrepareFallbackArgsWithSource(args, outputPath, true) // true = user-selected
 			if fallbackArgs != nil {
 				args = fallbackArgs
-				encoder = extractEncoderFromArgs(args)
+				encoder = extractEncoderFromArgsWithCaps(args, w.rewriteAdapter.HardwareCapabilities())
 				// Recompute cache key with the new encoder from pixel format fallback
 				cacheKey = GenerateCacheKey(job.InputFiles, job.Args, job.AutoHW, filepath.Ext(job.OutputFilename), encoder)
 				log.Printf("[PixelFormat] Using software encoder: %s", encoder)

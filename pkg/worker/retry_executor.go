@@ -6,7 +6,10 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/tsic404/rffmpeg/pkg/encoder/rewrite"
 )
 
 // RetryStage represents the current stage of retry execution.
@@ -180,6 +183,11 @@ type RetryExecutor struct {
 
 	// fallback handles software encoder fallback.
 	fallback *EncoderFallback
+
+	// hwCaps carries the worker-reported encoder set to the video encoder
+	// parser, matching the rewrite adapter's parse口径. Registration may
+	// repeat while jobs run, so it is stored atomically.
+	hwCaps atomic.Pointer[rewrite.HardwareCapabilities]
 }
 
 // NewRetryExecutor creates a new retry executor.
@@ -213,6 +221,21 @@ func NewRetryExecutorWithFallback(executor *Executor, config *RetryConfig, fallb
 	}
 }
 
+// SetHardwareCapabilities records the worker-reported encoders for the retry
+// and fallback encoder parsing. It is called from the registration path;
+// re-registration may call it again while jobs run, so the field is atomic.
+func (e *RetryExecutor) SetHardwareCapabilities(caps *rewrite.HardwareCapabilities) {
+	e.hwCaps.Store(caps)
+	if e.fallback != nil {
+		e.fallback.SetHardwareCapabilities(caps)
+	}
+}
+
+// extractEncoder parses the video encoder with the worker-reported encoder set.
+func (e *RetryExecutor) extractEncoder(args []string) string {
+	return extractEncoderFromArgsWithCaps(args, e.hwCaps.Load())
+}
+
 // ExecuteWithRetry executes an ffmpeg command with automatic retry and
 // fallback. outputPath keeps the output path consistent across retries.
 // networkOutput, or output "-" (streaming mode), skips file existence/size
@@ -232,7 +255,7 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 	}
 
 	// Track the original encoder
-	originalEncoder := extractEncoderFromArgs(args)
+	originalEncoder := e.extractEncoder(args)
 	result.OriginalEncoder = originalEncoder
 
 	// The user-selected encoder is tracked as a local variable instead of on
@@ -386,7 +409,7 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 			}
 
 			// Check if we need to switch to software encoder
-			newEncoder := extractEncoderFromArgs(nextArgs)
+			newEncoder := e.extractEncoder(nextArgs)
 			if newEncoder != currentEncoder {
 				log.Printf("Switching encoder from %s to %s for retry stage %s", currentEncoder, newEncoder, nextStage)
 				currentEncoder = newEncoder
@@ -433,7 +456,7 @@ func (e *RetryExecutor) ExecuteWithRetry(ctx context.Context, args []string, out
 			result.TotalAttempts++
 			result.UsedSoftwareEncoder = true
 
-			currentEncoder = extractEncoderFromArgs(fallbackArgs)
+			currentEncoder = e.extractEncoder(fallbackArgs)
 			result.FinalEncoder = currentEncoder
 
 			intercepted := e.interceptor.InterceptWithEncoder(ctx, execResult, currentEncoder)
@@ -548,8 +571,8 @@ func (e *RetryExecutor) applyRetryStrategy(args []string, intercepted *Intercept
 		intercepted.FFmpegError.Type == ErrorTypeOutputEmpty {
 		fallbackArgs := e.fallback.PrepareFallbackArgsWithSource(args, outputPath, isUserSelected)
 		if fallbackArgs != nil {
-			swEncoder := extractEncoderFromArgs(fallbackArgs)
-			currentEncoder := extractEncoderFromArgs(args)
+			swEncoder := e.extractEncoder(fallbackArgs)
+			currentEncoder := e.extractEncoder(args)
 			// Only switch if we actually get a different encoder
 			if swEncoder != "" && swEncoder != currentEncoder {
 				return fallbackArgs, RetryStageSoftwareFallback, []string{"fallback_to_software_output_empty"}
@@ -616,11 +639,11 @@ func (e *RetryExecutor) pruneHardwareParams(args []string) ([]string, []string) 
 	// Also switch encoder from hardware to software.
 	// If hardware params are being pruned, the hardware encoder won't work,
 	// so we must replace it with its software equivalent.
-	currentEncoder := extractEncoderFromArgs(prunedArgs)
+	currentEncoder := e.extractEncoder(prunedArgs)
 	if currentEncoder != "" && e.fallback.IsHardwareEncoder(currentEncoder) {
 		fallbackArgs := e.fallback.PrepareFallbackArgs(prunedArgs, "", true)
 		if fallbackArgs != nil {
-			swEncoder := extractEncoderFromArgs(fallbackArgs)
+			swEncoder := e.extractEncoder(fallbackArgs)
 			if swEncoder != "" && swEncoder != currentEncoder {
 				prunedArgs = fallbackArgs
 				prunedParams = append(prunedParams, "encoder:"+currentEncoder+"->"+swEncoder)
@@ -686,23 +709,23 @@ func (e *RetryExecutor) applyRetryInterval(ctx context.Context, attempt int) {
 	}
 }
 
-// extractEncoderFromArgs extracts the encoder name from ffmpeg arguments.
+// extractEncoderFromArgs extracts the video encoder using only the built-in
+// encoder families. Callers that have the worker capabilities use
+// extractEncoderFromArgsWithCaps.
 func extractEncoderFromArgs(args []string) string {
-	for i, arg := range args {
-		if (arg == "-c:v" || arg == "-vcodec" || arg == "-codec:v") && i+1 < len(args) {
-			return args[i+1]
-		}
-		if strings.HasPrefix(arg, "-c:v=") {
-			return strings.TrimPrefix(arg, "-c:v=")
-		}
-		if strings.HasPrefix(arg, "-codec:v=") {
-			return strings.TrimPrefix(arg, "-codec:v=")
-		}
-		if strings.HasPrefix(arg, "-vcodec=") {
-			return strings.TrimPrefix(arg, "-vcodec=")
-		}
+	return extractEncoderFromArgsWithCaps(args, nil)
+}
+
+// extractEncoderFromArgsWithCaps parses the video encoder with the same rule
+// and last-declaration precedence as the rewrite path. hwCaps supplies the
+// worker-reported encoders so a generic -c / -codec value outside the built-in
+// families is still recognized.
+func extractEncoderFromArgsWithCaps(args []string, hwCaps *rewrite.HardwareCapabilities) string {
+	flag, ok := rewrite.PrimaryVideoEncoderFlag(rewrite.ParseVideoEncoderFlags(args, hwCaps))
+	if !ok {
+		return ""
 	}
-	return ""
+	return flag.Value
 }
 
 // GetAuditTrailSummary returns a human-readable summary of the audit trail.
