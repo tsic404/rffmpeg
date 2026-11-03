@@ -145,7 +145,10 @@ func TestCompleteUploadSession(t *testing.T) {
 		t.Fatalf("Failed to create upload session: %v", err)
 	}
 
-	if err := db.CompleteUploadSession(session.ID); err != nil {
+	if claimed, err := db.ClaimUploadSessionAssembly(session.ID); err != nil || !claimed {
+		t.Fatalf("ClaimUploadSessionAssembly = (%v, %v), want (true, nil)", claimed, err)
+	}
+	if err := db.CompleteUploadSession(session.ID, "abc123"); err != nil {
 		t.Fatalf("Failed to complete upload session: %v", err)
 	}
 
@@ -156,6 +159,85 @@ func TestCompleteUploadSession(t *testing.T) {
 
 	if retrieved.Status != protocol.UploadSessionStatusCompleted {
 		t.Errorf("Expected status completed, got %s", retrieved.Status)
+	}
+	if !retrieved.FileID.Valid || retrieved.FileID.String != "abc123" {
+		t.Errorf("Expected file id abc123 to be persisted, got %+v", retrieved.FileID)
+	}
+}
+
+func TestClaimUploadSessionAssemblyIsSingleWinner(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	session, err := db.CreateUploadSession("test.mp4", 1024, 512, 2, nil)
+	if err != nil {
+		t.Fatalf("Failed to create upload session: %v", err)
+	}
+
+	claimed, err := db.ClaimUploadSessionAssembly(session.ID)
+	if err != nil || !claimed {
+		t.Fatalf("first claim = (%v, %v), want (true, nil)", claimed, err)
+	}
+	session, err = db.GetUploadSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetUploadSession: %v", err)
+	}
+	if session.Status != protocol.UploadSessionStatusAssembling {
+		t.Fatalf("status after claim = %s, want %s", session.Status, protocol.UploadSessionStatusAssembling)
+	}
+
+	claimed, err = db.ClaimUploadSessionAssembly(session.ID)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimed {
+		t.Error("second claim won the CAS: a concurrent completion could assemble the same chunks twice")
+	}
+
+	// A failed assembly reopens the session, so a corrected retry can claim it.
+	if err := db.ReopenUploadSession(session.ID); err != nil {
+		t.Fatalf("ReopenUploadSession: %v", err)
+	}
+	session, err = db.GetUploadSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetUploadSession: %v", err)
+	}
+	if session.Status != protocol.UploadSessionStatusInProgress {
+		t.Fatalf("status after reopen = %s, want %s", session.Status, protocol.UploadSessionStatusInProgress)
+	}
+	claimed, err = db.ClaimUploadSessionAssembly(session.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim after reopen = (%v, %v), want (true, nil)", claimed, err)
+	}
+}
+
+func TestCompleteUploadSessionRequiresAssemblyClaim(t *testing.T) {
+	db, err := New(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create database: %v", err)
+	}
+	defer db.Close()
+
+	session, err := db.CreateUploadSession("test.mp4", 1024, 512, 2, nil)
+	if err != nil {
+		t.Fatalf("Failed to create upload session: %v", err)
+	}
+
+	if err := db.CompleteUploadSession(session.ID, "abc123"); err == nil {
+		t.Fatal("expected completion without the assembly claim to fail")
+	}
+	retrieved, err := db.GetUploadSession(session.ID)
+	if err != nil {
+		t.Fatalf("GetUploadSession: %v", err)
+	}
+	if retrieved.Status != protocol.UploadSessionStatusInProgress {
+		t.Errorf("status = %s, want %s", retrieved.Status, protocol.UploadSessionStatusInProgress)
+	}
+	if retrieved.FileID.Valid {
+		t.Errorf("file id must stay unset after a rejected completion, got %q", retrieved.FileID.String)
 	}
 }
 
@@ -404,7 +486,8 @@ func TestExpireUploadSessionsAndListExpiredIDs(t *testing.T) {
 	}
 	defer db.Close()
 
-	// A live session (not yet expired) and one whose expires_at is backdated.
+	// A live session (not yet expired), an expired in_progress session and an
+	// expired session whose completion claim left it in assembling.
 	live, err := db.CreateUploadSession("live.mp4", 1024, 512, 2, nil)
 	if err != nil {
 		t.Fatalf("CreateUploadSession live: %v", err)
@@ -413,27 +496,39 @@ func TestExpireUploadSessionsAndListExpiredIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUploadSession expired: %v", err)
 	}
-
-	_, err = db.db.Exec(`UPDATE upload_sessions SET expires_at = ? WHERE id = ?`,
-		time.Now().Add(-time.Hour), expired.ID)
+	assembling, err := db.CreateUploadSession("assembling.mp4", 1024, 512, 2, nil)
 	if err != nil {
-		t.Fatalf("backdate expires_at: %v", err)
+		t.Fatalf("CreateUploadSession assembling: %v", err)
+	}
+	if claimed, err := db.ClaimUploadSessionAssembly(assembling.ID); err != nil || !claimed {
+		t.Fatalf("ClaimUploadSessionAssembly = (%v, %v), want (true, nil)", claimed, err)
+	}
+
+	for _, id := range []string{expired.ID, assembling.ID} {
+		if _, err := db.db.Exec(`UPDATE upload_sessions SET expires_at = ? WHERE id = ?`,
+			time.Now().Add(-time.Hour), id); err != nil {
+			t.Fatalf("backdate expires_at for %s: %v", id, err)
+		}
 	}
 
 	affected, err := db.ExpireUploadSessions()
 	if err != nil {
 		t.Fatalf("ExpireUploadSessions: %v", err)
 	}
-	if affected != 1 {
-		t.Errorf("ExpireUploadSessions affected %d rows, want 1", affected)
+	if affected != 2 {
+		t.Errorf("ExpireUploadSessions affected %d rows, want 2 (in_progress + assembling)", affected)
 	}
 
 	ids, err := db.GetExpiredUploadSessionIDs()
 	if err != nil {
 		t.Fatalf("GetExpiredUploadSessionIDs: %v", err)
 	}
-	if len(ids) != 1 || ids[0] != expired.ID {
-		t.Errorf("expired IDs = %v, want [%s]", ids, expired.ID)
+	got := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		got[id] = true
+	}
+	if len(ids) != 2 || !got[expired.ID] || !got[assembling.ID] {
+		t.Errorf("expired IDs = %v, want both %s and %s", ids, expired.ID, assembling.ID)
 	}
 
 	// The live session must not be expired or listed.
