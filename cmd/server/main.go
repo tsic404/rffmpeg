@@ -500,6 +500,33 @@ func setupLogFile(dataDir string) (*lumberjack.Logger, error) {
 	return logFile, nil
 }
 
+// optionalBoolFlag is a boolean flag that records whether it was given:
+// nil target means "not set", so Merge keeps the config-file or environment
+// value. An explicit --rate-limit-enabled=false must disable the limiter even
+// when the loaded configuration enabled it.
+type optionalBoolFlag struct {
+	target **bool
+}
+
+func (f optionalBoolFlag) String() string {
+	if f.target == nil || *f.target == nil {
+		return ""
+	}
+	return strconv.FormatBool(**f.target)
+}
+
+func (f optionalBoolFlag) Set(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return err
+	}
+	*f.target = &v
+	return nil
+}
+
+// IsBoolFlag lets the flag package accept the bare form and the =value form.
+func (optionalBoolFlag) IsBoolFlag() bool { return true }
+
 // parseFlags parses command-line flags
 func parseFlags() *config.Flags {
 	flags := &config.Flags{}
@@ -564,7 +591,7 @@ func parseFlags() *config.Flags {
 	flag.StringVar(&flags.AuthToken, "auth-token", "", "Authentication token (PSK) for API requests")
 
 	// Rate limit flags
-	flag.BoolVar(&flags.RateLimitEnabled, "rate-limit-enabled", true, "Enable per-client rate limiting")
+	flag.Var(optionalBoolFlag{target: &flags.RateLimitEnabled}, "rate-limit-enabled", "Enable per-client rate limiting (default: true)")
 	flag.IntVar(&flags.MaxConcurrentJobsPerClient, "max-concurrent-jobs-per-client", 0, "Maximum concurrent jobs per client (default: 10)")
 	flag.StringVar(&flags.RedisAddr, "redis-addr", "", "Redis address for distributed rate limiting (optional)")
 

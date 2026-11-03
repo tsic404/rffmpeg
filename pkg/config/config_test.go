@@ -456,9 +456,10 @@ func TestRateLimitFromEnv(t *testing.T) {
 }
 
 func TestRateLimitMerge(t *testing.T) {
+	enabled := true
 	cfg := DefaultServerConfig()
 	flags := &Flags{
-		RateLimitEnabled:           true,
+		RateLimitEnabled:           &enabled,
 		MaxConcurrentJobsPerClient: 20,
 	}
 
@@ -469,6 +470,26 @@ func TestRateLimitMerge(t *testing.T) {
 	}
 	if cfg.MaxConcurrentJobsPerClient != 20 {
 		t.Errorf("MaxConcurrentJobsPerClient should be 20 after merge, got %d", cfg.MaxConcurrentJobsPerClient)
+	}
+}
+
+// TestRateLimitMergeKeepsConfiguredFalse covers the tri-state contract: a
+// config file or environment value of false must survive Merge when the flag
+// was not given, and an explicit false flag must override an enabled config.
+func TestRateLimitMergeKeepsConfiguredFalse(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.RateLimitEnabled = false
+
+	cfg.Merge(&Flags{})
+	if cfg.RateLimitEnabled {
+		t.Error("Merge with no rate-limit flag re-enabled the limiter")
+	}
+
+	enabled := DefaultServerConfig()
+	disabled := false
+	enabled.Merge(&Flags{RateLimitEnabled: &disabled})
+	if enabled.RateLimitEnabled {
+		t.Error("explicit --rate-limit-enabled=false did not disable the limiter")
 	}
 }
 
