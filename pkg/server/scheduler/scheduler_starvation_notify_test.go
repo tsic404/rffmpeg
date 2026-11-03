@@ -6,7 +6,6 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
-	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
 // the starvation sweep fails jobs with a bulk UPDATE that
@@ -27,9 +26,6 @@ func TestSchedulerNoWorkerStarvationWakesTerminalNotifier(t *testing.T) {
 		NoWorkerJobTimeout:   1 * time.Minute,
 	})
 
-	counter := ratelimit.NewInMemoryCounter()
-	s.SetRateLimiter(counter)
-
 	// A worker must exist but be offline for the sweep to fire.
 	if _, err := database.CreateWorker("worker-1", "test-worker", protocol.WorkerCapabilities{
 		Encoders:      []string{"libx264"},
@@ -46,7 +42,6 @@ func TestSchedulerNoWorkerStarvationWakesTerminalNotifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create job: %v", err)
 	}
-	counter.RegisterJob("client-1", job.ID)
 	if _, err := database.GetDB().Exec(`
 		UPDATE jobs SET created_at = ? WHERE id = ?
 	`, time.Now().Add(-5*time.Minute), job.ID); err != nil {

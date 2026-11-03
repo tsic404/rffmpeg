@@ -13,8 +13,10 @@ import (
 
 // SaveChunk saves a single chunk to temporary storage
 func (s *Storage) SaveChunk(uploadID string, chunkIndex int, reader io.Reader) (string, int64, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// A chunk body is read from the network while the lock is held, so it must
+	// be the session-local lock: holding the files/ lock here blocked every
+	// download for the duration of a slow chunk transfer.
+	defer s.lockUpload(uploadID)()
 
 	chunkDir := filepath.Join(s.baseDir, "chunks", uploadID)
 	if err := os.MkdirAll(chunkDir, 0755); err != nil {
@@ -52,8 +54,7 @@ func (s *Storage) SaveChunk(uploadID string, chunkIndex int, reader io.Reader) (
 
 // OpenChunk opens a chunk file for reading
 func (s *Storage) OpenChunk(uploadID string, chunkIndex int) (*os.File, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	defer s.lockUpload(uploadID)()
 
 	chunkPath := filepath.Join(s.baseDir, "chunks", uploadID, fmt.Sprintf("chunk_%d", chunkIndex))
 	file, err := os.Open(chunkPath)
@@ -65,8 +66,7 @@ func (s *Storage) OpenChunk(uploadID string, chunkIndex int) (*os.File, error) {
 
 // DeleteChunk deletes a single chunk file
 func (s *Storage) DeleteChunk(uploadID string, chunkIndex int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockUpload(uploadID)()
 
 	chunkPath := filepath.Join(s.baseDir, "chunks", uploadID, fmt.Sprintf("chunk_%d", chunkIndex))
 	return os.Remove(chunkPath)
@@ -74,8 +74,7 @@ func (s *Storage) DeleteChunk(uploadID string, chunkIndex int) error {
 
 // DeleteChunkDirectory deletes all chunks for an upload session
 func (s *Storage) DeleteChunkDirectory(uploadID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lockUpload(uploadID)()
 
 	chunkDir := filepath.Join(s.baseDir, "chunks", uploadID)
 	return os.RemoveAll(chunkDir)
@@ -83,8 +82,9 @@ func (s *Storage) DeleteChunkDirectory(uploadID string) error {
 
 // AssembleChunks combines all chunks into a single file
 func (s *Storage) AssembleChunks(uploadID string, fileID string, chunkPaths []string) (string, int64, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Assembly copies the whole session into files/: it only needs the session
+	// lock, so downloads and unrelated uploads keep running meanwhile.
+	defer s.lockUpload(uploadID)()
 
 	// Sort chunk paths by their index to ensure correct order
 	sort.Slice(chunkPaths, func(i, j int) bool {
@@ -167,8 +167,7 @@ func (s *Storage) CalculateChunkChecksum(uploadID string, chunkIndex int) (strin
 
 // ChunkExists checks if a chunk file exists
 func (s *Storage) ChunkExists(uploadID string, chunkIndex int) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	defer s.lockUpload(uploadID)()
 
 	chunkPath := filepath.Join(s.baseDir, "chunks", uploadID, fmt.Sprintf("chunk_%d", chunkIndex))
 	_, err := os.Stat(chunkPath)
@@ -177,8 +176,7 @@ func (s *Storage) ChunkExists(uploadID string, chunkIndex int) bool {
 
 // GetChunkPaths returns all chunk paths for an upload session
 func (s *Storage) GetChunkPaths(uploadID string) ([]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	defer s.lockUpload(uploadID)()
 
 	chunkDir := filepath.Join(s.baseDir, "chunks", uploadID)
 	entries, err := os.ReadDir(chunkDir)

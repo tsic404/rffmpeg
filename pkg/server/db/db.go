@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,6 +84,13 @@ type Worker struct {
 type Database struct {
 	db       *sql.DB
 	notifier *JobNotifier
+
+	// terminalHook runs for every job that reaches a terminal state, whichever
+	// writer produced it. The rate limiter uses it to release the client's
+	// quota slot: a terminal job that never releases its slot permanently
+	// inflates the per-client counter and 429s that client's later submits.
+	terminalHookMu sync.RWMutex
+	terminalHook   func(jobID string)
 }
 
 // DefaultBusyTimeoutMS is how long a SQLite writer waits for a held write lock
@@ -390,9 +398,27 @@ func (d *Database) JobNotifier() *JobNotifier {
 	return d.notifier
 }
 
+// SetTerminalHook installs a callback invoked for every job that reaches a
+// terminal state, whichever writer produced it: worker report, cancel, the
+// scheduler/monitor failure paths, or the starvation sweep. It covers the
+// writers that bypass HTTP handlers, so per-job bookkeeping (quota release)
+// cannot be forgotten on a new terminal path.
+func (d *Database) SetTerminalHook(fn func(jobID string)) {
+	d.terminalHookMu.Lock()
+	d.terminalHook = fn
+	d.terminalHookMu.Unlock()
+}
+
 // NotifyTerminal wakes in-process waiters after a successful terminal-status
-// write. It is nil-safe for databases constructed without a notifier.
+// write and runs the terminal hook. It is nil-safe for databases constructed
+// without a notifier or a hook.
 func (d *Database) NotifyTerminal(jobID string) {
+	d.terminalHookMu.RLock()
+	hook := d.terminalHook
+	d.terminalHookMu.RUnlock()
+	if hook != nil {
+		hook(jobID)
+	}
 	if d.notifier != nil {
 		d.notifier.Notify(jobID)
 	}

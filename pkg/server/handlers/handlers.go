@@ -72,7 +72,7 @@ func New(database *db.Database, store *storage.Storage, version string, stateTab
 		storage:          store,
 		version:          version,
 		wsHub:            websocket.NewHubWithSeqStore(database),
-		rateLimiter:      ratelimit.NewInMemoryCounter(),
+		rateLimiter:      rateLimiterWithTerminalHook(database),
 		stateTable:       stateTable,
 		maxJobsPerWorker: 1,
 	}
@@ -85,15 +85,36 @@ func NewWithHub(database *db.Database, store *storage.Storage, version string, h
 		storage:          store,
 		version:          version,
 		wsHub:            hub,
-		rateLimiter:      ratelimit.NewInMemoryCounter(),
+		rateLimiter:      rateLimiterWithTerminalHook(database),
 		stateTable:       stateTable,
 		maxJobsPerWorker: 1,
 	}
 }
 
+// rateLimiterWithTerminalHook builds the per-client counter and binds quota
+// release to the database's terminal notification, so a job that finishes on
+// any path (worker report, cancel, scheduler/monitor failure) frees its slot
+// exactly once and later submits from the same client are not 429'd.
+func rateLimiterWithTerminalHook(database *db.Database) *ratelimit.InMemoryCounter {
+	counter := ratelimit.NewInMemoryCounter()
+	bindQuotaRelease(database, counter)
+	return counter
+}
+
+// bindQuotaRelease routes every terminal job to the counter's per-job release.
+// DecrementByJob forgets the job mapping, so a repeated terminal write for the
+// same job releases at most one slot.
+func bindQuotaRelease(database *db.Database, counter ratelimit.ClientJobCounter) {
+	if database == nil {
+		return
+	}
+	database.SetTerminalHook(func(jobID string) { counter.DecrementByJob(jobID) })
+}
+
 // SetRateLimiter sets the rate limiter counter (used when a custom counter is needed).
 func (h *Handler) SetRateLimiter(counter ratelimit.ClientJobCounter) {
 	h.rateLimiter = counter
+	bindQuotaRelease(h.db, counter)
 }
 
 // GetRateLimiter returns the rate limiter counter.
@@ -762,8 +783,8 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decrement rate limiter counter when job is cancelled
-	h.rateLimiter.DecrementByJob(jobID)
+	// The quota slot is released by the database terminal hook (CancelJob
+	// notifies), so no explicit decrement here.
 
 	// Broadcast cancellation to WebSocket clients
 	if err := h.wsHub.BroadcastStatus(jobID, protocol.JobStatusCancelled, 0, "Job cancelled"); err != nil {
@@ -880,10 +901,8 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Decrement rate limiter counter when job reaches terminal status
-		if protocol.IsTerminalStatus(req.Status) {
-			h.rateLimiter.DecrementByJob(jobID)
-		}
+		// A terminal write released this job's quota slot through the database
+		// terminal hook; nothing to decrement here.
 
 		// On terminal status, immediately flip the worker to idle if it has no
 		// remaining active jobs — otherwise it stays "busy" on the server for
