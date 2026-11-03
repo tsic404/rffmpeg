@@ -10,12 +10,12 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
@@ -28,6 +28,13 @@ import (
 // huge multipart memory buffers.
 const MaxChunkSize = 64 * 1024 * 1024
 
+// MaxTotalChunks bounds how many chunks a session may declare. Assembly holds
+// one entry per chunk and walks the index range, so a client-declared
+// total_chunks of 10^15 would otherwise buy a multi-terabyte allocation (or a
+// near-endless walk) from a single init — file_size has no upper bound and
+// chunk_size may be as small as one byte.
+const MaxTotalChunks = 1 << 20
+
 // Default chunk size: 10MB
 const DefaultChunkSize = 10 * 1024 * 1024
 
@@ -39,11 +46,10 @@ const MaxConcurrentChunkUploads = 4
 // exercising the 507/logging error path that a concrete *storage.Storage
 // cannot reproduce portably (close-time ENOSPC).
 type chunkStorage interface {
-	ChunkExists(uploadID string, chunkIndex int) bool
+	ChunkExists(uploadID string, chunkIndex int, expectedSize int64) bool
 	SaveChunk(uploadID string, chunkIndex int, reader io.Reader) (string, int64, string, error)
 	DeleteChunk(uploadID string, chunkIndex int) error
-	GetChunkPaths(uploadID string) ([]string, error)
-	AssembleChunks(uploadID string, fileID string, chunkPaths []string) (string, int64, string, error)
+	AssembleChunks(uploadID string, totalChunks int, chunkSize, fileSize int64) (string, int64, string, error)
 	GetFilePath(fileID string) string
 	DeleteFile(fileID string) error
 	DeleteChunkDirectory(uploadID string) error
@@ -51,14 +57,58 @@ type chunkStorage interface {
 
 // ChunkUploadHandler handles chunked file uploads
 type ChunkUploadHandler struct {
-	db          *db.Database
-	storage     chunkStorage
-	chunkSize   int64
-	authToken   string        // Non-empty when auth is configured
-	semaphore   chan struct{} // For concurrent upload control
-	cleanupOnce sync.Once
-	wg          sync.WaitGroup // Tracks async cleanup goroutines
-	done        chan struct{}  // Signals shutdown to background goroutines
+	db           *db.Database
+	storage      chunkStorage
+	chunkSize    int64
+	authToken    string        // Non-empty when auth is configured
+	semaphore    chan struct{} // For concurrent upload control
+	sessionLocks *sessionLock  // Serializes completion per upload session
+	cleanupOnce  sync.Once
+	wg           sync.WaitGroup // Tracks async cleanup goroutines
+	done         chan struct{}  // Signals shutdown to background goroutines
+}
+
+// sessionLock hands out one mutex per upload session. Completion holds it for
+// the whole claim-assemble-finalize sequence, so concurrent completes of the
+// same session assemble once and every caller returns the same file id.
+type sessionLock struct {
+	mu    sync.Mutex
+	locks map[string]*sessionLockEntry
+}
+
+type sessionLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func newSessionLock() *sessionLock {
+	return &sessionLock{locks: make(map[string]*sessionLockEntry)}
+}
+
+// Lock blocks until the session's mutex is held and returns its release
+// function. Entries are dropped once no caller references them, so the map
+// does not grow with the number of uploads served.
+func (l *sessionLock) Lock(key string) func() {
+	l.mu.Lock()
+	entry := l.locks[key]
+	if entry == nil {
+		entry = &sessionLockEntry{}
+		l.locks[key] = entry
+	}
+	entry.refs++
+	l.mu.Unlock()
+
+	entry.mu.Lock()
+
+	return func() {
+		entry.mu.Unlock()
+		l.mu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(l.locks, key)
+		}
+		l.mu.Unlock()
+	}
 }
 
 // NewChunkUploadHandler creates a new chunk upload handler
@@ -68,11 +118,12 @@ func NewChunkUploadHandler(database *db.Database, store *storage.Storage, chunkS
 	}
 
 	h := &ChunkUploadHandler{
-		db:        database,
-		storage:   store,
-		chunkSize: chunkSize,
-		semaphore: make(chan struct{}, MaxConcurrentChunkUploads),
-		done:      make(chan struct{}),
+		db:           database,
+		storage:      store,
+		chunkSize:    chunkSize,
+		semaphore:    make(chan struct{}, MaxConcurrentChunkUploads),
+		sessionLocks: newSessionLock(),
+		done:         make(chan struct{}),
 	}
 
 	// Start cleanup routine
@@ -168,6 +219,18 @@ func (h *ChunkUploadHandler) InitChunkUpload(w http.ResponseWriter, r *http.Requ
 		totalChunks++
 	}
 
+	// A session is validated against the declared chunking here rather than
+	// later: assembly sizes its working set from totalChunks, so an
+	// unbounded value would turn one init + complete into a huge allocation.
+	if totalChunks > MaxTotalChunks {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest,
+			fmt.Sprintf("total_chunks %d exceeds maximum of %d (file_size %d with chunk_size %d)",
+				totalChunks, MaxTotalChunks, req.FileSize, chunkSize), nil,
+		))
+		return
+	}
+
 	// If the client declares its planned chunking, it must match the
 	// server-computed values exactly.
 	if req.TotalChunks > 0 && req.TotalChunks != totalChunks {
@@ -224,6 +287,59 @@ func assembleErrorStatus(err error) (int, protocol.ErrorCode, string) {
 	return http.StatusInternalServerError, protocol.ErrCodeUploadFailed, fmt.Sprintf("Failed to assemble file: %v", err)
 }
 
+// expectedChunkSize reports the exact byte count chunkIndex must carry under
+// the session's chunking: every chunk is chunk_size except the last, which
+// holds the remainder (C-37).
+func expectedChunkSize(session *db.UploadSession, chunkIndex int) (int64, error) {
+	if session.ChunkSize <= 0 || session.TotalChunks <= 0 || session.FileSize <= 0 {
+		return 0, fmt.Errorf("session %s declares file_size=%d chunk_size=%d total_chunks=%d",
+			session.ID, session.FileSize, session.ChunkSize, session.TotalChunks)
+	}
+	if chunkIndex == session.TotalChunks-1 {
+		size := session.FileSize - session.ChunkSize*int64(session.TotalChunks-1)
+		if size <= 0 {
+			return 0, fmt.Errorf("session %s declares file_size=%d chunk_size=%d total_chunks=%d",
+				session.ID, session.FileSize, session.ChunkSize, session.TotalChunks)
+		}
+		return size, nil
+	}
+	return session.ChunkSize, nil
+}
+
+// isChunkSetError reports whether err describes a chunk set the client can
+// repair by resending, as opposed to a storage failure.
+func isChunkSetError(err error) bool {
+	return errors.Is(err, storage.ErrChunkMissing) ||
+		errors.Is(err, storage.ErrChunkSizeMismatch) ||
+		errors.Is(err, storage.ErrAssembledSizeMismatch)
+}
+
+// chunkAssemblyErrorMessage renders a chunk-set failure for the client.
+func chunkAssemblyErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, storage.ErrChunkMissing):
+		return "Not all chunks uploaded"
+	case errors.Is(err, storage.ErrChunkSizeMismatch):
+		return "Chunk size does not match the upload session"
+	default:
+		return "Chunk set does not add up to the declared file size"
+	}
+}
+
+// declaredChecksumMismatch returns a non-empty message when a checksum the
+// client declared (at init or on completion) disagrees with the bytes actually
+// received. Either claim being wrong means the assembled file is not the file
+// that was meant to be uploaded (C-40).
+func declaredChecksumMismatch(initChecksum, completeChecksum, actualChecksum string) string {
+	if initChecksum != "" && !strings.EqualFold(initChecksum, actualChecksum) {
+		return "Final file checksum mismatch with the checksum declared at init"
+	}
+	if completeChecksum != "" && !strings.EqualFold(completeChecksum, actualChecksum) {
+		return "Final file checksum mismatch"
+	}
+	return ""
+}
+
 // UploadChunk handles uploading a single chunk
 func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.validateAuthToken(w, r); !ok {
@@ -269,8 +385,19 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Check if chunk already exists (idempotent)
-	if h.storage.ChunkExists(uploadID, chunkIndex) {
+	expectedSize, err := expectedChunkSize(session, chunkIndex)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "Upload session has an invalid chunking", err,
+		))
+		return
+	}
+
+	// Idempotent retry: a chunk only counts as uploaded when its stored size is
+	// exactly the one the session implies. A crash-truncated chunk_N must be
+	// rewritten here — otherwise it survives to assembly and the corrupt
+	// content is reported as a successful upload.
+	if h.storage.ChunkExists(uploadID, chunkIndex, expectedSize) {
 		// Ensure session tracking is up-to-date even for idempotent retries.
 		// If a previous attempt saved the chunk to disk but failed to update
 		// the session (e.g., DB busy), the session's UploadedChunks may be
@@ -289,9 +416,15 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Acquire semaphore for concurrent upload control
-	h.semaphore <- struct{}{}
-	defer func() { <-h.semaphore }()
+	// Wait for a concurrent-upload slot without ignoring cancellation: four
+	// slow clients can occupy every slot, and a queued request whose client is
+	// already gone must leave the queue instead of waiting for one of them.
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	case <-r.Context().Done():
+		return
+	}
 
 	// Parse multipart form. The session's ChunkSize was validated at init
 	// time, but legacy sessions created before that validation may carry an
@@ -338,8 +471,23 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Verify checksum if provided
-	if expectedChecksum != "" && expectedChecksum != actualChecksum {
+	// Verify the chunk carries exactly the bytes the session declares: every
+	// chunk but the last is chunk_size, the last is the remainder. Without
+	// this, an undersized chunk would only surface at completion, after the
+	// client believes the chunk is safely stored.
+	if size != expectedSize {
+		h.storage.DeleteChunk(uploadID, chunkIndex)
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest,
+			fmt.Sprintf("Chunk %d has %d bytes, expected %d", chunkIndex, size, expectedSize), nil,
+		))
+		return
+	}
+
+	// Verify checksum if provided. Hex case is not part of a SHA-256's
+	// identity, so an uppercase digest must be accepted like the whole-file
+	// checksum comparison does.
+	if expectedChecksum != "" && !strings.EqualFold(expectedChecksum, actualChecksum) {
 		h.storage.DeleteChunk(uploadID, chunkIndex)
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Checksum mismatch", nil,
@@ -454,6 +602,12 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 
 	uploadID := req.UploadID
 
+	// Serialize completions of one session inside this process: the first
+	// caller assembles, the rest observe the completed session and return its
+	// file id (C-41) instead of assembling a second time.
+	release := h.sessionLocks.Lock(uploadID)
+	defer release()
+
 	// Get upload session
 	session, err := h.db.GetUploadSession(uploadID)
 	if err != nil {
@@ -463,125 +617,161 @@ func (h *ChunkUploadHandler) CompleteChunkUpload(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Validate session status
-	if session.Status != protocol.UploadSessionStatusInProgress {
+	switch session.Status {
+	case protocol.UploadSessionStatusCompleted:
+		// Repeat completion after the response was lost: return the same file
+		// identifier without rebuilding the file (C-41).
+		if session.FileID.Valid && session.FileID.String != "" {
+			writeJSON(w, http.StatusOK, protocol.ChunkUploadCompleteResponse{
+				FileID:  session.FileID.String,
+				Message: "File uploaded successfully",
+			})
+			return
+		}
+		// Sessions completed before the id was persisted cannot satisfy the
+		// idempotency contract; rebuilding the file to derive it is forbidden.
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "Upload session is already completed", nil,
+		))
+		return
+	case protocol.UploadSessionStatusAssembling:
+		// Reachable only when an earlier assembly died with the process: this
+		// handler holds the session lock, so no live assembler exists here.
+		log.Printf("Reclaiming upload session %s left in assembling state", uploadID)
+		if err := h.db.ReopenUploadSession(uploadID); err != nil {
+			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+				protocol.ErrCodeInternalError, "Failed to resume upload session", err,
+			))
+			return
+		}
+	case protocol.UploadSessionStatusInProgress:
+		// Claimed below.
+	default:
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Upload session is not in progress", nil,
 		))
 		return
 	}
 
-	// Check all chunks are uploaded — use both the session JSON array
-	// and the authoritative upload_chunks table to guard against race
-	// conditions in UpdateUploadSessionChunks.
-	var completedChunks []int
-	if err := json.Unmarshal([]byte(session.UploadedChunks), &completedChunks); err != nil {
+	// Claim the session before reading any chunk. The CAS makes assembly
+	// happen at most once even when two callers both saw the session as in
+	// progress.
+	claimed, err := h.db.ClaimUploadSessionAssembly(uploadID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-			protocol.ErrCodeInternalError, "Failed to parse uploaded chunks", err,
+			protocol.ErrCodeInternalError, "Failed to claim upload session", err,
 		))
 		return
 	}
-
-	// Also count chunks from the upload_chunks table (authoritative source).
-	dbChunks, dbErr := h.db.GetUploadChunks(uploadID)
-	dbChunkCount := len(completedChunks) // fallback
-	if dbErr == nil {
-		dbChunkCount = len(dbChunks)
-	}
-
-	if len(completedChunks) != session.TotalChunks && dbChunkCount != session.TotalChunks {
+	if !claimed {
+		current, getErr := h.db.GetUploadSession(uploadID)
+		if getErr == nil && current.Status == protocol.UploadSessionStatusCompleted && current.FileID.Valid {
+			writeJSON(w, http.StatusOK, protocol.ChunkUploadCompleteResponse{
+				FileID:  current.FileID.String,
+				Message: "File uploaded successfully",
+			})
+			return
+		}
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest,
-			fmt.Sprintf("Not all chunks uploaded: have %d (session) / %d (db) of %d total chunks",
-				len(completedChunks), dbChunkCount, session.TotalChunks), nil,
+			protocol.ErrCodeInvalidRequest, "Upload session is being assembled by another request", nil,
 		))
 		return
 	}
 
-	// If session tracking is missing some chunks but DB has them all,
-	// heal the session tracking before proceeding.
-	if len(completedChunks) != session.TotalChunks && dbChunkCount == session.TotalChunks {
-		log.Printf("Healing upload session %s: session tracks %d chunks but DB has %d, repairing...",
-			uploadID, len(completedChunks), dbChunkCount)
-		for _, chunk := range dbChunks {
-			_ = h.db.UpdateUploadSessionChunks(uploadID, chunk.ChunkIndex)
+	// From here the session is assembling: every failure path must put it back
+	// to in progress, otherwise the chunks can never be repaired and completed.
+	reopenAfterFailure := func() {
+		if err := h.db.ReopenUploadSession(uploadID); err != nil {
+			log.Printf("Warning: failed to reopen upload session %s after a failed completion: %v", uploadID, err)
 		}
 	}
 
-	// Get all chunk paths
-	chunkPaths, err := h.storage.GetChunkPaths(uploadID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
-			protocol.ErrCodeInternalError, "Failed to get chunk paths", err,
-		))
-		return
-	}
-
-	// Assemble chunks to a temp file first, then rename to content-hash-based path.
-	// This ensures the same file content always produces the same file ID,
-	// enabling cache key stability across uploads.
-	tempFileID := uuid.New().String()
-	filePath, totalSize, actualChecksum, err := h.storage.AssembleChunks(uploadID, tempFileID, chunkPaths)
+	// Assemble the chunks into a temporary file. Chunks are selected by index
+	// and each must carry exactly the size the session declares, so a missing
+	// or truncated chunk fails here rather than yielding a short file that
+	// looks like a successful upload.
+	filePath, totalSize, actualChecksum, err := h.storage.AssembleChunks(
+		uploadID, session.TotalChunks, session.ChunkSize, session.FileSize)
 	if err != nil {
 		// A full disk during assembly previously surfaced as a bare 500 with no
 		// server-side trace — log the cause and classify ENOSPC as a
 		// client-actionable 507, mirroring the SaveChunk path.
 		log.Printf("Failed to assemble chunks for upload %s: %v", uploadID, err)
+		reopenAfterFailure()
+		if isChunkSetError(err) {
+			writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+				protocol.ErrCodeInvalidRequest, chunkAssemblyErrorMessage(err), err,
+			))
+			return
+		}
 		status, code, message := assembleErrorStatus(err)
 		writeError(w, status, protocol.NewProtocolError(code, message, err))
 		return
 	}
 
-	// Rename assembled file to content-hash-based file ID for cache key stability.
-	// Only "already exists" is benign (same content uploaded twice): any other
-	// error must fail the request — deleting the temp file and writing a DB
-	// record pointing at a nonexistent path would corrupt the catalog.
+	// Verify the whole-file checksum before the file becomes addressable.
+	// Renaming first and deleting on mismatch cannot undo the published name
+	// and leaves a final file behind (C-40).
+	if mismatch := declaredChecksumMismatch(session.FileChecksum.String, req.Checksum, actualChecksum); mismatch != "" {
+		os.Remove(filePath)
+		reopenAfterFailure()
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, mismatch, nil,
+		))
+		return
+	}
+
+	// The file id is the content hash, so identical content keeps a stable
+	// identifier across uploads.
 	fileID := actualChecksum
 	finalPath := h.storage.GetFilePath(fileID)
-	if err := os.Rename(filePath, finalPath); err != nil {
-		if os.IsExist(err) {
-			// Destination already exists with identical content — drop the temp copy.
-			h.storage.DeleteFile(tempFileID)
-		} else {
-			h.storage.DeleteFile(tempFileID)
+	published := false
+	if _, statErr := os.Stat(finalPath); statErr == nil {
+		// The same content is already stored: drop the duplicate temp copy.
+		os.Remove(filePath)
+	} else if os.IsNotExist(statErr) {
+		if err := os.Rename(filePath, finalPath); err != nil {
+			os.Remove(filePath)
+			reopenAfterFailure()
 			writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 				protocol.ErrCodeInternalError, "Failed to finalize uploaded file", err,
 			))
 			return
 		}
+		published = true
 	} else {
-		filePath = finalPath
-	}
-
-	// Also check the checksum from the request
-	if req.Checksum != "" && req.Checksum != actualChecksum {
-		h.storage.DeleteFile(tempFileID)
-		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest, "Final file checksum mismatch", nil,
+		os.Remove(filePath)
+		reopenAfterFailure()
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to finalize uploaded file", statErr,
 		))
 		return
 	}
 
-	// Create file record in database
-	var checksum *string
-	if session.FileChecksum.Valid {
-		checksum = &session.FileChecksum.String
-	} else {
-		checksum = &actualChecksum
-	}
-
-	_, err = h.db.CreateFile(session.Filename, filePath, totalSize, checksum)
-	if err != nil {
-		h.storage.DeleteFile(fileID)
+	// Record the measured checksum: a declared one is only a claim and has
+	// already been verified above when present.
+	if _, err := h.db.CreateFile(session.Filename, finalPath, totalSize, &actualChecksum); err != nil {
+		// Drop the blob only when this request created it; a deduplicated path
+		// may already back another upload's file record.
+		if published {
+			h.storage.DeleteFile(fileID)
+		}
+		reopenAfterFailure()
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to create file record", err,
 		))
 		return
 	}
 
-	// Mark session as completed
-	if err := h.db.CompleteUploadSession(uploadID); err != nil {
-		log.Printf("Warning: failed to mark upload session as completed: %v", err)
+	// Persist completion together with the file id — the value a repeated
+	// completion must return (C-41).
+	if err := h.db.CompleteUploadSession(uploadID, fileID); err != nil {
+		log.Printf("Error: failed to mark upload session %s as completed: %v", uploadID, err)
+		reopenAfterFailure()
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to complete upload session", err,
+		))
+		return
 	}
 
 	// Clean up chunks asynchronously
@@ -706,9 +896,21 @@ func (h *ChunkUploadHandler) UploadFileFromReader(filename string, fileSize int6
 		return "", err
 	}
 
+	claimed, err := h.db.ClaimUploadSessionAssembly(session.ID)
+	if err != nil {
+		return "", err
+	}
+	if !claimed {
+		return "", fmt.Errorf("upload session %s could not be claimed", session.ID)
+	}
+
 	// Upload chunks
-	for i := 0; i < totalChunks; i++ {
-		chunkPath, size, _, err := h.storage.SaveChunk(session.ID, i, io.LimitReader(reader, h.chunkSize))
+	for i := range totalChunks {
+		expected, err := expectedChunkSize(session, i)
+		if err != nil {
+			return "", err
+		}
+		chunkPath, size, _, err := h.storage.SaveChunk(session.ID, i, io.LimitReader(reader, expected))
 		if err != nil {
 			return "", err
 		}
@@ -721,25 +923,30 @@ func (h *ChunkUploadHandler) UploadFileFromReader(filename string, fileSize int6
 		h.db.UpdateUploadSessionChunks(session.ID, i)
 	}
 
-	// Assemble
-	fileID := uuid.New().String()
-	chunkPaths, _ := h.storage.GetChunkPaths(session.ID)
-	filePath, totalSize, _, err := h.storage.AssembleChunks(session.ID, fileID, chunkPaths)
+	// Assemble and publish under the content hash, like CompleteChunkUpload.
+	tmpPath, totalSize, checksum, err := h.storage.AssembleChunks(session.ID, totalChunks, h.chunkSize, fileSize)
 	if err != nil {
 		return "", err
 	}
-
-	_, err = h.db.CreateFile(filename, filePath, totalSize, nil)
-	if err != nil {
+	finalPath := h.storage.GetFilePath(checksum)
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
 		return "", err
 	}
 
-	h.db.CompleteUploadSession(session.ID)
+	if _, err = h.db.CreateFile(filename, finalPath, totalSize, &checksum); err != nil {
+		return "", err
+	}
+
+	if err := h.db.CompleteUploadSession(session.ID, checksum); err != nil {
+		return "", err
+	}
+
 	go panicguard.Guard("chunk upload assembly cleanup", func() {
 		h.storage.DeleteChunkDirectory(session.ID)
 	})
 
-	return fileID, nil
+	return checksum, nil
 }
 
 // ResumeChunkUpload allows resuming an interrupted upload

@@ -12,15 +12,19 @@ import (
 )
 
 const (
-	UploadEndpoint  = "/api/v1/upload"
-	JobsEndpoint    = "/api/v1/jobs"
-	JobEndpoint     = "/api/v1/jobs/%s"
-	OutputEndpoint  = "/api/v1/output/%s"
-	ProbeEndpoint   = "/api/v1/probe"
-	HealthEndpoint  = "/api/v1/health"
-	DefaultTimeout  = 30 * time.Second
-	UploadTimeout   = 10 * time.Minute
-	DownloadTimeout = 10 * time.Minute
+	UploadEndpoint = "/api/v1/upload"
+	JobsEndpoint   = "/api/v1/jobs"
+	JobEndpoint    = "/api/v1/jobs/%s"
+	OutputEndpoint = "/api/v1/output/%s"
+	ProbeEndpoint  = "/api/v1/probe"
+	HealthEndpoint = "/api/v1/health"
+	DefaultTimeout = 30 * time.Second
+	UploadTimeout  = 10 * time.Minute
+	// DownloadIdleTimeout bounds a download by inactivity, not by total
+	// duration: a multi-gigabyte output that keeps delivering bytes is never
+	// cut off, while a stream that stops moving fails within one minute. There
+	// is deliberately no overall transfer deadline.
+	DownloadIdleTimeout = 60 * time.Second
 	// HealthProbeTimeout bounds a single health probe attempt. The probe is a
 	// readiness gate, not a data transfer: a server that accepts the connection
 	// but cannot answer within this budget is stalled, and a fresh attempt is

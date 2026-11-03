@@ -3,7 +3,11 @@ package worker
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,9 +84,9 @@ func TestExtractEncoderFromArgs(t *testing.T) {
 			expected: "h264_nvenc",
 		},
 		{
-			name:     "c:v with equals value",
+			name:     "c:v with equals value is not a selection",
 			args:     []string{"-i", "input.mp4", "-c:v=libx264", "output.mp4"},
-			expected: "libx264",
+			expected: "",
 		},
 		{
 			name:     "vcodec with separate value",
@@ -90,9 +94,9 @@ func TestExtractEncoderFromArgs(t *testing.T) {
 			expected: "hevc_qsv",
 		},
 		{
-			name:     "vcodec with equals value",
+			name:     "vcodec with equals value is not a selection",
 			args:     []string{"-i", "input.mp4", "-vcodec=libx265", "output.mp4"},
-			expected: "libx265",
+			expected: "",
 		},
 		{
 			name:     "no encoder",
@@ -105,9 +109,34 @@ func TestExtractEncoderFromArgs(t *testing.T) {
 			expected: "vp9_vaapi",
 		},
 		{
-			name:     "codec:v with equals value",
+			name:     "codec:v with equals value is not a selection",
 			args:     []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
-			expected: "h264_nvenc",
+			expected: "",
+		},
+		{
+			name:     "stream specifier -c:v:0",
+			args:     []string{"-i", "input.mp4", "-c:v:0", "h264_vaapi", "output.mp4"},
+			expected: "h264_vaapi",
+		},
+		{
+			name:     "stream specifier -codec:v:0",
+			args:     []string{"-i", "input.mp4", "-codec:v:0", "h264_vaapi", "output.mp4"},
+			expected: "h264_vaapi",
+		},
+		{
+			name:     "general -c with video encoder",
+			args:     []string{"-i", "input.mp4", "-c", "h264_vaapi", "output.mp4"},
+			expected: "h264_vaapi",
+		},
+		{
+			name:     "duplicate declarations use the last one",
+			args:     []string{"-i", "input.mp4", "-c:v", "libvpx-vp9", "-c:v", "vp9_qsv", "output.webm"},
+			expected: "vp9_qsv",
+		},
+		{
+			name:     "-vn after -- is not an encoder",
+			args:     []string{"-i", "input.mp4", "--", "-c:v", "h264_vaapi", "output.mp4"},
+			expected: "",
 		},
 	}
 
@@ -722,5 +751,225 @@ func TestExecuteWithRetry_StreamsStderrEveryAttempt(t *testing.T) {
 		if chunk == "" {
 			t.Errorf("attempt %d: streamed empty stderr", i+1)
 		}
+	}
+}
+
+// spellingFallbackExecutor fails while the args select a hardware encoder and
+// succeeds once the retry path has switched to software.
+type spellingFallbackExecutor struct{}
+
+func (s *spellingFallbackExecutor) Execute(ctx context.Context, args []string) ExecResult {
+	return s.ExecuteWithHandlers(ctx, args, nil, nil)
+}
+
+func (s *spellingFallbackExecutor) ExecuteWithHandlers(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult {
+	encoder := extractEncoderFromArgs(args)
+	if encoder != "" && NewEncoderFallback().IsHardwareEncoder(encoder) {
+		return ExecResult{ExitCode: 1, Stderr: "[error] Invalid argument\n"}
+	}
+	return ExecResult{ExitCode: 0}
+}
+
+// TestExecuteWithRetry_FallbackCoversEncoderSpellings is the end-to-end retry
+// regression: every recognized video-encoder spelling must resolve far enough
+// for the hardware_pruned stage to switch to the same-family software encoder.
+func TestExecuteWithRetry_FallbackCoversEncoderSpellings(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantFinal string
+	}{
+		{
+			name:      "stream specifier -c:v:0",
+			args:      []string{"-i", "in.mp4", "-c:v:0", "h264_vaapi", "out.mp4"},
+			wantFinal: "libx264",
+		},
+		{
+			name:      "stream specifier -codec:v:0",
+			args:      []string{"-i", "in.mp4", "-codec:v:0", "h264_vaapi", "out.mp4"},
+			wantFinal: "libx264",
+		},
+		{
+			name:      "general -c",
+			args:      []string{"-i", "in.mp4", "-c", "h264_vaapi", "out.mp4"},
+			wantFinal: "libx264",
+		},
+		{
+			name:      "duplicate declarations use the last one",
+			args:      []string{"-i", "in.mkv", "-c:v", "libvpx-vp9", "-c:v", "vp9_qsv", "out.webm"},
+			wantFinal: "libvpx-vp9",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			re := &RetryExecutor{
+				executor:    &spellingFallbackExecutor{},
+				interceptor: NewErrorInterceptor(),
+				pruner:      NewParamPruner(),
+				config: &RetryConfig{
+					MaxRetries:             3,
+					InitialInterval:        0,
+					EnableSoftwareFallback: true,
+				},
+				fallback: NewEncoderFallback(),
+			}
+
+			result := re.ExecuteWithRetry(context.Background(), tt.args, "-", false, nil, nil, nil)
+			if !result.Success {
+				t.Fatalf("retry did not recover: stage=%s final=%s attempts=%d",
+					result.FinalStage, result.FinalEncoder, result.TotalAttempts)
+			}
+			if result.FinalEncoder != tt.wantFinal {
+				t.Errorf("final encoder = %q, want %q", result.FinalEncoder, tt.wantFinal)
+			}
+			if result.FinalStage != RetryStageHardwarePruned {
+				t.Errorf("final stage = %s, want %s", result.FinalStage, RetryStageHardwarePruned)
+			}
+		})
+	}
+}
+
+// copyFailExecutor fails every attempt the way ffmpeg rejects an invalid
+// argument; the retry path must not turn it into a successful re-encode.
+type copyFailExecutor struct{}
+
+func (c *copyFailExecutor) Execute(ctx context.Context, args []string) ExecResult {
+	return c.ExecuteWithHandlers(ctx, args, nil, nil)
+}
+
+func (c *copyFailExecutor) ExecuteWithHandlers(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult {
+	return ExecResult{ExitCode: 1, Stderr: "[error] Invalid argument\n"}
+}
+
+// TestExecuteWithRetry_CopyNeverRewritten is the blocking regression: copy is a
+// stream-copy directive, not an unspecified encoder, so retry/fallback must
+// leave argv unchanged and never claim a software fallback.
+func TestExecuteWithRetry_CopyNeverRewritten(t *testing.T) {
+	forms := [][]string{
+		{"-i", "in.mp4", "-c", "copy", "out.mp4"},
+		{"-i", "in.mp4", "-c:v", "copy", "out.mp4"},
+		{"-i", "in.mp4", "-c:v:0", "copy", "out.mkv"},
+	}
+	for _, args := range forms {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			re := &RetryExecutor{
+				executor:    &copyFailExecutor{},
+				interceptor: NewErrorInterceptor(),
+				pruner:      NewParamPruner(),
+				config: &RetryConfig{
+					MaxRetries:             3,
+					InitialInterval:        0,
+					EnableSoftwareFallback: true,
+				},
+				fallback: NewEncoderFallback(),
+			}
+
+			result := re.ExecuteWithRetry(context.Background(), args, "-", false, nil, nil, nil)
+			if result.Success {
+				t.Fatalf("copy rewrite must not report success")
+			}
+			if result.UsedSoftwareEncoder {
+				t.Errorf("copy must not be reported as a software fallback")
+			}
+			if result.FinalEncoder != "copy" {
+				t.Errorf("final encoder = %q, want copy", result.FinalEncoder)
+			}
+			if len(result.AuditTrail) == 0 {
+				t.Fatal("expected retry attempts")
+			}
+			for _, entry := range result.AuditTrail {
+				if !slices.Equal(entry.Args, args) {
+					t.Errorf("copy argv changed at attempt %d: got %v, want %v", entry.AttemptNumber, entry.Args, args)
+				}
+			}
+		})
+	}
+}
+
+// finalFallbackStaleOutputExecutor emulates the two ffmpeg behaviours this
+// path meets: a hardware attempt creates the output file and then fails to
+// open its device, and a software attempt runs under native no -y semantics,
+// which refuses to overwrite an existing output.
+type finalFallbackStaleOutputExecutor struct {
+	outputPath   string
+	staleSeen    bool
+	fallbackCall int
+}
+
+func (f *finalFallbackStaleOutputExecutor) Execute(ctx context.Context, args []string) ExecResult {
+	return f.ExecuteWithHandlers(ctx, args, nil, nil)
+}
+
+func (f *finalFallbackStaleOutputExecutor) ExecuteWithHandlers(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult {
+	if encoder := extractEncoderFromArgsWithCaps(args, nil); encoder != "libx264" {
+		if err := os.WriteFile(f.outputPath, nil, 0o644); err != nil {
+			return ExecResult{ExitCode: 1, Error: err}
+		}
+		return ExecResult{
+			ExitCode: 1,
+			Stderr:   "Cannot open device /dev/video0: No such file or directory\n",
+			Error:    fmt.Errorf("ffmpeg exited with code 1"),
+		}
+	}
+
+	f.fallbackCall++
+	if _, err := os.Stat(f.outputPath); err == nil {
+		f.staleSeen = true
+		return ExecResult{
+			ExitCode: 1,
+			Stderr:   "File '" + f.outputPath + "' already exists. Overwrite? [y/N] Not overwriting - exiting\n",
+			Error:    fmt.Errorf("ffmpeg exited with code 1"),
+		}
+	}
+	if err := os.WriteFile(f.outputPath, []byte("transcoded"), 0o644); err != nil {
+		return ExecResult{ExitCode: 1, Error: err}
+	}
+	return ExecResult{ExitCode: 0}
+}
+
+// TestExecuteWithRetry_FinalFallbackClearsStaleOutput locks the fix: the final
+// software fallback is a fresh ffmpeg process and must clear the output the
+// previous failed attempt left behind, exactly like a retry attempt. Without
+// it, ffmpeg's no -y refusal turns an available same-family software encoder
+// into a hard failure.
+func TestExecuteWithRetry_FinalFallbackClearsStaleOutput(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "out.mp4")
+	exec := &finalFallbackStaleOutputExecutor{outputPath: outputPath}
+	re := &RetryExecutor{
+		executor:    exec,
+		interceptor: NewErrorInterceptor(),
+		pruner:      NewParamPruner(),
+		config: &RetryConfig{
+			MaxRetries:             1,
+			InitialInterval:        0,
+			EnableSoftwareFallback: true,
+		},
+		fallback: NewEncoderFallback(),
+	}
+
+	args := []string{"-i", "in.mp4", "-c:v", "h264_v4l2m2m", outputPath}
+	result := re.ExecuteWithRetry(context.Background(), args, outputPath, false, nil, nil, nil)
+
+	if exec.fallbackCall != 1 {
+		t.Fatalf("final software fallback attempted %d times, want 1", exec.fallbackCall)
+	}
+	if exec.staleSeen {
+		t.Fatal("final software fallback started with the stale output still present")
+	}
+	if !result.Success {
+		t.Fatalf("expected final software fallback to succeed: stage=%s attempts=%d",
+			result.FinalStage, result.TotalAttempts)
+	}
+	if result.FinalStage != RetryStageSoftwareFallback || result.FinalEncoder != "libx264" {
+		t.Errorf("final stage/encoder = %s/%s, want %s/libx264",
+			result.FinalStage, result.FinalEncoder, RetryStageSoftwareFallback)
+	}
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatalf("stat fallback output: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("fallback output is empty")
 	}
 }

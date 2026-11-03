@@ -19,6 +19,7 @@ type UploadSession struct {
 	TotalChunks    int
 	UploadedChunks string // JSON array of completed chunk indices
 	FileChecksum   sql.NullString
+	FileID         sql.NullString
 	Status         protocol.UploadSessionStatus
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -63,11 +64,11 @@ func (d *Database) CreateUploadSession(filename string, fileSize, chunkSize int6
 func (d *Database) GetUploadSession(id string) (*UploadSession, error) {
 	session := &UploadSession{}
 	err := d.db.QueryRow(`
-		SELECT id, filename, file_size, chunk_size, total_chunks, uploaded_chunks, file_checksum, status, created_at, updated_at, expires_at
+		SELECT id, filename, file_size, chunk_size, total_chunks, uploaded_chunks, file_checksum, file_id, status, created_at, updated_at, expires_at
 		FROM upload_sessions WHERE id = ?
 	`, id).Scan(
 		&session.ID, &session.Filename, &session.FileSize, &session.ChunkSize, &session.TotalChunks,
-		&session.UploadedChunks, &session.FileChecksum, &session.Status,
+		&session.UploadedChunks, &session.FileChecksum, &session.FileID, &session.Status,
 		&session.CreatedAt, &session.UpdatedAt, &session.ExpiresAt,
 	)
 
@@ -156,17 +157,64 @@ func (d *Database) UpdateUploadSessionChunks(uploadID string, chunkIndex int) er
 	return fmt.Errorf("failed to update upload session %s after %d retries: concurrent modification conflict", uploadID, maxRetries)
 }
 
-// CompleteUploadSession marks an upload session as completed
-func (d *Database) CompleteUploadSession(id string) error {
+// ClaimUploadSessionAssembly atomically moves a session from in_progress to
+// assembling. It reports false when the session is no longer in progress, so a
+// second completion — a concurrent request or another server instance — can
+// never assemble the same chunks twice.
+func (d *Database) ClaimUploadSessionAssembly(id string) (bool, error) {
 	now := time.Now()
-	_, err := d.db.Exec(`
-		UPDATE upload_sessions SET status = ?, updated_at = ? WHERE id = ?
-	`, protocol.UploadSessionStatusCompleted, now, id)
+	result, err := d.db.Exec(`
+		UPDATE upload_sessions SET status = ?, updated_at = ?
+		WHERE id = ? AND status = ?
+	`, protocol.UploadSessionStatusAssembling, now, id, protocol.UploadSessionStatusInProgress)
+
+	if err != nil {
+		return false, fmt.Errorf("failed to claim upload session for assembly: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to claim upload session for assembly: %w", err)
+	}
+	return rowsAffected > 0, nil
+}
+
+// ReopenUploadSession returns an assembling session to in_progress after a
+// failed assembly, so the client can repair the chunk set and complete again.
+func (d *Database) ReopenUploadSession(id string) error {
+	now := time.Now()
+	if _, err := d.db.Exec(`
+		UPDATE upload_sessions SET status = ?, updated_at = ?
+		WHERE id = ? AND status = ?
+	`, protocol.UploadSessionStatusInProgress, now, id, protocol.UploadSessionStatusAssembling); err != nil {
+		return fmt.Errorf("failed to reopen upload session: %w", err)
+	}
+	return nil
+}
+
+// CompleteUploadSession marks an assembling session as completed and records
+// the file id produced by the assembly. The id is persisted because a repeated
+// completion must return the very same identifier without rebuilding the file.
+// The update is conditional on the assembling status: only the caller that won
+// the claim can complete the session.
+func (d *Database) CompleteUploadSession(id, fileID string) error {
+	now := time.Now()
+	result, err := d.db.Exec(`
+		UPDATE upload_sessions SET status = ?, file_id = ?, updated_at = ?
+		WHERE id = ? AND status = ?
+	`, protocol.UploadSessionStatusCompleted, fileID, now, id, protocol.UploadSessionStatusAssembling)
 
 	if err != nil {
 		return fmt.Errorf("failed to complete upload session: %w", err)
 	}
 
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to complete upload session: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("failed to complete upload session %s: session is not assembling", id)
+	}
 	return nil
 }
 
@@ -184,13 +232,15 @@ func (d *Database) CancelUploadSession(id string) error {
 	return nil
 }
 
-// ExpireUploadSessions marks expired upload sessions
+// ExpireUploadSessions marks expired upload sessions. An assembling session
+// whose assembly was interrupted by a crash is expired like any other: nothing
+// will ever move it forward, and its chunks must not outlive the session.
 func (d *Database) ExpireUploadSessions() (int64, error) {
 	now := time.Now()
 	result, err := d.db.Exec(`
 		UPDATE upload_sessions SET status = ? 
-		WHERE status = ? AND expires_at IS NOT NULL AND expires_at < ?
-	`, protocol.UploadSessionStatusExpired, protocol.UploadSessionStatusInProgress, now)
+		WHERE status IN (?, ?) AND expires_at IS NOT NULL AND expires_at < ?
+	`, protocol.UploadSessionStatusExpired, protocol.UploadSessionStatusInProgress, protocol.UploadSessionStatusAssembling, now)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to expire upload sessions: %w", err)

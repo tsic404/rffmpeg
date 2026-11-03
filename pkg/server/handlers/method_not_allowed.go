@@ -62,3 +62,11 @@ func (w *methodNotAllowedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, 
 	}
 	return nil, nil, errors.New("hijacking not supported")
 }
+
+// Unwrap exposes the wrapped writer to http.ResponseController. This
+// middleware wraps every request before the idle-deadline middlewares run, so
+// without it their SetReadDeadline/SetWriteDeadline calls stop here and the
+// per-read/per-write bounds never reach the connection.
+func (w *methodNotAllowedResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}

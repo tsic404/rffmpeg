@@ -28,10 +28,24 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 	"github.com/tsic404/rffmpeg/pkg/server/scheduler"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
+	"github.com/tsic404/rffmpeg/pkg/server/transport"
 	"github.com/tsic404/rffmpeg/pkg/server/websocket"
 	"github.com/tsic404/rffmpeg/pkg/server/workerhealth"
 	tlspkg "github.com/tsic404/rffmpeg/pkg/tls"
 )
+
+// newHTTPServer builds the listener configuration. ReadHeaderTimeout bounds
+// how long a client may take to send request headers; ReadTimeout and
+// WriteTimeout stay zero because transfers are bounded per read/write by
+// pkg/server/transport rather than per request.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
 
 // staleWorkerFactor scales the heartbeat timeout into the startup cleanup
 // cutoff: a worker whose last heartbeat is older than staleWorkerFactor × the
@@ -261,10 +275,8 @@ func main() {
 		// install github.com/redis/go-redis/v9 and create a RedisCounter implementation.
 	}
 
-	// Scheduler releases rate-limit quota and broadcasts WS status for jobs
-	// it fails out-of-band (starvation sweep) — the handler path that normally
-	// does both is bypassed by the bulk DB update.
-	jobScheduler.SetRateLimiter(h.GetRateLimiter())
+	// Scheduler broadcasts WS status for jobs it fails out-of-band (starvation
+	// sweep); quota release for those jobs rides the database terminal hook.
 	jobScheduler.SetJobNotifier(h.GetWSHub())
 
 	// Setup router. Access logging goes through a non-blocking sink: chi's
@@ -281,10 +293,17 @@ func main() {
 	r.Use(middleware.RealIP)
 	r.Use(handlers.NormalizeMethodNotAllowed)
 
+	// No whole-request read or write deadline is configured; arm a fresh
+	// per-read and per-write deadline instead, so a stalled body or a client
+	// that stops reading a large response is dropped while a slow transfer
+	// that keeps moving bytes completes.
+	r.Use(transport.IdleBodyMiddleware(transport.IdleTimeout))
+	r.Use(transport.IdleWriteMiddleware(transport.IdleTimeout))
+
 	// Global request-body cap for JSON endpoints. Upload handlers apply
 	// their own larger MaxBytesReader before parsing multipart forms, so a
 	// 10MB default never truncates legitimate uploads.
-	r.Use(auth.MaxBodyBytesMiddleware)
+	r.Use(handlers.MaxBodyBytesMiddleware)
 
 	// Pass auth token to handler for health check reporting
 	h.SetAuthToken(cfg.AuthToken)
@@ -301,14 +320,13 @@ func main() {
 	// API routes
 	registerRoutes(r, h, chunkHandler, rateLimitCfg)
 
-	// Create HTTP server
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      r,
-		ReadTimeout:  5 * time.Minute, // Allow long uploads
-		WriteTimeout: 5 * time.Minute, // Allow long downloads
-		IdleTimeout:  120 * time.Second,
-	}
+	// Create HTTP server. Headers must arrive within 15s (slowloris), but there
+	// is no whole-request read or write deadline: the contract allows a 10 GiB
+	// single upload and single-shot downloads of arbitrarily large outputs, so
+	// a fixed cap truncates every transfer slower than that size divided by the
+	// cap. Stalled transfers are cut by the idle deadline middleware instead
+	// (see pkg/server/transport).
+	srv := newHTTPServer(addr, r)
 
 	// Configure TLS if enabled
 	var tlsConfig *tlspkg.Config

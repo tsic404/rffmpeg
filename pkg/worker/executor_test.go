@@ -59,7 +59,7 @@ func TestBuildArgs(t *testing.T) {
 			want:       []string{"/tmp/output.mp4"},
 		},
 		{
-			name:       "concatenated -i style placeholder",
+			name:       "separate -i input placeholder",
 			jobArgs:    []string{"-i", "<INPUT_FILE>", "-c:a", "aac"},
 			inputPaths: []string{"/tmp/downloaded/audio.mp3"},
 			outputPath: "/tmp/output.aac",

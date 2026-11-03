@@ -254,10 +254,9 @@ func TestEngineCoordinator_RewriteSync(t *testing.T) {
 	}
 }
 
-// TestEngineCoordinator_ParseInlineEncoderArgs verifies the RewriteSync
-// parser helpers handle the inline encoder forms (-c:v=/-codec:v=/-vcodec=):
-// the encoder must be detected and the codec key must NOT leak into the
-// extracted params (which would later be re-emitted at the tail).
+// TestEngineCoordinator_ParseInlineEncoderArgs verifies the "=" joined encoder
+// forms are not selections (ffmpeg rejects that syntax) and that the codec key
+// does not leak into the extracted params.
 func TestEngineCoordinator_ParseInlineEncoderArgs(t *testing.T) {
 	engine := NewEngineCoordinator()
 
@@ -268,21 +267,21 @@ func TestEngineCoordinator_ParseInlineEncoderArgs(t *testing.T) {
 		expectParams  map[string]string
 	}{
 		{
-			name:          "inline -codec:v= detected, no codec:v leak",
+			name:          "inline -codec:v= is not a selection",
 			args:          []string{"-codec:v=h264_nvenc", "-crf", "23", "output.mp4"},
-			expectEncoder: encoder.EncoderH264NVENC,
+			expectEncoder: "",
 			expectParams:  map[string]string{"crf": "23"},
 		},
 		{
-			name:          "inline -vcodec= detected, no vcodec leak",
+			name:          "inline -vcodec= is not a selection",
 			args:          []string{"-vcodec=libx264", "output.mp4"},
-			expectEncoder: encoder.EncoderLibX264,
+			expectEncoder: "",
 			expectParams:  map[string]string{},
 		},
 		{
-			name:          "inline -c:v= detected, no c:v leak",
+			name:          "inline -c:v= is not a selection",
 			args:          []string{"-c:v=libx264", "output.mp4"},
-			expectEncoder: encoder.EncoderLibX264,
+			expectEncoder: "",
 			expectParams:  map[string]string{},
 		},
 		{
@@ -295,11 +294,11 @@ func TestEngineCoordinator_ParseInlineEncoderArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := engine.parseEncoderFromArgs(tt.args); got != tt.expectEncoder {
+			if got := engine.parseEncoderFromArgs(tt.args, nil); got != tt.expectEncoder {
 				t.Errorf("parseEncoderFromArgs = %q, want %q", got, tt.expectEncoder)
 			}
 
-			got := engine.parseEncoderParamsFromArgs(tt.args)
+			got := engine.parseEncoderParamsFromArgs(tt.args, nil)
 			if len(got) != len(tt.expectParams) {
 				t.Errorf("parseEncoderParamsFromArgs = %v, want %v", got, tt.expectParams)
 				return
@@ -344,49 +343,45 @@ func TestEngineCoordinator_BuildRewrittenArgs(t *testing.T) {
 			originalArgs:   []string{"-i", "input.mp4", "-codec:v", "libx264", "output.mp4"},
 			targetEncoder:  encoder.EncoderH264QSV,
 			params:         map[string]string{},
-			expectContains: []string{"-c:v", "h264_qsv"},
+			expectContains: []string{"-codec:v", "h264_qsv"},
 		},
 		{
-			name:              "replace inline -codec:v= encoder",
+			name:              "inline -codec:v= passes through unchanged",
 			originalArgs:      []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
 			targetEncoder:     encoder.EncoderH264QSV,
 			params:            map[string]string{},
-			expectContains:    []string{"-c:v", "h264_qsv"},
-			expectNotContains: []string{"-codec:v=h264_nvenc"},
+			expectContains:    []string{"-codec:v=h264_nvenc"},
+			expectNotContains: []string{"-codec:v=h264_qsv", "h264_qsv"},
 		},
 		{
-			name:              "replace inline -vcodec= encoder",
+			name:              "inline -vcodec= passes through unchanged",
 			originalArgs:      []string{"-i", "input.mp4", "-vcodec=libx264", "output.mp4"},
 			targetEncoder:     encoder.EncoderH264NVENC,
 			params:            map[string]string{},
-			expectContains:    []string{"-c:v", "h264_nvenc"},
-			expectNotContains: []string{"-vcodec=libx264"},
+			expectContains:    []string{"-vcodec=libx264"},
+			expectNotContains: []string{"-vcodec=h264_nvenc"},
 		},
 		{
-			name:              "replace inline -c:v= encoder",
+			name:              "inline -c:v= passes through unchanged",
 			originalArgs:      []string{"-i", "input.mp4", "-c:v=libx264", "output.mp4"},
 			targetEncoder:     encoder.EncoderH264NVENC,
 			params:            map[string]string{},
-			expectContains:    []string{"-c:v", "h264_nvenc"},
-			expectNotContains: []string{"-c:v=libx264"},
+			expectContains:    []string{"-c:v=libx264"},
+			expectNotContains: []string{"-c:v=h264_nvenc"},
 		},
 		{
-			// Regression: a leaked video-codec key in params (e.g. from the
-			// RewriteSync parser on an inline form) must not be re-emitted at
-			// the tail as a separate "-codec:v <value>" pair, which would
-			// silently override the rewritten encoder.
-			name:              "leaked codec:v param is not re-emitted after inline encoder",
+			name:              "inline form ignores leaked codec param",
 			originalArgs:      []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
 			targetEncoder:     encoder.EncoderH264QSV,
 			params:            map[string]string{"codec:v": "h264_nvenc"},
-			expectContains:    []string{"-c:v", "h264_qsv"},
-			expectNotContains: []string{"-codec:v", "h264_nvenc"},
+			expectContains:    []string{"-codec:v=h264_nvenc"},
+			expectNotContains: []string{"-codec:v=h264_qsv", "h264_qsv"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil, nil)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil, nil, nil)
 
 			for _, expected := range tt.expectContains {
 				found := false
@@ -623,7 +618,7 @@ func TestBuildRewrittenArgs_GlobalInitParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil, nil)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, nil, nil, nil)
 
 			for _, expected := range tt.expectContains {
 				found := false
@@ -676,7 +671,7 @@ func TestBuildRewrittenArgs_EncoderPlacement(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEnc, map[string]string{}, nil, nil)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEnc, map[string]string{}, nil, nil, nil)
 
 			encIdx := -1
 			outputIdx := -1
@@ -835,7 +830,7 @@ func TestBuildRewrittenArgs_ParamsToFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, tt.paramsToFilter, nil)
+			result := engine.buildRewrittenArgs(tt.originalArgs, tt.targetEncoder, tt.params, tt.paramsToFilter, nil, nil)
 
 			for _, expected := range tt.expectContains {
 				found := false
@@ -858,6 +853,46 @@ func TestBuildRewrittenArgs_ParamsToFilter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBuildRewrittenArgs_InsertBeforeOutputWithDashValue pins the fix:
+// a value-taking option whose value starts with '-' ("-map -0:a") must not
+// make the following token look like a flag; the rewritten encoder and its
+// parameters have to land before the output file, or ffmpeg silently ignores
+// them (per-file options apply to the next output).
+func TestBuildRewrittenArgs_InsertBeforeOutputWithDashValue(t *testing.T) {
+	engine := NewEngineCoordinator()
+	originalArgs := []string{
+		"-i", "in.mp4", "-c:v", "libx264", "-crf", "23",
+		"-map", "0:v", "-map", "-0:a", "out.mp4",
+	}
+	result := engine.buildRewrittenArgs(
+		originalArgs,
+		encoder.EncoderH264NVENC,
+		map[string]string{"cq": "23"},
+		map[string]string{"crf": "23"},
+		nil,
+		nil,
+	)
+
+	pos := func(token string) int {
+		for i, arg := range result {
+			if arg == token {
+				return i
+			}
+		}
+		return -1
+	}
+	outputPos := pos("out.mp4")
+	if outputPos != len(result)-1 {
+		t.Fatalf("output file is not last: %v", result)
+	}
+	if cqPos := pos("-cq"); cqPos < 0 || cqPos > outputPos {
+		t.Errorf("-cq must be inserted before the output file, got %v", result)
+	}
+	if cPos := pos("-c:v"); cPos < 0 || cPos > outputPos {
+		t.Errorf("-c:v must be inserted before the output file, got %v", result)
 	}
 }
 
@@ -943,7 +978,7 @@ func TestBuildRewrittenArgs_SameNameConversion(t *testing.T) {
 	t.Run("separate-value form carries the converted value", func(t *testing.T) {
 		result := engine.buildRewrittenArgs(
 			[]string{"-i", "input.mp4", "-c:v", "libx264", "-preset", "fast", "output.mp4"},
-			encoder.EncoderH264QSV, params, nil, converted,
+			encoder.EncoderH264QSV, params, nil, converted, nil,
 		)
 		if !hasPair(result, "-preset", "6") {
 			t.Errorf("expected -preset 6 in rewritten args, got %v", result)
@@ -956,7 +991,7 @@ func TestBuildRewrittenArgs_SameNameConversion(t *testing.T) {
 	t.Run("inline form keeps the user's value", func(t *testing.T) {
 		result := engine.buildRewrittenArgs(
 			[]string{"-i", "input.mp4", "-c:v", "libx264", "-preset=fast", "output.mp4"},
-			encoder.EncoderH264QSV, params, nil, converted,
+			encoder.EncoderH264QSV, params, nil, converted, nil,
 		)
 		if !has(result, "-preset=fast") {
 			t.Errorf("expected the user's -preset=fast to survive, got %v", result)
@@ -965,4 +1000,75 @@ func TestBuildRewrittenArgs_SameNameConversion(t *testing.T) {
 			t.Errorf("inline preset must not be rewritten, got %v", result)
 		}
 	})
+}
+
+// fixedInjector always reports the given injected parameters, ignoring whether
+// the user already supplied them. It isolates the engine's merge guard from
+// the hardware injector's own duplicate check.
+type fixedInjector struct {
+	params map[string]string
+}
+
+func (f *fixedInjector) Inject(ctx context.Context, enc encoder.EncoderFamily, params map[string]string, hwCaps *HardwareCapabilities) (*InjectionResult, error) {
+	return &InjectionResult{
+		InjectedParams: f.params,
+		AllParams:      params,
+		AuditRecords:   []AuditRecord{},
+	}, nil
+}
+
+func (f *fixedInjector) GetRequiredParams(enc encoder.EncoderFamily) []string { return nil }
+
+func (f *fixedInjector) SupportsEncoder(enc encoder.EncoderFamily) bool { return true }
+
+// TestRewrite_InjectionMergeKeepsUserParam pins the second C-73 guard: even
+// when the injector returns a parameter the user already supplied, the engine
+// merge must keep the user's value.
+func TestRewrite_InjectionMergeKeepsUserParam(t *testing.T) {
+	engine := NewEngineCoordinatorWithComponents(
+		NewScenarioClassifier(),
+		&mockTranslator{
+			translateFunc: func(ctx context.Context, source, target encoder.EncoderFamily, params map[string]string) (*TranslationResult, error) {
+				return &TranslationResult{
+					TargetEncoder:    target,
+					TranslatedParams: map[string]string{"gpu": "3"},
+					AuditRecords:     []AuditRecord{},
+				}, nil
+			},
+		},
+		&fixedInjector{params: map[string]string{"gpu": "0"}},
+		nil, nil, nil,
+	)
+
+	response, err := engine.Rewrite(context.Background(), &EncoderRewriteRequest{
+		OriginalArgs:     []string{"-i", "in.mp4", "-c:v", "libx264", "-gpu", "3", "out.mp4"},
+		SpecifiedEncoder: encoder.EncoderLibX264,
+		EncoderParams:    map[string]string{"gpu": "3"},
+		AutoHW:           true,
+		HardwareCapabilities: HardwareCapabilities{
+			AvailableEncoders: []encoder.EncoderFamily{encoder.EncoderH264NVENC, encoder.EncoderLibX264},
+			HardwareEncoders:  []encoder.EncoderFamily{encoder.EncoderH264NVENC},
+			SoftwareEncoders:  []encoder.EncoderFamily{encoder.EncoderLibX264},
+			SupportedCodecs:   []encoder.CodecFormat{encoder.CodecH264},
+			EncoderPriority:   DefaultEncoderPriority(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("rewrite failed: %v", err)
+	}
+
+	hasPair := func(args []string, flag, value string) bool {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == flag && args[i+1] == value {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasPair(response.RewrittenArgs, "-gpu", "3") {
+		t.Errorf("user's -gpu 3 was lost: %v", response.RewrittenArgs)
+	}
+	if hasPair(response.RewrittenArgs, "-gpu", "0") {
+		t.Errorf("injected -gpu 0 overrode the user's value: %v", response.RewrittenArgs)
+	}
 }

@@ -338,8 +338,6 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.rateLimiter.DecrementByJob(jobID)
-
 	if err := h.wsHub.BroadcastStatus(jobID, protocol.JobStatusCancelled, 0, "Job cancelled"); err != nil {
 		log.Printf("Failed to broadcast cancellation for job %s: %v", jobID, err)
 	}
@@ -439,10 +437,6 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 				protocol.ErrCodeInternalError, "Failed to update job", err,
 			))
 			return
-		}
-
-		if protocol.IsTerminalStatus(req.Status) {
-			h.rateLimiter.DecrementByJob(jobID)
 		}
 
 		if protocol.IsTerminalStatus(req.Status) {

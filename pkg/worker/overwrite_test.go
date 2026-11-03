@@ -78,7 +78,7 @@ func TestBuildArgsOverwriteSemantics(t *testing.T) {
 		// refusal), so the raw exit code is not a rejection signal. The worker
 		// rejects the job via stderr classification instead — assert that
 		// classifier fires, so the refusal is never reported as success.
-		if !ffmpegStderrIndicatesCriticalError(res.Stderr) {
+		if !ffmpegStderrIndicatesUnwrittenOutput(res.Stderr) {
 			t.Errorf("worker must classify 'Not overwriting' as a job failure, stderr=%q", res.Stderr)
 		}
 		if got := readOutput(t); got != staleContent {
@@ -92,7 +92,7 @@ func TestBuildArgsOverwriteSemantics(t *testing.T) {
 		if !strings.Contains(res.Stderr, "already exists") {
 			t.Errorf("expected 'already exists' in stderr, got %q", res.Stderr)
 		}
-		if !ffmpegStderrIndicatesCriticalError(res.Stderr) {
+		if !ffmpegStderrIndicatesUnwrittenOutput(res.Stderr) {
 			t.Errorf("worker must classify '-n already exists' as a job failure, stderr=%q", res.Stderr)
 		}
 		if got := readOutput(t); got != staleContent {

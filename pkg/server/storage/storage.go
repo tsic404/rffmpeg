@@ -16,7 +16,49 @@ import (
 // Storage manages file storage on the local filesystem
 type Storage struct {
 	baseDir string
-	mu      sync.RWMutex
+
+	// mu guards the shared files/ directory: blob writes, downloads, output
+	// writes and the TTL sweeps.
+	mu sync.RWMutex
+
+	// chunkLocks serializes operations on one upload session's chunk
+	// directory. Chunk transfers must not hold mu: a slow chunk upload or a
+	// multi-gigabyte assembly would otherwise block every download.
+	chunkLocksMu sync.Mutex
+	chunkLocks   map[string]*uploadLock
+}
+
+// uploadLock is a per-session mutex with a reference count so the entry can be
+// dropped when the last operation on that session finishes.
+type uploadLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockUpload acquires the session's exclusive chunk lock and returns its
+// release function. Locking a session is independent of every other session
+// and of the files/ lock.
+func (s *Storage) lockUpload(uploadID string) func() {
+	s.chunkLocksMu.Lock()
+	lock := s.chunkLocks[uploadID]
+	if lock == nil {
+		lock = &uploadLock{}
+		s.chunkLocks[uploadID] = lock
+	}
+	lock.refs++
+	s.chunkLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+
+		s.chunkLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(s.chunkLocks, uploadID)
+		}
+		s.chunkLocksMu.Unlock()
+	}
 }
 
 // New creates a new storage instance
@@ -25,7 +67,7 @@ func New(baseDir string) (*Storage, error) {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
-	return &Storage{baseDir: baseDir}, nil
+	return &Storage{baseDir: baseDir, chunkLocks: make(map[string]*uploadLock)}, nil
 }
 
 // SaveFile saves a file to storage and returns the relative path, size, and SHA256 checksum.

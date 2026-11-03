@@ -15,11 +15,18 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// GetJob gets job status
+// GetJob gets job status.
 func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
+	return c.getJob(context.Background(), jobID)
+}
+
+// getJob is GetJob tied to ctx, so a wait that is ending can abandon an
+// in-flight status request instead of holding its helper goroutine open for
+// the transport timeout after the caller already returned.
+func (c *Client) getJob(ctx context.Context, jobID string) (*protocol.JobInfo, error) {
 	url := fmt.Sprintf(c.serverURL+JobEndpoint, jobID)
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -33,7 +40,8 @@ func (c *Client) GetJob(jobID string) (*protocol.JobInfo, error) {
 	defer DrainAndClose(resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("job not found: %s", jobID)
+
+		return nil, fmt.Errorf("%w: %s", protocol.ErrJobNotFound, jobID)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -61,46 +69,72 @@ func isServerSilence(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
+// statusPollBudget bounds one run of failed status polls. Two failure runs are
+// tracked separately: continuous silence — requests the server never answered
+// — by silenceBudget, and any run of failures by failBudget, so a server that
+// answers with errors still gives up eventually instead of polling forever. A
+// zero budget means "no retries": the first failure of that kind is final.
+type statusPollBudget struct {
+	silenceBudget time.Duration
+	failBudget    time.Duration
+	failStart     time.Time // first failure of the current run, any cause
+	silenceStart  time.Time // first unanswered failure of the current run
+}
+
+// failure records one failed poll and returns the give-up verdict once a
+// budget is spent; nil means the caller keeps polling.
+func (b *statusPollBudget) failure(jobID string, err error, now time.Time) error {
+	if b.failStart.IsZero() {
+		b.failStart = now
+	}
+	if isServerSilence(err) {
+		if b.silenceStart.IsZero() {
+			b.silenceStart = now
+		}
+	} else {
+
+		b.silenceStart = time.Time{}
+	}
+	if !b.silenceStart.IsZero() && now.Sub(b.silenceStart) >= b.silenceBudget {
+		return &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling lost contact with server for %s: %w", now.Sub(b.silenceStart).Round(time.Second), err)}
+	}
+	if now.Sub(b.failStart) >= b.failBudget {
+		return &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling failed for %s: %w", now.Sub(b.failStart).Round(time.Second), err)}
+	}
+	return nil
+}
+
+// reset starts a fresh failure run after a successful poll.
+func (b *statusPollBudget) reset() {
+	b.failStart = time.Time{}
+	b.silenceStart = time.Time{}
+}
+
 // backupPoll polls GetJob as a backup to the WebSocket stream, reporting the
-// terminal job on pollDone or the give-up verdict on pollErr. Two failure runs
-// are bounded separately: continuous silence — requests the server never
-// answered — by silenceBudget, and any run of failures by failBudget, so a
-// server that answers with errors still gives up eventually instead of polling
-// forever. A zero failBudget means "no retries": the first failure is final.
+// terminal job on pollDone or the give-up verdict on pollErr.
 func (c *Client) backupPoll(ctx context.Context, jobID string, interval time.Duration, silenceBudget, failBudget time.Duration, pollDone chan<- *protocol.JobInfo, pollErr chan<- error) {
-	var failStart time.Time    // first failure of the current run, any cause
-	var silenceStart time.Time // first unanswered failure of the current run
+	budget := statusPollBudget{silenceBudget: silenceBudget, failBudget: failBudget}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(interval):
-			job, err := c.GetJob(jobID)
+			job, err := c.getJob(ctx, jobID)
 			if err != nil {
-				now := time.Now()
-				if failStart.IsZero() {
-					failStart = now
-				}
-				if isServerSilence(err) {
-					if silenceStart.IsZero() {
-						silenceStart = now
-					}
-				} else {
-
-					silenceStart = time.Time{}
-				}
-				if !silenceStart.IsZero() && now.Sub(silenceStart) >= silenceBudget {
-					pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling lost contact with server for %s: %w", now.Sub(silenceStart).Round(time.Second), err)}
+				if ctx.Err() != nil {
 					return
 				}
-				if now.Sub(failStart) >= failBudget {
-					pollErr <- &RetriesExhaustedError{JobID: jobID, Cause: fmt.Errorf("job status polling failed for %s: %w", now.Sub(failStart).Round(time.Second), err)}
+				if errors.Is(err, protocol.ErrJobNotFound) {
+					pollErr <- err
+					return
+				}
+				if giveUp := budget.failure(jobID, err, time.Now()); giveUp != nil {
+					pollErr <- giveUp
 					return
 				}
 				continue
 			}
-			failStart = time.Time{}
-			silenceStart = time.Time{}
+			budget.reset()
 			if protocol.IsTerminalStatus(job.Status) {
 				pollDone <- job
 				return
@@ -111,15 +145,41 @@ func (c *Client) backupPoll(ctx context.Context, jobID string, interval time.Dur
 
 // WaitForJob waits for job completion and returns exit code.
 // It polls until the job reaches a terminal status or ctx is cancelled.
+//
+// A single failed poll is not fatal: this is the fallback channel for a job
+// that was already submitted, so one transient error must not turn a running
+// job into a client-side failure and leave the user without its output. The
+// same failure budgets as the WebSocket backup poll bound the retry run, and
+// spending them is reported as RetriesExhaustedError — the distinct "the job
+// is still running server-side" verdict — rather than as an ordinary error.
 func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool) (*protocol.JobInfo, error) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	budget := statusPollBudget{
+		silenceBudget: serverLossBudget(c.maxRetries, c.serverLossTimeout),
+		failBudget:    retryBudget(c.maxRetries),
+	}
 
 	for {
-		job, err := c.GetJob(jobID)
+		job, err := c.getJob(ctx, jobID)
 		if err != nil {
-			return nil, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if errors.Is(err, protocol.ErrJobNotFound) {
+				return nil, err
+			}
+			if giveUp := budget.failure(jobID, err, time.Now()); giveUp != nil {
+				return nil, giveUp
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ticker.C:
+			}
+			continue
 		}
+		budget.reset()
 
 		if showProgress {
 			fmt.Fprintf(os.Stderr, "Job %s: %s\n", jobID, job.Status)
@@ -139,6 +199,12 @@ func (c *Client) WaitForJob(ctx context.Context, jobID string, showProgress bool
 
 // WaitForJobWithLogs waits for job completion with real-time log streaming via WebSocket
 func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+
+	ctx, cancel := context.WithCancel(ctx)
+	var helpers sync.WaitGroup
+	defer helpers.Wait()
+	defer cancel()
+
 	// terminalSeen is closed once the WebSocket delivers a terminal status or
 	// complete event. The backup HTTP poll runs on a 2s tick, so without this
 	// the CLI would linger up to a full poll interval after the worker's
@@ -194,7 +260,9 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	}
 
 	listenDone := make(chan error, 1)
+	helpers.Add(1)
 	go func() {
+		defer helpers.Done()
 		listenDone <- wsClient.Listen(ctx)
 	}()
 
@@ -204,7 +272,9 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	// must not read the test-replaceable process-wide pollInterval after the
 	// caller may have changed it.
 	interval := pollInterval
+	helpers.Add(1)
 	go func() {
+		defer helpers.Done()
 		c.backupPoll(ctx, jobID, interval,
 			serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
 			pollDone, pollErr)
@@ -276,7 +346,9 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 			}
 			nextListen := make(chan error, 1)
 			listenDone = nextListen
+			helpers.Add(1)
 			go func() {
+				defer helpers.Done()
 				nextListen <- wsClient.Listen(ctx)
 			}()
 		case <-ctx.Done():
@@ -295,6 +367,12 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 // WaitForJobWithStreamingOutput waits for job completion with streaming output to stdout.
 // This is used when the output file is "-" to stream transcoded data directly to stdout.
 func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string, quiet bool) (*protocol.JobInfo, error) {
+
+	ctx, cancel := context.WithCancel(ctx)
+	var helpers sync.WaitGroup
+	defer helpers.Wait()
+	defer cancel()
+
 	// stdoutBytes counts bytes actually written to stdout (partial writes and
 	// failures excluded); stdoutErr records the first write failure. A completed
 	// streaming job that delivered zero bytes — or whose stdout write failed —
@@ -396,14 +474,18 @@ func (c *Client) WaitForJobWithStreamingOutput(ctx context.Context, jobID string
 	}
 
 	listenDone := make(chan error, 1)
+	helpers.Add(1)
 	go func() {
+		defer helpers.Done()
 		listenDone <- wsClient.Listen(ctx)
 	}()
 
 	pollDone := make(chan *protocol.JobInfo, 1)
 	pollErr := make(chan error, 1)
 	interval := pollInterval
+	helpers.Add(1)
 	go func() {
+		defer helpers.Done()
 		c.backupPoll(ctx, jobID, interval,
 			serverLossBudget(c.maxRetries, c.serverLossTimeout), retryBudget(c.maxRetries),
 			pollDone, pollErr)
@@ -461,7 +543,9 @@ waitLoop:
 			}
 			nextListen := make(chan error, 1)
 			listenDone = nextListen
+			helpers.Add(1)
 			go func() {
+				defer helpers.Done()
 				nextListen <- wsClient.Listen(ctx)
 			}()
 		case <-ctx.Done():

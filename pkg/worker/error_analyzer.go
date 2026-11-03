@@ -252,11 +252,9 @@ func enhanceErrorMessage(message string, args []string, errorType FFmpegErrorTyp
 			}
 		}
 	case ErrorTypeEncoderNotFound:
-		// Try to identify which encoder was requested
-		for i, arg := range args {
-			if (arg == "-c:v" || arg == "-vcodec" || arg == "-codec:v") && i+1 < len(args) {
-				return message + " (requested encoder: " + args[i+1] + ")"
-			}
+		// Try to identify which encoder was requested.
+		if encoder := extractEncoderFromArgs(args); encoder != "" {
+			return message + " (requested encoder: " + encoder + ")"
 		}
 	case ErrorTypeDeviceNotFound:
 		// Try to identify device path

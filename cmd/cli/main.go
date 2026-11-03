@@ -153,7 +153,8 @@ func parseArgs(argList []string) (*Options, error) {
 			opts.AutoHW = true
 		case "--auto-hw=false", "-auto-hw=false":
 			opts.AutoHW = false
-		case "--timeout", "-timeout":
+
+		case "--timeout":
 			val, err := needValue(i, arg)
 			if err != nil {
 				return nil, err

@@ -61,7 +61,7 @@ func New(database *db.Database, store *storage.Storage, version string, stateTab
 		storage:          store,
 		version:          version,
 		wsHub:            websocket.NewHubWithSeqStore(database),
-		rateLimiter:      ratelimit.NewInMemoryCounter(),
+		rateLimiter:      rateLimiterWithTerminalHook(database),
 		stateTable:       stateTable,
 		maxJobsPerWorker: 1,
 	}
@@ -74,15 +74,36 @@ func NewWithHub(database *db.Database, store *storage.Storage, version string, h
 		storage:          store,
 		version:          version,
 		wsHub:            hub,
-		rateLimiter:      ratelimit.NewInMemoryCounter(),
+		rateLimiter:      rateLimiterWithTerminalHook(database),
 		stateTable:       stateTable,
 		maxJobsPerWorker: 1,
 	}
 }
 
+// rateLimiterWithTerminalHook builds the per-client counter and binds quota
+// release to the database's terminal notification, so a job that finishes on
+// any path (worker report, cancel, scheduler/monitor failure) frees its slot
+// exactly once and later submits from the same client are not 429'd.
+func rateLimiterWithTerminalHook(database *db.Database) *ratelimit.InMemoryCounter {
+	counter := ratelimit.NewInMemoryCounter()
+	bindQuotaRelease(database, counter)
+	return counter
+}
+
+// bindQuotaRelease routes every terminal job to the counter's per-job release.
+// DecrementByJob forgets the job mapping, so a repeated terminal write for the
+// same job releases at most one slot.
+func bindQuotaRelease(database *db.Database, counter ratelimit.ClientJobCounter) {
+	if database == nil {
+		return
+	}
+	database.SetTerminalHook(func(jobID string) { counter.DecrementByJob(jobID) })
+}
+
 // SetRateLimiter sets the rate limiter counter (used when a custom counter is needed).
 func (h *Handler) SetRateLimiter(counter ratelimit.ClientJobCounter) {
 	h.rateLimiter = counter
+	bindQuotaRelease(h.db, counter)
 }
 
 // GetRateLimiter returns the rate limiter counter.

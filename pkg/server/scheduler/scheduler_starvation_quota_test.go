@@ -45,7 +45,9 @@ func TestSchedulerNoWorkerStarvationReleasesQuotaAndBroadcasts(t *testing.T) {
 
 	counter := ratelimit.NewInMemoryCounter()
 	broadcaster := &fakeBroadcaster{}
-	s.SetRateLimiter(counter)
+	// Production binds quota release to the database terminal hook; the
+	// starvation sweep must therefore release both slots through NotifyTerminal.
+	database.SetTerminalHook(func(jobID string) { counter.DecrementByJob(jobID) })
 	s.SetJobNotifier(broadcaster)
 
 	// Register two starved jobs against client-1 (limit 2 so both fit).

@@ -2436,7 +2436,8 @@ func TestGiveUpBudget(t *testing.T) {
 // disconnectedJobClient is a jobWaitClient whose wait methods report that the
 // client gave up waiting for the submitted job.
 type disconnectedJobClient struct {
-	jobID string
+	jobID     string
+	cancelled bool
 }
 
 func (d *disconnectedJobClient) GetJob(jobID string) (*protocol.JobInfo, error) {
@@ -2451,7 +2452,10 @@ func (d *disconnectedJobClient) WaitForJobWithStreamingOutput(ctx context.Contex
 	return nil, &client.RetriesExhaustedError{JobID: d.jobID, Cause: errors.New("boom")}
 }
 
-func (d *disconnectedJobClient) CancelJob(jobID string) error { return nil }
+func (d *disconnectedJobClient) CancelJob(jobID string) error {
+	d.cancelled = true
+	return nil
+}
 
 // TestWaitForJobLoop_RetriesExhausted maps a RetriesExhaustedError to
 // ExitDisconnected — the job was submitted but the client gave up waiting for
@@ -2470,6 +2474,9 @@ func TestWaitForJobLoop_RetriesExhausted(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "GET /api/v1/jobs/job-lost") {
 		t.Errorf("stderr = %q, want final-status query hint", stderr)
+	}
+	if fake.cancelled {
+		t.Error("waitForJobLoop cancelled a job the client gave up waiting for; it must keep running server-side")
 	}
 }
 
