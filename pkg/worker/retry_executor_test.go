@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -882,5 +884,92 @@ func TestExecuteWithRetry_CopyNeverRewritten(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// finalFallbackStaleOutputExecutor emulates the two ffmpeg behaviours this
+// path meets: a hardware attempt creates the output file and then fails to
+// open its device, and a software attempt runs under native no -y semantics,
+// which refuses to overwrite an existing output.
+type finalFallbackStaleOutputExecutor struct {
+	outputPath   string
+	staleSeen    bool
+	fallbackCall int
+}
+
+func (f *finalFallbackStaleOutputExecutor) Execute(ctx context.Context, args []string) ExecResult {
+	return f.ExecuteWithHandlers(ctx, args, nil, nil)
+}
+
+func (f *finalFallbackStaleOutputExecutor) ExecuteWithHandlers(ctx context.Context, args []string, stdoutHandler StdoutHandler, stderrHandler StderrHandler) ExecResult {
+	if encoder := extractEncoderFromArgsWithCaps(args, nil); encoder != "libx264" {
+		if err := os.WriteFile(f.outputPath, nil, 0o644); err != nil {
+			return ExecResult{ExitCode: 1, Error: err}
+		}
+		return ExecResult{
+			ExitCode: 1,
+			Stderr:   "Cannot open device /dev/video0: No such file or directory\n",
+			Error:    fmt.Errorf("ffmpeg exited with code 1"),
+		}
+	}
+
+	f.fallbackCall++
+	if _, err := os.Stat(f.outputPath); err == nil {
+		f.staleSeen = true
+		return ExecResult{
+			ExitCode: 1,
+			Stderr:   "File '" + f.outputPath + "' already exists. Overwrite? [y/N] Not overwriting - exiting\n",
+			Error:    fmt.Errorf("ffmpeg exited with code 1"),
+		}
+	}
+	if err := os.WriteFile(f.outputPath, []byte("transcoded"), 0o644); err != nil {
+		return ExecResult{ExitCode: 1, Error: err}
+	}
+	return ExecResult{ExitCode: 0}
+}
+
+// TestExecuteWithRetry_FinalFallbackClearsStaleOutput locks the fix: the final
+// software fallback is a fresh ffmpeg process and must clear the output the
+// previous failed attempt left behind, exactly like a retry attempt. Without
+// it, ffmpeg's no -y refusal turns an available same-family software encoder
+// into a hard failure.
+func TestExecuteWithRetry_FinalFallbackClearsStaleOutput(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "out.mp4")
+	exec := &finalFallbackStaleOutputExecutor{outputPath: outputPath}
+	re := &RetryExecutor{
+		executor:    exec,
+		interceptor: NewErrorInterceptor(),
+		pruner:      NewParamPruner(),
+		config: &RetryConfig{
+			MaxRetries:             1,
+			InitialInterval:        0,
+			EnableSoftwareFallback: true,
+		},
+		fallback: NewEncoderFallback(),
+	}
+
+	args := []string{"-i", "in.mp4", "-c:v", "h264_v4l2m2m", outputPath}
+	result := re.ExecuteWithRetry(context.Background(), args, outputPath, false, nil, nil, nil)
+
+	if exec.fallbackCall != 1 {
+		t.Fatalf("final software fallback attempted %d times, want 1", exec.fallbackCall)
+	}
+	if exec.staleSeen {
+		t.Fatal("final software fallback started with the stale output still present")
+	}
+	if !result.Success {
+		t.Fatalf("expected final software fallback to succeed: stage=%s attempts=%d",
+			result.FinalStage, result.TotalAttempts)
+	}
+	if result.FinalStage != RetryStageSoftwareFallback || result.FinalEncoder != "libx264" {
+		t.Errorf("final stage/encoder = %s/%s, want %s/libx264",
+			result.FinalStage, result.FinalEncoder, RetryStageSoftwareFallback)
+	}
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatalf("stat fallback output: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("fallback output is empty")
 	}
 }
