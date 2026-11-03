@@ -142,6 +142,16 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 		Warnings:      make([]string, 0),
 	}
 
+	// No video output: leave the user's arguments untouched. Injecting a video
+	// encoder (-c:v) or video parameters would conflict with -vn and break
+	// audio extraction and other non-video jobs. Inline "=" encoder options are
+	// invalid ffmpeg syntax: they are not a selection and must not trigger
+	// auto-selection, so the command is left for ffmpeg to reject.
+	if HasNoVideoOutput(req.OriginalArgs) || HasInlineVideoEncoderSyntax(req.OriginalArgs) {
+		response.RewrittenArgs = req.OriginalArgs
+		return response, nil
+	}
+
 	// Step 1: Classify the scenario
 	scenario, err := e.classifier.Classify(ctx, req)
 	if err != nil {
@@ -317,8 +327,13 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 			response.Warnings = append(response.Warnings, fmt.Sprintf("Hardware injection warning: %v", err))
 		}
 		if injectionResult != nil {
-			// Merge injected params
+			// Merge injected params. A parameter the user already supplied
+			// stays as-is: hardware injection must not override an explicit
+			// user value of the same name.
 			for k, v := range injectionResult.InjectedParams {
+				if _, exists := translatedParams[k]; exists {
+					continue
+				}
 				translatedParams[k] = v
 			}
 
@@ -328,7 +343,7 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 	}
 
 	// Step 5: Build rewritten arguments
-	response.RewrittenArgs = e.buildRewrittenArgs(req.OriginalArgs, targetEncoder, translatedParams, paramsToFilter, sameNameConverted)
+	response.RewrittenArgs = e.buildRewrittenArgs(req.OriginalArgs, targetEncoder, translatedParams, paramsToFilter, sameNameConverted, &req.HardwareCapabilities)
 
 	// Step 6: Generate notifications
 	// Notification message formats:
@@ -494,7 +509,13 @@ func isGlobalInitParam(paramName string) bool {
 // from the args (these were translated to different parameter names).
 // sameNameConverted maps parameters that kept their name but had their value
 // converted by a translation rule (e.g., x264 "preset fast" -> NVENC "p5").
-func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEncoder encoder.EncoderFamily, params map[string]string, paramsToFilter map[string]string, sameNameConverted map[string]string) []string {
+func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEncoder encoder.EncoderFamily, params map[string]string, paramsToFilter map[string]string, sameNameConverted map[string]string, hwCaps *HardwareCapabilities) []string {
+	// No video output or an inline "=" encoder option: never select, replace,
+	// or inject a video encoder.
+	if HasNoVideoOutput(originalArgs) || HasInlineVideoEncoderSyntax(originalArgs) {
+		return originalArgs
+	}
+
 	result := make([]string, 0, len(originalArgs)+len(params)+2)
 
 	// Collect global initialization args (init_hw_device, hwaccel, etc.)
@@ -519,8 +540,14 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 	// Prepend global init args at the very beginning (before everything)
 	result = append(result, globalInitArgs...)
 
-	// Track if we've added the encoder
-	encoderAdded := false
+	// Encoder selections found in the original args, keyed by token index.
+	encoderFlags := ParseVideoEncoderFlags(originalArgs, hwCaps)
+	encoderFlagAt := make(map[int]VideoEncoderFlag, len(encoderFlags))
+	for _, flag := range encoderFlags {
+		encoderFlagAt[flag.Index] = flag
+	}
+	primaryEncoder, hasPrimaryEncoder := PrimaryVideoEncoderFlag(encoderFlags)
+
 	// Track encoder params we've seen (including global params we already handled)
 	seenParams := make(map[string]bool)
 	for paramName := range params {
@@ -532,11 +559,36 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 	for paramName := range existingGlobalParams {
 		seenParams[paramName] = true
 	}
+	// Never re-emit a video codec param from the params map at the tail (a
+	// leaked "c:v"/"codec:v"/"vcodec" key would silently re-add the original
+	// encoder after the rewritten one).
+	markCodecParamSeen := func(name string) {
+		seenParams[name] = true
+		if idx := strings.IndexByte(name, ':'); idx >= 0 {
+			seenParams[name[:idx]] = true
+		}
+	}
+	for _, name := range []string{"c", "codec", "c:v", "codec:v", "vcodec"} {
+		markCodecParamSeen(name)
+	}
+	for _, flag := range encoderFlags {
+		markCodecParamSeen(flag.Name)
+	}
 
 	skipNext := false
+	passthrough := false
 	for i, arg := range originalArgs {
 		if skipNext {
 			skipNext = false
+			continue
+		}
+		if passthrough {
+			result = append(result, arg)
+			continue
+		}
+		if arg == "--" {
+			passthrough = true
+			result = append(result, arg)
 			continue
 		}
 
@@ -547,27 +599,24 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 			continue
 		}
 
-		// Handle encoder specification (-c:v, -codec:v, -vcodec), both the
-		// separate ("-c:v libx264") and inline ("-c:v=libx264") forms. The
-		// inline form carries its own value, so only the separate form
-		// consumes the next argument.
-		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" ||
-			strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
-			if !strings.Contains(arg, "=") {
-				// Separate form: skip both the flag and its value.
-				skipNext = true
+		// Handle every video encoder spelling: -c:v / -codec:v (with an
+		// optional stream specifier), -vcodec, and the general -c / -codec
+		// when it names a video encoder. Only the primary selection is
+		// rewritten: it is the last explicit declaration, so earlier
+		// same-specifier declarations are inert under ffmpeg's later-wins
+		// rule. Every other selection — including a general "-c copy" — is
+		// kept verbatim.
+		if flag, ok := encoderFlagAt[i]; ok {
+			rewritePrimary := hasPrimaryEncoder &&
+				flag.Index == primaryEncoder.Index &&
+				primaryEncoder.Value != string(targetEncoder) &&
+				primaryEncoder.Value != "copy"
+			if rewritePrimary {
+				result = append(result, flag.RewrittenTokens(targetEncoder)...)
+			} else {
+				result = append(result, arg, originalArgs[i+1])
 			}
-			if !encoderAdded {
-				result = append(result, "-c:v", string(targetEncoder))
-				encoderAdded = true
-			}
-			// The encoder is fully handled here; never re-emit a video
-			// codec param from the params map at the tail (a leaked
-			// "c:v"/"codec:v"/"vcodec" key would silently re-add the
-			// original encoder after the rewritten one).
-			seenParams["c:v"] = true
-			seenParams["codec:v"] = true
-			seenParams["vcodec"] = true
+			skipNext = true
 			continue
 		}
 
@@ -657,7 +706,7 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 	// file.  If we append -c:v after the output path, there is no next file
 	// and FFmpeg falls back to its default encoder (e.g. libx264).  We must
 	// insert -c:v BEFORE the output path for it to take effect.
-	if !encoderAdded {
+	if !hasPrimaryEncoder {
 		result = insertBeforeOutputPath(result, []string{"-c:v", string(targetEncoder)})
 	}
 
@@ -757,10 +806,10 @@ func (e *EngineCoordinator) RewriteSync(ctx context.Context, originalArgs []stri
 	}
 
 	// Parse encoder from args
-	req.SpecifiedEncoder = e.parseEncoderFromArgs(originalArgs)
+	req.SpecifiedEncoder = e.parseEncoderFromArgs(originalArgs, hwCaps)
 
 	// Parse encoder params from args
-	req.EncoderParams = e.parseEncoderParamsFromArgs(originalArgs)
+	req.EncoderParams = e.parseEncoderParamsFromArgs(originalArgs, hwCaps)
 
 	response, err := e.Rewrite(ctx, req)
 	if err != nil {
@@ -775,41 +824,35 @@ func (e *EngineCoordinator) RewriteSync(ctx context.Context, originalArgs []stri
 }
 
 // parseEncoderFromArgs extracts the specified encoder from FFmpeg arguments.
-func (e *EngineCoordinator) parseEncoderFromArgs(args []string) encoder.EncoderFamily {
-	for i, arg := range args {
-		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
-			if i+1 < len(args) {
-				return encoder.EncoderFamily(args[i+1])
-			}
-		}
-		// Inline forms: -c:v=libx264, -codec:v=copy, -vcodec=h264_qsv.
-		switch {
-		case strings.HasPrefix(arg, "-c:v="):
-			return encoder.EncoderFamily(arg[5:])
-		case strings.HasPrefix(arg, "-codec:v="):
-			return encoder.EncoderFamily(arg[9:])
-		case strings.HasPrefix(arg, "-vcodec="):
-			return encoder.EncoderFamily(arg[8:])
-		}
+func (e *EngineCoordinator) parseEncoderFromArgs(args []string, hwCaps *HardwareCapabilities) encoder.EncoderFamily {
+	flags := ParseVideoEncoderFlags(args, hwCaps)
+	flag, ok := PrimaryVideoEncoderFlag(flags)
+	if !ok {
+		return ""
 	}
-	return ""
+	return encoder.EncoderFamily(flag.Value)
 }
 
 // parseEncoderParamsFromArgs extracts encoder parameters from FFmpeg arguments.
-func (e *EngineCoordinator) parseEncoderParamsFromArgs(args []string) map[string]string {
+func (e *EngineCoordinator) parseEncoderParamsFromArgs(args []string, hwCaps *HardwareCapabilities) map[string]string {
 	params := make(map[string]string)
+
+	// Encoder selections are handled by the rewrite, never as parameters.
+	encoderArgs := make(map[int]bool)
+	for _, flag := range ParseVideoEncoderFlags(args, hwCaps) {
+		encoderArgs[flag.Index] = true
+		encoderArgs[flag.Index+1] = true
+	}
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Skip encoder specification (separate form consumes its value)
-		if arg == "-c:v" || arg == "-codec:v" || arg == "-vcodec" {
-			i++ // Skip value too
+		if arg == "--" {
+			break
+		}
+		if encoderArgs[i] {
 			continue
 		}
-
-		// Skip inline encoder forms (-c:v=, -codec:v=, -vcodec=).
-		if strings.HasPrefix(arg, "-c:v=") || strings.HasPrefix(arg, "-codec:v=") || strings.HasPrefix(arg, "-vcodec=") {
+		if HasInlineVideoEncoderSyntax(args[i : i+1]) {
 			continue
 		}
 

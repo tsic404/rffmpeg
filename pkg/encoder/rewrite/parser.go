@@ -5,7 +5,6 @@ package rewrite
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/tsic404/rffmpeg/pkg/encoder"
 )
@@ -29,28 +28,15 @@ func (p *FFmpegParser) ParseArgs(args []string) (encoder.EncoderFamily, encoder.
 	var targetCodec encoder.CodecFormat
 	encoderParams := make(map[string]string)
 
-	// Simple parsing: look for -c:v, -codec:v, -vcodec
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-
-		switch arg {
-		case "-c:v", "-codec:v", "-vcodec":
-			if i+1 < len(args) {
-				encoderName := args[i+1]
-				enc := encoder.EncoderFamily(encoderName)
-				// Validate it's a known encoder
-				if enc.CodecFormat() != "" {
-					detectedEncoder = enc
-					targetCodec = enc.CodecFormat()
-				}
-				i++ // Skip next arg since we consumed it
-			}
-		default:
-			// Try to detect encoder from other patterns
-			if enc := p.detectEncoderFromArg(arg); enc != "" {
-				detectedEncoder = enc
-				targetCodec = enc.CodecFormat()
-			}
+	// Only flags select an encoder: the general -c / -codec counts when its
+	// value is a known video encoder, explicit video flags always do.
+	flag, ok := PrimaryVideoEncoderFlag(ParseVideoEncoderFlags(args, nil))
+	if ok {
+		enc := encoder.EncoderFamily(flag.Value)
+		// Validate it's a known encoder
+		if enc.CodecFormat() != "" {
+			detectedEncoder = enc
+			targetCodec = enc.CodecFormat()
 		}
 	}
 
@@ -59,51 +45,6 @@ func (p *FFmpegParser) ParseArgs(args []string) (encoder.EncoderFamily, encoder.
 	// For now, we'll return empty params
 
 	return detectedEncoder, targetCodec, encoderParams, nil
-}
-
-// detectEncoderFromArg tries to detect an encoder from a command-line argument.
-func (p *FFmpegParser) detectEncoderFromArg(arg string) encoder.EncoderFamily {
-	// Check if argument contains an encoder name
-	for _, enc := range allEncoders() {
-		if strings.Contains(arg, string(enc)) {
-			return enc
-		}
-	}
-	return ""
-}
-
-// allEncoders returns a list of all known encoder families.
-func allEncoders() []encoder.EncoderFamily {
-	return []encoder.EncoderFamily{
-		// H.264 encoders
-		encoder.EncoderLibX264,
-		encoder.EncoderH264NVENC,
-		encoder.EncoderH264QSV,
-		encoder.EncoderH264VAAPI,
-		encoder.EncoderH264AMF,
-		encoder.EncoderH264VT,
-
-		// HEVC encoders
-		encoder.EncoderLibX265,
-		encoder.EncoderHEVCNVENC,
-		encoder.EncoderHEVCQSV,
-		encoder.EncoderHEVCVAAPI,
-		encoder.EncoderHEVCAMF,
-		encoder.EncoderHEVCVT,
-
-		// VP9 encoders
-		encoder.EncoderLibVPX,
-		encoder.EncoderVP9NVENC,
-		encoder.EncoderVP9QSV,
-		encoder.EncoderVP9VAAPI,
-
-		// AV1 encoders
-		encoder.EncoderLibSVTAV1,
-		encoder.EncoderLibAOM,
-		encoder.EncoderAV1NVENC,
-		encoder.EncoderAV1QSV,
-		encoder.EncoderAV1VAAPI,
-	}
 }
 
 // CreateEncoderRewriteRequest creates an EncoderRewriteRequest from FFmpeg arguments

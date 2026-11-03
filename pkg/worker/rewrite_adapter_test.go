@@ -126,19 +126,13 @@ func TestRewriteAdapter_RewriteArgs(t *testing.T) {
 	}
 }
 
-// TestRewriteAdapter_RewriteArgs_InlineCodecForm is a regression for the
-// inline encoder form: a `-c:v=`/`-codec:v=`/`-vcodec=` token must be
-// stripped during rewrite, not left behind to collide with the inserted
-// `-c:v <target>` (ffmpeg then fails with rc=234/8). Asserting the absence
-// of any residual codec flag — not just the inline token — also catches the
-// failure mode where the original encoder leaks back as a separate
-// "-codec:v <value>" pair, silently overriding the rewrite. Exact full-args
-// equality is not used because hardware-injected params have map-ordering
-// that is non-deterministic across runs.
+// TestRewriteAdapter_RewriteArgs_InlineCodecForm pins the design rule for
+// "=" joined encoder options: ffmpeg rejects that syntax, so it is not a
+// selection and must not trigger auto-selection. The command passes through
+// verbatim and ffmpeg reports the error.
 func TestRewriteAdapter_RewriteArgs_InlineCodecForm(t *testing.T) {
 	adapter := NewRewriteAdapter()
-
-	caps := &protocol.WorkerCapabilities{
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
 		VideoEncoders: []protocol.EncoderInfo{
 			{Name: "h264_nvenc", Type: "video", IsHW: true},
 			{Name: "libx264", Type: "video", IsHW: false},
@@ -146,53 +140,28 @@ func TestRewriteAdapter_RewriteArgs_InlineCodecForm(t *testing.T) {
 		GPUDevices: []protocol.GPUDeviceInfo{
 			{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
 		},
-	}
-	adapter.SetHardwareCapabilities(caps)
+	})
 
-	tests := []struct {
-		name            string
-		args            []string
-		originalEncoder string
-	}{
-		{
-			name:            "inline -vcodec=libx264 is stripped on HW upgrade",
-			args:            []string{"-i", "input.mp4", "-vcodec=libx264", "output.mp4"},
-			originalEncoder: "libx264",
-		},
-		{
-			name:            "inline -codec:v=libx264 is stripped on HW upgrade",
-			args:            []string{"-i", "input.mp4", "-codec:v=libx264", "output.mp4"},
-			originalEncoder: "libx264",
-		},
-		{
-			name:            "inline -c:v=libx264 is stripped on HW upgrade",
-			args:            []string{"-i", "input.mp4", "-c:v=libx264", "output.mp4"},
-			originalEncoder: "libx264",
-		},
+	forms := [][]string{
+		{"-i", "input.mp4", "-vcodec=libx264", "output.mp4"},
+		{"-i", "input.mp4", "-codec:v=libx264", "output.mp4"},
+		{"-i", "input.mp4", "-c:v=libx264", "output.mp4"},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rewritten, _, err := adapter.RewriteArgs(context.Background(), tt.args, true)
+	for _, args := range forms {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			rewritten, result, err := adapter.RewriteArgs(context.Background(), args, true)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-
-			if !slices.Contains(rewritten, "-c:v") || !slices.Contains(rewritten, "h264_nvenc") {
-				t.Fatalf("expected target -c:v h264_nvenc in %v", rewritten)
+			if !slices.Equal(rewritten, args) {
+				t.Errorf("= form must pass through verbatim: got %v, want %v", rewritten, args)
 			}
-
+			if result.Performed {
+				t.Errorf("= form must not be rewritten: %+v", result)
+			}
 			for _, arg := range rewritten {
-				if arg == tt.originalEncoder {
-					t.Errorf("original encoder value %q leaked into args: %v", arg, rewritten)
-				}
-				switch {
-				case strings.HasPrefix(arg, "-codec:v"):
-					t.Errorf("residual -codec:v flag %q in args: %v", arg, rewritten)
-				case strings.HasPrefix(arg, "-vcodec"):
-					t.Errorf("residual -vcodec flag %q in args: %v", arg, rewritten)
-				case strings.HasPrefix(arg, "-c:v="):
-					t.Errorf("residual inline -c:v= flag %q in args: %v", arg, rewritten)
+				if arg == "h264_nvenc" {
+					t.Errorf("auto-selection ran on invalid = syntax: %v", rewritten)
 				}
 			}
 		})
@@ -282,19 +251,19 @@ func TestRewriteAdapter_ParseEncoderFromArgs(t *testing.T) {
 			expectedResult: encoder.EncoderH264QSV,
 		},
 		{
-			name:           "-c:v= syntax",
+			name:           "-c:v= syntax is not a selection",
 			args:           []string{"-i", "input.mp4", "-c:v=libx265", "output.mp4"},
-			expectedResult: encoder.EncoderLibX265,
+			expectedResult: "",
 		},
 		{
-			name:           "-codec:v= inline syntax",
+			name:           "-codec:v= inline syntax is not a selection",
 			args:           []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
-			expectedResult: encoder.EncoderH264NVENC,
+			expectedResult: "",
 		},
 		{
-			name:           "-vcodec= inline syntax",
+			name:           "-vcodec= inline syntax is not a selection",
 			args:           []string{"-i", "input.mp4", "-vcodec=hevc_nvenc", "output.mp4"},
-			expectedResult: encoder.EncoderHEVCNVENC,
+			expectedResult: "",
 		},
 		{
 			name:           "bare -c copy",
@@ -307,14 +276,14 @@ func TestRewriteAdapter_ParseEncoderFromArgs(t *testing.T) {
 			expectedResult: encoder.EncoderFamily("copy"),
 		},
 		{
-			name:           "bare -c=copy inline",
+			name:           "bare -c=copy inline is not a selection",
 			args:           []string{"-i", "input.mp4", "-c=copy", "output.mp4"},
-			expectedResult: encoder.EncoderFamily("copy"),
+			expectedResult: "",
 		},
 		{
-			name:           "bare -codec=copy inline",
+			name:           "bare -codec=copy inline is not a selection",
 			args:           []string{"-i", "input.mp4", "-codec=copy", "output.mp4"},
-			expectedResult: encoder.EncoderFamily("copy"),
+			expectedResult: "",
 		},
 		{
 			name:           "video-specific overrides general -c copy",
@@ -322,14 +291,14 @@ func TestRewriteAdapter_ParseEncoderFromArgs(t *testing.T) {
 			expectedResult: encoder.EncoderH264QSV,
 		},
 		{
-			name:           "inline -codec:v= overrides general -c copy",
+			name:           "inline -codec:v= does not override general -c copy",
 			args:           []string{"-i", "input.mp4", "-c", "copy", "-codec:v=h264_qsv", "output.mp4"},
-			expectedResult: encoder.EncoderH264QSV,
+			expectedResult: encoder.EncoderFamily("copy"),
 		},
 		{
-			name:           "inline -vcodec= overrides general -c copy",
+			name:           "inline -vcodec= does not override general -c copy",
 			args:           []string{"-i", "input.mp4", "-c", "copy", "-vcodec=h264_qsv", "output.mp4"},
-			expectedResult: encoder.EncoderH264QSV,
+			expectedResult: encoder.EncoderFamily("copy"),
 		},
 		{
 			name:           "bare -c non-copy codec left to auto-selection",
@@ -350,7 +319,7 @@ func TestRewriteAdapter_ParseEncoderFromArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := adapter.parseEncoderFromArgs(tt.args)
+			result := adapter.parseEncoderFromArgs(tt.args, nil)
 			if result != tt.expectedResult {
 				t.Errorf("expected %s, got %s", tt.expectedResult, result)
 			}
@@ -509,54 +478,27 @@ func TestRewriteAdapter_FallbackToSoftware(t *testing.T) {
 	}
 }
 
-// TestRewriteAdapter_FallbackToSoftware_InlineCodecForm is a regression for
-// the inline encoder form in the fallback path: a `-c:v=`/`-codec:v=`/
-// `-vcodec=` token must be replaced by the software encoder, not left behind
-// (which would leave ffmpeg with the residual token plus the appended sw
-// encoder, i.e. rc=234/8). extractEncoderFromArgs re-parses the result so
-// the original encoder leaking through is detected as a non-`libx264` value.
+// TestRewriteAdapter_FallbackToSoftware_InlineCodecForm pins that the
+// fallback helper itself leaves "=" joined encoder options untouched: they are
+// not selections and must not be replaced by a software encoder.
 func TestRewriteAdapter_FallbackToSoftware_InlineCodecForm(t *testing.T) {
 	adapter := NewRewriteAdapter()
 	hwCaps := &rewrite.HardwareCapabilities{
 		SoftwareEncoders: []encoder.EncoderFamily{encoder.EncoderLibX264},
 	}
 
-	tests := []struct {
-		name            string
-		args            []string
-		originalEncoder string
-	}{
-		{
-			name:            "inline -codec:v= replaced on fallback",
-			args:            []string{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
-			originalEncoder: "h264_nvenc",
-		},
-		{
-			name:            "inline -vcodec= replaced on fallback",
-			args:            []string{"-i", "input.mp4", "-vcodec=h264_nvenc", "output.mp4"},
-			originalEncoder: "h264_nvenc",
-		},
-		{
-			name:            "inline -c:v= replaced on fallback",
-			args:            []string{"-i", "input.mp4", "-c:v=h264_nvenc", "output.mp4"},
-			originalEncoder: "h264_nvenc",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := adapter.fallbackToSoftware(context.Background(), tt.args, hwCaps)
+	for _, args := range [][]string{
+		{"-i", "input.mp4", "-codec:v=h264_nvenc", "output.mp4"},
+		{"-i", "input.mp4", "-vcodec=h264_nvenc", "output.mp4"},
+		{"-i", "input.mp4", "-c:v=h264_nvenc", "output.mp4"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			result, err := adapter.fallbackToSoftware(context.Background(), args, hwCaps)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got := extractEncoderFromArgs(result); got != string(encoder.EncoderLibX264) {
-				t.Errorf("fallback encoder = %q, want %q (args: %v)", got, encoder.EncoderLibX264, result)
-			}
-			for _, arg := range result {
-				if strings.Contains(arg, tt.originalEncoder) {
-					t.Errorf("original encoder %q leaked into fallback args: %q (args: %v)",
-						tt.originalEncoder, arg, result)
-				}
+			if !slices.Equal(result, args) {
+				t.Errorf("fallback must leave = syntax unchanged: got %v, want %v", result, args)
 			}
 		})
 	}
@@ -721,7 +663,7 @@ func TestRewriteAdapter_ParseEncoderParamsFromArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := adapter.parseEncoderParamsFromArgs(tt.args)
+			result := adapter.parseEncoderParamsFromArgs(tt.args, nil)
 			if len(result) != len(tt.expectedParams) {
 				t.Errorf("expected %d params, got %d: %v", len(tt.expectedParams), len(result), result)
 				return
@@ -1106,5 +1048,285 @@ func TestRewriteChainLineStaysBoundedForFullFFmpegBuild(t *testing.T) {
 	// all 131 entries produced a line over 1 KB, i.e. several terminal screens.
 	if len(line) > 512 {
 		t.Errorf("rewrite chain line too long (%d bytes): %q", len(line), line)
+	}
+}
+
+// TestRewriteAdapter_ExplicitEncoderSpellings covers every ffmpeg spelling of
+// a video encoder selection: an available explicit encoder must survive
+// verbatim and must never gain a second -c:v from the rewrite.
+func TestRewriteAdapter_ExplicitEncoderSpellings(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+			{Name: "libvpx-vp9", Type: "video"},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+		},
+	})
+
+	forms := []struct {
+		name string
+		args []string
+	}{
+		{name: "generic -c", args: []string{"-i", "in.mp4", "-c", "libvpx-vp9", "out.webm"}},
+		{name: "stream specifier -c:v:0", args: []string{"-i", "in.mp4", "-c:v:0", "libvpx-vp9", "out.webm"}},
+		{name: "stream specifier -codec:v:0", args: []string{"-i", "in.mp4", "-codec:v:0", "libvpx-vp9", "out.webm"}},
+		{name: "inline stream specifier -c:v:0=", args: []string{"-i", "in.mp4", "-c:v:0=libvpx-vp9", "out.webm"}},
+		{name: "inline -codec:v=", args: []string{"-i", "in.mp4", "-codec:v=libvpx-vp9", "out.webm"}},
+	}
+
+	for _, tt := range forms {
+		t.Run(tt.name, func(t *testing.T) {
+			rewritten, result, err := adapter.RewriteArgs(context.Background(), tt.args, false)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !slices.Equal(rewritten, tt.args) {
+				t.Errorf("available encoder must pass through verbatim: got %v, want %v", rewritten, tt.args)
+			}
+			if result.Performed {
+				t.Errorf("pass-through must not report a rewrite: %+v", result)
+			}
+			if slices.Contains(rewritten, "-c:v") {
+				t.Errorf("must not append -c:v over the user's encoder: %v", rewritten)
+			}
+			if !strings.Contains(strings.Join(rewritten, " "), "libvpx-vp9") {
+				t.Errorf("user encoder must survive: %v", rewritten)
+			}
+		})
+	}
+}
+
+// TestRewriteAdapter_EncoderSpellingFallback verifies that the unrecognized
+// spellings reach the same-family fallback path instead of being treated as
+// "no encoder" and overridden with a cross-family target.
+func TestRewriteAdapter_EncoderSpellingFallback(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+			{Name: "vp9_qsv", Type: "video", IsHW: true},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+		},
+	})
+
+	forms := [][]string{
+		{"-i", "in.mp4", "-c", "libvpx-vp9", "out.webm"},
+		{"-i", "in.mp4", "-c:v:0", "libvpx-vp9", "out.webm"},
+		{"-i", "in.mp4", "-codec:v", "libvpx-vp9", "out.webm"},
+	}
+
+	for _, args := range forms {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			rewritten, result, err := adapter.RewriteArgs(context.Background(), args, false)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.TargetEncoder != "vp9_qsv" {
+				t.Errorf("target encoder = %q, want vp9_qsv (same family)", result.TargetEncoder)
+			}
+			if !slices.Contains(rewritten, "vp9_qsv") {
+				t.Errorf("expected fallback encoder in %v", rewritten)
+			}
+			if slices.Contains(rewritten, "h264_nvenc") || slices.Contains(rewritten, "libvpx-vp9") {
+				t.Errorf("user/other-family encoder must not survive: %v", rewritten)
+			}
+			var notified bool
+			for _, msg := range result.Notifications {
+				if strings.Contains(msg, "libvpx-vp9 unavailable, fallback to vp9_qsv") {
+					notified = true
+				}
+			}
+			if !notified {
+				t.Errorf("notification must name the user's encoder: %v", result.Notifications)
+			}
+		})
+	}
+}
+
+// TestRewriteAdapter_ParamFateNamesUserParams pins the parameter destination
+// line for an unrecognized encoder spelling: the user's crf mapping must be
+// reported, and hardware injection must not appear as a user parameter.
+func TestRewriteAdapter_ParamFateNamesUserParams(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "vp9_qsv", Type: "video", IsHW: true},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "qsv", Vendor: "Intel", Accessible: true, QSVHealthy: true},
+		},
+	})
+
+	args := []string{"-i", "in.mp4", "-c:v:0", "libvpx-vp9", "-crf", "23", "out.webm"}
+	rewritten, result, err := adapter.RewriteArgs(context.Background(), args, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Contains(rewritten, "vp9_qsv") {
+		t.Fatalf("expected vp9_qsv fallback in %v", rewritten)
+	}
+	var fate string
+	for _, msg := range result.Notifications {
+		if strings.Contains(msg, " params: ") {
+			fate = msg
+		}
+	}
+	if !strings.Contains(fate, "-crf 23 → -global_quality 23") {
+		t.Errorf("parameter fate line missing crf mapping: %v", result.Notifications)
+	}
+	for _, injected := range []string{"-init_hw_device", "-qsv_device", "-async_depth"} {
+		if strings.Contains(fate, injected) {
+			t.Errorf("hardware injection %q must not be reported as a user parameter: %q", injected, fate)
+		}
+	}
+}
+
+// TestRewriteAdapter_InjectionDoesNotOverrideUserParam is the C-73 guard: a
+// hardware parameter injected by the target encoder must not replace the same
+// parameter the user supplied.
+func TestRewriteAdapter_InjectionDoesNotOverrideUserParam(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+			{Name: "libx264", Type: "video"},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "nvenc", Vendor: "NVIDIA", Path: "0", Accessible: true},
+		},
+	})
+
+	args := []string{"-i", "in.mp4", "-c:v", "libx264", "-gpu", "3", "out.mp4"}
+	rewritten, _, err := adapter.RewriteArgs(context.Background(), args, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Contains(rewritten, "h264_nvenc") {
+		t.Fatalf("expected h264_nvenc upgrade in %v", rewritten)
+	}
+	for i := 0; i+1 < len(rewritten); i++ {
+		if rewritten[i] != "-gpu" {
+			continue
+		}
+		if rewritten[i+1] != "3" {
+			t.Errorf("injected -gpu %q overrode the user's -gpu 3: %v", rewritten[i+1], rewritten)
+		}
+	}
+}
+
+// TestRewriteAdapter_CopySpellingsPassThrough covers stream-copy written with
+// a stream specifier: it must not be mistaken for "no encoder" and injected.
+func TestRewriteAdapter_CopySpellingsPassThrough(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "h264_nvenc", Type: "video", IsHW: true},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "nvenc", Vendor: "NVIDIA", Accessible: true},
+		},
+	})
+
+	forms := [][]string{
+		{"-i", "in.mp4", "-c:v:0", "copy", "out.mp4"},
+		{"-i", "in.mp4", "-codec:v:0", "copy", "out.mp4"},
+		{"-i", "in.mp4", "-c:v:0=copy", "out.mp4"},
+	}
+	for _, args := range forms {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			rewritten, _, err := adapter.RewriteArgs(context.Background(), args, true)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !slices.Equal(rewritten, args) {
+				t.Errorf("stream copy must pass through verbatim: got %v, want %v", rewritten, args)
+			}
+		})
+	}
+}
+
+// TestRewriteAdapter_DuplicateEncoderDeclaration covers repeated declarations
+// of the same video stream specifier: ffmpeg applies the last one, so the
+// fallback must replace the winning declaration instead of leaving a stale
+// earlier value in the argument list.
+func TestRewriteAdapter_DuplicateEncoderDeclaration(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "vp9_qsv", Type: "video", IsHW: true},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "qsv", Vendor: "Intel", Accessible: true, QSVHealthy: true},
+		},
+	})
+
+	args := []string{"-i", "in.mp4", "-c:v", "libvpx-vp9", "-c:v", "libvpx-vp9", "out.webm"}
+	rewritten, result, err := adapter.RewriteArgs(context.Background(), args, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.TargetEncoder != "vp9_qsv" {
+		t.Errorf("target encoder = %q, want vp9_qsv", result.TargetEncoder)
+	}
+	var encoderValues []string
+	for i, arg := range rewritten {
+		if arg == "-c:v" && i+1 < len(rewritten) {
+			encoderValues = append(encoderValues, rewritten[i+1])
+		}
+	}
+	if len(encoderValues) == 0 {
+		t.Fatalf("no video encoder declaration in %v", rewritten)
+	}
+	if encoderValues[len(encoderValues)-1] != "vp9_qsv" {
+		t.Errorf("last video encoder declaration must be the fallback target, got %v in %v", encoderValues, rewritten)
+	}
+}
+
+// TestRewriteAdapter_CopyPreservedDuringEncoderRewrite exercises the engine
+// rewrite path (unlike the bare-copy passthrough test, which short-circuits)
+// with a general "-c copy" present: the copy directive must survive untouched
+// and only the explicit video declaration may be rewritten.
+func TestRewriteAdapter_CopyPreservedDuringEncoderRewrite(t *testing.T) {
+	adapter := NewRewriteAdapter()
+	adapter.SetHardwareCapabilities(&protocol.WorkerCapabilities{
+		VideoEncoders: []protocol.EncoderInfo{
+			{Name: "vp9_qsv", Type: "video", IsHW: true},
+		},
+		GPUDevices: []protocol.GPUDeviceInfo{
+			{Type: "qsv", Vendor: "Intel", Accessible: true, QSVHealthy: true},
+		},
+	})
+
+	forms := [][]string{
+		{"-i", "in.mp4", "-c", "copy", "-c:v", "libvpx-vp9", "out.mkv"},
+		{"-i", "in.mp4", "-c:v", "libvpx-vp9", "-c", "copy", "out.mkv"},
+	}
+	for _, args := range forms {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			rewritten, result, err := adapter.RewriteArgs(context.Background(), args, false)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.TargetEncoder != "vp9_qsv" {
+				t.Errorf("target encoder = %q, want vp9_qsv", result.TargetEncoder)
+			}
+			var copyPairs int
+			for i := 0; i+1 < len(rewritten); i++ {
+				if rewritten[i] == "-c" && rewritten[i+1] == "copy" {
+					copyPairs++
+				}
+			}
+			if copyPairs != 1 {
+				t.Errorf("-c copy must survive the rewrite, got %v", rewritten)
+			}
+			if slices.Contains(rewritten, "libvpx-vp9") {
+				t.Errorf("explicit encoder should be rewritten, got %v", rewritten)
+			}
+		})
 	}
 }

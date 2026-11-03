@@ -5,6 +5,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
+
+	"github.com/tsic404/rffmpeg/pkg/encoder"
+	"github.com/tsic404/rffmpeg/pkg/encoder/rewrite"
 )
 
 // EncoderFallback manages software encoder fallback logic.
@@ -21,6 +25,23 @@ type EncoderFallback struct {
 	// same codec family (e.g. libaom-av1 -> libsvtav1); cross-format transitions
 	// are rejected at read time by GetAlternativeSoftwareEncoder.
 	softwareFallbackChain map[string]string
+
+	// hwCaps carries the worker-reported encoder set so generic -c / -codec
+	// values that are ffmpeg-known but not built-in still count as a video
+	// selection, matching the rewrite adapter's parse口径. Registration may
+	// repeat while jobs run, so it is stored atomically.
+	hwCaps atomic.Pointer[rewrite.HardwareCapabilities]
+}
+
+// SetHardwareCapabilities records the worker-reported encoders used by the
+// video encoder parser. Re-registration may call it again while jobs run.
+func (f *EncoderFallback) SetHardwareCapabilities(caps *rewrite.HardwareCapabilities) {
+	f.hwCaps.Store(caps)
+}
+
+// hardwareCapabilities returns the current worker-reported encoder set.
+func (f *EncoderFallback) hardwareCapabilities() *rewrite.HardwareCapabilities {
+	return f.hwCaps.Load()
 }
 
 // NewEncoderFallback creates a new encoder fallback handler.
@@ -247,9 +268,11 @@ func (f *EncoderFallback) PrepareFallbackArgsWithSource(args []string, outputPat
 // prepareFallbackArgsWithSource is the internal implementation.
 // isFallback means the current encoder was a system-chosen fallback, not user-selected.
 func (f *EncoderFallback) prepareFallbackArgsWithSource(args []string, outputPath string, isFallback bool) []string {
-	// Find the current encoder
-	currentEncoder := extractEncoderFromArgs(args)
-	if currentEncoder == "" {
+	// Find the current encoder. "copy" is a stream-copy directive, not an
+	// unspecified encoder: it must not be rewritten or inferred from the
+	// output extension.
+	currentEncoder := extractEncoderFromArgsWithCaps(args, f.hardwareCapabilities())
+	if currentEncoder == "" || currentEncoder == "copy" {
 		return nil
 	}
 
@@ -283,31 +306,16 @@ func (f *EncoderFallback) prepareFallbackArgsWithSource(args []string, outputPat
 // buildFallbackArgs creates new args with the given software encoder, stripping
 // hardware-specific parameters.
 func (f *EncoderFallback) buildFallbackArgs(args []string, swEncoder string, outputPath string) []string {
-	// Create new args with software encoder
+	// The encoder selection is parsed and replaced by the rewrite package, so
+	// every recognized spelling (-c:v:N, -codec:v:N, -vcodec, and the generic
+	// -c / -codec form) follows the same rule as the rewrite path.
+	caps := f.hardwareCapabilities()
+	_, hasPrimary := rewrite.PrimaryVideoEncoderFlag(rewrite.ParseVideoEncoderFlags(args, caps))
+	args = rewrite.ReplacePrimaryVideoEncoder(args, encoder.EncoderFamily(swEncoder), caps)
+
 	result := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-
-		// Replace encoder argument
-		if (arg == "-c:v" || arg == "-vcodec" || arg == "-codec:v") && i+1 < len(args) {
-			result = append(result, arg, swEncoder)
-			i++ // Skip the next argument (old encoder value)
-			continue
-		}
-
-		// Handle encoder in key=value format
-		if strings.HasPrefix(arg, "-c:v=") {
-			result = append(result, "-c:v="+swEncoder)
-			continue
-		}
-		if strings.HasPrefix(arg, "-codec:v=") {
-			result = append(result, "-codec:v="+swEncoder)
-			continue
-		}
-		if strings.HasPrefix(arg, "-vcodec=") {
-			result = append(result, "-vcodec="+swEncoder)
-			continue
-		}
 
 		// Skip hardware-specific parameters
 		if f.isHardwareSpecificParam(arg) {
@@ -319,6 +327,11 @@ func (f *EncoderFallback) buildFallbackArgs(args []string, swEncoder string, out
 		}
 
 		result = append(result, arg)
+	}
+
+	// No selection to rewrite (e.g. the encoder was inferred): append one.
+	if !hasPrimary {
+		result = append(result, "-c:v", string(swEncoder))
 	}
 
 	// Ensure output path is preserved
