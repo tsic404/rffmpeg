@@ -435,17 +435,55 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
-	workerMonitor.Stop()
-	jobScheduler.Stop()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server shutdown failed: %v", err)
+	if err := shutdownServer(ctx, srv, h.GetWSHub(), jobScheduler, workerMonitor); err != nil {
+		// Keep going: the deferred closes below (WebSocket hub is already
+		// closed by shutdownServer, access log, database, input cleaner) must
+		// run. A fatal exit here would skip them and lose buffered writes.
+		log.Printf("Server shutdown incomplete: %v", err)
 	}
 
 	log.Println("Server stopped")
+}
+
+// stopper is the shutdown half of a background component.
+type stopper interface {
+	Stop()
+}
+
+// httpDrainer is the graceful-stop half of http.Server.
+type httpDrainer interface {
+	Shutdown(context.Context) error
+}
+
+// closer is the shutdown half of the WebSocket hub.
+type closer interface {
+	Close()
+}
+
+// shutdownServer drains the server in a deliberate order:
+//
+//  1. http.Server.Shutdown stops accepting requests and waits for in-flight
+//     handlers, so no new job is submitted while the rest is torn down.
+//  2. The WebSocket hub closes its connections — they are hijacked and
+//     therefore invisible to http.Server.Shutdown — and stops accepting new
+//     ones.
+//  3. The scheduler stops dispatching.
+//  4. The worker-health monitor stops, after which the deferred database and
+//     access-log closes run.
+//
+// It returns the HTTP shutdown error instead of exiting, so a drain timeout
+// still reaches the normal cleanup path.
+func shutdownServer(ctx context.Context, srv httpDrainer, hub closer, scheduler, monitor stopper) error {
+	var firstErr error
+	if err := srv.Shutdown(ctx); err != nil {
+		firstErr = fmt.Errorf("http shutdown: %w", err)
+	}
+	hub.Close()
+	scheduler.Stop()
+	monitor.Stop()
+	return firstErr
 }
 
 // minDataDirFreeBytes is the free-space floor the data directory's filesystem

@@ -53,6 +53,16 @@ type Hub struct {
 	seqStore SeqStore
 	// seqPersistFailures counts failed store writes/deletes for observability.
 	seqPersistFailures atomic.Int64
+	// closeCh stops accepting new clients and asks the run loop to close the
+	// live ones; closedDone acknowledges that teardown. Hijacked WebSocket
+	// connections are not tracked by http.Server.Shutdown, so the process
+	// shutdown path must close them here.
+	closeCh    chan struct{}
+	closedDone chan struct{}
+	closeOnce  sync.Once
+	doneOnce   sync.Once
+	closed     atomic.Bool
+	started    atomic.Bool
 }
 
 // BroadcastMessage represents a message to be broadcast
@@ -84,14 +94,36 @@ func NewHubWithSeqStore(store SeqStore) *Hub {
 		unregister: make(chan *Client, 100), // Buffered to prevent blocking
 		seq:        make(map[string]int64),
 		seqStore:   store,
+		closeCh:    make(chan struct{}),
+		closedDone: make(chan struct{}),
 	}
 }
 
 // Run starts the hub's main loop
 func (h *Hub) Run() {
+	h.started.Store(true)
 	for {
 		select {
+		case <-h.closeCh:
+			// Close every live connection (hijacked sockets that
+			// http.Server.Shutdown does not track) and clear the map so no
+			// later broadcast can touch a closed send channel. The loop keeps
+			// draining register/unregister so their senders never block.
+			h.mu.Lock()
+			for jobID, clients := range h.clients {
+				for client := range clients {
+					client.Close()
+				}
+				delete(h.clients, jobID)
+			}
+			h.mu.Unlock()
+			h.doneOnce.Do(func() { close(h.closedDone) })
+
 		case client := <-h.register:
+			if h.closed.Load() {
+				client.Close()
+				continue
+			}
 			h.mu.Lock()
 			if _, ok := h.clients[client.jobID]; !ok {
 				h.clients[client.jobID] = make(map[*Client]bool)
@@ -163,6 +195,20 @@ func (h *Hub) Register(client *Client) {
 // Unregister unregisters a client from the hub
 func (h *Hub) Unregister(client *Client) {
 	h.unregister <- client
+}
+
+// Close stops accepting clients and closes every live connection. WebSocket
+// connections are hijacked, so http.Server.Shutdown neither waits for nor
+// closes them; the process shutdown path calls this explicitly. Safe to call
+// more than once and from any goroutine.
+func (h *Hub) Close() {
+	if !h.started.Load() {
+		h.closed.Store(true)
+		return
+	}
+	h.closed.Store(true)
+	h.closeOnce.Do(func() { close(h.closeCh) })
+	<-h.closedDone
 }
 
 // Broadcast sends a message to all clients listening for a job. The send is
