@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # TC-encoder-04: crf / preset 语义映射与参数去向行（AC-24）
 # 判据：`[rffmpeg] <target> params:` 行存在；-crf 与 -preset 各有映射记录，
-# 不支持者被标注；不做 SSIM/PSNR 计算。
+# 不支持者被标注；不做 SSIM/PSNR 计算。`-map -0:a` 同时验证取值以 `-` 开头
+# 时改写参数仍插在输出文件之前（否则 ffmpeg 静默忽略它们）。
 set -euo pipefail
 PORT="${PORT:-18999}"
 ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +27,7 @@ LOG="$TMP_ROOT/cli.log"
 set +e
 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
 	-i "$MEDIA" -c:v "$TARGET" -crf 23 -preset fast -tune film \
-	"$TMP_ROOT/params-out.mp4" 2>"$LOG"
+	-map 0:v -map -0:a "$TMP_ROOT/params-out.mp4" 2>"$LOG"
 RC=$?
 set -e
 expect_rc "$RC" 0 "params-mapping rc"

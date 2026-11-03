@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TC-transcode-01: 单输入基础转码（AC-01、AC-02、AC-03、AC-04）
 # 判据：无报错；stderr 进度可解析；输出可 ffprobe；同参数与原生 ffmpeg
-# 输出逐字节一致。
+# 输出逐字节一致。`-i_qfactor` 另作回归：以 -i 开头的取值选项不是输入文件。
 set -euo pipefail
 PORT="${PORT:-18999}"
 ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +16,7 @@ MEDIA="$(make_media base.mp4 4)"
 OUT="$TMP_ROOT/out.mp4"
 NATIVE="$TMP_ROOT/native.mp4"
 LOG="$TMP_ROOT/cli.log"
-ARGS=(-c:v libx264 -crf 23 -preset veryfast -threads 1)
+ARGS=(-c:v libx264 -crf 23 -preset veryfast -threads 1 -i_qfactor 0.71)
 
 set +e
 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
@@ -36,4 +36,4 @@ python3 -c 'import sys; sys.exit(0 if abs(float(sys.argv[1]) - 4.0) <= 0.1 else 
 ffmpeg -loglevel error -y -i "$MEDIA" "${ARGS[@]}" "$NATIVE"
 cmp -s "$OUT" "$NATIVE" || fail "output differs from native ffmpeg (AC-04)"
 
-echo "PASS: rc=0, progress parsable, duration=$DUR, output identical to native ffmpeg"
+echo "PASS: rc=0, progress parsable, duration=$DUR, output identical to native ffmpeg, -i_qfactor accepted"

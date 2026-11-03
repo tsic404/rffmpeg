@@ -498,8 +498,11 @@ func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]st
 
 			// Check if this is a flag to skip
 			if skipFlags[paramName] {
-				// Skip the value too if next arg exists and is not a flag
-				if i+1 < len(args) && (len(args[i+1]) == 0 || args[i+1][0] != '-') {
+				// A value-taking flag consumes the next token even when it
+				// starts with '-' ("-map -0:a", "-ss -5"): leaving it
+				// unpaired makes the value look like a flag and the token
+				// after it look like a parameter value.
+				if i+1 < len(args) {
 					i++
 				}
 				continue
@@ -510,8 +513,9 @@ func (a *RewriteAdapter) parseEncoderParamsFromArgs(args []string) map[string]st
 				continue
 			}
 
-			// Check if next arg is the value (not a flag)
-			if i+1 < len(args) && (len(args[i+1]) == 0 || args[i+1][0] != '-') {
+			// Check if next arg is the value. Arity, not the value's shape,
+			// decides: values may begin with '-' ("-ss -5").
+			if i+1 < len(args) {
 				params[paramName] = args[i+1]
 				i++ // Skip value
 			}

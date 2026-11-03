@@ -861,6 +861,45 @@ func TestBuildRewrittenArgs_ParamsToFilter(t *testing.T) {
 	}
 }
 
+// TestBuildRewrittenArgs_InsertBeforeOutputWithDashValue pins the fix:
+// a value-taking option whose value starts with '-' ("-map -0:a") must not
+// make the following token look like a flag; the rewritten encoder and its
+// parameters have to land before the output file, or ffmpeg silently ignores
+// them (per-file options apply to the next output).
+func TestBuildRewrittenArgs_InsertBeforeOutputWithDashValue(t *testing.T) {
+	engine := NewEngineCoordinator()
+	originalArgs := []string{
+		"-i", "in.mp4", "-c:v", "libx264", "-crf", "23",
+		"-map", "0:v", "-map", "-0:a", "out.mp4",
+	}
+	result := engine.buildRewrittenArgs(
+		originalArgs,
+		encoder.EncoderH264NVENC,
+		map[string]string{"cq": "23"},
+		map[string]string{"crf": "23"},
+		nil,
+	)
+
+	pos := func(token string) int {
+		for i, arg := range result {
+			if arg == token {
+				return i
+			}
+		}
+		return -1
+	}
+	outputPos := pos("out.mp4")
+	if outputPos != len(result)-1 {
+		t.Fatalf("output file is not last: %v", result)
+	}
+	if cqPos := pos("-cq"); cqPos < 0 || cqPos > outputPos {
+		t.Errorf("-cq must be inserted before the output file, got %v", result)
+	}
+	if cPos := pos("-c:v"); cPos < 0 || cPos > outputPos {
+		t.Errorf("-c:v must be inserted before the output file, got %v", result)
+	}
+}
+
 // TestTranslatorAdapter_CanTranslate_CrossFormatRejected verifies that a
 // cross-format translation is refused: rewriting AV1 parameters to any H.264
 // encoder would silently change the requested output codec, so the mapping
