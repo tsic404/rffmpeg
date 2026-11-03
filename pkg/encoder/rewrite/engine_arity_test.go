@@ -26,6 +26,11 @@ func TestFindOutputFilePosArityConsensus(t *testing.T) {
 		{"shortest keeps output", []string{"-i", "input.mp4", "-shortest", "output.mp4"}, 3},
 		// Inline "=value" form never consumes the next arg.
 		{"inline value keeps output", []string{"-i", "input.mp4", "-loglevel=verbose", "output.mp4"}, 3},
+		// A value may begin with '-': arity, not the value's shape, decides
+		// pairing. Leaving the value unpaired makes it swallow the output.
+		{"map negative value keeps output", []string{"-i", "input.mp4", "-c:v", "libx264", "-crf", "23", "-map", "-0:s", "output.mp4"}, 8},
+		{"ss negative value keeps output", []string{"-i", "input.mp4", "-ss", "-5", "output.mp4"}, 4},
+		{"itsoffset negative value keeps output", []string{"-i", "input.mp4", "-itsoffset", "-5", "-c:v", "libx264", "output.mp4"}, 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

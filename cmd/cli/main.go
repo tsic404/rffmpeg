@@ -163,7 +163,10 @@ func parseArgs(argList []string) (*Options, error) {
 			opts.AutoHW = true
 		case "--auto-hw=false", "-auto-hw=false":
 			opts.AutoHW = false
-		case "--timeout", "-timeout":
+		// Only the double-dash form is rffmpeg's job budget: ffmpeg (and its
+		// protocols) define "-timeout" themselves, so the single-dash spelling
+		// must reach ffmpeg verbatim instead of failing as a bad duration.
+		case "--timeout":
 			val, err := needValue(i, arg)
 			if err != nil {
 				return nil, err

@@ -610,8 +610,10 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 			if _, exists := lookup(paramsToFilter); exists {
 				if !inlineForm {
 					// Separate-value form: consume the value so it isn't
-					// mistaken for an input/output path.
-					if i+1 < len(originalArgs) && !strings.HasPrefix(originalArgs[i+1], "-") {
+					// mistaken for a flag. ffmpeg accepts values that start
+					// with '-' ("-ss -5"), so the next token is the value
+					// regardless of its shape.
+					if i+1 < len(originalArgs) {
 						skipNext = true
 					}
 				}
@@ -633,7 +635,7 @@ func (e *EngineCoordinator) buildRewrittenArgs(originalArgs []string, targetEnco
 				markSeen()
 				if !inlineForm {
 					result = append(result, arg)
-					if i+1 < len(originalArgs) && !strings.HasPrefix(originalArgs[i+1], "-") {
+					if i+1 < len(originalArgs) {
 						result = append(result, convertedValue)
 						skipNext = true
 					}
@@ -690,8 +692,12 @@ func isBooleanFlagArg(arg string) bool {
 
 // findOutputFilePos returns the index of the output file within args: the
 // last positional (no leading '-') argument that is NOT the value of a
-// preceding value-taking flag. Pairing skips boolean flags and inline
-// "=value" forms, which never consume the next argument.
+// preceding value-taking flag. Arity comes from the generated table in
+// pkg/ffmpegopts: boolean flags and inline "=value" forms never consume the
+// next argument, while every value-taking option consumes it unconditionally
+// — ffmpeg accepts values that begin with '-' ("-map -0:a", "-ss -5"), and
+// leaving such a value unpaired makes it look like a flag that swallows the
+// real output path.
 func findOutputFilePos(args []string) int {
 	outputPos := -1
 	expectValue := false
@@ -701,9 +707,7 @@ func findOutputFilePos(args []string) int {
 			continue
 		}
 		if strings.HasPrefix(arg, "-") && arg != "-" && !isBooleanFlagArg(arg) {
-			// A value-taking flag consumes the next arg only if that arg
-			// does not start with '-'.
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if i+1 < len(args) {
 				expectValue = true
 			}
 			continue
@@ -820,8 +824,10 @@ func (e *EngineCoordinator) parseEncoderParamsFromArgs(args []string) map[string
 				continue
 			}
 
-			// Check if next arg is the value
-			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			// Check if next arg is the value. Arity, not the value's shape,
+			// decides: values may begin with '-' ("-ss -5"), and a boolean
+			// flag never takes one.
+			if !ffmpegopts.IsBoolean(paramName) && i+1 < len(args) {
 				params[paramName] = args[i+1]
 				i++ // Skip value
 			}

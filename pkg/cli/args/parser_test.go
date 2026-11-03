@@ -1,6 +1,7 @@
 package args
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,11 +38,11 @@ func TestParseBasicInput(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "concatenated -i option",
-			args:       []string{"-iinput.mp4", "output.mp4"},
-			wantInputs: []string{"input.mp4"},
-			wantOutput: "output.mp4",
-			wantErr:    false,
+			// ffmpeg has no glued "-i<input>" form ("Unrecognized option
+			// 'iinput.mp4'"), so rffmpeg must not invent one either.
+			name:    "concatenated -i option is not an input",
+			args:    []string{"-iinput.mp4", "output.mp4"},
+			wantErr: true,
 		},
 		{
 			name:    "no input",
@@ -229,8 +230,8 @@ func TestParseNegativeOptionValue(t *testing.T) {
 
 // TestParseIPrefixedDemuxerOption pins the fix for demuxer
 // AVOptions absent from `ffmpeg -h long`: "-input_format" starts with "-i"
-// and must parse as a value-taking option (hand-written in valueFlags), not
-// as a concatenated "-i<input>" input path that would silently drop "mjpeg".
+// and must parse as a value-taking option, not as an input path that would
+// silently drop "mjpeg".
 func TestParseIPrefixedDemuxerOption(t *testing.T) {
 	p := NewParser()
 	result, err := p.Parse([]string{"-f", "v4l2", "-input_format", "mjpeg", "-i", "/dev/video0", "out.mp4"})
@@ -252,6 +253,83 @@ func TestParseIPrefixedDemuxerOption(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("AllArgs = %v, want -input_format mjpeg preserved", result.AllArgs)
+	}
+}
+
+// TestParseIPrefixedOptionsAreNotInputs pins the fix: only a bare "-i" names
+// an input, exactly as in ffmpeg. Encoder-private and codec options whose
+// names merely start with "-i" ("-intra-refresh", "-idr_interval",
+// "-i_qfactor") are value-taking options and must keep their values.
+func TestParseIPrefixedOptionsAreNotInputs(t *testing.T) {
+	p := NewParser()
+	options := [][2]string{
+		{"-intra-refresh", "1"},
+		{"-idr_interval", "2"},
+		{"-i_qfactor", "0.71"},
+	}
+	for _, opt := range options {
+		args := []string{"-i", "in.mp4", opt[0], opt[1], "out.mp4"}
+		result, err := p.Parse(args)
+		if err != nil {
+			t.Errorf("Parse(%v): error = %v", args, err)
+			continue
+		}
+		if len(result.InputFiles) != 1 || result.InputFiles[0] != "in.mp4" {
+			t.Errorf("Parse(%v): InputFiles = %v, want [in.mp4]", args, result.InputFiles)
+		}
+		if result.OutputFile != "out.mp4" {
+			t.Errorf("Parse(%v): OutputFile = %q, want out.mp4", args, result.OutputFile)
+		}
+		found := false
+		for i, a := range result.AllArgs {
+			if a == opt[0] && i+1 < len(result.AllArgs) && result.AllArgs[i+1] == opt[1] {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Parse(%v): AllArgs = %v, want %s %s preserved", args, result.AllArgs, opt[0], opt[1])
+		}
+	}
+}
+
+// TestParseRejectsMultipleOutputs pins the fix: a second output used to be
+// dropped silently (exit 0, no file produced). It is now a hard error.
+func TestParseRejectsMultipleOutputs(t *testing.T) {
+	p := NewParser()
+	cases := [][]string{
+		{"-i", "a.mp4", "o1.mp4", "o2.mp4"},
+		{"-i", "a.mp4", "o1.mp4", "-c:v", "libx264", "o2.mp4"},
+		{"-i", "a.mp4", "-o", "o1.mp4", "o2.mp4"},
+		{"-i", "a.mp4", "o1.mp4", "-o", "o2.mp4"},
+		{"-o", "o1.mp4", "-o", "o2.mp4"},
+		// A positional before -i is an output, not an implicit input:
+		// ffmpeg writes both positionals and rffmpeg must reject the extra.
+		{"o1.mp4", "-i", "src.mp4", "o2.mp4"},
+		{"o1.mp4", "o2.mp4", "-i", "src.mp4"},
+	}
+	for _, args := range cases {
+		_, err := p.Parse(args)
+		if !errors.Is(err, ErrMultipleOutputs) {
+			t.Errorf("Parse(%v): error = %v, want ErrMultipleOutputs", args, err)
+		}
+	}
+}
+
+// TestParseOutputBeforeExplicitInput pins the other side of the pre-input
+// rule: a lone positional before -i is the output, not an input. Only a
+// second one makes the invocation ambiguous.
+func TestParseOutputBeforeExplicitInput(t *testing.T) {
+	p := NewParser()
+	result, err := p.Parse([]string{"out.mp4", "-i", "in.mp4"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(result.InputFiles) != 1 || result.InputFiles[0] != "in.mp4" {
+		t.Errorf("InputFiles = %v, want [in.mp4]", result.InputFiles)
+	}
+	if result.OutputFile != "out.mp4" {
+		t.Errorf("OutputFile = %q, want out.mp4", result.OutputFile)
 	}
 }
 

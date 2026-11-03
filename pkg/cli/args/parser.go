@@ -11,22 +11,15 @@ import (
 )
 
 var (
-	ErrNoInputFile  = errors.New("no input file specified")
-	ErrNoOutputFile = errors.New("no output file specified")
+	ErrNoInputFile     = errors.New("no input file specified")
+	ErrNoOutputFile    = errors.New("no output file specified")
+	ErrMultipleOutputs = errors.New("multiple output files are not supported")
 )
 
 // isBooleanFlag checks if an option is a boolean flag (doesn't take a value),
 // using the generated FFmpeg arity table in pkg/ffmpegopts.
 func isBooleanFlag(arg string) bool {
 	return ffmpegopts.IsBoolean(arg)
-}
-
-// isKnownOption reports whether arg names a known FFmpeg option (boolean or
-// value-taking), using the generated arity table in pkg/ffmpegopts. It
-// disambiguates a real "-i"-prefixed option such as "-itsoffset" from a
-// concatenated "-i<input>" input path.
-func isKnownOption(arg string) bool {
-	return ffmpegopts.IsKnown(arg)
 }
 
 // ParseResult contains parsed ffmpeg arguments
@@ -65,6 +58,10 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	// Find the last argument that looks like an output file (typically the
 	// last non-option argument, or an explicit -o value).
 	outputCandidateIdx := findOutputCandidate(args)
+	// A bare positional is ffmpeg's output syntax. The implicit-input fallback
+	// below only covers invocations that name no input at all; when any -i is
+	// present, a positional before it is a second output, not an input.
+	explicitInput := hasExplicitInput(args)
 
 	// Parse arguments
 	i := 0
@@ -84,22 +81,13 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 			continue
 		}
 
-		// Handle concatenated -i option: -iinputfile. A known "-i"-prefixed
-		// option such as "-itsoffset" is NOT an inline input; it falls through
-		// to the generic option handling below.
-		if strings.HasPrefix(arg, "-i") && len(arg) > 2 && !isKnownOption(arg) {
-			inputFile := arg[2:]
-			inputFiles = append(inputFiles, inputFile)
-			// Add -i <INPUT_FILE> to allArgs - Worker will replace <INPUT_FILE> with actual path
-			allArgs = append(allArgs, "-i", "<INPUT_FILE>")
-			i++
-			continue
-		}
-
 		// Handle -o option for explicit output file specification (e.g. -o - for streaming output)
 		if arg == "-o" {
 			if i+1 >= len(args) {
 				return nil, ErrNoOutputFile
+			}
+			if outputFile != "" {
+				return nil, fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, args[i+1])
 			}
 			outputFile = args[i+1]
 			i += 2
@@ -109,6 +97,9 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 		// Check if this is the output file
 		// "-" is stdout (streaming output) — treat as output file, not a flag
 		if outputCandidateIdx >= 0 && i == outputCandidateIdx && (!strings.HasPrefix(arg, "-") || arg == "-") {
+			if outputFile != "" {
+				return nil, fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, arg)
+			}
 			outputFile = arg
 			i++
 			continue
@@ -136,15 +127,20 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 			continue
 		}
 
-		// Non-option argument (could be input or output)
-		if len(inputFiles) == 0 {
-			// This might be an input file without -i (some ffmpeg versions allow this)
+		// Non-option argument (input shorthand or output)
+		if len(inputFiles) == 0 && !explicitInput {
+			// No -i anywhere: the positional is the implicit input. Rewrite it
+			// into the same -i <INPUT_FILE> form the worker substitutes, so
+			// omitting -i still yields a real input stream.
 			inputFiles = append(inputFiles, arg)
-			// Rewrite the implicit input into the same -i <INPUT_FILE> form the
-			// worker substitutes, so omitting -i still yields a real input stream.
 			allArgs = append(allArgs, "-i", "<INPUT_FILE>")
 		} else if outputFile == "" && i == outputCandidateIdx {
 			outputFile = arg
+		} else {
+			// ffmpeg accepts multiple outputs; rffmpeg produces exactly one.
+			// Dropping the extra output silently would report success for a
+			// file the user never gets.
+			return nil, fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, arg)
 		}
 		i++
 	}
@@ -178,6 +174,20 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	return result, nil
 }
 
+// hasExplicitInput reports whether args name an input with -i / --input.
+// ffmpeg has no implicit-input form: every bare positional is an output, so
+// the parser's implicit-input fallback must stay off as soon as one -i is
+// present — otherwise "a1.mp4 -i src.mp4 a3.mp4" treats a1.mp4 as an input
+// and silently drops it.
+func hasExplicitInput(args []string) bool {
+	for _, arg := range args {
+		if arg == "-i" || arg == "--input" {
+			return true
+		}
+	}
+	return false
+}
+
 // findOutputCandidate returns the index of the last positional argument,
 // which ffmpeg treats as the output file. It scans left-to-right so a
 // value-taking option consumes its next token even when that value begins
@@ -190,8 +200,6 @@ func findOutputCandidate(args []string) int {
 		switch {
 		case arg == "-i" || arg == "--input":
 			i += 2 // input flag and its value
-		case strings.HasPrefix(arg, "-i") && len(arg) > 2 && !isKnownOption(arg):
-			i++ // -iinput inline form
 		case arg == "-o":
 			i += 2 // explicit output flag and its value
 		case strings.HasPrefix(arg, "-") && arg != "-":
