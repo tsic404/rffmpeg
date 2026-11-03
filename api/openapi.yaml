@@ -619,7 +619,360 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /files/{fileId}:
+    get:
+      tags: [files]
+      summary: Download an input file
+      description: >-
+        Download a stored input file by its content-addressed identifier. The
+        response body is the file itself; Range requests are not supported.
+      operationId: downloadFile
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          description: 64-hex SHA-256 content hash
+          schema:
+            type: string
+      responses:
+        '200':
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /encoders:
+    get:
+      tags: [workers]
+      summary: List encoders across the cluster
+      description: All unique encoders reported by registered workers, with hardware flags.
+      operationId: listEncoders
+      responses:
+        '200':
+          description: Encoder list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  encoders:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/EncoderInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /encoders/{encoder}/workers:
+    get:
+      tags: [workers]
+      summary: List workers that advertise an encoder
+      operationId: listWorkersByEncoder
+      parameters:
+        - name: encoder
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workers advertising the encoder
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  encoder:
+                    type: string
+                  workers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkerInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /decoders:
+    get:
+      tags: [workers]
+      summary: List decoders across the cluster
+      operationId: listDecoders
+      responses:
+        '200':
+          description: Decoder list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decoders:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DecoderInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /codecs:
+    get:
+      tags: [workers]
+      summary: List codecs across the cluster
+      description: >-
+        Plain-text ffmpeg-style list by default. With ?json=1 the same items
+        are returned as a JSON object.
+      operationId: listCodecs
+      parameters:
+        - $ref: '#/components/parameters/JsonFlag'
+      responses:
+        '200':
+          description: Codec list
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfoFlagResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /filters:
+    get:
+      tags: [workers]
+      summary: List filters across the cluster
+      operationId: listFilters
+      parameters:
+        - $ref: '#/components/parameters/JsonFlag'
+      responses:
+        '200':
+          description: Filter list
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfoFlagResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /pix_fmts:
+    get:
+      tags: [workers]
+      summary: List pixel formats across the cluster
+      operationId: listPixFmts
+      parameters:
+        - $ref: '#/components/parameters/JsonFlag'
+      responses:
+        '200':
+          description: Pixel format list
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfoFlagResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /formats:
+    get:
+      tags: [workers]
+      summary: List container formats across the cluster
+      operationId: listFormats
+      parameters:
+        - $ref: '#/components/parameters/JsonFlag'
+      responses:
+        '200':
+          description: Format list
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfoFlagResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /hwaccels:
+    get:
+      tags: [workers]
+      summary: List hardware acceleration methods across the cluster
+      description: >-
+        Plain-text single-column list by default. With ?json=true (or json=1)
+        the same items are returned as a JSON object.
+      operationId: listHwaccels
+      parameters:
+        - $ref: '#/components/parameters/JsonFlag'
+      responses:
+        '200':
+          description: Hardware acceleration method list
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hwaccels:
+                    type: array
+                    items:
+                      type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /probe:
+    post:
+      tags: [jobs]
+      summary: Probe an input with ffprobe through a worker
+      description: >-
+        Dispatches a real probe job to a live worker and returns the ffprobe
+        result with rffmpeg extensions under the reserved `_rffmpeg` key.
+      operationId: probeInput
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProbeRequest'
+      responses:
+        '200':
+          description: Probe result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /admin/config:
+    servers:
+      - url: /
+    get:
+      tags: [admin]
+      summary: Read runtime rate-limit configuration
+      operationId: getAdminConfig
+      responses:
+        '200':
+          description: Current runtime configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [admin]
+      summary: Update runtime rate-limit configuration
+      operationId: updateAdminConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rate_limit_enabled:
+                  type: boolean
+                max_concurrent_jobs_per_client:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Configuration after the update
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /admin/metrics:
+    servers:
+      - url: /
+    get:
+      tags: [admin]
+      summary: Read rate-limit metrics
+      operationId: getAdminMetrics
+      responses:
+        '200':
+          description: Rate-limit counters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_active_jobs:
+                    type: integer
+                  rejected_count:
+                    type: integer
+                    format: int64
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /admin/workers/eviction/clear:
+    servers:
+      - url: /
+    post:
+      tags: [admin]
+      summary: Clear one worker's eviction mark
+      description: >-
+        Releases the eviction mark of a single worker located by identifier or
+        registered name. Registration and pull restrictions lift with it; the
+        cumulative completion count is untouched.
+      operationId: clearWorkerEviction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [worker]
+              properties:
+                worker:
+                  type: string
+                  description: Worker identifier or registered name
+      responses:
+        '200':
+          description: Eviction mark cleared (or already clear)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClearWorkerEvictionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
 components:
+  parameters:
+    JsonFlag:
+      name: json
+      in: query
+      required: false
+      description: Return the list as JSON instead of plain text (value 1 or true).
+      schema:
+        type: string
+        enum: ['1', 'true']
+
   schemas:
     UploadResponse:
       type: object
@@ -695,6 +1048,31 @@ components:
           type: array
           items:
             type: string
+        output_filename:
+          type: string
+        streaming_output:
+          type: boolean
+          description: Output is streamed over the WebSocket log channel instead of stored.
+        auto_hw:
+          type: boolean
+          description: Automatic hardware encoder upgrade was requested for this job.
+        timeout:
+          type: integer
+          description: Per-job ffmpeg execution budget in nanoseconds (omitted = worker default).
+        no_worker_deadline:
+          type: string
+          format: date-time
+          description: >-
+            Server-computed time at which a still-pending job is failed as
+            NO_WORKER_AVAILABLE. Omitted for non-pending jobs, when the sweep is
+            disabled, or while a live schedulable worker exists.
+        progress_percent:
+          type: number
+          format: double
+          description: Last reported progress percentage (0-100).
+        eta_seconds:
+          type: integer
+          description: Last reported ETA in seconds (0 when no estimate is available).
         worker_id:
           type: string
           format: uuid
@@ -794,9 +1172,27 @@ components:
           description: Human-readable failure details.
         stderr_chunk:
           type: string
+        stdout_chunk:
+          type: string
+          description: Base64-encoded raw stdout bytes (binary-safe).
         progress:
           type: number
           format: double
+        eta_seconds:
+          type: integer
+          description: Estimated seconds remaining (0 when no estimate is available).
+        time_us:
+          type: integer
+          format: int64
+          description: Current decoded time in microseconds.
+        duration_us:
+          type: integer
+          format: int64
+          description: Total duration in microseconds (0 when unknown).
+        speed:
+          type: number
+          format: double
+          description: Current encoding speed multiplier.
         worker_id:
           type: string
           description: >-
@@ -1339,6 +1735,91 @@ components:
         detail:
           type: string
 
+    ProbeRequest:
+      type: object
+      required: [input]
+      properties:
+        input:
+          type: string
+          description: >-
+            Input identifier: a stored file ID, a remote URL, or a
+            shared-filesystem path (resolved by the Worker).
+    ProbeResponse:
+      type: object
+      properties:
+        format: {}
+        streams: {}
+        _rffmpeg:
+          $ref: '#/components/schemas/RffmpegMeta'
+        error:
+          type: string
+        message:
+          type: string
+    RffmpegMeta:
+      type: object
+      properties:
+        worker_encoders:
+          type: array
+          items:
+            type: string
+        worker_encoder_overrides:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        suggestion:
+          type: object
+          properties:
+            recommended_encoder:
+              type: string
+            reason:
+              type: string
+        workers:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              status:
+                type: string
+              ffmpeg_version:
+                type: string
+              max_concurrent:
+                type: integer
+    InfoFlagResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: string
+    AdminConfig:
+      type: object
+      properties:
+        rate_limit_enabled:
+          type: boolean
+        max_concurrent_jobs_per_client:
+          type: integer
+    ClearWorkerEvictionResponse:
+      type: object
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        worker_name:
+          type: string
+        evicted:
+          type: boolean
+          description: Always false after a successful clear.
+        cleared:
+          type: boolean
+          description: False when the worker was not evicted in the first place.
+
   responses:
     BadRequest:
       description: Invalid request
@@ -1378,6 +1859,18 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     UpgradeRequired:
       description: WebSocket upgrade required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Concurrent-job limit exceeded (job not created or queued)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    GatewayTimeout:
+      description: Probe or job waiting time exceeded
       content:
         application/json:
           schema:
