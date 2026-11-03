@@ -153,6 +153,12 @@ func (rw *rateLimitResponseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
 }
 
+// Unwrap exposes the wrapped writer to http.ResponseController so deadline
+// middlewares layered inside this wrapper still reach the connection.
+func (rw *rateLimitResponseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
 func writeRateLimitResponse(w http.ResponseWriter, current, limit int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Retry-After", "5")

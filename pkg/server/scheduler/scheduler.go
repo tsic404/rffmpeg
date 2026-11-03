@@ -11,7 +11,6 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
-	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
 // crashStarvationErrMsg is the terminal error for a pending job that reached
@@ -95,12 +94,6 @@ type JobBroadcaster interface {
 	BroadcastStatus(jobID string, status protocol.JobStatus, exitCode int, err string) error
 }
 
-// SetRateLimiter wires the rate limiter so quota is released for jobs failed
-// outside the HTTP handler path.
-func (s *Scheduler) SetRateLimiter(counter ratelimit.ClientJobCounter) {
-	s.rateLimiter = counter
-}
-
 // SetJobNotifier wires the WS broadcaster for out-of-band job failures.
 func (s *Scheduler) SetJobNotifier(n JobBroadcaster) {
 	s.jobNotifier = n
@@ -116,10 +109,6 @@ type Scheduler struct {
 	started  bool          // Set by Start; guards the Stop-before-Start path
 	resched  chan struct{} // Channel to trigger immediate rescheduling
 	stopOnce sync.Once     // Guarantees Stop is idempotent
-
-	// rateLimiter releases the per-client quota of jobs failed outside the
-	// HTTP handler path (e.g. starvation sweep). Optional: nil skips release.
-	rateLimiter ratelimit.ClientJobCounter
 
 	// jobNotifier broadcasts terminal-state WS messages for jobs failed
 	// outside the HTTP handler path. Optional: nil skips broadcast.
@@ -574,12 +563,12 @@ func (s *Scheduler) checkNoWorkerStarvation(trigger starvationTrigger) {
 		"no worker available for over %s (all workers offline or evicted); submit again once a worker is online",
 		s.config.NoWorkerJobTimeout)
 
-	// The bulk UPDATE bypasses the HTTP handler that normally releases the
-	// per-client quota and broadcasts the terminal status. Do both here, or
-	// clients get stuck behind a permanently inflated counter and CLI
-	// listeners never learn their job died. A job migrated off a crashed
-	// worker (heartbeat timeout) keeps WORKER_CRASH; the rest are genuine
-	// starvation (NO_WORKER_AVAILABLE).
+	// The bulk UPDATE bypasses the per-job terminal writers that notify. Every
+	// failed job still needs its terminal notification: it releases the
+	// client's quota slot through the database terminal hook and wakes probe
+	// waiters, or the client stays 429'd and CLI listeners never learn their
+	// job died. A job migrated off a crashed worker (heartbeat timeout) keeps
+	// WORKER_CRASH; the rest are genuine starvation (NO_WORKER_AVAILABLE).
 	starved, err := s.db.GetStarvedPendingJobs(cutoff, string(migration.ReasonHeartbeatTimeout))
 	if err != nil {
 		log.Printf("Scheduler: Failed to list starved pending jobs: %v", err)
@@ -606,17 +595,14 @@ func (s *Scheduler) checkNoWorkerStarvation(trigger starvationTrigger) {
 			if sj.Crashed {
 				msg = crashStarvationErrMsg
 			}
-			if s.rateLimiter != nil {
-				s.rateLimiter.DecrementByJob(sj.ID)
-			}
 			if s.jobNotifier != nil {
 				if err := s.jobNotifier.BroadcastStatus(sj.ID, protocol.JobStatusFailed, -1, msg); err != nil {
 					log.Printf("Scheduler: Failed to broadcast starvation failure for job %s: %v", sj.ID, err)
 				}
 			}
-			// Wake in-process DB waiters (probe handler). The bulk UPDATE
-			// bypasses the terminal-status writers that normally notify, so
-			// notifyTerminal must run here too.
+			// The bulk UPDATE bypasses the terminal-status writers, so the
+			// terminal notification must run here: it releases the quota slot
+			// and wakes in-process DB waiters (probe handler).
 			s.db.NotifyTerminal(sj.ID)
 		}
 	}

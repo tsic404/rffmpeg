@@ -151,6 +151,13 @@ func (w *handshakeResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) 
 	return nil, nil, errors.New("hijacking not supported")
 }
 
+// Unwrap exposes the wrapped writer to http.ResponseController, so a
+// deadline middleware layered inside this wrapper still reaches the
+// connection.
+func (w *handshakeResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // replay forwards gorilla's original 400 response that WriteHeader/Write
 // buffered, preserving the pre-426 behavior for handshake failures that RFC
 // 6455 does not map to 426.

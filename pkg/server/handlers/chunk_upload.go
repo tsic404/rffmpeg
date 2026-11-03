@@ -289,9 +289,15 @@ func (h *ChunkUploadHandler) UploadChunk(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Acquire semaphore for concurrent upload control
-	h.semaphore <- struct{}{}
-	defer func() { <-h.semaphore }()
+	// Wait for a concurrent-upload slot without ignoring cancellation: four
+	// slow clients can occupy every slot, and a queued request whose client is
+	// already gone must leave the queue instead of waiting for one of them.
+	select {
+	case h.semaphore <- struct{}{}:
+		defer func() { <-h.semaphore }()
+	case <-r.Context().Done():
+		return
+	}
 
 	// Parse multipart form. The session's ChunkSize was validated at init
 	// time, but legacy sessions created before that validation may carry an

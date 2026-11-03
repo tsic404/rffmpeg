@@ -129,20 +129,3 @@ func GetClientID(r *http.Request) string {
 	}
 	return ""
 }
-
-// maxJSONBodyBytes is the global request-body cap for JSON endpoints. It
-// bounds memory/CPU spent parsing unauthenticated input; multipart upload
-// endpoints apply their own (larger) MaxBytesReader before this matters.
-const maxJSONBodyBytes int64 = 10 * 1024 * 1024
-
-// MaxBodyBytesMiddleware caps JSON request bodies at 10MB via MaxBytesReader.
-// Multipart requests are exempt: upload handlers apply their own larger
-// MaxBytesReader sized to the actual payload limits.
-func MaxBodyBytesMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil && !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
-			r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
-		}
-		next.ServeHTTP(w, r)
-	})
-}
