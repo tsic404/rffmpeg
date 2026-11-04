@@ -3,11 +3,13 @@ package gpu
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // DeviceType represents the type of GPU acceleration.
@@ -41,11 +43,21 @@ type Detector struct {
 	// sysfsRoot is the base path for sysfs reads (default "/sys"). Injected
 	// in tests to construct fake sysfs trees without touching /sys.
 	sysfsRoot string
+	// nvidiaSMITimeout bounds each nvidia-smi query. A wedged driver must not
+	// hold Worker startup open: the probe fails and capability detection falls
+	// back to the manual list.
+	nvidiaSMITimeout time.Duration
 }
+
+// defaultNVIDIASMITimeout bounds the nvidia-smi probe when no override is set.
+const defaultNVIDIASMITimeout = 5 * time.Second
 
 // NewDetector creates a new GPU detector.
 func NewDetector() *Detector {
-	return &Detector{sysfsRoot: "/sys"}
+	return &Detector{
+		sysfsRoot:        "/sys",
+		nvidiaSMITimeout: defaultNVIDIASMITimeout,
+	}
 }
 
 // DetectGPUDevices detects available GPU devices on the current platform.
@@ -251,32 +263,39 @@ func (d *Detector) detectNVIDIA() []Device {
 	return devices
 }
 
-// getNVIDIASMIInfo gets GPU info using nvidia-smi command.
+// getNVIDIASMIInfo gets GPU info using nvidia-smi command. Each query is
+// bounded by nvidiaSMITimeout: a hung driver returns empty fields, which the
+// caller treats as "no device detected" and capability detection falls back to
+// the manual list instead of hanging Worker startup.
 func (d *Detector) getNVIDIASMIInfo() (name, driver string) {
 	// Check if nvidia-smi exists
 	if _, err := exec.LookPath("nvidia-smi"); err != nil {
 		return "", ""
 	}
 
-	// Get GPU name
-	cmd := exec.Command("nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits")
-	if output, err := cmd.Output(); err == nil {
-		name = strings.TrimSpace(string(output))
+	timeout := d.nvidiaSMITimeout
+	if timeout <= 0 {
+		timeout = defaultNVIDIASMITimeout
+	}
+	query := func(field string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu="+field, "--format=csv,noheader,nounits")
+		bindProcessGroup(cmd)
+		output, err := cmd.Output()
+		if err != nil {
+			return ""
+		}
+		value := strings.TrimSpace(string(output))
 		// Handle multiple GPUs - take first one
-		if idx := strings.Index(name, "\n"); idx > 0 {
-			name = name[:idx]
+		if idx := strings.Index(value, "\n"); idx > 0 {
+			value = value[:idx]
 		}
+		return value
 	}
 
-	// Get driver version
-	cmd = exec.Command("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader,nounits")
-	if output, err := cmd.Output(); err == nil {
-		driver = strings.TrimSpace(string(output))
-		if idx := strings.Index(driver, "\n"); idx > 0 {
-			driver = driver[:idx]
-		}
-	}
-
+	name = query("name")
+	driver = query("driver_version")
 	return name, driver
 }
 

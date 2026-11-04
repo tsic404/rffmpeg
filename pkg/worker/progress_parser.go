@@ -29,8 +29,12 @@ var speedRegex = regexp.MustCompile(`speed=\s*([0-9.]+)x`)
 // frameRegex matches ffmpeg's frame= counter.
 var frameRegex = regexp.MustCompile(`frame=\s*(\d+)`)
 
-// durationRegex matches ffmpeg Duration: HH:MM:SS.ms pattern (from output header).
-var durationRegex = regexp.MustCompile(`Duration:\s*(\d+):(\d+):(\d+)\.(\d+)`)
+// durationRegex matches the Duration: HH:MM:SS.ms header line. It is anchored
+// to the start of the line with at most the header's two-space indent: the
+// same token appears inside a Metadata block (indented under "  Metadata:"),
+// and an unanchored match would take that container field for the stream's
+// real duration.
+var durationRegex = regexp.MustCompile(`^ {0,2}Duration:\s*(\d+):(\d+):(\d+)\.(\d+)`)
 
 // ProgressParser parses ffmpeg stderr output for progress information.
 //

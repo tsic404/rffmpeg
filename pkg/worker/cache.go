@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/worker/workerconfig"
@@ -217,13 +218,72 @@ func (l *lruTracker) totalSize() int64 {
 	return total
 }
 
-// cacheDirMode returns 0700 for the per-user fallback dir (shared /tmp,
-// private artifacts) and 0755 otherwise.
-func cacheDirMode(dir string) os.FileMode {
-	if workerconfig.IsFallbackCacheDir(dir) {
-		return 0o700
+// cacheDirMode is the permission of every cache directory. Cached outputs are
+// private worker artifacts, so neither group nor others may read or traverse
+// them; the mode is enforced on directories the process did not create.
+const cacheDirMode = os.FileMode(0o700)
+
+// ensureCacheDir creates dir and validates an existing directory: the owner
+// must be the effective user and the mode must be 0700. A directory left over
+// from an older build (0755) is tightened to 0700; one owned by another user is
+// an error, because writing cache entries into it would hand that user the
+// transcoded outputs.
+func ensureCacheDir(dir string) error {
+	return ensureCacheDirAs(dir, os.Geteuid())
+}
+
+// ensureCacheDirAs is ensureCacheDir with the expected owner injected, so the
+// ownership branch is testable without root (and therefore actually runs in
+// CI).
+func ensureCacheDirAs(dir string, euid int) error {
+	if err := os.MkdirAll(dir, cacheDirMode); err != nil {
+		return fmt.Errorf("failed to create cache directory %s: %w", dir, err)
 	}
-	return 0o755
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("failed to stat cache directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("cache path %s is not a directory", dir)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		if euid >= 0 && int(st.Uid) != euid {
+			return fmt.Errorf("cache directory %s is owned by uid %d, want %d", dir, st.Uid, euid)
+		}
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(dir, cacheDirMode); err != nil {
+			return fmt.Errorf("failed to restrict permissions on cache directory %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// validCacheKey reports whether key is the canonical cache key form: 64
+// lowercase hex characters (SHA-256). Keys reach keyPath from metadata files,
+// so an unvalidated value could escape the cache directory via path
+// separators or "..".
+func validCacheKey(key string) bool {
+	if len(key) != 64 {
+		return false
+	}
+	for i := range len(key) {
+		c := key[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// entryTTL is the TTL that governs one entry: the per-entry value when the
+// entry recorded one (URL-derived inputs use a short TTL), otherwise the
+// cache-wide default.
+func (c *Cache) entryTTL(meta cacheEntryMeta) time.Duration {
+	if meta.TTL > 0 {
+		return meta.TTL
+	}
+	return c.cfg.TTL
 }
 
 // NewCache creates a new Cache with the given configuration.
@@ -248,9 +308,9 @@ func NewCache(cfg CacheConfig) (*Cache, error) {
 		cfg.LRUCheckInterval = 5 * time.Minute
 	}
 
-	// Create cache directory if it doesn't exist
-	if err := os.MkdirAll(cfg.Dir, cacheDirMode(cfg.Dir)); err != nil {
-		return nil, fmt.Errorf("failed to create cache directory %s: %w", cfg.Dir, err)
+	// Create the cache directory and validate an existing one (owner and mode).
+	if err := ensureCacheDir(cfg.Dir); err != nil {
+		return nil, err
 	}
 
 	c := &Cache{
@@ -352,22 +412,34 @@ func canonicalizeArgs(args []string) string {
 	return strings.Join(tokens, " ")
 }
 
-// keyPath returns the file path for a cache key (sharded by first 2 hex chars).
+// keyPath returns the file path for a cache key (sharded by first 2 hex
+// chars). It returns "" for a key that is not canonical 64-hex, so a value
+// read from a metadata file can never traverse outside the cache directory.
 func (c *Cache) keyPath(key string) string {
-	if len(key) < 4 {
-		return filepath.Join(c.cfg.Dir, key)
+	if !validCacheKey(key) {
+		return ""
 	}
 	return filepath.Join(c.cfg.Dir, key[:2], key)
 }
 
 // metaPath returns the metadata file path for a cache key.
 func (c *Cache) metaPath(key string) string {
-	return c.keyPath(key) + ".meta"
+	p := c.keyPath(key)
+	if p == "" {
+		return ""
+	}
+	return p + ".meta"
 }
 
 // Check looks up a cache key. Returns (cachedFilePath, true) on hit.
 func (c *Cache) Check(key string) (string, bool) {
 	if !c.cfg.Enabled {
+		return "", false
+	}
+	if !validCacheKey(key) {
+		c.mu.Lock()
+		c.stats.Misses++
+		c.mu.Unlock()
 		return "", false
 	}
 
@@ -392,11 +464,7 @@ func (c *Cache) Check(key string) (string, bool) {
 	}
 
 	// Check TTL (use per-entry TTL from metadata if set, otherwise global config)
-	effectiveTTL := c.cfg.TTL
-	if meta.TTL > 0 {
-		effectiveTTL = meta.TTL
-	}
-	if time.Since(meta.CreatedAt) > effectiveTTL {
+	if time.Since(meta.CreatedAt) > c.entryTTL(meta) {
 		// Expired — evict it
 		c.removeEntry(key, cachePath, metaPath, meta.Size)
 		c.stats.Misses++
@@ -424,6 +492,9 @@ func (c *Cache) Check(key string) (string, bool) {
 // ConfirmHit records a confirmed cache hit (stats + LRU touch).
 // Should be called after successfully using the cached file.
 func (c *Cache) ConfirmHit(key string) {
+	if !validCacheKey(key) {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stats.Hits++
@@ -436,6 +507,9 @@ func (c *Cache) ConfirmHit(key string) {
 func (c *Cache) Put(key string, srcPath string, ttlOverride ...time.Duration) error {
 	if !c.cfg.Enabled {
 		return nil
+	}
+	if !validCacheKey(key) {
+		return fmt.Errorf("invalid cache key %q", key)
 	}
 
 	// Stat the source file for size
@@ -451,10 +525,20 @@ func (c *Cache) Put(key string, srcPath string, ttlOverride ...time.Duration) er
 	metaPath := c.metaPath(key)
 	tmpPath := cachePath + ".tmp"
 
-	// Create shard directory if needed
-	if len(key) >= 4 {
-		if err := os.MkdirAll(filepath.Join(c.cfg.Dir, key[:2]), 0755); err != nil {
-			return fmt.Errorf("failed to create shard directory: %w", err)
+	// Create shard directory if needed, with the same owner/permission
+	// validation as the cache root.
+	if err := ensureCacheDir(filepath.Join(c.cfg.Dir, key[:2])); err != nil {
+		return fmt.Errorf("failed to create shard directory: %w", err)
+	}
+
+	// A fresh .tmp at this path (left by a crashed copy, counted by
+	// scanExisting but absent from the LRU list) is truncated and reused by
+	// copyFile below. Release its accounted bytes first, or the renamed entry
+	// is counted twice and the ghost survives until the next restart.
+	if fi, err := os.Stat(tmpPath); err == nil {
+		c.stats.CurrentSizeBytes -= fi.Size()
+		if c.stats.CurrentSizeBytes < 0 {
+			c.stats.CurrentSizeBytes = 0
 		}
 	}
 
@@ -510,21 +594,40 @@ func (c *Cache) Stats() CacheStats {
 	return s
 }
 
-// scanExisting scans the cache directory and rebuilds LRU state.
+// staleTempFileAge is how old a leftover ".tmp" file must be before the scan
+// removes it. Put writes it immediately before the atomic rename, so anything
+// this old is residue from a crashed copy, not a write in flight.
+const staleTempFileAge = time.Hour
+
+// scanExisting scans the cache directory and rebuilds LRU state. Leftover
+// ".tmp" files count toward the cache size (they occupy the budget) and are
+// removed once they are older than staleTempFileAge. Metadata whose key is not
+// canonical hex is discarded instead of being trusted as a path.
 func (c *Cache) scanExisting() error {
 	var totalSize int64
 	var count int
+	tmpCutoff := time.Now().Add(-staleTempFileAge)
 
 	err := filepath.Walk(c.cfg.Dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip errors
 		}
 		if info.IsDir() {
+			if path != c.cfg.Dir {
+				if err := ensureCacheDir(path); err != nil {
+					log.Printf("Warning: %v", err)
+				}
+			}
 			return nil
 		}
 		if strings.HasSuffix(path, ".meta") {
 			meta, err := c.loadMeta(path)
 			if err != nil {
+				return nil
+			}
+			if !validCacheKey(meta.Key) {
+				log.Printf("Warning: discarding cache metadata with invalid key: %s", path)
+				os.Remove(path)
 				return nil
 			}
 			// Check if the corresponding cache file exists
@@ -537,6 +640,14 @@ func (c *Cache) scanExisting() error {
 			c.lruList.add(meta.Key, meta.Size)
 			totalSize += meta.Size
 			count++
+			return nil
+		}
+		if strings.HasSuffix(path, ".tmp") {
+			if info.ModTime().Before(tmpCutoff) {
+				os.Remove(path)
+				return nil
+			}
+			totalSize += info.Size()
 		}
 		return nil
 	})
@@ -622,8 +733,15 @@ func (c *Cache) evictExpired() {
 		if err != nil {
 			return nil
 		}
+		if !validCacheKey(meta.Key) {
+			log.Printf("Warning: discarding cache metadata with invalid key: %s", path)
+			os.Remove(path)
+			return nil
+		}
 
-		if time.Since(meta.CreatedAt) > c.cfg.TTL {
+		// Each entry ages out on its own TTL: URL-derived entries carry a
+		// short one and must not wait for the cache-wide default.
+		if time.Since(meta.CreatedAt) > c.entryTTL(meta) {
 			expiredKeys = append(expiredKeys, meta.Key)
 		}
 		return nil
@@ -648,6 +766,38 @@ func (c *Cache) evictExpired() {
 
 	if len(expiredKeys) > 0 {
 		log.Printf("TTL eviction: removed %d expired entries", len(expiredKeys))
+	}
+
+	// Leftover ".tmp" files count toward the size budget but are not in the
+	// LRU list, so a crashed Put would otherwise hold budget forever and push
+	// real entries out. The periodic TTL scan reclaims those older than the
+	// in-flight window.
+	tmpCutoff := time.Now().Add(-staleTempFileAge)
+	var removedTmp int
+	var reclaimed int64
+	walkErr := filepath.Walk(c.cfg.Dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".tmp") {
+			return nil
+		}
+		if info.ModTime().After(tmpCutoff) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil {
+			return nil
+		}
+		removedTmp++
+		reclaimed += info.Size()
+		return nil
+	})
+	if walkErr != nil {
+		log.Printf("Cache temp scan error: %v", walkErr)
+	}
+	if reclaimed > 0 {
+		c.stats.CurrentSizeBytes -= reclaimed
+		if c.stats.CurrentSizeBytes < 0 {
+			c.stats.CurrentSizeBytes = 0
+		}
+		log.Printf("TTL cleanup: removed %d stale temp file(s), reclaimed %d bytes", removedTmp, reclaimed)
 	}
 }
 
@@ -695,7 +845,7 @@ func (c *Cache) Clear() error {
 		return fmt.Errorf("failed to clear cache: %w", err)
 	}
 
-	if err := os.MkdirAll(c.cfg.Dir, cacheDirMode(c.cfg.Dir)); err != nil {
+	if err := ensureCacheDir(c.cfg.Dir); err != nil {
 		return fmt.Errorf("failed to recreate cache directory: %w", err)
 	}
 

@@ -415,7 +415,9 @@ func TestIntegration_RateLimit_ProbeFailureReleasesOnlyItsOwnSlot(t *testing.T) 
 	rejectedProbes := map[string][]byte{
 		"malformed JSON": []byte("{not-json"),
 		"missing input":  []byte(`{}`),
-		"unknown file":   []byte(`{"input":"does-not-exist.mp4"}`),
+		// A registered-form file ID absent from storage is the server-side
+		// rejection path; a bare path is resolved by the Worker instead.
+		"unknown file": []byte(`{"input":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`),
 	}
 	for name, body := range rejectedProbes {
 		rec := httptest.NewRecorder()

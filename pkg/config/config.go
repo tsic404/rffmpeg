@@ -108,17 +108,21 @@ type Flags struct {
 	// Retry budgets use pointers: nil means "flag not set", so 0 stays an
 	// expressible value (disable retries/migration) unlike MaxJobsPerWorker,
 	// where 0 already means unset.
-	MaxTimeoutRetries          *int
-	MaxRetryCount              *int
-	TLSEnabled                 bool
-	TLSCertFile                string
-	TLSKeyFile                 string
-	TLSClientCAFile            string
-	TLSMTLS                    bool
-	TLSMinVersion              string
-	TLSExpirationWarningDays   int
-	AllowedOrigins             []string
-	RateLimitEnabled           bool
+	MaxTimeoutRetries        *int
+	MaxRetryCount            *int
+	TLSEnabled               bool
+	TLSCertFile              string
+	TLSKeyFile               string
+	TLSClientCAFile          string
+	TLSMTLS                  bool
+	TLSMinVersion            string
+	TLSExpirationWarningDays int
+	AllowedOrigins           []string
+	// RateLimitEnabled is tri-state for the same reason as the retry budgets:
+	// nil means "flag not set" so a config file or environment value of false
+	// survives Merge, while an explicit --rate-limit-enabled=false still
+	// overrides it.
+	RateLimitEnabled           *bool
 	MaxConcurrentJobsPerClient int
 	RedisAddr                  string
 }
@@ -404,8 +408,8 @@ func (c *ServerConfig) Merge(flags *Flags) {
 	}
 
 	// Rate limit flags
-	if flags.RateLimitEnabled {
-		c.RateLimitEnabled = true
+	if flags.RateLimitEnabled != nil {
+		c.RateLimitEnabled = *flags.RateLimitEnabled
 	}
 	if flags.MaxConcurrentJobsPerClient > 0 {
 		c.MaxConcurrentJobsPerClient = flags.MaxConcurrentJobsPerClient

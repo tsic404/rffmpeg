@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -79,6 +80,7 @@ func main() {
 	}
 
 	log.Printf("Configuration: %s", cfg)
+	warnInsecureTransport(cfg)
 
 	// Bind before the expensive initialization so the port is in LISTEN within
 	// milliseconds of process start; see bindListener for the probe contract.
@@ -321,95 +323,7 @@ func main() {
 	}
 
 	// API routes
-	r.Route("/api/v1", func(r chi.Router) {
-		// File upload (simple)
-		r.Post("/upload", h.Upload)
-
-		// Chunked upload
-		r.Post("/upload/init", chunkHandler.InitChunkUpload)
-		r.Post("/upload/chunk/{uploadId}/{chunkIndex}", chunkHandler.UploadChunk)
-		r.Get("/upload/progress/{uploadId}", chunkHandler.GetUploadProgress)
-		r.Post("/upload/complete", chunkHandler.CompleteChunkUpload)
-		r.Post("/upload/cancel/{uploadId}", chunkHandler.CancelChunkUpload)
-		r.Get("/upload/resume/{uploadId}", chunkHandler.ResumeChunkUpload)
-
-		// Jobs
-		r.Group(func(r chi.Router) {
-			r.Use(ratelimit.JobSubmitMiddleware(h.GetRateLimiter(), rateLimitCfg))
-			r.Post("/jobs", h.SubmitJob)
-		})
-		r.Get("/jobs", h.ListJobs)
-		r.Get("/jobs/{jobId}", h.GetJob)
-		r.Delete("/jobs/{jobId}", h.CancelJob)
-		r.Patch("/jobs/{jobId}", h.UpdateJob)
-		r.Post("/jobs/{jobId}/output", h.UploadJobOutput)
-		r.Get("/jobs/{jobId}/log", h.GetJobLogWS) // WebSocket endpoint for real-time logs
-
-		// Output download
-		r.Get("/output/{fileId}", h.DownloadOutput)
-
-		// File download (for workers)
-		r.Get("/files/{fileId}", h.DownloadFile)
-
-		// Workers
-		r.Post("/workers/register", h.RegisterWorker)
-		r.Post("/workers/heartbeat", h.WorkerHeartbeat)
-		r.Get("/workers/{workerId}/jobs", h.PullWorkerJobs)
-		r.Get("/workers", h.ListWorkers)
-		r.Get("/workers/{workerId}", h.GetWorker)
-
-		// Encoders (capability query)
-		r.Get("/encoders", h.ListAllEncoders)
-		r.Get("/encoders/{encoder}/workers", h.ListWorkersByEncoder)
-
-		// Decoders (capability query)
-		r.Get("/decoders", h.ListAllDecoders)
-
-		// Info flags (capability query — ffmpeg -codecs/-filters/-pix_fmts/-formats equivalent)
-		r.Get("/codecs", h.ListAllCodecs)
-		r.Get("/filters", h.ListAllFilters)
-		r.Get("/pix_fmts", h.ListAllPixFmts)
-		r.Get("/formats", h.ListAllFormats)
-
-		// Hwaccels (P0 info flag aggregation)
-		r.Get("/hwaccels", h.ListAllHwaccels)
-
-		// Health check
-		r.Get("/health", h.Health)
-
-		// Migration audit events
-		r.Get("/migrations", h.ListMigrationEvents)
-		r.Get("/migrations/{eventId}", h.GetMigrationEvent)
-
-		// Probe (ffprobe sync endpoint) — behind the job-submission rate
-		// limiter: a probe dispatches real work, so an unthrottled client can
-		// starve the queue just like unbounded job submissions. The probe
-		// variant releases its slot when the handler returns (no job mapping
-		// exists for the completion callback), so the reservation lasts exactly
-		// one request.
-		r.Group(func(r chi.Router) {
-			r.Use(ratelimit.ProbeMiddleware(h.GetRateLimiter(), rateLimitCfg))
-			r.Post("/probe", h.Probe)
-		})
-	})
-
-	// Admin routes (outside /api/v1, separate prefix)
-	r.Route("/admin", func(r chi.Router) {
-		adminHandler := handlers.NewAdminHandler(h, rateLimitCfg)
-		r.Get("/config", adminHandler.GetConfig)
-		r.Patch("/config", adminHandler.UpdateConfig)
-		r.Get("/metrics", adminHandler.GetMetrics)
-		// Single-object eviction release: the only exit for a worker whose
-		// throughput recovery is unreachable (post-restart, idle).
-		r.Post("/workers/eviction/clear", adminHandler.ClearWorkerEviction)
-	})
-
-	// Root-level health check for monitoring tools (load balancers, orchestrators)
-	r.Get("/health", h.Health)
-	// Protocol-consistent JSON 404 for any unmatched path, so a trailing empty
-	// segment (e.g. /api/v1/migrations/) returns the same {"code":"not_found"}
-	// structure as resource-specific 404s (e.g. GetMigrationEvent).
-	r.NotFound(handlers.NotFound)
+	registerRoutes(r, h, chunkHandler, rateLimitCfg)
 
 	// Create HTTP server. Headers must arrive within 15s (slowloris), but there
 	// is no whole-request read or write deadline: the contract allows a 10 GiB
@@ -458,17 +372,70 @@ func main() {
 	<-quit
 
 	log.Println("Shutting down server...")
-	workerMonitor.Stop()
-	jobScheduler.Stop()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server shutdown failed: %v", err)
+	if err := shutdownServer(ctx, srv, h.GetWSHub(), jobScheduler, workerMonitor); err != nil {
+		// Keep going: the deferred closes below (WebSocket hub is already
+		// closed by shutdownServer, access log, database, input cleaner) must
+		// run. A fatal exit here would skip them and lose buffered writes.
+		log.Printf("Server shutdown incomplete: %v", err)
 	}
 
 	log.Println("Server stopped")
+}
+
+// warnInsecureTransport makes the transport posture explicit at startup. TLS
+// is off by default for local development, and a minimum version below 1.2 is
+// still accepted for compatibility, but neither may pass silently: credentials
+// and media traverse the network unprotected, and every operator who reads the
+// startup log should see that.
+func warnInsecureTransport(cfg *config.ServerConfig) {
+	if cfg.TLS == nil || !cfg.TLS.Enabled {
+		log.Printf("WARNING: TLS is disabled; the API is served over plaintext HTTP. Auth tokens and job payloads are not protected in transit.")
+		return
+	}
+	if cfg.TLS.MinVersion != 0 && cfg.TLS.MinVersion < tls.VersionTLS12 {
+		log.Printf("WARNING: TLS minimum version is %s; versions below TLS 1.2 are deprecated and should not be used on an untrusted network.", tls.VersionName(cfg.TLS.MinVersion))
+	}
+}
+
+// stopper is the shutdown half of a background component.
+type stopper interface {
+	Stop()
+}
+
+// httpDrainer is the graceful-stop half of http.Server.
+type httpDrainer interface {
+	Shutdown(context.Context) error
+}
+
+// closer is the shutdown half of the WebSocket hub.
+type closer interface {
+	Close()
+}
+
+// shutdownServer drains the server in a deliberate order:
+//
+//  1. http.Server.Shutdown stops accepting requests and waits for in-flight
+//     handlers, so no new job is submitted while the rest is torn down.
+//  2. The WebSocket hub closes its connections — they are hijacked and
+//     therefore invisible to http.Server.Shutdown — and stops accepting new
+//     ones.
+//  3. The scheduler stops dispatching.
+//  4. The worker-health monitor stops, after which the deferred database and
+//     access-log closes run.
+//
+// It returns the HTTP shutdown error instead of exiting, so a drain timeout
+// still reaches the normal cleanup path.
+func shutdownServer(ctx context.Context, srv httpDrainer, hub closer, scheduler, monitor stopper) error {
+	var firstErr error
+	if err := srv.Shutdown(ctx); err != nil {
+		firstErr = fmt.Errorf("http shutdown: %w", err)
+	}
+	hub.Close()
+	scheduler.Stop()
+	monitor.Stop()
+	return firstErr
 }
 
 // minDataDirFreeBytes is the free-space floor the data directory's filesystem
@@ -522,6 +489,33 @@ func setupLogFile(dataDir string) (*lumberjack.Logger, error) {
 	log.SetOutput(io.MultiWriter(os.Stderr, logFile))
 	return logFile, nil
 }
+
+// optionalBoolFlag is a boolean flag that records whether it was given:
+// nil target means "not set", so Merge keeps the config-file or environment
+// value. An explicit --rate-limit-enabled=false must disable the limiter even
+// when the loaded configuration enabled it.
+type optionalBoolFlag struct {
+	target **bool
+}
+
+func (f optionalBoolFlag) String() string {
+	if f.target == nil || *f.target == nil {
+		return ""
+	}
+	return strconv.FormatBool(**f.target)
+}
+
+func (f optionalBoolFlag) Set(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return err
+	}
+	*f.target = &v
+	return nil
+}
+
+// IsBoolFlag lets the flag package accept the bare form and the =value form.
+func (optionalBoolFlag) IsBoolFlag() bool { return true }
 
 // parseFlags parses command-line flags
 func parseFlags() *config.Flags {
@@ -587,7 +581,7 @@ func parseFlags() *config.Flags {
 	flag.StringVar(&flags.AuthToken, "auth-token", "", "Authentication token (PSK) for API requests")
 
 	// Rate limit flags
-	flag.BoolVar(&flags.RateLimitEnabled, "rate-limit-enabled", true, "Enable per-client rate limiting")
+	flag.Var(optionalBoolFlag{target: &flags.RateLimitEnabled}, "rate-limit-enabled", "Enable per-client rate limiting (default: true)")
 	flag.IntVar(&flags.MaxConcurrentJobsPerClient, "max-concurrent-jobs-per-client", 0, "Maximum concurrent jobs per client (default: 10)")
 	flag.StringVar(&flags.RedisAddr, "redis-addr", "", "Redis address for distributed rate limiting (optional)")
 

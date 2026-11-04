@@ -41,6 +41,16 @@ func NewParser() *Parser {
 
 // Parse parses command-line arguments into a ParseResult
 // ffmpeg syntax: ffmpeg [global_options] [-i input_file]... [output_options] output_file
+//
+// Three non-native input forms are kept deliberately:
+//   - "-o <path>" is the output-target option the contract recognises and
+//     strips from the passthrough args; it is documented in the README.
+//   - "--input" is the long spelling of "-i"; the worker's argument builder
+//     accepts the same spelling, so both sides parse one grammar.
+//   - a positional argument seen before any -i is taken as the input, so an
+//     omitted -i still yields a real input stream instead of "no input".
+//
+// Native ffmpeg invocations are unaffected by these extensions.
 func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	result := &ParseResult{
 		RawArgs: args,
