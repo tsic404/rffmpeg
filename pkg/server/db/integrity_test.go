@@ -14,6 +14,7 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 func setupIntegrityDB(t *testing.T) (*db.Database, func()) {
@@ -177,14 +178,16 @@ func TestTerminalStateNotOverwritten(t *testing.T) {
 		rival func(d *db.Database, jobID string) error
 	}{
 		{"migrate", func(d *db.Database, _ string) error {
-			_, err := d.MigrateJobsFromWorker("w1")
+			if err := d.UpdateWorkerStatus("w1", protocol.WorkerStatusOffline); err != nil {
+				return err
+			}
+			_, err := d.MigrateJobsFromWorker("w1", "heartbeat_timeout", 3)
 			return err
 		}},
 		{"cancel", func(d *db.Database, jobID string) error { return d.CancelJob(jobID) }},
 		{"reschedule", func(d *db.Database, jobID string) error { return d.RescheduleJob(jobID) }},
-		{"failover-reset", func(d *db.Database, jobID string) error { return d.ResetJobToPending(jobID) }},
 		{"late-running-report", func(d *db.Database, jobID string) error {
-			return d.UpdateJobStatusWithFailure(jobID, protocol.JobStatusRunning, nil, nil, nil, nil)
+			return d.UpdateJobRunningStatusWithOwner(jobID, "w1", nil, nil, nil, nil)
 		}},
 		{"starvation-sweep", func(d *db.Database, jobID string) error {
 			_, err := d.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: jobID}}, "starved", "crash")
@@ -201,11 +204,11 @@ func TestTerminalStateNotOverwritten(t *testing.T) {
 			if _, err := database.AssignPendingJobsToWorker("w1", 10); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+			if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			exitCode := 0
-			if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil {
+			if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 
@@ -249,7 +252,7 @@ func TestCancelRacingCompletionKeepsCompleted(t *testing.T) {
 		go func(id string) {
 			defer wg.Done()
 			exitCode := 0
-			if err := database.UpdateJobStatusWithFailure(id, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil &&
+			if err := dbtest.SetJobStatus(t, database, id, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil &&
 				err != protocol.ErrJobTerminal {
 				t.Errorf("completion rejected unexpectedly: %v", err)
 			}
@@ -332,11 +335,11 @@ func TestConcurrentWritesNoDatabaseLocked(t *testing.T) {
 					}
 					continue
 				}
-				if _, err := database.UpdateJobProgress(job.ID, float64(i), i); isLockedErr(err) {
+				if _, err := dbtest.SetJobProgress(t, database, job.ID, float64(i), i); isLockedErr(err) {
 					errCh <- err
 					return
 				}
-				if err := database.UpdateJobOutput(job.ID, `["f1"]`); isLockedErr(err) {
+				if err := database.UpdateJobOutputWithOwner(job.ID, "w-x", `["f1"]`); isLockedErr(err) {
 					errCh <- err
 					return
 				}
@@ -449,20 +452,23 @@ func TestMigrateSkipsTerminalJobs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := database.UpdateJobStatusWithFailure(running.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, running.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	exitCode := 0
-	if err := database.UpdateJobStatusWithFailure(done.ID, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, done.ID, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
-	migrated, err := database.MigrateJobsFromWorker("w1")
+	if err := database.UpdateWorkerStatus("w1", protocol.WorkerStatusOffline); err != nil {
+		t.Fatal(err)
+	}
+	migration, err := database.MigrateJobsFromWorker("w1", "heartbeat_timeout", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, id := range migrated {
+	for _, id := range migration.Migrated {
 		if id == done.ID {
 			t.Error("completed job was migrated back to pending")
 		}
@@ -484,31 +490,32 @@ func TestMigrateSkipsTerminalJobs(t *testing.T) {
 	}
 }
 
-// UpdateJobStatusWithFailure distinguishes missing jobs from terminal ones
-// and keeps the failed→completed retry path open while freezing completed.
+// The job-staging fixture distinguishes missing jobs from terminal ones and
+// keeps the failed→completed retry path open while freezing completed, so
+// tests can stage retry-after-failure sequences.
 func TestUpdateStatusTerminalVsNotFound(t *testing.T) {
 	database, cleanup := setupIntegrityDB(t)
 	defer cleanup()
 
 	job := createNJobs(t, database, 1)[0]
 	exitCode := 1
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, &exitCode, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusFailed, &exitCode, nil, nil, nil); err != nil {
 		t.Fatalf("initial fail: %v", err)
 	}
 
 	// Late running report on a failed job → ErrJobTerminal.
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != protocol.ErrJobTerminal {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != protocol.ErrJobTerminal {
 		t.Errorf("late running report: expected ErrJobTerminal, got %v", err)
 	}
 
 	// Nonexistent job → ErrJobNotFound.
-	if err := database.UpdateJobStatusWithFailure("no-such-job", protocol.JobStatusRunning, nil, nil, nil, nil); err != protocol.ErrJobNotFound {
+	if err := dbtest.SetJobStatus(t, database, "no-such-job", protocol.JobStatusRunning, nil, nil, nil, nil); err != protocol.ErrJobNotFound {
 		t.Errorf("missing job: expected ErrJobNotFound, got %v", err)
 	}
 
 	// failed→completed remains legal (retry-after-failure flow).
 	exitOK := 0
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusCompleted, &exitOK, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusCompleted, &exitOK, nil, nil, nil); err != nil {
 		t.Errorf("failed→completed retry transition rejected: %v", err)
 	}
 	got, err := database.GetJob(job.ID)
@@ -520,7 +527,7 @@ func TestUpdateStatusTerminalVsNotFound(t *testing.T) {
 	}
 
 	// But completed→failed is frozen.
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, nil, nil, nil, nil); err != protocol.ErrJobTerminal {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusFailed, nil, nil, nil, nil); err != protocol.ErrJobTerminal {
 		t.Errorf("completed→failed allowed: %v", err)
 	}
 }

@@ -277,6 +277,11 @@ func main() {
 	// sweep); quota release for those jobs rides the database terminal hook.
 	jobScheduler.SetJobNotifier(h.GetWSHub())
 
+	// Jobs the monitor terminalizes itself (migration retry budget exhausted)
+	// never emit the complete frame that normally releases a job's WS sequence
+	// counter, so the monitor releases it explicitly.
+	workerMonitor.SetJobStreamReleaser(h.GetWSHub())
+
 	// Setup router. Access logging goes through a non-blocking sink: chi's
 	// Logger writes the access line from inside the handler chain, before the
 	// response is flushed, so a stalled stdout would stall every response it

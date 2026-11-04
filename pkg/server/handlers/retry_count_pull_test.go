@@ -34,9 +34,7 @@ func TestPullWorkerJobsPopulatesRetryCount(t *testing.T) {
 	if _, err := h.GetDB().GetDB().Exec(`UPDATE jobs SET direct_paths = '[]' WHERE id = ?`, migrated.ID); err != nil {
 		t.Fatalf("set migrated direct_paths: %v", err)
 	}
-	if _, err := h.GetDB().CreateMigrationEvent("old-worker", "old-worker", "heartbeat_timeout", 0, []string{migrated.ID}, 1); err != nil {
-		t.Fatalf("CreateMigrationEvent: %v", err)
-	}
+	insertMigrationEventForTest(t, h.GetDB(), "old-worker", "old-worker", "heartbeat_timeout", 0, []string{migrated.ID})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/workers/"+workerID+"/jobs", nil)
 	req.Header.Set("Authorization", "Bearer test-token")

@@ -15,6 +15,7 @@ import (
 	"github.com/mattn/go-sqlite3"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 func setupDBTest(t *testing.T) (*db.Database, func()) {
@@ -564,7 +565,7 @@ func TestRecoverState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to assign job2: %v", err)
 	}
-	err = database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job2 as running: %v", err)
 	}
@@ -601,7 +602,7 @@ func TestRecoverState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create job4: %v", err)
 	}
-	err = database.UpdateJobStatusWithFailure(job4.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job4.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to set job4 as completed: %v", err)
 	}
@@ -1225,17 +1226,6 @@ func TestJobReadPathsNormalizeUUID(t *testing.T) {
 		t.Errorf("Expected 1 active job on canonical row, got %d", count)
 	}
 
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
-		t.Fatalf("Failed to set job running: %v", err)
-	}
-	running, err := database.GetRunningJobsByWorker(compact)
-	if err != nil {
-		t.Fatalf("Compact-format GetRunningJobsByWorker failed: %v", err)
-	}
-	if len(running) != 1 || running[0].ID != job.ID {
-		t.Errorf("Expected running job %s via compact ID, got %d jobs", job.ID, len(running))
-	}
-
 	caps := protocol.WorkerCapabilities{
 		Encoders:      []string{"h264_nvenc"},
 		FFmpegVersion: "6.0",
@@ -1277,13 +1267,13 @@ func TestGetJobsByStatus(t *testing.T) {
 	}
 
 	// Mark one as completed
-	err = database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job2.ID, protocol.JobStatusCompleted, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job2: %v", err)
 	}
 
 	// Mark one as failed
-	err = database.UpdateJobStatusWithFailure(job3.ID, protocol.JobStatusFailed, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job3.ID, protocol.JobStatusFailed, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job3: %v", err)
 	}
@@ -1464,7 +1454,7 @@ func TestAssignPendingJobsToWorkerWithSchedulerRaceCondition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to assign job to worker: %v", err)
 	}
-	err = database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
+	err = dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusQueued, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to update job status to queued: %v", err)
 	}
@@ -1845,7 +1835,7 @@ func TestFailureTypeRetryablePersisted(t *testing.T) {
 			t.Fatalf("CreateJob: %v", err)
 		}
 		ft := string(protocol.FailureTimeout)
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusTimeout, nil, &errMsg, &ft, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusTimeout, nil, &errMsg, &ft, nil); err != nil {
 			t.Fatalf("timeout update: %v", err)
 		}
 		assertRetryable(t, job.ID, 1)
@@ -1867,12 +1857,12 @@ func TestFailureTypeRetryablePersisted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateJob: %v", err)
 		}
-		n, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: job.ID, Crashed: true}}, "no worker", "crashed")
+		failedIDs, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: job.ID, Crashed: true}}, "no worker", "crashed")
 		if err != nil {
 			t.Fatalf("FailStarvedPendingJobs: %v", err)
 		}
-		if n != 1 {
-			t.Fatalf("failed %d jobs, want 1", n)
+		if len(failedIDs) != 1 || failedIDs[0] != job.ID {
+			t.Fatalf("failed %v, want [%s]", failedIDs, job.ID)
 		}
 		assertRetryable(t, job.ID, 1)
 	})
@@ -1882,12 +1872,12 @@ func TestFailureTypeRetryablePersisted(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateJob: %v", err)
 		}
-		n, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: job.ID}}, "no worker", "crashed")
+		failedIDs, err := database.FailStarvedPendingJobs(time.Now().Add(time.Hour), []db.StarvedJob{{ID: job.ID}}, "no worker", "crashed")
 		if err != nil {
 			t.Fatalf("FailStarvedPendingJobs: %v", err)
 		}
-		if n != 1 {
-			t.Fatalf("failed %d jobs, want 1", n)
+		if len(failedIDs) != 1 || failedIDs[0] != job.ID {
+			t.Fatalf("failed %v, want [%s]", failedIDs, job.ID)
 		}
 		assertRetryable(t, job.ID, 0)
 	})
@@ -1898,7 +1888,7 @@ func TestFailureTypeRetryablePersisted(t *testing.T) {
 			t.Fatalf("CreateJob: %v", err)
 		}
 		ft := string(protocol.FailureInputUnreachable)
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, nil, &errMsg, &ft, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusFailed, nil, &errMsg, &ft, nil); err != nil {
 			t.Fatalf("failed update: %v", err)
 		}
 		assertRetryable(t, job.ID, 0)
@@ -1933,32 +1923,45 @@ func TestFailureTypeRetryablePersisted(t *testing.T) {
 			t.Fatalf("CreateJob: %v", err)
 		}
 		ft := string(protocol.FailureTimeout)
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, nil, &errMsg, &ft, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusFailed, nil, &errMsg, &ft, nil); err != nil {
 			t.Fatalf("fail update: %v", err)
 		}
 		assertRetryable(t, job.ID, 1)
 		empty := ""
 		exitCode := 0
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusCompleted, &exitCode, nil, &empty, &empty); err != nil {
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusCompleted, &exitCode, nil, &empty, &empty); err != nil {
 			t.Fatalf("complete update: %v", err)
 		}
 		assertRetryable(t, job.ID, 0)
 	})
 
-	t.Run("reset clears retryable", func(t *testing.T) {
+	t.Run("requeue clears retryable", func(t *testing.T) {
 		job, err := database.CreateJob(`["in.mkv"]`, `["-c:v","libx264"]`, "out.mkv", false)
 		if err != nil {
 			t.Fatalf("CreateJob: %v", err)
 		}
 		ft := string(protocol.FailureTimeout)
 		// A running job carrying a stale classification is what the failover
-		// reset clears when it re-queues the job for another worker.
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, &ft, nil); err != nil {
+		// migration clears when it re-queues the job for another worker.
+		if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
+			t.Fatalf("AssignJobToWorker: %v", err)
+		}
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, &ft, nil); err != nil {
 			t.Fatalf("set running with failure_type: %v", err)
 		}
 		assertRetryable(t, job.ID, 1)
-		if err := database.ResetJobToPending(job.ID); err != nil {
-			t.Fatalf("ResetJobToPending: %v", err)
+		if _, err := database.GetWorker("worker-1"); err != nil {
+			if _, err := database.CreateWorker("worker-1", "worker-1", protocol.WorkerCapabilities{
+				Encoders: []string{"libx264"}, FFmpegVersion: "6.0",
+			}); err != nil {
+				t.Fatalf("CreateWorker: %v", err)
+			}
+		}
+		if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
+			t.Fatalf("UpdateWorkerStatus: %v", err)
+		}
+		if _, err := database.MigrateJobsFromWorker("worker-1", "heartbeat_timeout", 3); err != nil {
+			t.Fatalf("MigrateJobsFromWorker: %v", err)
 		}
 		assertRetryable(t, job.ID, 0)
 	})

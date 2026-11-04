@@ -797,6 +797,10 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Failed to broadcast completion for cancelled job %s: %v", jobID, err)
 		}
 	}
+	// A cancellation of a still-queued job emits no complete frame, so the
+	// sequence counter is released explicitly; the call is idempotent after
+	// the complete broadcast above.
+	h.wsHub.ReleaseJobStream(jobID)
 
 	writeJSON(w, http.StatusOK, protocol.JobCancelResponse{
 		Message: "Job cancelled successfully",
@@ -811,6 +815,19 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Invalid JSON body", err,
+		))
+		return
+	}
+
+	// PATCH is a worker report: the reporting identity is required so every
+	// write is ownership-guarded. Without it the server cannot tell a worker
+	// that still owns the job from one whose job was migrated away, and a
+	// stale reporter could write status/progress/stream chunks without an
+	// owner check. Output upload already requires the same parameter.
+	workerID := db.NormalizeWorkerID(req.WorkerID)
+	if workerID == "" {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "worker_id is required", nil,
 		))
 		return
 	}
@@ -832,6 +849,34 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Error != "" {
 		errMsg = &req.Error
+	}
+
+	// A report from a worker that no longer owns this job (it was migrated to
+	// another worker after a heartbeat timeout) must be refused before ANY side
+	// effect — status, progress and stderr/stdout chunks alike. Otherwise the
+	// stale worker could flip a requeued job back to running without an owner,
+	// or interleave its output into the new owner's stream.
+	job, err := h.db.GetJob(jobID)
+	if err != nil {
+		if errors.Is(err, protocol.ErrJobNotFound) {
+			writeError(w, http.StatusNotFound, protocol.NewProtocolError(
+				protocol.ErrCodeNotFound, "Job not found", err,
+			))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to get job", err,
+		))
+		return
+	}
+	owns := job.WorkerID.Valid &&
+		db.NormalizeWorkerID(job.WorkerID.String) == workerID &&
+		(job.Status == protocol.JobStatusRunning || job.Status == protocol.JobStatusQueued)
+	if !owns {
+		writeError(w, http.StatusConflict, protocol.NewProtocolError(
+			protocol.ErrCodeConflict, "Job no longer assigned to this worker", protocol.ErrJobNotOwned,
+		))
+		return
 	}
 
 	// Only update status if provided
@@ -860,14 +905,17 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var err error
-		if protocol.IsTerminalStatus(req.Status) && req.WorkerID != "" {
+		if protocol.IsTerminalStatus(req.Status) {
 			// Ownership-guarded terminal update: the report only lands if
-			// req.WorkerID still owns the job (running/queued). A stale
-			// terminal report from a worker that lost the job to failover
-			// returns 409 instead of overwriting the new owner's result.
-			err = h.db.UpdateJobTerminalStatusWithOwnerAndCache(jobID, db.NormalizeWorkerID(req.WorkerID), req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
+			// workerID still owns the job (running/queued). A stale terminal
+			// report from a worker that lost the job to failover returns 409
+			// instead of overwriting the new owner's result.
+			err = h.db.UpdateJobTerminalStatusWithOwnerAndCache(jobID, workerID, req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
 		} else {
-			err = h.db.UpdateJobStatusWithFailureAndCache(jobID, req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
+			// Ownership-guarded running report. Without the guard a stale
+			// worker turns a migrated (pending, unassigned) job back into
+			// running, which no scheduling or sweep path can recover.
+			err = h.db.UpdateJobRunningStatusWithOwner(jobID, workerID, exitCode, errMsg, failureType, failureDetails)
 		}
 		if err != nil {
 			if errors.Is(err, protocol.ErrJobNotFound) {
@@ -949,11 +997,23 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 	// Handle progress update from worker
 	if req.Progress > 0 || req.EtaSeconds > 0 {
 		// Store progress in DB. A report that would move the job's percent
-		// backward is rejected (see Database.UpdateJobProgress): the job's
+		// backward is rejected (see Database.UpdateJobProgressWithOwner): the job's
 		// progress is monotonic across re-dispatches, and neither the stored
 		// value nor the broadcast may rewind what the CLI already showed.
-		accepted, err := h.db.UpdateJobProgress(jobID, req.Progress, req.EtaSeconds)
+		accepted, err := h.db.UpdateJobProgressWithOwner(jobID, workerID, req.Progress, req.EtaSeconds)
 		if err != nil {
+			if errors.Is(err, protocol.ErrJobNotOwned) {
+				writeError(w, http.StatusConflict, protocol.NewProtocolError(
+					protocol.ErrCodeConflict, "Job no longer assigned to this worker", err,
+				))
+				return
+			}
+			if errors.Is(err, protocol.ErrJobNotFound) {
+				writeError(w, http.StatusNotFound, protocol.NewProtocolError(
+					protocol.ErrCodeNotFound, "Job not found", err,
+				))
+				return
+			}
 			log.Printf("Failed to update job progress for job %s: %v", jobID, err)
 		}
 		// Broadcast when the report was accepted, or when the store failed so
@@ -993,12 +1053,23 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// UploadJobOutput handles output file upload from worker
+// UploadJobOutput handles output file upload from worker. The reporting
+// worker identifies itself via the worker_id query parameter; an upload from a
+// worker that no longer owns an active job is refused (409) before the body is
+// read, so a stale worker cannot overwrite the new owner's product.
 func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobId")
 
-	// Verify job exists
-	_, err := h.db.GetJob(jobID)
+	workerID := db.NormalizeWorkerID(r.URL.Query().Get("worker_id"))
+	if workerID == "" {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "worker_id is required", nil,
+		))
+		return
+	}
+
+	// Verify the job exists and is still owned by the uploading worker.
+	job, err := h.db.GetJob(jobID)
 	if err != nil {
 		if errors.Is(err, protocol.ErrJobNotFound) {
 			writeError(w, http.StatusNotFound, protocol.NewProtocolError(
@@ -1008,6 +1079,15 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to get job", err,
+		))
+		return
+	}
+	owns := job.WorkerID.Valid &&
+		db.NormalizeWorkerID(job.WorkerID.String) == workerID &&
+		(job.Status == protocol.JobStatusRunning || job.Status == protocol.JobStatusQueued)
+	if !owns {
+		writeError(w, http.StatusConflict, protocol.NewProtocolError(
+			protocol.ErrCodeConflict, "Job no longer assigned to this worker", protocol.ErrJobNotOwned,
 		))
 		return
 	}
@@ -1059,7 +1139,19 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
-	if err := h.db.UpdateJobOutput(jobID, string(outputFilesJSON)); err != nil {
+	if err := h.db.UpdateJobOutputWithOwner(jobID, workerID, string(outputFilesJSON)); err != nil {
+		if errors.Is(err, protocol.ErrJobNotOwned) {
+			// The job was migrated between the pre-check and this write; drop
+			// the just-saved file rather than leaving another worker's
+			// product behind, and tell the stale worker to stop.
+			if rmErr := os.Remove(h.storage.GetOutputPath(jobID, fileID)); rmErr != nil && !os.IsNotExist(rmErr) {
+				log.Printf("UploadJobOutput: failed to remove stale output for job %s: %v", jobID, rmErr)
+			}
+			writeError(w, http.StatusConflict, protocol.NewProtocolError(
+				protocol.ErrCodeConflict, "Job no longer assigned to this worker", err,
+			))
+			return
+		}
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to update job output", err,
 		))
@@ -1646,8 +1738,12 @@ func (h *Handler) waitForProbeTerminal(ctx context.Context, jobID string, waitTi
 		select {
 		case <-ctx.Done():
 			// Client went away: stop burning server resources and cancel
-			// the dispatched probe job.
-			_ = h.db.CancelJob(jobID)
+			// the dispatched probe job. The cancellation is out of band (no
+			// waiters left to broadcast to), so release the stream bookkeeping
+			// here rather than leaving a counter behind.
+			if err := h.db.CancelJob(jobID); err == nil {
+				h.wsHub.ReleaseJobStream(jobID)
+			}
 			return nil, ctx.Err()
 		case <-timer.C:
 			return nil, nil

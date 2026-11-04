@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -504,7 +505,10 @@ func (c *Client) UploadOutput(jobID, filePath string) error {
 		pw.CloseWithError(writer.Close())
 	}()
 
-	url := fmt.Sprintf("%s%s/jobs/%s/output", c.baseURL, apiSuffix, jobID)
+	// worker_id identifies the uploader: the server refuses an upload from a
+	// worker that no longer owns the job (migrated after a heartbeat timeout).
+	url := fmt.Sprintf("%s%s/jobs/%s/output?worker_id=%s", c.baseURL, apiSuffix, jobID,
+		url.QueryEscape(c.getWorkerID()))
 	httpReq, err := http.NewRequest("POST", url, pr)
 	if err != nil {
 		pr.Close()

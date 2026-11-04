@@ -6,6 +6,7 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
@@ -35,7 +36,7 @@ func TestSchedulerTimeoutRetryExhaustedReleasesQuota(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "w1"); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to mark job running: %v", err)
 	}
 	if _, err := database.GetDB().Exec(

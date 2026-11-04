@@ -9,9 +9,10 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
-// fakeBroadcaster records BroadcastStatus calls.
+// fakeBroadcaster records BroadcastStatus and ReleaseJobStream calls.
 type fakeBroadcaster struct {
 	statuses []broadcastCall
+	released []string
 }
 
 type broadcastCall struct {
@@ -23,6 +24,10 @@ type broadcastCall struct {
 func (f *fakeBroadcaster) BroadcastStatus(jobID string, status protocol.JobStatus, exitCode int, err string) error {
 	f.statuses = append(f.statuses, broadcastCall{jobID: jobID, status: status, err: err})
 	return nil
+}
+
+func (f *fakeBroadcaster) ReleaseJobStream(jobID string) {
+	f.released = append(f.released, jobID)
 }
 
 // the starvation sweep fails jobs in the DB layer,
@@ -96,6 +101,16 @@ func TestSchedulerNoWorkerStarvationReleasesQuotaAndBroadcasts(t *testing.T) {
 		if broadcaster.statuses[i].jobID != id || broadcaster.statuses[i].status != protocol.JobStatusFailed {
 			t.Errorf("broadcast[%d] = (%s, %s), want (%s, failed)",
 				i, broadcaster.statuses[i].jobID, broadcaster.statuses[i].status, id)
+		}
+	}
+	// Out-of-band verdicts have no complete frame, so each job's WS sequence
+	// bookkeeping must be released explicitly.
+	if len(broadcaster.released) != len(jobIDs) {
+		t.Fatalf("released = %v, want %v", broadcaster.released, jobIDs)
+	}
+	for i, id := range jobIDs {
+		if broadcaster.released[i] != id {
+			t.Errorf("released[%d] = %s, want %s", i, broadcaster.released[i], id)
 		}
 	}
 }

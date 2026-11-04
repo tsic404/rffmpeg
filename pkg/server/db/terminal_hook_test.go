@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
 
@@ -50,7 +51,7 @@ func TestTerminalHookFiresOnEveryTerminalWriter(t *testing.T) {
 		if err := database.AssignJobToWorker(job.ID, "w1"); err != nil {
 			t.Fatalf("Failed to assign job: %v", err)
 		}
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 			t.Fatalf("Failed to mark job running: %v", err)
 		}
 	}
@@ -134,16 +135,20 @@ func TestTerminalHookReleasesQuotaOncePerJob(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "w1"); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to mark job running: %v", err)
 	}
 
 	// failed -> failed is allowed for the worker retry-after-failure flow.
+	// Staged through the fixture because the ownership guard accepts terminal
+	// reports only while the job is active, so a second terminal write cannot
+	// be produced by a production writer; the idempotent hook is what this
+	// test pins.
 	failure := string(protocol.FailureWorkerCrash)
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, nil, nil, &failure, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusFailed, nil, nil, &failure, nil); err != nil {
 		t.Fatalf("Failed to fail job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusFailed, nil, nil, &failure, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusFailed, nil, nil, &failure, nil); err != nil {
 		t.Fatalf("Failed to repeat failure report: %v", err)
 	}
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
@@ -73,21 +74,21 @@ func TestMultiWorkerFailover_FullFlow(t *testing.T) {
 	if err := database.AssignJobToWorker(job1.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job1 to worker-a: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job1.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job1 as running: %v", err)
 	}
 
 	if err := database.AssignJobToWorker(job2.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job2 to worker-a: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job2.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job2 as running: %v", err)
 	}
 
 	if err := database.AssignJobToWorker(job3.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job3 to worker-a: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job3.ID, protocol.JobStatusQueued, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job3.ID, protocol.JobStatusQueued, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job3 as queued: %v", err)
 	}
 
@@ -180,7 +181,7 @@ func TestMultiWorkerFailover_FullFlow(t *testing.T) {
 	}
 
 	// Step 8: Verify worker-B can pull the pending jobs
-	idleWorkersWithCount, err := database.GetIdleWorkersWithJobCount()
+	idleWorkersWithCount, err := database.GetIdleWorkersWithJobCount(0)
 	if err != nil {
 		t.Fatalf("Failed to get idle workers: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestMultiWorkerFailover_CapabilityAwareRescheduling(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, workerA.ID); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
 
@@ -279,7 +280,7 @@ func TestMultiWorkerFailover_CapabilityAwareRescheduling(t *testing.T) {
 	}
 
 	// Verify worker-B with h264_nvenc capability is idle and can accept the job
-	workersByEncoder, err := database.GetIdleWorkersByEncoder("h264_nvenc")
+	workersByEncoder, err := database.GetIdleWorkersByEncoder("h264_nvenc", 0)
 	if err != nil {
 		t.Fatalf("Failed to get workers by encoder: %v", err)
 	}
@@ -344,7 +345,7 @@ func TestMultiWorkerFailover_StressMultipleWorkers(t *testing.T) {
 		if err := database.AssignJobToWorker(job.ID, workerIDs[workerIdx]); err != nil {
 			t.Fatalf("Failed to assign job %d: %v", i, err)
 		}
-		if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 			t.Fatalf("Failed to set job %d running: %v", i, err)
 		}
 	}
@@ -384,7 +385,7 @@ func TestMultiWorkerFailover_StressMultipleWorkers(t *testing.T) {
 	}
 
 	// Verify no offline workers appear in idle list
-	idleWorkers, err := database.GetIdleWorkers()
+	idleWorkers, err := database.GetIdleWorkers(0)
 	if err != nil {
 		t.Fatalf("Failed to get idle workers: %v", err)
 	}
