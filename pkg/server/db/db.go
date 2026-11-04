@@ -640,3 +640,26 @@ func (d *Database) migrateRetryableColumn() error {
 	}
 	return nil
 }
+
+// jobExec is the statement executor shared by *sql.DB and *sql.Tx, so the
+// requeue helpers below run identically inside and outside a transaction.
+type jobExec interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// Worker-availability predicates shared by the stuck-job scan and the sweep
+// UPDATE, so the two statements cannot drift. A running job on an
+// offline-but-still-present worker is deliberately NOT matched: that is
+// exactly the failover migration's case (C-84 ②), and failing it here would
+// race the requeue. The sweep only steps in when nobody can migrate it.
+const (
+	missingWorkerPredicate = `(j.worker_id IS NULL OR NOT EXISTS (
+		SELECT 1 FROM workers w WHERE w.id = j.worker_id
+	))`
+	offlineWorkerPredicate = `EXISTS (
+		SELECT 1 FROM workers w WHERE w.id = j.worker_id AND w.status = ?
+	)`
+	liveWorkerPredicate = `EXISTS (
+		SELECT 1 FROM workers w WHERE w.id = j.worker_id AND w.status != ?
+	)`
+)

@@ -348,6 +348,8 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.wsHub.ReleaseJobStream(jobID)
+
 	writeJSON(w, http.StatusOK, protocol.JobCancelResponse{
 		Message: "Job cancelled successfully",
 	})
@@ -361,6 +363,14 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
 			protocol.ErrCodeInvalidRequest, "Invalid JSON body", err,
+		))
+		return
+	}
+
+	workerID := db.NormalizeWorkerID(req.WorkerID)
+	if workerID == "" {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "worker_id is required", nil,
 		))
 		return
 	}
@@ -381,6 +391,29 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Error != "" {
 		errMsg = &req.Error
+	}
+
+	job, err := h.db.GetJob(jobID)
+	if err != nil {
+		if errors.Is(err, protocol.ErrJobNotFound) {
+			writeError(w, http.StatusNotFound, protocol.NewProtocolError(
+				protocol.ErrCodeNotFound, "Job not found", err,
+			))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
+			protocol.ErrCodeInternalError, "Failed to get job", err,
+		))
+		return
+	}
+	owns := job.WorkerID.Valid &&
+		db.NormalizeWorkerID(job.WorkerID.String) == workerID &&
+		(job.Status == protocol.JobStatusRunning || job.Status == protocol.JobStatusQueued)
+	if !owns {
+		writeError(w, http.StatusConflict, protocol.NewProtocolError(
+			protocol.ErrCodeConflict, "Job no longer assigned to this worker", protocol.ErrJobNotOwned,
+		))
+		return
 	}
 
 	if req.Status != "" {
@@ -406,11 +439,12 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var err error
-		if protocol.IsTerminalStatus(req.Status) && req.WorkerID != "" {
+		if protocol.IsTerminalStatus(req.Status) {
 
-			err = h.db.UpdateJobTerminalStatusWithOwnerAndCache(jobID, db.NormalizeWorkerID(req.WorkerID), req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
+			err = h.db.UpdateJobTerminalStatusWithOwnerAndCache(jobID, workerID, req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
 		} else {
-			err = h.db.UpdateJobStatusWithFailureAndCache(jobID, req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
+
+			err = h.db.UpdateJobRunningStatusWithOwner(jobID, workerID, exitCode, errMsg, failureType, failureDetails)
 		}
 		if err != nil {
 			if errors.Is(err, protocol.ErrJobNotFound) {
@@ -473,8 +507,20 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 
 	if req.Progress > 0 || req.EtaSeconds > 0 {
 
-		accepted, err := h.db.UpdateJobProgress(jobID, req.Progress, req.EtaSeconds)
+		accepted, err := h.db.UpdateJobProgressWithOwner(jobID, workerID, req.Progress, req.EtaSeconds)
 		if err != nil {
+			if errors.Is(err, protocol.ErrJobNotOwned) {
+				writeError(w, http.StatusConflict, protocol.NewProtocolError(
+					protocol.ErrCodeConflict, "Job no longer assigned to this worker", err,
+				))
+				return
+			}
+			if errors.Is(err, protocol.ErrJobNotFound) {
+				writeError(w, http.StatusNotFound, protocol.NewProtocolError(
+					protocol.ErrCodeNotFound, "Job not found", err,
+				))
+				return
+			}
 			log.Printf("Failed to update job progress for job %s: %v", jobID, err)
 		}
 

@@ -444,9 +444,13 @@ func TestUpdateJobStatus(t *testing.T) {
 	var jobResp protocol.JobSubmitResponse
 	json.NewDecoder(w.Body).Decode(&jobResp)
 
+	// Worker-addressed updates require a live owner: pull the job first.
+	claimTestJob(t, router)
+
 	// Update job to running
 	updateReq := protocol.JobUpdateRequest{
-		Status: protocol.JobStatusRunning,
+		Status:   protocol.JobStatusRunning,
+		WorkerID: "test-worker-1",
 	}
 	updateBody, _ := json.Marshal(updateReq)
 
@@ -477,6 +481,7 @@ func TestUpdateJobStatus(t *testing.T) {
 	updateReq = protocol.JobUpdateRequest{
 		Status:   protocol.JobStatusCompleted,
 		ExitCode: 0,
+		WorkerID: "test-worker-1",
 	}
 	updateBody, _ = json.Marshal(updateReq)
 
@@ -742,17 +747,20 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	var jobResp protocol.JobSubmitResponse
 	json.NewDecoder(w.Body).Decode(&jobResp)
 
-	patch := func(update protocol.JobUpdateRequest) *httptest.ResponseRecorder {
+	// Worker-addressed updates require a live owner.
+	claimTestJob(t, router)
+
+	patch := func(target string, update protocol.JobUpdateRequest) *httptest.ResponseRecorder {
 		updateBody, _ := json.Marshal(update)
-		r := httptest.NewRequest("PATCH", "/api/v1/jobs/"+jobResp.JobID, bytes.NewReader(updateBody))
+		r := httptest.NewRequest("PATCH", "/api/v1/jobs/"+target, bytes.NewReader(updateBody))
 		r.Header.Set("Authorization", "Bearer test-token")
 		r.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, r)
 		return rec
 	}
-	getJob := func() protocol.JobInfo {
-		r := httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+	getJob := func(target string) protocol.JobInfo {
+		r := httptest.NewRequest("GET", "/api/v1/jobs/"+target, nil)
 		r.Header.Set("Authorization", "Bearer test-token")
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, r)
@@ -762,40 +770,57 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	}
 
 	// 1. Invalid failure_type is rejected
-	resp := patch(protocol.JobUpdateRequest{
+	resp := patch(jobResp.JobID, protocol.JobUpdateRequest{
 		Status:      protocol.JobStatusFailed,
 		FailureType: "NOT_A_REAL_TYPE",
+		WorkerID:    "test-worker-1",
 	})
 	if resp.Code != http.StatusBadRequest {
 		t.Errorf("invalid failure_type: expected 400, got %d", resp.Code)
 	}
 
 	// 2. Valid classification is persisted
-	resp = patch(protocol.JobUpdateRequest{
+	resp = patch(jobResp.JobID, protocol.JobUpdateRequest{
 		Status:         protocol.JobStatusFailed,
 		ExitCode:       1,
 		Error:          "ffmpeg blew up",
 		FailureType:    string(protocol.FailureInputUnreachable),
 		FailureDetails: "Input file or stream cannot be reached",
+		WorkerID:       "test-worker-1",
 	})
 	if resp.Code != http.StatusOK {
 		t.Fatalf("failed update: expected 200, got %d", resp.Code)
 	}
-	job := getJob()
+	job := getJob(jobResp.JobID)
 	if job.FailureType != string(protocol.FailureInputUnreachable) {
 		t.Errorf("expected failure_type %q persisted, got %q",
 			protocol.FailureInputUnreachable, job.FailureType)
 	}
 
-	// 3. Completing clears stale failure metadata (retry-after-failure path)
-	resp = patch(protocol.JobUpdateRequest{
+	// 3. Completing clears stale failure metadata. The owner-guarded terminal
+	// path only accepts a terminal report while the job is still active, so a
+	// fresh job carries the stale classification: a running report persists it,
+	// then completion clears it.
+	staleJobID := submitTestJob(t, router)
+	claimTestJob(t, router)
+	resp = patch(staleJobID, protocol.JobUpdateRequest{
+		Status:         protocol.JobStatusRunning,
+		FailureType:    string(protocol.FailureInputUnreachable),
+		FailureDetails: "stale attempt metadata",
+		WorkerID:       "test-worker-1",
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("running update: expected 200, got %d", resp.Code)
+	}
+	resp = patch(staleJobID, protocol.JobUpdateRequest{
 		Status:   protocol.JobStatusCompleted,
 		ExitCode: 0,
+		WorkerID: "test-worker-1",
 	})
 	if resp.Code != http.StatusOK {
 		t.Fatalf("complete update: expected 200, got %d", resp.Code)
 	}
-	job = getJob()
+	job = getJob(staleJobID)
 	if job.Status != protocol.JobStatusCompleted {
 		t.Fatalf("expected completed, got %q", job.Status)
 	}
@@ -810,54 +835,14 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 // TestUpdateJobFailureTypeAllEnumsAccepted locks the gap: every one
 // of the nine documented FailureType values must be accepted by the server
 // (not just TIMEOUT / INPUT_UNREACHABLE) and persisted onto the job, and each
-// must expose the retryable flag the contract assigns to it. A failed→failed
-// update is a legal retry-after-failure transition, so one job can exercise
-// all nine values in sequence.
+// must expose the retryable flag the contract assigns to it. Each value is
+// reported by the owning worker on a fresh job, because a terminal report is
+// only accepted while the job is still active (ownership guard).
 func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
 	registerTestWorker(t, router, []string{"libx264"})
-
-	fileContent := []byte("test content")
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	part, _ := writer.CreateFormFile("file", "test.mp4")
-	part.Write(fileContent)
-	writer.Close()
-
-	req := httptest.NewRequest("POST", "/api/v1/upload", body)
-	req.Header.Set("Authorization", "Bearer test-token")
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("upload failed: status %d, body: %s", w.Code, w.Body.String())
-	}
-
-	var uploadResp protocol.UploadResponse
-	if err := json.NewDecoder(w.Body).Decode(&uploadResp); err != nil {
-		t.Fatalf("Failed to decode upload response: %v", err)
-	}
-
-	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
-	}
-	jobBody, _ := json.Marshal(jobReq)
-	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
-	req.Header.Set("Authorization", "Bearer test-token")
-	req.Header.Set("Content-Type", "application/json")
-	w = httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("job submit failed: status %d, body: %s", w.Code, w.Body.String())
-	}
-
-	var jobResp protocol.JobSubmitResponse
-	if err := json.NewDecoder(w.Body).Decode(&jobResp); err != nil {
-		t.Fatalf("Failed to decode job response: %v", err)
-	}
 
 	allTypes := []protocol.FailureType{
 		protocol.FailureInputUnreachable,
@@ -899,15 +884,18 @@ func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 			t.Fatalf("%s must be a valid enum value", ft)
 		}
 
+		jobID := submitTestJob(t, router)
+		claimTestJob(t, router)
 		update := protocol.JobUpdateRequest{
 			Status:         protocol.JobStatusFailed,
 			ExitCode:       1,
 			Error:          "ffmpeg blew up",
 			FailureType:    string(ft),
 			FailureDetails: "injected for enum coverage",
+			WorkerID:       "test-worker-1",
 		}
 		updateBody, _ := json.Marshal(update)
-		r := httptest.NewRequest("PATCH", "/api/v1/jobs/"+jobResp.JobID, bytes.NewReader(updateBody))
+		r := httptest.NewRequest("PATCH", "/api/v1/jobs/"+jobID, bytes.NewReader(updateBody))
 		r.Header.Set("Authorization", "Bearer test-token")
 		r.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -917,7 +905,7 @@ func TestUpdateJobFailureTypeAllEnumsAccepted(t *testing.T) {
 				ft, rec.Code, rec.Body.String())
 		}
 
-		gr := httptest.NewRequest("GET", "/api/v1/jobs/"+jobResp.JobID, nil)
+		gr := httptest.NewRequest("GET", "/api/v1/jobs/"+jobID, nil)
 		gr.Header.Set("Authorization", "Bearer test-token")
 		grec := httptest.NewRecorder()
 		router.ServeHTTP(grec, gr)
@@ -1035,9 +1023,12 @@ func TestCancelRunningJob(t *testing.T) {
 	var jobResp protocol.JobSubmitResponse
 	json.NewDecoder(w.Body).Decode(&jobResp)
 
+	claimTestJob(t, router)
+
 	// Update job to running status
 	updateReq := protocol.JobUpdateRequest{
-		Status: protocol.JobStatusRunning,
+		Status:   protocol.JobStatusRunning,
+		WorkerID: "test-worker-1",
 	}
 	updateBody, _ := json.Marshal(updateReq)
 
@@ -1122,7 +1113,8 @@ func TestUploadOutputAndDownload(t *testing.T) {
 	outputPart.Write(outputContent)
 	outputWriter.Close()
 
-	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/output", jobResp.JobID), outputBody)
+	claimTestJob(t, router)
+	req = httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/output?worker_id=test-worker-1", jobResp.JobID), outputBody)
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", outputWriter.FormDataContentType())
 	w = httptest.NewRecorder()
@@ -1221,6 +1213,19 @@ func submitTestJob(t *testing.T, router *chi.Mux) string {
 	return jobResp.JobID
 }
 
+// claimTestJob pulls the pending job onto test-worker-1. Output uploads are
+// ownership-guarded, so the uploaded file needs a live owner on the job.
+func claimTestJob(t *testing.T, router *chi.Mux) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/v1/workers/test-worker-1/jobs", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("claim job failed: status %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
 // uploadOutputPayload streams a multipart file part of the given size through
 // a pipe so the test never buffers the whole body in memory.
 func uploadOutputPayload(t *testing.T, router *chi.Mux, jobID string, size int) *httptest.ResponseRecorder {
@@ -1249,7 +1254,7 @@ func uploadOutputPayload(t *testing.T, router *chi.Mux, jobID string, size int) 
 		pw.CloseWithError(writer.Close())
 	}()
 
-	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/output", jobID), pr)
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/jobs/%s/output?worker_id=test-worker-1", jobID), pr)
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	w := httptest.NewRecorder()
@@ -1273,6 +1278,7 @@ func TestUploadLargeOutput(t *testing.T) {
 			defer cleanup()
 
 			jobID := submitTestJob(t, router)
+			claimTestJob(t, router)
 			w := uploadOutputPayload(t, router, jobID, tc.size)
 			if w.Code != http.StatusOK {
 				t.Fatalf("Upload output (%d bytes) failed with status %d: %s", tc.size, w.Code, w.Body.String())
@@ -2640,6 +2646,7 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	updateReq := protocol.JobUpdateRequest{
 		Status:   protocol.JobStatusCompleted,
 		ExitCode: 0,
+		WorkerID: regResp.WorkerID,
 	}
 	updateBody, _ := json.Marshal(updateReq)
 	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/v1/jobs/%s", jobResp.JobID), bytes.NewReader(updateBody))
@@ -2764,10 +2771,13 @@ func TestCancelCompletedJob(t *testing.T) {
 	var jobResp protocol.JobSubmitResponse
 	json.NewDecoder(w.Body).Decode(&jobResp)
 
+	claimTestJob(t, router)
+
 	// Update job to completed status
 	updateReq := protocol.JobUpdateRequest{
 		Status:   protocol.JobStatusCompleted,
 		ExitCode: 0,
+		WorkerID: "test-worker-1",
 	}
 	updateBody, _ := json.Marshal(updateReq)
 

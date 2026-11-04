@@ -122,6 +122,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: The job is no longer assigned to this worker
         '507':
           $ref: '#/components/responses/InsufficientStorage'
 
@@ -349,8 +351,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JobUpdateResponse'
+        '400':
+          description: Malformed body, invalid status/failure_type, or missing worker_id
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: The job is no longer assigned to this worker, or is already terminal
 
   /jobs/{jobId}/log:
     get:
@@ -375,7 +381,11 @@ paths:
     post:
       tags: [jobs]
       summary: Upload output file
-      description: Worker uploads transcoded output file
+      description: |
+        Worker uploads the transcoded output file. The uploading worker must
+        identify itself with `worker_id`; an upload from a worker that no
+        longer owns an active job is refused with 409 so a stale worker cannot
+        overwrite the new owner's product.
       operationId: uploadJobOutput
       parameters:
         - name: jobId
@@ -384,6 +394,12 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: worker_id
+          in: query
+          required: true
+          description: Identifier of the uploading worker.
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -1152,7 +1168,7 @@ components:
 
     JobUpdateRequest:
       type: object
-      required: [status]
+      required: [worker_id]
       properties:
         status:
           $ref: '#/components/schemas/JobStatus'
@@ -1196,11 +1212,10 @@ components:
         worker_id:
           type: string
           description: >-
-            Reporting worker identity. When present, terminal-status updates are
+            Reporting worker identity (required). Every update is
             ownership-guarded: the server returns 409 if this worker no longer
-            owns the job (reassigned after failover, or already finished).
-            Omitting it falls back to the unguarded update for backward
-            compatibility.
+            owns the job (reassigned after failover, or already finished), and
+            400 when the field is missing.
 
     JobUpdateResponse:
       type: object

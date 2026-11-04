@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 )
 
@@ -39,7 +40,7 @@ func TestMigrationEventObservableViaMonitorLoop(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, worker.ID); err != nil {
 		t.Fatalf("Failed to assign job to worker: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to set job running: %v", err)
 	}
 
@@ -111,8 +112,8 @@ func TestMigrationEventObservableViaMonitorLoop(t *testing.T) {
 	// goroutine (close(done) is received in Stop), which establishes a
 	// happens-before edge so the plain-bool read is race-free, and guarantees
 	// the ticker iteration that wrote the migration event also completed its
-	// TriggerReschedule() call — CreateMigrationEvent runs before
-	// TriggerReschedule in migrateJobsFromWorker, so reading the flag without
+	// TriggerReschedule() call — the migration (audit rows included) runs
+	// before TriggerReschedule in migrateJobsFromWorker, so reading the flag without
 	// joining could race ahead and see false (the reviewer's flaky window).
 	monitor.Stop()
 
@@ -161,7 +162,7 @@ func TestMigrationEventRetryCountIsCumulative(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
 		t.Fatalf("assign to worker-1: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
 	if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
@@ -185,7 +186,7 @@ func TestMigrationEventRetryCountIsCumulative(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "worker-2"); err != nil {
 		t.Fatalf("assign to worker-2: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("set running (2nd): %v", err)
 	}
 	if _, err := database.GetDB().Exec(`UPDATE workers SET last_heartbeat = ? WHERE id = ?`,
@@ -230,9 +231,7 @@ func TestMigrationEventRetryCountPerJobMixedBatch(t *testing.T) {
 		t.Fatalf("create jobA: %v", err)
 	}
 	for i, w := range []string{"old-w1", "old-w2", "old-w3"} {
-		if _, err := database.CreateMigrationEvent(w, w, string(migration.ReasonHeartbeatTimeout), i+1, []string{jobA.ID}, 1); err != nil {
-			t.Fatalf("seed jobA migration %d: %v", i+1, err)
-		}
+		insertMigrationEventForTest(t, database, w, w, string(migration.ReasonHeartbeatTimeout), i+1, []string{jobA.ID})
 	}
 
 	// jobB is fresh: its first migration records a cumulative count of 1.
@@ -245,7 +244,7 @@ func TestMigrationEventRetryCountPerJobMixedBatch(t *testing.T) {
 		if err := database.AssignJobToWorker(jid, "worker-1"); err != nil {
 			t.Fatalf("assign %s: %v", jid, err)
 		}
-		if err := database.UpdateJobStatusWithFailure(jid, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, jid, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 			t.Fatalf("set %s running: %v", jid, err)
 		}
 	}

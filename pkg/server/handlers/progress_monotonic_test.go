@@ -19,7 +19,11 @@ import (
 // reportJobProgress PATCHes a progress/ETA report for jobID, as a worker does.
 func reportJobProgress(t *testing.T, router *chi.Mux, jobID string, progress float64, eta int) {
 	t.Helper()
-	body, err := json.Marshal(protocol.JobUpdateRequest{Progress: progress, EtaSeconds: eta})
+	body, err := json.Marshal(protocol.JobUpdateRequest{
+		Progress:   progress,
+		EtaSeconds: eta,
+		WorkerID:   "test-worker-1",
+	})
 	if err != nil {
 		t.Fatalf("marshal update: %v", err)
 	}
@@ -66,9 +70,15 @@ func TestJobProgressNeverRegresses(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
+	registerTestWorker(t, router, []string{"libx264"})
 	job, err := h.GetDB().CreateJob(`["in.mp4"]`, `["-c:v","libx264"]`, "out.mp4", false)
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
+	}
+	// Progress reports are ownership-guarded: the job must be assigned and
+	// active, not a bare pending row.
+	if err := h.GetDB().AssignJobToWorker(job.ID, "test-worker-1"); err != nil {
+		t.Fatalf("AssignJobToWorker: %v", err)
 	}
 
 	reportJobProgress(t, router, job.ID, 71.1, 7)
@@ -109,9 +119,15 @@ func TestJobProgressBroadcastGate(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
+	registerTestWorker(t, router, []string{"libx264"})
 	job, err := h.GetDB().CreateJob(`["in.mp4"]`, `["-c:v","libx264"]`, "out.mp4", false)
 	if err != nil {
 		t.Fatalf("CreateJob: %v", err)
+	}
+	// Progress reports are ownership-guarded: the job must be assigned and
+	// active, not a bare pending row.
+	if err := h.GetDB().AssignJobToWorker(job.ID, "test-worker-1"); err != nil {
+		t.Fatalf("AssignJobToWorker: %v", err)
 	}
 
 	// Subscribe a real WebSocket client to the job, the way the CLI does.

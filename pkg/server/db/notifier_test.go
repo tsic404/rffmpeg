@@ -16,12 +16,23 @@ func TestJobNotifierWakesSubscriberOnTerminalWrite(t *testing.T) {
 		t.Fatalf("CreateJob: %v", err)
 	}
 
+	worker, err := database.CreateWorker("w1", "w1", protocol.WorkerCapabilities{
+		Encoders: []string{"libx264"}, FFmpegVersion: "6.0", MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorker: %v", err)
+	}
+	if err := database.AssignJobToWorker(job.ID, worker.ID); err != nil {
+		t.Fatalf("AssignJobToWorker: %v", err)
+	}
+
 	notifyCh, cancel := database.JobNotifier().Subscribe(job.ID)
 	defer cancel()
 
-	// A non-terminal status update must not wake the waiter.
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
-		t.Fatalf("UpdateJobStatusWithFailure(running): %v", err)
+	// A non-terminal status update (production running writer) must not wake
+	// the waiter.
+	if err := database.UpdateJobRunningStatusWithOwner(job.ID, worker.ID, nil, nil, nil, nil); err != nil {
+		t.Fatalf("set running: %v", err)
 	}
 	select {
 	case <-notifyCh:
@@ -29,8 +40,9 @@ func TestJobNotifierWakesSubscriberOnTerminalWrite(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusCompleted, nil, nil, nil, nil); err != nil {
-		t.Fatalf("UpdateJobStatusWithFailure(completed): %v", err)
+	// The production terminal writer must wake it.
+	if err := database.UpdateJobTerminalStatusWithOwner(job.ID, worker.ID, protocol.JobStatusCompleted, nil, nil, nil, nil); err != nil {
+		t.Fatalf("complete: %v", err)
 	}
 	select {
 	case <-notifyCh:

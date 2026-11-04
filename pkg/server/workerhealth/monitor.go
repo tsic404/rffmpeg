@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 	"github.com/tsic404/rffmpeg/pkg/server/panicguard"
@@ -43,12 +42,25 @@ type Monitor struct {
 	stopOnce   sync.Once // Guarantees Stop is idempotent
 	sched      SchedulerInterface
 	stateTable *WorkerStateTable // Optional: enables slow node detection
+
+	// streamReleaser drops the WebSocket sequence bookkeeping of jobs this
+	// monitor terminalizes out of band (migration retry budget exhausted).
+	// Optional: nil skips the cleanup.
+	streamReleaser JobStreamReleaser
 }
 
 // SchedulerInterface defines the interface for the scheduler
 // This allows the monitor to trigger job rescheduling after migration
 type SchedulerInterface interface {
 	TriggerReschedule()
+}
+
+// JobStreamReleaser drops a terminal job's WebSocket sequence bookkeeping.
+// The websocket.Hub satisfies it; an interface keeps the monitor decoupled
+// from the hub package. Jobs the monitor fails on its own never emit the
+// complete frame that normally releases the counter.
+type JobStreamReleaser interface {
+	ReleaseJobStream(jobID string)
 }
 
 // New creates a new worker health monitor
@@ -64,6 +76,12 @@ func New(database *db.Database, config Config) *Monitor {
 // SetScheduler sets the scheduler for triggering rescheduling
 func (m *Monitor) SetScheduler(scheduler SchedulerInterface) {
 	m.sched = scheduler
+}
+
+// SetJobStreamReleaser wires the WebSocket stream cleanup used for jobs this
+// monitor terminalizes without a broadcast (migration retry budget exhausted).
+func (m *Monitor) SetJobStreamReleaser(r JobStreamReleaser) {
+	m.streamReleaser = r
 }
 
 // SetStateTable sets the worker state table for slow node detection.
@@ -181,6 +199,11 @@ func (m *Monitor) logOfflineDetection(workerID string) {
 
 // detectSlowWorkers runs slow node detection using the WorkerStateTable.
 // Syncs eviction state to DB and records audit events for eviction/recovery.
+//
+// DetectSlowWorkers applies its decisions to the in-memory marks first, so the
+// persistent write below is the authority: a mark whose write fails is reverted
+// here and a failed clear keeps the memory mark, leaving memory and DB in
+// agreement instead of letting the panel and the next judgement diverge.
 func (m *Monitor) detectSlowWorkers() {
 	if m.stateTable == nil {
 		return
@@ -191,7 +214,11 @@ func (m *Monitor) detectSlowWorkers() {
 	// Sync eviction state to DB for newly evicted workers
 	for _, workerID := range result.NewlyEvicted {
 		if err := m.db.MarkWorkerEvicted(workerID); err != nil {
+			// The persistent mark was not written: drop the in-memory one so
+			// it cannot outlive the DB's (absent) mark.
+			m.stateTable.SetEviction(workerID, false)
 			log.Printf("Failed to mark worker %s as evicted in DB: %v", workerID, err)
+			continue
 		}
 		// Get worker state for throughput info
 		state, ok := m.stateTable.Get(workerID)
@@ -226,7 +253,11 @@ func (m *Monitor) detectSlowWorkers() {
 			result.Median,
 			db.EvictionReasonThroughputRecovered,
 		); err != nil {
+			// The DB still carries the mark: put it back in memory so both
+			// agree and the next judgement stays on the recovery branch.
+			m.stateTable.SetEviction(workerID, true)
 			log.Printf("Failed to clear eviction for worker %s in DB: %v", workerID, err)
+			continue
 		}
 		log.Printf("Worker %s recovered: EWMA=%.2f, median=%.2f", workerID, state.EWMAJobsPerSec, result.Median)
 	}
@@ -241,113 +272,46 @@ func (m *Monitor) detectSlowWorkers() {
 	}
 }
 
-// migrateJobsFromWorker migrates in-progress jobs from a worker and records the migration event.
-// Jobs that have exceeded MaxRetryCount (previous retries >= MaxRetryCount) are marked as failed
-// instead of being migrated.
+// migrateJobsFromWorker migrates the in-progress jobs of a worker the health
+// tick just flipped offline. The classification, audit trail (migration event
+// + per-job redistribution placeholders) and requeues run in one database
+// transaction (see Database.MigrateJobsFromWorker), so C-85 holds: no job is
+// released into scheduling before its audit row, and an audit write failure
+// rolls the requeues back instead of stranding jobs.
+//
+// A failed migration restores the worker's non-offline status so the next tick
+// re-detects it and retries — leaving it offline would make it invisible to
+// the offline scan forever and orphan its jobs.
 func (m *Monitor) migrateJobsFromWorker(workerID string) {
-	// Get worker info before migration
-	worker, err := m.db.GetWorker(workerID)
+	result, err := m.db.MigrateJobsFromWorker(workerID, string(migration.ReasonHeartbeatTimeout), m.config.MaxRetryCount)
 	if err != nil {
-		log.Printf("Failed to get worker %s info for migration: %v", workerID, err)
-		return
-	}
-
-	// Get jobs that will be migrated
-	jobs, err := m.db.GetRunningJobsByWorker(workerID)
-	if err != nil {
-		log.Printf("Failed to get running jobs for worker %s: %v", workerID, err)
-		return
-	}
-
-	if len(jobs) == 0 {
-		log.Printf("Worker %s has no running jobs to migrate", workerID)
-		return
-	}
-
-	workerName := ""
-	if worker.Name != "" {
-		workerName = worker.Name
-	}
-
-	// Phase 1: classify jobs (read-only) into migrated vs failed. A migrated
-	// job's post-migration cumulative count (prior + 1) is tracked per job and
-	// as the event-level max, so the audit rows stay exact even when one
-	// worker's batch mixes jobs at different retry stages. No job is made
-	// schedulable here.
-	var migratedJobIDs []string
-	var failedJobIDs []string
-	retryCounts := make(map[string]int)
-	maxRetryCount := 0
-
-	for _, job := range jobs {
-		count, err := m.db.GetJobRetryCount(job.ID)
-		if err != nil {
-			log.Printf("Failed to get retry count for job %s: %v", job.ID, err)
-			continue
+		log.Printf("Failed to migrate jobs from offline worker %s: %v", workerID, err)
+		if restoreErr := m.db.RestoreWorkerStatusAfterFailedMigration(workerID); restoreErr != nil {
+			log.Printf("Failed to restore worker %s after failed migration: %v", workerID, restoreErr)
 		}
+		return
+	}
 
-		if count >= m.config.MaxRetryCount {
-			failedJobIDs = append(failedJobIDs, job.ID)
-		} else {
-			migratedJobIDs = append(migratedJobIDs, job.ID)
-			postCount := count + 1
-			retryCounts[job.ID] = postCount
-			if postCount > maxRetryCount {
-				maxRetryCount = postCount
+	if len(result.Migrated) == 0 && len(result.Failed) == 0 {
+		log.Printf("Worker %s: no jobs to migrate (none active, or the worker recovered)", workerID)
+		return
+	}
+
+	if len(result.Migrated) > 0 {
+		log.Printf("Migrated %d job(s) from offline worker %s", len(result.Migrated), workerID)
+		// Trigger scheduler to reschedule migrated jobs
+		if m.sched != nil {
+			m.sched.TriggerReschedule()
+		}
+	}
+	if len(result.Failed) > 0 {
+		if m.streamReleaser != nil {
+			for _, jobID := range result.Failed {
+				m.streamReleaser.ReleaseJobStream(jobID)
 			}
 		}
-	}
-
-	// Phase 2: record the migration event and the per-job redistribution
-	// placeholders BEFORE any job becomes schedulable. ResetJobToPending (phase
-	// 3) is what makes a job claimable, and a job claimed in the window between
-	// reset and placeholder insert would never have its target written back —
-	// a permanent loss of that hop's target.
-	if len(migratedJobIDs) > 0 {
-		event, err := m.db.CreateMigrationEvent(
-			workerID,
-			workerName,
-			string(migration.ReasonHeartbeatTimeout),
-			maxRetryCount,
-			migratedJobIDs,
-			len(migratedJobIDs),
-		)
-		if err != nil {
-			log.Printf("Failed to create migration event for worker %s: %v", workerID, err)
-		} else if err := m.db.CreateJobRedistributions(event.ID, retryCounts); err != nil {
-			// The migration event is authoritative; a redistribution placeholder
-			// failure only degrades target observability.
-			log.Printf("Failed to create job redistributions for worker %s: %v", workerID, err)
-		}
-	}
-
-	// Phase 3: apply the decisions. ResetJobToPending is conditional on the job
-	// still being active, so a job that raced to a terminal state is left alone.
-	for _, jobID := range migratedJobIDs {
-		if err := m.db.ResetJobToPending(jobID); err != nil {
-			log.Printf("Failed to reset job %s to pending: %v", jobID, err)
-		}
-	}
-	for _, jobID := range failedJobIDs {
-		errMsg := "max retry count exceeded after repeated worker failures"
-		if err := m.db.FailJob(jobID, errMsg, string(protocol.FailureWorkerCrash)); err != nil {
-			log.Printf("Failed to mark job %s as failed: %v", jobID, err)
-		}
-	}
-
-	if len(migratedJobIDs) > 0 {
-		log.Printf("Migrated %d job(s) from offline worker %s (retry count: %d)",
-			len(migratedJobIDs), workerID, maxRetryCount)
-	}
-
-	if len(failedJobIDs) > 0 {
 		log.Printf("Failed %d job(s) from offline worker %s due to exceeding max retry count (%d)",
-			len(failedJobIDs), workerID, m.config.MaxRetryCount)
-	}
-
-	// Trigger scheduler to reschedule migrated jobs
-	if len(migratedJobIDs) > 0 && m.sched != nil {
-		m.sched.TriggerReschedule()
+			len(result.Failed), workerID, m.config.MaxRetryCount)
 	}
 }
 

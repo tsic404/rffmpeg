@@ -218,8 +218,8 @@ func TestStarvationTickFallbackJudgesAfterWakeCouldNotArm(t *testing.T) {
 	assertStarvedNoWorker(t, database, job.ID)
 }
 
-// A crash migration requeues the job (ResetJobToPending refreshes created_at)
-// and signals the scheduler. That path must arm the expiry wake: with the tick
+// A crash migration requeues the job (refreshing created_at) and signals the
+// scheduler. That path must arm the expiry wake: with the tick
 // an hour out, only the wake can produce the verdict just past the re-anchored
 // deadline. This is the scheduling sequence behind the WORKER_CRASH branch of
 // the acceptance case, pinned without the real heartbeat timeout.
@@ -250,13 +250,14 @@ func TestStarvationWakeJudgesCrashRequeuedJob(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "worker-1"); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if _, err := database.CreateMigrationEvent(
-		"worker-1", "test-worker", "heartbeat_timeout", 1, []string{job.ID}, 1,
-	); err != nil {
-		t.Fatalf("Failed to create migration event: %v", err)
-	}
+	// The monitor's failover sequence: worker goes offline, the migration
+	// writes the heartbeat_timeout event and requeues the job (refreshing the
+	// pending anchor) in one transaction.
 	if err := database.UpdateWorkerStatus("worker-1", protocol.WorkerStatusOffline); err != nil {
 		t.Fatalf("Failed to mark worker offline: %v", err)
+	}
+	if _, err := database.MigrateJobsFromWorker("worker-1", "heartbeat_timeout", 3); err != nil {
+		t.Fatalf("Failed to migrate jobs: %v", err)
 	}
 
 	notifyCh, cancel := database.JobNotifier().Subscribe(job.ID)
@@ -268,11 +269,6 @@ func TestStarvationWakeJudgesCrashRequeuedJob(t *testing.T) {
 	s.Start()
 	defer s.Stop()
 
-	// The monitor's failover sequence: requeue (refreshes the pending anchor)
-	// then signal the scheduler.
-	if err := database.ResetJobToPending(job.ID); err != nil {
-		t.Fatalf("Failed to requeue job: %v", err)
-	}
 	requeuedAt := time.Now()
 	s.TriggerReschedule()
 

@@ -311,7 +311,9 @@ func (h *Handler) waitForProbeTerminal(ctx context.Context, jobID string, waitTi
 		select {
 		case <-ctx.Done():
 
-			_ = h.db.CancelJob(jobID)
+			if err := h.db.CancelJob(jobID); err == nil {
+				h.wsHub.ReleaseJobStream(jobID)
+			}
 			return nil, ctx.Err()
 		case <-timer.C:
 			return nil, nil

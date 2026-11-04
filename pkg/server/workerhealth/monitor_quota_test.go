@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 	"github.com/tsic404/rffmpeg/pkg/server/migration"
 	"github.com/tsic404/rffmpeg/pkg/server/ratelimit"
 )
@@ -32,16 +33,13 @@ func TestMonitorMigrationRetryExhaustedReleasesQuota(t *testing.T) {
 	if err := database.AssignJobToWorker(job.ID, "worker-A"); err != nil {
 		t.Fatalf("Failed to assign job: %v", err)
 	}
-	if err := database.UpdateJobStatusWithFailure(job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+	if err := dbtest.SetJobStatus(t, database, job.ID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 		t.Fatalf("Failed to mark job running: %v", err)
 	}
 	for i := range 3 {
-		if _, err := database.CreateMigrationEvent(
+		insertMigrationEventForTest(t, database,
 			"old-w"+string(rune('0'+i)), "old-worker",
-			string(migration.ReasonHeartbeatTimeout), i, []string{job.ID}, 1,
-		); err != nil {
-			t.Fatalf("Failed to create migration event %d: %v", i, err)
-		}
+			string(migration.ReasonHeartbeatTimeout), i, []string{job.ID})
 	}
 
 	if _, allowed := counter.TryIncrement("client-1", 1); !allowed {

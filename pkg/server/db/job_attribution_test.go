@@ -5,6 +5,7 @@ import (
 
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
+	"github.com/tsic404/rffmpeg/pkg/server/db/dbtest"
 )
 
 // TestJobAttributionPersisted guards the executor attribution recorded on the
@@ -56,7 +57,7 @@ func TestJobAttributionPersisted(t *testing.T) {
 
 	t.Run("completed keeps attribution", func(t *testing.T) {
 		jobID := newAssignedJob(t)
-		if err := database.UpdateJobStatusWithFailure(jobID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, jobID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 			t.Fatalf("set running: %v", err)
 		}
 		exitCode := 0
@@ -68,7 +69,7 @@ func TestJobAttributionPersisted(t *testing.T) {
 
 	t.Run("failed keeps attribution after worker_id clear", func(t *testing.T) {
 		jobID := newAssignedJob(t)
-		if err := database.UpdateJobStatusWithFailure(jobID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
+		if err := dbtest.SetJobStatus(t, database, jobID, protocol.JobStatusRunning, nil, nil, nil, nil); err != nil {
 			t.Fatalf("set running: %v", err)
 		}
 		if err := database.FailJob(jobID, "boom", string(protocol.FailureWorkerCrash)); err != nil {
@@ -122,8 +123,10 @@ func TestJobAttributionPersisted(t *testing.T) {
 			t.Fatalf("null attribution: %v", err)
 		}
 		exitCode := 0
-		if err := database.UpdateJobStatusWithFailure(jobID, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil {
-			t.Fatalf("complete via unguarded path: %v", err)
+		// The guarded terminal writer backfills attribution from worker_id when
+		// the row predates the attribution columns.
+		if err := database.UpdateJobTerminalStatusWithOwner(jobID, worker.ID, protocol.JobStatusCompleted, &exitCode, nil, nil, nil); err != nil {
+			t.Fatalf("complete via guarded path: %v", err)
 		}
 		assertAttribution(t, jobID, "no-owner-terminal")
 	})

@@ -6,10 +6,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+
+	"github.com/google/uuid"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/server/db"
 	"github.com/tsic404/rffmpeg/pkg/server/storage"
 )
 
@@ -147,11 +150,22 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// UploadJobOutput handles output file upload from worker
+// UploadJobOutput handles output file upload from worker. The reporting
+// worker identifies itself via the worker_id query parameter; an upload from a
+// worker that no longer owns an active job is refused (409) before the body is
+// read, so a stale worker cannot overwrite the new owner's product.
 func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobId")
 
-	_, err := h.db.GetJob(jobID)
+	workerID := db.NormalizeWorkerID(r.URL.Query().Get("worker_id"))
+	if workerID == "" {
+		writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
+			protocol.ErrCodeInvalidRequest, "worker_id is required", nil,
+		))
+		return
+	}
+
+	job, err := h.db.GetJob(jobID)
 	if err != nil {
 		if errors.Is(err, protocol.ErrJobNotFound) {
 			writeError(w, http.StatusNotFound, protocol.NewProtocolError(
@@ -161,6 +175,15 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to get job", err,
+		))
+		return
+	}
+	owns := job.WorkerID.Valid &&
+		db.NormalizeWorkerID(job.WorkerID.String) == workerID &&
+		(job.Status == protocol.JobStatusRunning || job.Status == protocol.JobStatusQueued)
+	if !owns {
+		writeError(w, http.StatusConflict, protocol.NewProtocolError(
+			protocol.ErrCodeConflict, "Job no longer assigned to this worker", protocol.ErrJobNotOwned,
 		))
 		return
 	}
@@ -207,7 +230,17 @@ func (h *Handler) UploadJobOutput(w http.ResponseWriter, r *http.Request) {
 		))
 		return
 	}
-	if err := h.db.UpdateJobOutput(jobID, string(outputFilesJSON)); err != nil {
+	if err := h.db.UpdateJobOutputWithOwner(jobID, workerID, string(outputFilesJSON)); err != nil {
+		if errors.Is(err, protocol.ErrJobNotOwned) {
+
+			if rmErr := os.Remove(h.storage.GetOutputPath(jobID, fileID)); rmErr != nil && !os.IsNotExist(rmErr) {
+				log.Printf("UploadJobOutput: failed to remove stale output for job %s: %v", jobID, rmErr)
+			}
+			writeError(w, http.StatusConflict, protocol.NewProtocolError(
+				protocol.ErrCodeConflict, "Job no longer assigned to this worker", err,
+			))
+			return
+		}
 		writeError(w, http.StatusInternalServerError, protocol.NewProtocolError(
 			protocol.ErrCodeInternalError, "Failed to update job output", err,
 		))

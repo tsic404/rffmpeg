@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -26,38 +27,6 @@ type MigrationEvent struct {
 	JobIDs       string // JSON array stored as string
 	JobsMigrated int
 	CreatedAt    time.Time
-}
-
-// CreateMigrationEvent creates a new migration event record.
-//
-// retryCount is the max cumulative migration count among the migrated jobs
-// after this event (the first migration records 1, not 0), persisted verbatim.
-// A batch whose jobs carry different histories stores each job's exact count
-// in job_redistributions.retry_count (see CreateJobRedistributions).
-func (d *Database) CreateMigrationEvent(workerID, workerName, reason string, retryCount int, jobIDs []string, jobsMigrated int) (*MigrationEvent, error) {
-	id := uuid.New().String()
-	now := time.Now()
-
-	jobIDsJSON, err := json.Marshal(jobIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal job IDs: %w", err)
-	}
-
-	var workerNameVal interface{}
-	if workerName != "" {
-		workerNameVal = workerName
-	}
-
-	_, err = d.db.Exec(`
-		INSERT INTO migration_events (id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, now, workerID, workerNameVal, reason, retryCount, string(jobIDsJSON), jobsMigrated, now)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create migration event: %w", err)
-	}
-
-	return d.GetMigrationEvent(id)
 }
 
 // GetMigrationEvent retrieves a migration event by ID.
@@ -164,34 +133,6 @@ type JobRedistribution struct {
 	CreatedAt        time.Time
 }
 
-// CreateJobRedistributions inserts an unresolved placeholder row per migrated
-// job, linking it to the migration event that migrated it. retryCounts maps
-// each job ID to its cumulative migration count after this event (first
-// migration = 1), persisted per job so a batch whose jobs carry different
-// migration histories keeps each job's exact count. The target is filled later
-// by RecordMigrationTarget when the scheduler/pull path reassigns the job. This
-// is a cold path (one call per worker-offline migration).
-func (d *Database) CreateJobRedistributions(migrationEventID string, retryCounts map[string]int) error {
-	tx, err := d.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	now := time.Now()
-	for jobID, retryCount := range retryCounts {
-		id := uuid.New().String()
-		if _, err := tx.Exec(`
-			INSERT INTO job_redistributions (id, migration_event_id, job_id, retry_count, target_worker_id, target_worker_name, created_at)
-			VALUES (?, ?, ?, ?, NULL, NULL, ?)
-		`, id, migrationEventID, jobID, retryCount, now); err != nil {
-			return fmt.Errorf("failed to create job redistribution for job %s: %w", jobID, err)
-		}
-	}
-
-	return tx.Commit()
-}
-
 // RecordMigrationTarget fills the unresolved redistribution placeholder for a
 // migrated job with the worker it was reassigned to. The lookup is an indexed
 // point query on job_id, so a fresh job (no placeholder) matches zero rows and
@@ -265,91 +206,228 @@ func (d *Database) GetJobRedistributionsByEvents(migrationEventIDs []string) ([]
 	return redistributions, nil
 }
 
-// MigrateJobsFromWorker migrates all in-progress jobs from a worker back to
-// pending state. Returns the list of job IDs that were migrated.
+// insertMigrationEventTx writes one migration_events row inside tx. It is the
+// single copy of the audit INSERT: the batch failover migration and the
+// single-job timeout requeue both go through it, so the column list cannot
+// drift between the two writers. workerName is NULL when not valid.
+func insertMigrationEventTx(tx *sql.Tx, id string, at time.Time, workerID string, workerName sql.NullString, reason string, retryCount int, jobIDs []string) error {
+	jobIDsJSON, err := json.Marshal(jobIDs)
+	if err != nil {
+		return fmt.Errorf("marshal job ids: %w", err)
+	}
+	var nameVal any
+	if workerName.Valid {
+		nameVal = workerName.String
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO migration_events (id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, at, workerID, nameVal, reason, retryCount, string(jobIDsJSON), len(jobIDs), at); err != nil {
+		return fmt.Errorf("insert migration event: %w", err)
+	}
+	return nil
+}
+
+// insertRedistributionsTx writes one unresolved (target-empty) placeholder row
+// per migrated job, the single copy of that INSERT for both requeue writers.
+func insertRedistributionsTx(tx *sql.Tx, eventID string, retryCounts map[string]int, at time.Time) error {
+	for jobID, retryCount := range retryCounts {
+		if _, err := tx.Exec(`
+			INSERT INTO job_redistributions (id, migration_event_id, job_id, retry_count, target_worker_id, target_worker_name, created_at)
+			VALUES (?, ?, ?, ?, NULL, NULL, ?)
+		`, uuid.New().String(), eventID, jobID, retryCount, at); err != nil {
+			return fmt.Errorf("insert job redistribution for %s: %w", jobID, err)
+		}
+	}
+	return nil
+}
+
+// WorkerMigrationResult summarises the migration of one offline worker's
+// jobs. Migrated lists the jobs actually reset to pending; Failed lists the
+// jobs that exhausted the migration retry budget and were judged
+// WORKER_CRASH. Both lists are post-transaction facts, not the pre-read
+// snapshot.
+type WorkerMigrationResult struct {
+	EventID    string
+	WorkerName string
+	Migrated   []string
+	Failed     []string
+}
+
+// MigrateJobsFromWorker migrates all in-progress jobs from an offline worker
+// back to pending in ONE transaction, writing the migration audit trail in the
+// same transaction.
 //
-// the whole migration runs in one transaction, and each reset is a
-// conditional UPDATE on status IN (running, queued). This closes two holes:
-// (1) a job that reaches a terminal state after the snapshot is no longer
-// dragged back to pending and re-run, and (2) a partial failure mid-migration
-// now rolls back instead of leaving jobs half-reset with orphaned outputs.
-func (d *Database) MigrateJobsFromWorker(workerID string) ([]string, error) {
+// The caller (health monitor) has just flipped the worker offline. Doing the
+// classification, the audit rows and the job resets in one transaction makes
+// C-85 hold structurally: no reset can commit before its migration event and
+// per-job redistribution placeholder, and an audit write failure rolls the
+// resets back so the jobs are never released into scheduling without their
+// audit row. The worker's offline flag is re-checked inside the transaction:
+// a worker whose heartbeat revived it in between keeps its jobs (it is alive
+// again, so migrating them would double-execute).
+//
+// reason is recorded on the migration event (heartbeat_timeout / worker_offline
+// / server_restart). Jobs whose prior migration count reached maxRetryCount are
+// failed as WORKER_CRASH instead of migrated.
+//
+// A caller that receives an error must call RestoreWorkerStatusAfterFailedMigration
+// for that worker, or the offline flag keeps it out of the scan that would
+// retry the migration and its jobs stay stranded.
+func (d *Database) MigrateJobsFromWorker(workerID, reason string, maxRetryCount int) (*WorkerMigrationResult, error) {
+	workerID = NormalizeWorkerID(workerID)
+	now := time.Now()
+
 	tx, err := d.db.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, fmt.Errorf("failed to begin migration for worker %s: %w", workerID, err)
 	}
 	defer tx.Rollback()
 
-	now := time.Now()
-
-	rows, err := tx.Query(`
-		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, claimed_at = NULL, updated_at = ?,
-		                created_at = ?
-		WHERE worker_id = ? AND status IN (?, ?)
-		RETURNING id
-	`, protocol.JobStatusPending, now, now, workerID,
-		protocol.JobStatusRunning, protocol.JobStatusQueued)
+	var workerName sql.NullString
+	var status protocol.WorkerStatus
+	err = tx.QueryRow(`SELECT name, status FROM workers WHERE id = ?`, workerID).Scan(&workerName, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &WorkerMigrationResult{}, nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to migrate jobs for worker %s: %w", workerID, err)
+		return nil, fmt.Errorf("failed to read worker %s for migration: %w", workerID, err)
+	}
+	if status != protocol.WorkerStatusOffline {
+
+		return &WorkerMigrationResult{WorkerName: workerName.String}, nil
 	}
 
-	var jobIDs []string
+	rows, err := tx.Query(`
+		SELECT j.id, COALESCE((
+			SELECT COUNT(*) FROM migration_events me, json_each(me.job_ids)
+			WHERE json_each.value = j.id AND me.reason != ?
+		), 0)
+		FROM jobs j
+		WHERE j.worker_id = ? AND j.status IN (?, ?)
+		ORDER BY j.created_at ASC
+	`, "job_timeout", workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read active jobs for worker %s: %w", workerID, err)
+	}
+
+	type jobRetry struct {
+		id    string
+		count int
+	}
+	var migrated, failed []jobRetry
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var j jobRetry
+		if err := rows.Scan(&j.id, &j.count); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("failed to scan migrated job id: %w", err)
+			return nil, fmt.Errorf("failed to scan active job for worker %s: %w", workerID, err)
 		}
-		jobIDs = append(jobIDs, id)
+		if j.count >= maxRetryCount {
+			failed = append(failed, j)
+		} else {
+			migrated = append(migrated, j)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return nil, fmt.Errorf("failed to iterate migrated jobs: %w", err)
+		return nil, fmt.Errorf("failed to iterate active jobs for worker %s: %w", workerID, err)
 	}
 	rows.Close()
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit migration: %w", err)
+	result := &WorkerMigrationResult{WorkerName: workerName.String}
+
+	retryCounts := make(map[string]int, len(migrated))
+	maxPostRetry := 0
+	for _, j := range migrated {
+		reset, err := resetJobToPendingExec(tx, j.id, workerID, now)
+		if err != nil {
+			return nil, fmt.Errorf("failed to migrate job %s: %w", j.id, err)
+		}
+		if !reset {
+
+			continue
+		}
+		result.Migrated = append(result.Migrated, j.id)
+		postCount := j.count + 1
+		retryCounts[j.id] = postCount
+		if postCount > maxPostRetry {
+			maxPostRetry = postCount
+		}
 	}
 
-	return jobIDs, nil
+	if len(result.Migrated) > 0 {
+		eventID := uuid.New().String()
+		if err := insertMigrationEventTx(tx, eventID, now, workerID, workerName, reason, maxPostRetry, result.Migrated); err != nil {
+			return nil, fmt.Errorf("failed to create migration event for worker %s: %w", workerID, err)
+		}
+		if err := insertRedistributionsTx(tx, eventID, retryCounts, now); err != nil {
+			return nil, fmt.Errorf("failed to create job redistributions for worker %s: %w", workerID, err)
+		}
+		result.EventID = eventID
+	}
+
+	// Jobs past the migration budget are terminal WORKER_CRASH. They stay in
+	// the same transaction so a partial migration cannot leave them running on
+	// a worker that will never be selected again.
+	const maxRetryErrMsg = "max retry count exceeded after repeated worker failures"
+	for _, j := range failed {
+		res, err := tx.Exec(`
+			UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, claimed_at = NULL,
+			                exit_code = -1, error = ?,
+			                failure_type = ?, retryable = 1,
+			                finished_at = ?, updated_at = ?
+			WHERE id = ? AND worker_id = ? AND status IN (?, ?)
+		`, protocol.JobStatusFailed, maxRetryErrMsg, string(protocol.FailureWorkerCrash), now, now,
+			j.id, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fail job %s past retry budget: %w", j.id, err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return nil, fmt.Errorf("failed to count failed job %s: %w", j.id, err)
+		} else if n > 0 {
+			result.Failed = append(result.Failed, j.id)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit migration for worker %s: %w", workerID, err)
+	}
+
+	for _, jobID := range result.Failed {
+		d.notifyTerminal(jobID)
+	}
+
+	return result, nil
 }
 
-// MarkOfflineWorkersWithMigration marks workers as offline and returns their IDs for job migration.
-// This is similar to MarkOfflineWorkers but returns the worker IDs that were marked offline.
+// MarkOfflineWorkersWithMigration flips heartbeat-stale workers offline and
+// returns exactly the IDs that this call flipped, in one atomic
+// UPDATE ... RETURNING. The previous SELECT-then-UPDATE pair could return a
+// worker whose heartbeat refreshed in between (so it was never actually marked
+// offline), and the caller would then migrate a live worker's jobs.
 func (d *Database) MarkOfflineWorkersWithMigration(heartbeatTimeout time.Duration) ([]string, error) {
 	cutoff := time.Now().Add(-heartbeatTimeout)
 
 	rows, err := d.db.Query(`
-		SELECT id FROM workers
+		UPDATE workers SET status = ?
 		WHERE status != ? AND last_heartbeat < ?
-	`, protocol.WorkerStatusOffline, cutoff)
+		RETURNING id
+	`, protocol.WorkerStatusOffline, protocol.WorkerStatusOffline, cutoff)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query offline workers: %w", err)
+		return nil, fmt.Errorf("failed to mark offline workers: %w", err)
 	}
+	defer rows.Close()
 
 	var workerIDs []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("failed to scan worker id: %w", err)
+			return nil, fmt.Errorf("failed to scan offline worker id: %w", err)
 		}
 		workerIDs = append(workerIDs, id)
 	}
-	rows.Close()
-
-	if len(workerIDs) == 0 {
-		return nil, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate marked-offline workers: %w", err)
 	}
-
-	_, err = d.db.Exec(`
-		UPDATE workers SET status = ?
-		WHERE status != ? AND last_heartbeat < ?
-	`, protocol.WorkerStatusOffline, protocol.WorkerStatusOffline, cutoff)
-	if err != nil {
-		return nil, fmt.Errorf("failed to mark offline workers: %w", err)
-	}
-
 	return workerIDs, nil
 }

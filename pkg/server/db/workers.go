@@ -377,14 +377,19 @@ func (d *Database) GetActiveWorkers() ([]*Worker, error) {
 	return d.scanWorkers(rows)
 }
 
-// GetIdleWorkers retrieves all workers that are idle and can accept jobs.
-// Evicted workers are excluded.
-func (d *Database) GetIdleWorkers() ([]*Worker, error) {
+// GetIdleWorkers retrieves all workers that are idle, not evicted and (when
+// freshness > 0) with a heartbeat newer than freshness. C-61 makes heartbeat
+// freshness part of the dispatch candidate set: a worker whose heartbeat went
+// stale but which the health tick has not flipped offline yet is dead in
+// practice, and dispatching to it burns a migration retry. A non-positive
+// freshness disables the check.
+func (d *Database) GetIdleWorkers(freshness time.Duration) ([]*Worker, error) {
+	freshnessClause, freshnessArgs := heartbeatFreshnessSQL(freshness)
 	rows, err := d.db.Query(`
 		SELECT id, name, status, gpu_model, encoders, decoders, video_encoders, video_decoders, gpu_devices, ffmpeg_version, max_concurrent, evicted, evicted_at, hwaccels, codecs, filters, pix_fmts, formats, last_heartbeat, created_at
-		FROM workers WHERE status = ? AND evicted = 0
+		FROM workers WHERE status = ? AND evicted = 0`+freshnessClause+`
 		ORDER BY last_heartbeat DESC
-	`, protocol.WorkerStatusIdle)
+	`, append([]any{protocol.WorkerStatusIdle}, freshnessArgs...)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get idle workers: %w", err)
 	}
@@ -559,15 +564,17 @@ func (d *Database) GetWorkersByEncoder(encoderName string) ([]*Worker, error) {
 	return d.scanWorkers(rows)
 }
 
-// GetIdleWorkersByEncoder retrieves idle workers that have a specific encoder capability.
-// Evicted workers are excluded.
-func (d *Database) GetIdleWorkersByEncoder(encoderName string) ([]*Worker, error) {
+// GetIdleWorkersByEncoder retrieves idle, non-evicted workers with the given
+// encoder capability and (when freshness > 0) a fresh heartbeat — the same
+// C-61 candidate rule as GetIdleWorkers.
+func (d *Database) GetIdleWorkersByEncoder(encoderName string, freshness time.Duration) ([]*Worker, error) {
+	freshnessClause, freshnessArgs := heartbeatFreshnessSQL(freshness)
 	rows, err := d.db.Query(`
 		SELECT DISTINCT w.id, w.name, w.status, w.gpu_model, w.encoders, w.decoders, w.video_encoders, w.video_decoders, w.gpu_devices, w.ffmpeg_version, w.max_concurrent, w.evicted, w.evicted_at, w.hwaccels, w.codecs, w.filters, w.pix_fmts, w.formats, w.last_heartbeat, w.created_at
 		FROM workers w, json_each(w.encoders) AS enc
-		WHERE w.status = ? AND w.evicted = 0 AND enc.value = ?
+		WHERE w.status = ? AND w.evicted = 0 AND enc.value = ?`+freshnessClause+`
 		ORDER BY w.last_heartbeat DESC
-	`, protocol.WorkerStatusIdle, encoderName)
+	`, append([]any{protocol.WorkerStatusIdle, encoderName}, freshnessArgs...)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get idle workers by encoder: %w", err)
 	}
@@ -716,10 +723,11 @@ type WorkerWithJobCount struct {
 }
 
 // GetIdleWorkersWithJobCount retrieves idle workers with their active and
-// completed job counts. The active count drives scheduling; the completed
-// count breaks ties so late-registered workers are not starved.
-func (d *Database) GetIdleWorkersWithJobCount() ([]WorkerWithJobCount, error) {
-	workers, err := d.GetIdleWorkers()
+// completed job counts (see GetIdleWorkers for the freshness rule). The active
+// count drives scheduling; the completed count breaks ties so late-registered
+// workers are not starved.
+func (d *Database) GetIdleWorkersWithJobCount(freshness time.Duration) ([]WorkerWithJobCount, error) {
+	workers, err := d.GetIdleWorkers(freshness)
 	if err != nil {
 		return nil, err
 	}
@@ -729,9 +737,9 @@ func (d *Database) GetIdleWorkersWithJobCount() ([]WorkerWithJobCount, error) {
 
 // GetIdleWorkersByEncoderWithJobCount retrieves idle workers with a specific
 // encoder and their active and completed job counts, sorted by active then
-// completed job count ascending.
-func (d *Database) GetIdleWorkersByEncoderWithJobCount(encoderName string) ([]WorkerWithJobCount, error) {
-	workers, err := d.GetIdleWorkersByEncoder(encoderName)
+// completed job count ascending. Freshness applies as in GetIdleWorkers.
+func (d *Database) GetIdleWorkersByEncoderWithJobCount(encoderName string, freshness time.Duration) ([]WorkerWithJobCount, error) {
+	workers, err := d.GetIdleWorkersByEncoder(encoderName, freshness)
 	if err != nil {
 		return nil, err
 	}
@@ -836,6 +844,30 @@ func (d *Database) GetWorkerEncoders(workerID string) ([]string, error) {
 	}
 
 	return encoders, nil
+}
+
+// RestoreWorkerStatusAfterFailedMigration reverts the offline flag whose job
+// migration failed. Without it the worker stays offline, the next health tick
+// never re-selects it (it only marks non-offline workers), and its jobs stay
+// stranded in running/queued forever. The restored status reflects whether
+// jobs remain attached (busy) or not (idle); the stale heartbeat keeps both
+// out of dispatch (C-61), so the worker cannot receive new work while it is
+// merely awaiting its migration retry.
+func (d *Database) RestoreWorkerStatusAfterFailedMigration(workerID string) error {
+	workerID = NormalizeWorkerID(workerID)
+	_, err := d.db.Exec(`
+		UPDATE workers SET status = CASE
+			WHEN EXISTS (SELECT 1 FROM jobs WHERE worker_id = workers.id AND status IN (?, ?)) THEN ?
+			ELSE ?
+		END
+		WHERE id = ? AND status = ?
+	`, protocol.JobStatusRunning, protocol.JobStatusQueued,
+		protocol.WorkerStatusBusy, protocol.WorkerStatusIdle,
+		workerID, protocol.WorkerStatusOffline)
+	if err != nil {
+		return fmt.Errorf("failed to restore worker %s after failed migration: %w", workerID, err)
+	}
+	return nil
 }
 
 // MarkWorkerEvicted marks a worker as evicted (slow node) with the current timestamp.

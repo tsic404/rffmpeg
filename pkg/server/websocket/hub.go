@@ -307,6 +307,23 @@ func (h *Hub) BroadcastWSMessage(msg protocol.WSMessage) error {
 	return err
 }
 
+// ReleaseJobStream drops a job's per-job sequence counter and its persisted
+// row. It is the cleanup for terminal paths that do not broadcast a
+// complete/error frame (jobs failed by the scheduler's starvation or stuck-job
+// sweep, timeout-exhausted jobs, migrations that exhausted the retry budget):
+// those paths still stamp a terminal status, so without an explicit release the
+// counter would leak in both h.seq and the seq store for the life of the
+// process. Status-then-complete paths keep deleting at the complete frame,
+// which preserves the numbering that frame continues.
+//
+// Idempotent and safe after a complete broadcast (already deleted).
+func (h *Hub) ReleaseJobStream(jobID string) {
+	h.mu.Lock()
+	delete(h.seq, jobID)
+	h.mu.Unlock()
+	h.persistSeq(jobID, 0, true)
+}
+
 // persistSeq writes the counter through to the store (best-effort) and drops
 // it once the job is terminal. Errors are logged, never fatal: an unpersisted
 // counter only costs gap detection across a restart, not the live stream.

@@ -24,9 +24,7 @@ func TestClientJobAPIPopulatesRetryCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateJob(migrated): %v", err)
 	}
-	if _, err := h.GetDB().CreateMigrationEvent("old-worker", "old-worker", "heartbeat_timeout", 0, []string{migrated.ID}, 1); err != nil {
-		t.Fatalf("CreateMigrationEvent: %v", err)
-	}
+	insertMigrationEventForTest(t, h.GetDB(), "old-worker", "old-worker", "heartbeat_timeout", 0, []string{migrated.ID})
 
 	getBody := func(path string) []byte {
 		req := httptest.NewRequest(http.MethodGet, path, nil)

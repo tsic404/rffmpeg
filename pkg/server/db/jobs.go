@@ -2,7 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -137,104 +136,6 @@ func (d *Database) JobExists(id string) (bool, error) {
 	return exists, nil
 }
 
-// UpdateJobStatusWithFailure updates the job status along with failure
-// classification fields; non-failure fields are ignored when their pointers
-// are nil. The update is guarded against stale writes: a late running report
-// (or a stale cancel racing a worker's completion) must never resurrect or
-// overwrite a finished job. The one legal terminal→terminal transition is
-// failed→completed/failed (a worker retries a failed job and reports
-// success). Everything else hitting a terminal job is dropped as
-// ErrJobTerminal.
-func (d *Database) UpdateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
-	return d.updateJobStatusWithFailure(id, status, exitCode, errMsg, failureType, failureDetails, false)
-}
-
-// UpdateJobStatusWithFailureAndCache is UpdateJobStatusWithFailure with the
-// cached flag persisted on terminal completion. cached is coerced
-// to false for any status other than completed: the column records whether a
-// completed result was served from the worker cache.
-func (d *Database) UpdateJobStatusWithFailureAndCache(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
-	return d.updateJobStatusWithFailure(id, status, exitCode, errMsg, failureType, failureDetails, cached)
-}
-
-func (d *Database) updateJobStatusWithFailure(id string, status protocol.JobStatus, exitCode *int, errMsg *string, failureType, failureDetails *string, cached bool) error {
-	now := time.Now()
-
-	if status != protocol.JobStatusCompleted {
-		cached = false
-	}
-
-	var startedAt, finishedAt *time.Time
-	if status == protocol.JobStatusRunning {
-		startedAt = &now
-	}
-	if protocol.IsTerminalStatus(status) {
-		finishedAt = &now
-	}
-
-	// reject updates that would overwrite a terminal outcome.
-	// failed→completed / failed→failed remains allowed for the worker
-	// retry-after-failure flow; all other terminal targets are frozen.
-	var result sql.Result
-	var err error
-	if status == protocol.JobStatusCompleted || status == protocol.JobStatusFailed {
-		result, err = d.db.Exec(`
-			UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
-			                failure_type = COALESCE(?, failure_type),
-			                retryable = CASE WHEN COALESCE(?, failure_type) IN ('TIMEOUT', 'WORKER_CRASH') THEN 1 ELSE 0 END,
-			                failure_details = COALESCE(?, failure_details),
-			                started_at = COALESCE(started_at, ?), finished_at = ?,
-			                cached = ?,
-			                assigned_worker = COALESCE(assigned_worker, worker_id),
-			                worker_name = COALESCE(worker_name, (SELECT name FROM workers WHERE id = jobs.worker_id))
-			WHERE id = ?
-			  AND NOT EXISTS (
-			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?)
-			  )
-		`, status, now, exitCode, errMsg, failureType, failureType, failureDetails,
-			startedAt, finishedAt, cached, id, id,
-			protocol.JobStatusCompleted, protocol.JobStatusCancelled, protocol.JobStatusTimeout)
-	} else {
-		result, err = d.db.Exec(`
-			UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
-			                failure_type = COALESCE(?, failure_type),
-			                retryable = CASE WHEN COALESCE(?, failure_type) IN ('TIMEOUT', 'WORKER_CRASH') THEN 1 ELSE 0 END,
-			                failure_details = COALESCE(?, failure_details),
-			                started_at = COALESCE(started_at, ?), finished_at = ?
-			WHERE id = ?
-			  AND NOT EXISTS (
-			      SELECT 1 FROM jobs WHERE id = ? AND status IN (?, ?, ?, ?)
-			  )
-		`, status, now, exitCode, errMsg, failureType, failureType, failureDetails,
-			startedAt, finishedAt, id, id,
-			protocol.JobStatusCompleted, protocol.JobStatusFailed,
-			protocol.JobStatusCancelled, protocol.JobStatusTimeout)
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to update job status: %w", err)
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to check rows affected: %w", err)
-	}
-
-	if rows == 0 {
-
-		if _, getErr := d.GetJob(id); getErr != nil {
-			return protocol.ErrJobNotFound
-		}
-		return protocol.ErrJobTerminal
-	}
-
-	if protocol.IsTerminalStatus(status) {
-		d.notifyTerminal(id)
-	}
-
-	return nil
-}
-
 // UpdateJobTerminalStatusWithOwner updates a job to a terminal state only if
 // the job is still owned by the reporting worker and still active (running or
 // queued). This closes the double-execution window: after failover the job's
@@ -287,21 +188,54 @@ func (d *Database) updateJobTerminalStatusWithOwner(jobID, workerID string, stat
 	return nil
 }
 
-// UpdateJobProgress stores the progress and ETA seconds for a job, reporting
-// whether the report was accepted. A job's progress is monotonic: a report
-// that would move the percent backward is rejected without writing, so a
+// UpdateJobRunningStatusWithOwner applies a non-terminal (running) report only
+// while workerID still owns an active job. The non-terminal path used to
+// ignore ownership entirely: a worker that lost the job to failover could flip
+// a requeued (pending, unassigned) job back to running, leaving it owned by
+// nobody — invisible to scheduling, migration and the starvation sweep. A
+// report that loses the guard returns protocol.ErrJobNotOwned.
+func (d *Database) UpdateJobRunningStatusWithOwner(jobID, workerID string, exitCode *int, errMsg *string, failureType, failureDetails *string) error {
+	now := time.Now()
+	result, err := d.db.Exec(`
+		UPDATE jobs SET status = ?, updated_at = ?, exit_code = ?, error = ?,
+		                failure_type = COALESCE(?, failure_type),
+		                retryable = CASE WHEN COALESCE(?, failure_type) IN ('TIMEOUT', 'WORKER_CRASH') THEN 1 ELSE 0 END,
+		                failure_details = COALESCE(?, failure_details),
+		                started_at = COALESCE(started_at, ?)
+		WHERE id = ? AND worker_id = ? AND status IN (?, ?)
+	`, protocol.JobStatusRunning, now, exitCode, errMsg, failureType, failureType, failureDetails,
+		now, jobID, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
+	if err != nil {
+		return fmt.Errorf("failed to update job running status: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rows == 0 {
+		return protocol.ErrJobNotOwned
+	}
+	return nil
+}
+
+// UpdateJobProgressWithOwner stores the progress and ETA seconds of a job the
+// reporting worker still owns. A job's progress is monotonic: a report that
+// would move the percent backward is rejected without writing, so a
 // re-dispatched job — its new worker re-encodes from zero and reports low
 // percentages again — cannot rewind the value the API and the CLI already
-// published. The comparison runs inside the UPDATE, so concurrent reporters
-// (a late request racing the new owner's) serialize on the row.
-func (d *Database) UpdateJobProgress(id string, progress float64, etaSeconds int) (bool, error) {
+// published. The comparison runs inside the UPDATE, so concurrent reporters (a
+// late request racing the new owner's) serialize on the row. accepted is false
+// for a regression; a report that loses the ownership guard returns
+// protocol.ErrJobNotOwned instead, so the caller can answer 409.
+func (d *Database) UpdateJobProgressWithOwner(id, workerID string, progress float64, etaSeconds int) (bool, error) {
 	now := time.Now()
 
 	res, err := d.db.Exec(`
 		UPDATE jobs SET progress_percent = ?, eta_seconds = ?, updated_at = ?
-		WHERE id = ? AND progress_percent <= ?
-	`, progress, etaSeconds, now, id, progress)
-
+		WHERE id = ? AND worker_id = ? AND status IN (?, ?) AND progress_percent <= ?
+	`, progress, etaSeconds, now, id, workerID,
+		protocol.JobStatusRunning, protocol.JobStatusQueued, progress)
 	if err != nil {
 		return false, fmt.Errorf("failed to update job progress: %w", err)
 	}
@@ -309,8 +243,26 @@ func (d *Database) UpdateJobProgress(id string, progress float64, etaSeconds int
 	if err != nil {
 		return false, fmt.Errorf("failed to update job progress: %w", err)
 	}
+	if written > 0 {
+		return true, nil
+	}
 
-	return written > 0, nil
+	// Zero rows: tell a regression (acceptable, not owned by this guard) from
+	// a reporter that no longer owns the job.
+	var owner sql.NullString
+	var status protocol.JobStatus
+	err = d.db.QueryRow(`SELECT worker_id, status FROM jobs WHERE id = ?`, id).Scan(&owner, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, protocol.ErrJobNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to classify rejected progress report: %w", err)
+	}
+	if !owner.Valid || NormalizeWorkerID(owner.String) != NormalizeWorkerID(workerID) ||
+		(status != protocol.JobStatusRunning && status != protocol.JobStatusQueued) {
+		return false, protocol.ErrJobNotOwned
+	}
+	return false, nil
 }
 
 // AssignJobToWorker atomically assigns a job to a worker: one statement sets
@@ -373,18 +325,29 @@ func (d *Database) CancelJob(id string) error {
 	return nil
 }
 
-// UpdateJobOutput updates the output files for a job
-func (d *Database) UpdateJobOutput(id string, outputFiles string) error {
+// UpdateJobOutputWithOwner attaches uploaded output files only while workerID
+// still owns an active job. A stale worker whose job was migrated must not
+// overwrite the new owner's product.
+func (d *Database) UpdateJobOutputWithOwner(id, workerID, outputFiles string) error {
 	now := time.Now()
-	_, err := d.db.Exec(`
-		UPDATE jobs SET output_files = ?, updated_at = ? WHERE id = ?
-	`, outputFiles, now, id)
-
+	res, err := d.db.Exec(`
+		UPDATE jobs SET output_files = ?, updated_at = ?
+		WHERE id = ? AND worker_id = ? AND status IN (?, ?)
+	`, outputFiles, now, id, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
 	if err != nil {
 		return fmt.Errorf("failed to update job output: %w", err)
 	}
-
-	return nil
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if rows > 0 {
+		return nil
+	}
+	if _, getErr := d.GetJob(id); getErr != nil {
+		return protocol.ErrJobNotFound
+	}
+	return protocol.ErrJobNotOwned
 }
 
 // GetPendingJobs retrieves all pending jobs
@@ -738,16 +701,19 @@ func (d *Database) GetStarvedPendingJobs(cutoff time.Time, crashReason string) (
 }
 
 // FailStarvedPendingJobs fails the pre-classified starved jobs in a single
-// transaction, returning the number of jobs failed. Used by the scheduler
+// transaction and returns exactly the IDs it failed. Used by the scheduler
 // starvation guard so a backlog larger than any fetch limit converges within
 // one tick.
 //
 // The classification comes from GetStarvedPendingJobs and is reused here, not
 // recomputed: Crashed jobs keep WORKER_CRASH, the rest are NO_WORKER_AVAILABLE.
-// Both UPDATEs run in one transaction so a partial failure rolls back instead
-// of leaving already-failed jobs without their quota release and terminal
-// broadcast.
-func (d *Database) FailStarvedPendingJobs(cutoff time.Time, starved []StarvedJob, noWorkerErrMsg, crashErrMsg string) (int64, error) {
+// The UPDATE re-checks the pending/unassigned/cutoff predicate, so a job that a
+// worker claimed after the scan is left alone and absent from the returned set —
+// callers must notify/release only for that set, never for the pre-read
+// classification. Both UPDATEs run in one transaction so a partial failure
+// rolls back instead of leaving already-failed jobs without their quota release
+// and terminal broadcast.
+func (d *Database) FailStarvedPendingJobs(cutoff time.Time, starved []StarvedJob, noWorkerErrMsg, crashErrMsg string) ([]string, error) {
 	var crashIDs, noWorkerIDs []string
 	for _, sj := range starved {
 		if sj.Crashed {
@@ -759,7 +725,7 @@ func (d *Database) FailStarvedPendingJobs(cutoff time.Time, starved []StarvedJob
 
 	tx, err := d.db.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("failed to begin starvation sweep: %w", err)
+		return nil, fmt.Errorf("failed to begin starvation sweep: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -768,16 +734,16 @@ func (d *Database) FailStarvedPendingJobs(cutoff time.Time, starved []StarvedJob
 
 	failed, err := failStarvedJobsChunked(tx, now, exitCode, crashIDs, crashErrMsg, string(protocol.FailureWorkerCrash), cutoff)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	n, err := failStarvedJobsChunked(tx, now, exitCode, noWorkerIDs, noWorkerErrMsg, string(protocol.FailureNoWorkerAvailable), cutoff)
+	noWorkerFailed, err := failStarvedJobsChunked(tx, now, exitCode, noWorkerIDs, noWorkerErrMsg, string(protocol.FailureNoWorkerAvailable), cutoff)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	failed += n
+	failed = append(failed, noWorkerFailed...)
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit starvation sweep: %w", err)
+		return nil, fmt.Errorf("failed to commit starvation sweep: %w", err)
 	}
 	return failed, nil
 }
@@ -788,12 +754,14 @@ func (d *Database) FailStarvedPendingJobs(cutoff time.Time, starved []StarvedJob
 const starvedUpdateChunkSize = 500
 
 // failStarvedJobsChunked applies the starvation failure to the given job IDs in
-// chunks, re-checking each is still a pending, unassigned job past the cutoff.
-// The guard matters because GetStarvedPendingJobs and this UPDATE are separate
-// statements: a job re-migrated (or claimed) in between has a fresh created_at
-// (or a worker_id) and must be left for the next tick.
-func failStarvedJobsChunked(tx *sql.Tx, now time.Time, exitCode int, ids []string, errMsg, failureType string, cutoff time.Time) (int64, error) {
-	var total int64
+// chunks, re-checking each is still a pending, unassigned job past the cutoff,
+// and returns the IDs each statement actually changed. The guard matters
+// because GetStarvedPendingJobs and this UPDATE are separate statements: a job
+// re-migrated (or claimed) in between has a fresh created_at (or a worker_id)
+// and must be left for the next tick — and must not be reported as failed, or
+// its quota and WS sequence would be released while it is still running.
+func failStarvedJobsChunked(tx *sql.Tx, now time.Time, exitCode int, ids []string, errMsg, failureType string, cutoff time.Time) ([]string, error) {
+	var failed []string
 	retryable := protocol.FailureType(failureType).Retryable()
 	for start := 0; start < len(ids); start += starvedUpdateChunkSize {
 		end := start + starvedUpdateChunkSize
@@ -809,53 +777,55 @@ func failStarvedJobsChunked(tx *sql.Tx, now time.Time, exitCode int, ids []strin
 		}
 		args = append(args, protocol.JobStatusPending, cutoff)
 
-		res, err := tx.Exec(fmt.Sprintf(`
+		rows, err := tx.Query(fmt.Sprintf(`
 			UPDATE jobs SET status = ?, worker_id = NULL,
 			                exit_code = ?, error = ?,
 			                failure_type = ?, retryable = ?, finished_at = ?, updated_at = ?
 			WHERE id IN (%s) AND status = ? AND worker_id IS NULL AND created_at < ?
+			RETURNING id
 		`, placeholders), args...)
 		if err != nil {
-			return total, fmt.Errorf("failed to fail starved pending jobs: %w", err)
+			return failed, fmt.Errorf("failed to fail starved pending jobs: %w", err)
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return total, fmt.Errorf("failed to count starved pending jobs: %w", err)
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return failed, fmt.Errorf("failed to scan starved job id: %w", err)
+			}
+			failed = append(failed, id)
 		}
-		total += n
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return failed, fmt.Errorf("failed to iterate starved jobs: %w", err)
+		}
+		rows.Close()
 	}
-	return total, nil
+	return failed, nil
 }
 
-// ResetJobToPending resets a job to pending status, clearing worker assignment.
-// This is used during worker failover to re-queue a job for another worker.
-func (d *Database) ResetJobToPending(id string) error {
-	now := time.Now()
-
-	result, err := d.db.Exec(`
+// resetJobToPendingExec re-queues one job only while workerID still owns it and
+// the job is still active. The ownership condition is mandatory: a failover
+// sweep racing a job already re-claimed by another worker must not drag that
+// job back to pending (which would double-execute it). created_at is refreshed
+// because a requeue re-anchors the starvation sweep and NoWorkerDeadline
+// clocks they share. Returns false when the job left the owned active set.
+func resetJobToPendingExec(e jobExec, id, workerID string, now time.Time) (bool, error) {
+	result, err := e.Exec(`
 		UPDATE jobs SET status = ?, worker_id = NULL, started_at = NULL, claimed_at = NULL, updated_at = ?,
 		                created_at = ?,
 		                failure_type = '', retryable = 0, failure_details = '', exit_code = NULL, error = NULL
-		WHERE id = ? AND status IN (?, ?, ?)
-	`, protocol.JobStatusPending, now, now, id,
-		protocol.JobStatusQueued, protocol.JobStatusRunning, protocol.JobStatusPending)
+		WHERE id = ? AND worker_id = ? AND status IN (?, ?)
+	`, protocol.JobStatusPending, now, now, id, workerID,
+		protocol.JobStatusQueued, protocol.JobStatusRunning)
 	if err != nil {
-		return fmt.Errorf("failed to reset job to pending: %w", err)
+		return false, fmt.Errorf("failed to reset job to pending: %w", err)
 	}
-
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to check rows affected: %w", err)
+		return false, fmt.Errorf("failed to check rows affected: %w", err)
 	}
-	if rows == 0 {
-		job, getErr := d.GetJob(id)
-		if getErr != nil {
-			return protocol.ErrJobNotFound
-		}
-		return fmt.Errorf("cannot reset job in status %s: %w", job.Status, protocol.ErrJobTerminal)
-	}
-
-	return nil
+	return rows > 0, nil
 }
 
 // RecoverState performs recovery operations after server restart: it resets
@@ -936,53 +906,161 @@ func (d *Database) ListJobs(limit int, offset int) ([]*Job, error) {
 	return d.scanJobs(rows)
 }
 
-// GetRunningJobsByWorker retrieves all running/queued jobs for a specific worker.
-func (d *Database) GetRunningJobsByWorker(workerID string) ([]*Job, error) {
-	workerID = NormalizeWorkerID(workerID)
-	rows, err := d.db.Query(`
-		SELECT id, status, input_files, args, output_filename, streaming_output, output_files, worker_id, exit_code, error, failure_type, failure_details, auto_hw, cached, timeout, direct_paths, progress_percent, eta_seconds,
-		       created_at, updated_at, claimed_at, started_at, finished_at, assigned_worker, worker_name
-		FROM jobs WHERE worker_id = ? AND status IN (?, ?)
-		ORDER BY created_at ASC
-	`, workerID, protocol.JobStatusRunning, protocol.JobStatusQueued)
+// StuckJob is an active job the orphan sweep judged unable to make progress:
+// either stuck in queued past the stale threshold, or still attached to a
+// worker record that is gone. Crashed is true for the worker-loss cases, which
+// classify the terminal outcome as WORKER_CRASH instead of INFRA.
+type StuckJob struct {
+	ID      string
+	Crashed bool
+}
 
+// GetStuckActiveJobs lists active jobs that have not been touched for
+// staleAfter and can no longer make progress:
+//
+//   - any job stuck in queued that long (its worker never picked it up), and
+//   - any job whose owning worker record is gone or unset.
+//
+// A running job on a live worker belongs to checkTimeouts; a running job on a
+// merely offline worker belongs to the failover migration.
+func (d *Database) GetStuckActiveJobs(staleAfter time.Duration) ([]StuckJob, error) {
+	cutoff := time.Now().Add(-staleAfter)
+	rows, err := d.db.Query(`
+		SELECT j.id,
+		       CASE WHEN `+missingWorkerPredicate+` THEN 1
+		            WHEN `+offlineWorkerPredicate+` THEN 1
+		            ELSE 0 END
+		FROM jobs j
+		WHERE j.status IN (?, ?)
+		  AND j.updated_at < ?
+		  AND (j.status = ? OR `+missingWorkerPredicate+`)
+		ORDER BY j.updated_at ASC
+	`,
+		protocol.WorkerStatusOffline,
+		protocol.JobStatusQueued, protocol.JobStatusRunning,
+		cutoff, protocol.JobStatusQueued)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get running jobs by worker: %w", err)
+		return nil, fmt.Errorf("failed to list stuck active jobs: %w", err)
 	}
 	defer rows.Close()
 
-	return d.scanJobs(rows)
+	stuck := make([]StuckJob, 0, 16)
+	for rows.Next() {
+		var sj StuckJob
+		if err := rows.Scan(&sj.ID, &sj.Crashed); err != nil {
+			return nil, fmt.Errorf("failed to scan stuck active job: %w", err)
+		}
+		stuck = append(stuck, sj)
+	}
+	return stuck, rows.Err()
 }
 
-// GetJobRetryCount returns the number of times a job has been migrated due to
-// worker failure (heartbeat timeout / worker offline / server restart). It
-// excludes timeout-driven requeues: those are a separate budget consumed by
-// GetJobTimeoutRetryCount, and a hung ffmpeg rescheduled by the scheduler
-// must not burn the worker-failure migration budget.
-func (d *Database) GetJobRetryCount(jobID string) (int, error) {
-	// Count migration events where this job ID appears in the job_ids JSON array.
-	// Use json_each to properly expand the JSON array and check for exact matches,
-	// avoiding partial match issues that would occur with LIKE.
-	var count int
-	err := d.db.QueryRow(`
-		SELECT COUNT(*) FROM migration_events
-		WHERE reason != 'job_timeout'
-		  AND id IN (
-			SELECT me.id FROM migration_events me, json_each(me.job_ids)
-			WHERE json_each.value = ?
-		  )
-	`, jobID).Scan(&count)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get job retry count: %w", err)
+// FailStuckActiveJobs fails the pre-classified stuck jobs in one transaction
+// and returns exactly the IDs it failed. Each update re-checks the same
+// stale/worker-availability predicate as the scan, so a job that recovered in
+// between (its worker came back, another path claimed or requeued it) is left
+// alone and absent from the result — callers must notify/release only for the
+// returned IDs, never for the pre-read classification.
+func (d *Database) FailStuckActiveJobs(staleAfter time.Duration, stuck []StuckJob, infraErrMsg, crashErrMsg string) ([]string, error) {
+	var crashIDs, infraIDs []string
+	for _, sj := range stuck {
+		if sj.Crashed {
+			crashIDs = append(crashIDs, sj.ID)
+		} else {
+			infraIDs = append(infraIDs, sj.ID)
+		}
 	}
-	return count, nil
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin stuck-job sweep: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	cutoff := now.Add(-staleAfter)
+
+	failed, err := failStuckJobsChunked(tx, now, cutoff, crashIDs, crashErrMsg,
+		string(protocol.FailureWorkerCrash), true)
+	if err != nil {
+		return nil, err
+	}
+	infraFailed, err := failStuckJobsChunked(tx, now, cutoff, infraIDs, infraErrMsg,
+		string(protocol.FailureInfra), false)
+	if err != nil {
+		return nil, err
+	}
+	failed = append(failed, infraFailed...)
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit stuck-job sweep: %w", err)
+	}
+	return failed, nil
+}
+
+// failStuckJobsChunked applies the terminal failure to one classification of
+// stuck jobs in id chunks, returning the IDs each statement actually changed.
+// crashed selects the re-check guard: the worker-loss cases (missing record, or
+// offline record with a queued job) vs. a job still queued on a live worker.
+func failStuckJobsChunked(tx *sql.Tx, now, cutoff time.Time, ids []string, errMsg, failureType string, crashed bool) ([]string, error) {
+	var failed []string
+	retryable := protocol.FailureType(failureType).Retryable()
+	for start := 0; start < len(ids); start += starvedUpdateChunkSize {
+		end := start + starvedUpdateChunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+
+		args := make([]any, 0, len(chunk)+10)
+		args = append(args, protocol.JobStatusFailed, -1, errMsg, failureType, retryable, now, now)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		args = append(args, protocol.JobStatusQueued, protocol.JobStatusRunning, cutoff)
+
+		guard := `AND j.status = ? AND ` + liveWorkerPredicate
+		if crashed {
+			guard = `AND (` + missingWorkerPredicate + ` OR (j.status = ? AND ` + offlineWorkerPredicate + `))`
+			args = append(args, protocol.JobStatusQueued, protocol.WorkerStatusOffline)
+		} else {
+			args = append(args, protocol.JobStatusQueued, protocol.WorkerStatusOffline)
+		}
+
+		rows, err := tx.Query(fmt.Sprintf(`
+			UPDATE jobs AS j SET status = ?, worker_id = NULL, started_at = NULL, claimed_at = NULL,
+			                exit_code = ?, error = ?,
+			                failure_type = ?, retryable = ?, finished_at = ?, updated_at = ?
+			WHERE j.id IN (%s) AND j.status IN (?, ?) AND j.updated_at < ? `+guard+`
+			RETURNING id
+		`, placeholders), args...)
+		if err != nil {
+			return failed, fmt.Errorf("failed to fail stuck jobs: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return failed, fmt.Errorf("failed to scan stuck job id: %w", err)
+			}
+			failed = append(failed, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return failed, fmt.Errorf("failed to iterate stuck jobs: %w", err)
+		}
+		rows.Close()
+	}
+	return failed, nil
 }
 
 // GetJobRetryCounts returns the worker-failure migration count for each job in
-// a single batched query, keyed by job ID. It mirrors GetJobRetryCount (same
-// json_each expansion, same job_timeout exclusion) but avoids an N+1 query
-// storm when a worker pull returns up to MaxJobsPerWorker jobs in one response.
-// Jobs with no migration history are absent from the map.
+// a single batched query, keyed by job ID. The count is the number of
+// migration events whose job_ids contain the job, excluding job_timeout
+// requeues (a separate budget); batching avoids an N+1 query storm when a
+// worker pull returns up to MaxJobsPerWorker jobs in one response. Jobs with
+// no migration history are absent from the map.
 func (d *Database) GetJobRetryCounts(jobIDs []string) (map[string]int, error) {
 	counts := make(map[string]int, len(jobIDs))
 	if len(jobIDs) == 0 {
@@ -1074,23 +1152,16 @@ func (d *Database) RecordJobTimeoutMigration(workerID, jobID string, retryCount 
 		return false, nil
 	}
 
-	eventID := uuid.New().String()
-	jobIDsJSON, err := json.Marshal([]string{jobID})
-	if err != nil {
-		return false, fmt.Errorf("marshal job ids for job %s: %w", jobID, err)
+	var workerName sql.NullString
+	if err := tx.QueryRow(`SELECT name FROM workers WHERE id = ?`, workerID).Scan(&workerName); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("read worker %s for timeout migration: %w", workerID, err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO migration_events (id, timestamp, worker_id, worker_name, reason, retry_count, job_ids, jobs_migrated, created_at)
-		VALUES (?, ?, ?, (SELECT name FROM workers WHERE id = ?), 'job_timeout', ?, ?, ?, ?)
-	`, eventID, now, workerID, workerID, retryCount, string(jobIDsJSON), 1, now); err != nil {
+	eventID := uuid.New().String()
+	if err := insertMigrationEventTx(tx, eventID, now, workerID, workerName, "job_timeout", retryCount, []string{jobID}); err != nil {
 		return false, fmt.Errorf("insert timeout migration event for job %s: %w", jobID, err)
 	}
-
-	if _, err := tx.Exec(`
-		INSERT INTO job_redistributions (id, migration_event_id, job_id, retry_count, target_worker_id, target_worker_name, created_at)
-		VALUES (?, ?, ?, ?, NULL, NULL, ?)
-	`, uuid.New().String(), eventID, jobID, retryCount, now); err != nil {
+	if err := insertRedistributionsTx(tx, eventID, map[string]int{jobID: retryCount}, now); err != nil {
 		return false, fmt.Errorf("insert job redistribution for job %s: %w", jobID, err)
 	}
 
