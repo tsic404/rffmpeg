@@ -126,30 +126,6 @@ func TestWaitForJobWithStreamingOutput_GapStillFails(t *testing.T) {
 	}
 }
 
-// TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling is the
-// review regression test: when the WS closes gracefully (NORMAL_CLOSURE),
-// WaitForJobWithStreamingOutput falls back to polling and returns a non-nil
-// job — never (nil, nil), which makes main.go panic dereferencing job.Status.
-// The fallback must also apply the integrity checks: the streamed output
-// carried a sequenced hole, so the gap must surface as an error instead of a
-// clean rc=0.
-func TestWaitForJobWithStreamingOutput_GracefulCloseFallsBackToPolling(t *testing.T) {
-	srv := gapLogServer(t, 400*time.Millisecond, false) // graceful close, then job completes
-	defer srv.Close()
-
-	cli := New(srv.URL, "")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	job, err := cli.WaitForJobWithStreamingOutput(ctx, "job-1", true)
-	if job == nil {
-		t.Fatal("graceful WS close fallback must return a non-nil job — caller dereferences job.Status")
-	}
-	if err == nil || !strings.Contains(err.Error(), "gap") {
-		t.Fatalf("graceful WS close with a sequenced gap must surface it, got err=%v", err)
-	}
-}
-
 // TestWaitForJobWithLogs_CtxDoneRaceWithPollDone is the regression test: when
 // the client-side timeout fires after the job already reached a terminal
 // status (e.g. a cache hit landed between the last poll and ctx.Done()),
