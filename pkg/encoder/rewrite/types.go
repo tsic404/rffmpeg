@@ -19,8 +19,8 @@ const (
 	ScenarioUnspecifiedEncoderWithHW ScenarioType = iota + 1
 
 	// ScenarioUnspecifiedEncoderNoHW indicates the user did not specify an encoder
-	// and no hardware acceleration is available. The engine should use libx264
-	// as the software baseline.
+	// and the target family has no available hardware encoder. The engine should
+	// use that family's software encoder (libvpx-vp9 for webm, mpeg4 for avi, …).
 	ScenarioUnspecifiedEncoderNoHW
 
 	// ScenarioSpecifiedEncoderSupported indicates the user specified an encoder
@@ -78,7 +78,7 @@ func (s ScenarioType) Description() string {
 	case ScenarioUnspecifiedEncoderWithHW:
 		return "Auto-upgrade to best hardware encoder"
 	case ScenarioUnspecifiedEncoderNoHW:
-		return "Use software baseline (libx264)"
+		return "Use the container family's software encoder"
 	case ScenarioSpecifiedEncoderSupported:
 		return "Pass through unchanged"
 	case ScenarioSpecifiedEncoderUnsupportedWithAlternative:
@@ -253,6 +253,10 @@ type EncoderRewriteResponse struct {
 
 	// TargetEncoder is the encoder that was selected after rewriting.
 	TargetEncoder encoder.EncoderFamily `json:"target_encoder"`
+
+	// ContainerFormat is the muxer the auto-selected target family was derived
+	// from (C-72); empty when no container-derived selection happened.
+	ContainerFormat string `json:"container_format,omitempty"`
 
 	// Scenario is the rewrite scenario that was applied.
 	Scenario ScenarioType `json:"scenario"`

@@ -1330,3 +1330,42 @@ func TestRewriteAdapter_CopyPreservedDuringEncoderRewrite(t *testing.T) {
 		})
 	}
 }
+
+// TestRewriteAdapter_ContainerDecisionReason covers the chain line's Reason
+// for a container-derived auto-selection (C-74): the line records both the
+// target and the container the family came from.
+func TestRewriteAdapter_ContainerDecisionReason(t *testing.T) {
+	adapter := NewRewriteAdapter()
+
+	cases := []struct {
+		name     string
+		response *rewrite.EncoderRewriteResponse
+		want     string
+	}{
+		{
+			name: "container derived selection",
+			response: &rewrite.EncoderRewriteResponse{
+				Scenario:        rewrite.ScenarioUnspecifiedEncoderWithHW,
+				TargetEncoder:   encoder.EncoderMpeg2VAAPI,
+				ContainerFormat: "mpegts",
+			},
+			want: "auto-selected mpeg2_vaapi (container mpegts)",
+		},
+		{
+			name: "specified encoder keeps the scenario wording",
+			response: &rewrite.EncoderRewriteResponse{
+				Scenario:        rewrite.ScenarioSpecifiedEncoderSupported,
+				OriginalEncoder: encoder.EncoderLibX264,
+				TargetEncoder:   encoder.EncoderLibX264,
+			},
+			want: "specified_encoder_supported",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := adapter.buildDecisionReason(tt.response); got != tt.want {
+				t.Errorf("buildDecisionReason() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

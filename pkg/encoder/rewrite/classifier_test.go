@@ -26,6 +26,7 @@ func TestScenarioClassifier_Classify(t *testing.T) {
 			name: "no encoder specified with hardware available",
 			request: &EncoderRewriteRequest{
 				SpecifiedEncoder: "",
+				TargetCodec:      encoder.CodecH264,
 				HardwareCapabilities: HardwareCapabilities{
 					HardwareEncoders:  []encoder.EncoderFamily{encoder.EncoderH264NVENC},
 					AvailableEncoders: []encoder.EncoderFamily{encoder.EncoderH264NVENC, encoder.EncoderLibX264},
@@ -38,6 +39,7 @@ func TestScenarioClassifier_Classify(t *testing.T) {
 			name: "no encoder specified no hardware",
 			request: &EncoderRewriteRequest{
 				SpecifiedEncoder: "",
+				TargetCodec:      encoder.CodecH264,
 				HardwareCapabilities: HardwareCapabilities{
 					SoftwareEncoders:  []encoder.EncoderFamily{encoder.EncoderLibX264},
 					AvailableEncoders: []encoder.EncoderFamily{encoder.EncoderLibX264},
@@ -218,6 +220,7 @@ func TestScenarioClassifier_SelectTargetEncoder(t *testing.T) {
 			name:     "unspecified with hw - select best hardware",
 			scenario: ScenarioUnspecifiedEncoderWithHW,
 			request: &EncoderRewriteRequest{
+				TargetCodec: encoder.CodecH264,
 				HardwareCapabilities: HardwareCapabilities{
 					AvailableEncoders: []encoder.EncoderFamily{encoder.EncoderH264NVENC, encoder.EncoderLibX264},
 					HardwareEncoders:  []encoder.EncoderFamily{encoder.EncoderH264NVENC},
@@ -230,9 +233,19 @@ func TestScenarioClassifier_SelectTargetEncoder(t *testing.T) {
 			name:     "unspecified no hw - use libx264",
 			scenario: ScenarioUnspecifiedEncoderNoHW,
 			request: &EncoderRewriteRequest{
+				TargetCodec:          encoder.CodecH264,
 				HardwareCapabilities: HardwareCapabilities{},
 			},
 			expectedResult: encoder.EncoderLibX264,
+		},
+		{
+			name:     "unspecified no hw - use the container family's software encoder",
+			scenario: ScenarioUnspecifiedEncoderNoHW,
+			request: &EncoderRewriteRequest{
+				TargetCodec:          encoder.CodecVP9,
+				HardwareCapabilities: HardwareCapabilities{},
+			},
+			expectedResult: encoder.EncoderLibVPX,
 		},
 		{
 			name:     "supported - use specified",

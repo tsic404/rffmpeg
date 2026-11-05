@@ -80,14 +80,28 @@ func TestRewriteVideoEncoderFlagKeepsSpelling(t *testing.T) {
 }
 
 func TestHasNoVideoOutput(t *testing.T) {
-	if !HasNoVideoOutput([]string{"-i", "in.mp4", "-vn", "out.m4a"}) {
-		t.Error("expected -vn to disable video output")
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "-vn disables video", args: []string{"-i", "in.mp4", "-vn", "out.m4a"}, want: true},
+		{name: "-vn after -- is passed through", args: []string{"-i", "in.mp4", "--", "-vn"}, want: false},
+		{name: "plain transcode keeps video", args: []string{"-i", "in.mp4", "out.mp4"}, want: false},
+		{name: "map audio only", args: []string{"-i", "in.mp4", "-map", "0:a", "out.mp4"}, want: true},
+		{name: "map optional audio only", args: []string{"-i", "in.mp4", "-map", "0:a?", "out.mp4"}, want: true},
+		{name: "map audio and video", args: []string{"-i", "in.mp4", "-map", "0:a", "-map", "0:v:0", "out.mp4"}, want: false},
+		{name: "map whole input", args: []string{"-i", "in.mp4", "-map", "0", "out.mp4"}, want: false},
+		{name: "map untyped stream index", args: []string{"-i", "in.mp4", "-map", "0:0", "out.mp4"}, want: false},
+		{name: "map label from a filter graph", args: []string{"-i", "in.mp4", "-map", "[v]", "out.mp4"}, want: false},
+		{name: "negative map removes streams only", args: []string{"-i", "in.mp4", "-map", "-0:a", "out.mp4"}, want: false},
 	}
-	if HasNoVideoOutput([]string{"-i", "in.mp4", "--", "-vn"}) {
-		t.Error("-vn after -- is passed through, not a video flag")
-	}
-	if HasNoVideoOutput([]string{"-i", "in.mp4", "out.mp4"}) {
-		t.Error("expected video output")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasNoVideoOutput(tt.args); got != tt.want {
+				t.Errorf("HasNoVideoOutput(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
 	}
 }
 

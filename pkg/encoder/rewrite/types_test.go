@@ -38,7 +38,7 @@ func TestScenarioTypeDescription(t *testing.T) {
 		want     string
 	}{
 		{ScenarioUnspecifiedEncoderWithHW, "Auto-upgrade to best hardware encoder"},
-		{ScenarioUnspecifiedEncoderNoHW, "Use software baseline (libx264)"},
+		{ScenarioUnspecifiedEncoderNoHW, "Use the container family's software encoder"},
 		{ScenarioSpecifiedEncoderSupported, "Pass through unchanged"},
 		{ScenarioSpecifiedEncoderUnsupportedWithAlternative, "Translate to local hardware encoder"},
 		{ScenarioSpecifiedEncoderUnsupportedFallbackSoftware, "Fallback to software encoder"},
@@ -502,6 +502,9 @@ func TestSoftwareEncoderForCodec(t *testing.T) {
 		{encoder.CodecHEVC, encoder.EncoderLibX265},
 		{encoder.CodecVP9, encoder.EncoderLibVPX},
 		{encoder.CodecAV1, encoder.EncoderLibSVTAV1},
+		{encoder.CodecVP8, encoder.EncoderLibVPX8},
+		{encoder.CodecMPEG2, encoder.EncoderMpeg2Video},
+		{encoder.CodecMPEG4, encoder.EncoderMpeg4},
 	}
 
 	for _, tt := range tests {

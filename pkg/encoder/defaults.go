@@ -50,6 +50,17 @@ func registerEncoderFamilies(m *EncoderMapping) {
 	m.RegisterEncoder(EncoderAV1NVENC, CodecAV1)
 	m.RegisterEncoder(EncoderAV1QSV, CodecAV1)
 	m.RegisterEncoder(EncoderAV1VAAPI, CodecAV1)
+
+	// VP8 encoders
+	m.RegisterEncoder(EncoderLibVPX8, CodecVP8)
+	m.RegisterEncoder(EncoderVP8VAAPI, CodecVP8)
+
+	// MPEG-2 encoders
+	m.RegisterEncoder(EncoderMpeg2Video, CodecMPEG2)
+	m.RegisterEncoder(EncoderMpeg2VAAPI, CodecMPEG2)
+
+	// MPEG-4 part 2 encoders
+	m.RegisterEncoder(EncoderMpeg4, CodecMPEG4)
 }
 
 func registerParameterTranslations(m *EncoderMapping) {

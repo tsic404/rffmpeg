@@ -378,6 +378,9 @@ func (a *RewriteAdapter) buildDecisionReason(response *rewrite.EncoderRewriteRes
 		return ""
 	}
 	scenarioInfo := response.Scenario.String()
+	if response.OriginalEncoder == "" && response.ContainerFormat != "" {
+		return fmt.Sprintf("auto-selected %s (container %s)", response.TargetEncoder, response.ContainerFormat)
+	}
 	if response.OriginalEncoder != response.TargetEncoder {
 		if response.TargetEncoder.IsHardware() && !response.OriginalEncoder.IsHardware() {
 			return fmt.Sprintf("auto-upgrade to hardware encoder %s (%s)", response.TargetEncoder, scenarioInfo)

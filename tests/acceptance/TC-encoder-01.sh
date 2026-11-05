@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # TC-encoder-01: 未指定编码器 → 自动硬件加速（AC-21、F3 负向）
-# 判据：stderr 至少含 `[rffmpeg] auto-selected <name>` 与
+# 判据：stderr 至少含 `[rffmpeg] auto-selected <name> (container <fmt>)` 与
 # `[rffmpeg] INFO: Worker capabilities: ...`；不断言具体编码器名。
 set -euo pipefail
 PORT="${PORT:-18999}"
@@ -23,8 +23,8 @@ RC=$?
 set -e
 expect_rc "$RC" 0 "auto-selected transcode rc"
 
-grep -qE '^\[rffmpeg\] auto-selected [A-Za-z0-9_.-]+$' "$LOG" ||
-	fail "missing '[rffmpeg] auto-selected <name>' line"
+grep -qE '^\[rffmpeg\] auto-selected [A-Za-z0-9_.-]+ \(container [A-Za-z0-9_.-]+\)$' "$LOG" ||
+	fail "missing '[rffmpeg] auto-selected <name> (container <fmt>)' line"
 grep -qF '[rffmpeg] INFO: Worker capabilities:' "$LOG" ||
 	fail "missing '[rffmpeg] INFO: Worker capabilities:' line"
 [[ -f "$OUT" ]] || fail "output missing"

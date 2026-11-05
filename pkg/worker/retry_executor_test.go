@@ -239,6 +239,8 @@ func TestEncoderFallback_GetSoftwareEncoder(t *testing.T) {
 		{"hevc_qsv", "hevc_qsv", "libx265"},
 		{"h264_vaapi", "h264_vaapi", "libx264"},
 		{"vp9_vaapi", "vp9_vaapi", "libvpx-vp9"},
+		{"vp8_vaapi", "vp8_vaapi", "libvpx"},
+		{"mpeg2_vaapi", "mpeg2_vaapi", "mpeg2video"},
 		{"libx264", "libx264", "libx264"},
 		{"libx265", "libx265", "libx265"},
 	}
