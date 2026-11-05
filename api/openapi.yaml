@@ -374,6 +374,12 @@ paths:
       responses:
         '101':
           description: WebSocket connection established
+        '400':
+          description: >-
+            Malformed WebSocket handshake: the upgrade headers are present but
+            the handshake itself is invalid (bad `Sec-WebSocket-Key`, missing
+            `Sec-WebSocket-Version`). Answered as a plain-text 400, not the JSON
+            error shape.
         '426':
           $ref: '#/components/responses/UpgradeRequired'
 
@@ -1873,7 +1879,10 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     UpgradeRequired:
-      description: WebSocket upgrade required
+      description: >-
+        The request did not ask for a WebSocket upgrade (bare GET, or missing
+        `Connection: Upgrade` / `Upgrade: websocket`); the body is an
+        `ErrorResponse` with `code` `upgrade_required`.
       content:
         application/json:
           schema:
