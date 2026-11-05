@@ -80,6 +80,12 @@ func defaultHardwareToSoftwareMap() map[string]string {
 		"av1_qsv":   "libaom-av1",
 		"av1_vaapi": "libaom-av1",
 		"av1_amf":   "libaom-av1",
+
+		// VP8 encoders
+		"vp8_vaapi": "libvpx",
+
+		// MPEG-2 encoders
+		"mpeg2_vaapi": "mpeg2video",
 	}
 }
 

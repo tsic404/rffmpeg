@@ -97,6 +97,12 @@ func SoftwareEncoderForCodec(codec encoder.CodecFormat) encoder.EncoderFamily {
 		return encoder.EncoderLibVPX
 	case encoder.CodecAV1:
 		return encoder.EncoderLibSVTAV1
+	case encoder.CodecVP8:
+		return encoder.EncoderLibVPX8
+	case encoder.CodecMPEG2:
+		return encoder.EncoderMpeg2Video
+	case encoder.CodecMPEG4:
+		return encoder.EncoderMpeg4
 	default:
 		return ""
 	}

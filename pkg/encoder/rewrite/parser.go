@@ -55,8 +55,15 @@ func (p *FFmpegParser) CreateEncoderRewriteRequest(args []string, hwCaps *Hardwa
 		return nil, fmt.Errorf("failed to parse FFmpeg arguments: %w", err)
 	}
 
-	// If no encoder specified but we have a target codec, we still need to handle it
-	// In practice, FFmpeg might infer codec from output format
+	// With no explicit encoder the output container decides the target family
+	// (C-72): ffmpeg's default video codec for the effective output format,
+	// provided the worker can run an encoder of that family. Otherwise the
+	// target stays empty and the command is left to ffmpeg.
+	if specifiedEncoder == "" {
+		if _, family, ok := containerTargetCodec(args, hwCaps); ok {
+			targetCodec = family
+		}
+	}
 
 	req := &EncoderRewriteRequest{
 		OriginalArgs:         args,

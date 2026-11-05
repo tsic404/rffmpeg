@@ -51,11 +51,12 @@ func (c *ScenarioClassifierImpl) Classify(ctx context.Context, req *EncoderRewri
 
 	// Case 1: No encoder specified
 	if req.SpecifiedEncoder == "" {
-		// If hardware encoders are available, upgrade to best hardware encoder
-		if hwCaps.HasHardwareEncoder() {
+		// The target family comes from the output container (C-72). Prefer a
+		// hardware encoder of that family when the worker has one; otherwise
+		// the family's software encoder is the target.
+		if req.TargetCodec != "" && hwCaps.GetBestHardwareEncoder(req.TargetCodec) != "" {
 			return ScenarioUnspecifiedEncoderWithHW, nil
 		}
-		// Otherwise, use software baseline (libx264)
 		return ScenarioUnspecifiedEncoderNoHW, nil
 	}
 
@@ -148,11 +149,11 @@ func (c *ScenarioClassifierImpl) GetScenarioInfo(scenario ScenarioType) Scenario
 	case ScenarioUnspecifiedEncoderNoHW:
 		return ScenarioInfo{
 			Type:                scenario,
-			Description:         "Use software baseline (libx264)",
+			Description:         "Use the container family's software encoder",
 			RequiresTranslation: false,
 			RequiresHWInjection: false,
 			IsError:             false,
-			RecommendedAction:   "Use libx264 as the default software encoder",
+			RecommendedAction:   "Use the software encoder of the target family (e.g. libvpx-vp9 for webm, mpeg4 for avi)",
 		}
 	case ScenarioSpecifiedEncoderSupported:
 		return ScenarioInfo{
@@ -217,16 +218,15 @@ func (c *ScenarioClassifierImpl) SelectTargetEncoder(scenario ScenarioType, req 
 
 	switch scenario {
 	case ScenarioUnspecifiedEncoderWithHW:
-		// Select best hardware encoder for default codec (H.264)
-		if enc := hwCaps.GetBestHardwareEncoder(encoder.CodecH264); enc != "" {
+		// Prefer hardware of the container-derived family.
+		if enc := hwCaps.GetBestHardwareEncoder(req.TargetCodec); enc != "" {
 			return enc
 		}
-		// Fallback to software
-		return encoder.EncoderLibX264
+		return softwareTarget(hwCaps, req.TargetCodec)
 
 	case ScenarioUnspecifiedEncoderNoHW:
-		// Use software baseline
-		return encoder.EncoderLibX264
+		// Use the family's software encoder (the codec's native baseline).
+		return softwareTarget(hwCaps, req.TargetCodec)
 
 	case ScenarioSpecifiedEncoderSupported:
 		// Use the specified encoder
@@ -255,4 +255,16 @@ func (c *ScenarioClassifierImpl) SelectTargetEncoder(scenario ScenarioType, req 
 	default:
 		return ""
 	}
+}
+
+// softwareTarget returns the software encoder for codec: one this worker
+// reports when available, otherwise the codec's native baseline encoder.
+func softwareTarget(hwCaps *HardwareCapabilities, codec encoder.CodecFormat) encoder.EncoderFamily {
+	if codec == "" {
+		return ""
+	}
+	if enc := hwCaps.GetSoftwareEncoder(codec); enc != "" {
+		return enc
+	}
+	return SoftwareEncoderForCodec(codec)
 }

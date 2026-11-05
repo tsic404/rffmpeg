@@ -79,6 +79,11 @@ func TestEncoderFamilyCodecFormat(t *testing.T) {
 		{EncoderVP9VAAPI, CodecVP9},
 		{EncoderLibSVTAV1, CodecAV1},
 		{EncoderAV1NVENC, CodecAV1},
+		{EncoderLibVPX8, CodecVP8},
+		{EncoderVP8VAAPI, CodecVP8},
+		{EncoderMpeg2Video, CodecMPEG2},
+		{EncoderMpeg2VAAPI, CodecMPEG2},
+		{EncoderMpeg4, CodecMPEG4},
 	}
 
 	for _, tt := range tests {

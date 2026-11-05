@@ -54,7 +54,7 @@ func Example() {
 	fmt.Printf("Test 2 - Specified h264_qsv (not available): %s - %s\n", scenario2.String(), info2.Description)
 
 	// Test case 3: User doesn't specify encoder, hardware available
-	args3 := []string{"-b:v", "5000k", "-crf", "23"}
+	args3 := []string{"-i", "input.mp4", "-b:v", "5000k", "-crf", "23", "output.mp4"}
 	req3, _ := parser.CreateEncoderRewriteRequest(args3, hwCaps, false, "req-3")
 	scenario3, _ := classifier.Classify(context.Background(), req3)
 	info3 := classifier.GetScenarioInfo(scenario3)

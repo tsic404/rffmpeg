@@ -152,6 +152,24 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 		return response, nil
 	}
 
+	// A request that names no encoder takes its target family from the output
+	// container: the codec native ffmpeg would select for the effective output
+	// format (C-72). A container without a video codec, a format ffmpeg cannot
+	// determine, a family this engine does not model, or a family with no
+	// usable encoder on this worker leaves the command to ffmpeg (C-69, C-72),
+	// so no target is selected and nothing is injected.
+	containerFormat := ""
+	if req.SpecifiedEncoder == "" {
+		var codec encoder.CodecFormat
+		var ok bool
+		containerFormat, codec, ok = containerTargetCodec(req.OriginalArgs, &req.HardwareCapabilities)
+		if !ok {
+			response.RewrittenArgs = req.OriginalArgs
+			return response, nil
+		}
+		req.TargetCodec = codec
+	}
+
 	// Step 1: Classify the scenario
 	scenario, err := e.classifier.Classify(ctx, req)
 	if err != nil {
@@ -194,6 +212,13 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 
 	// Step 2: Select target encoder
 	targetEncoder := e.classifier.SelectTargetEncoder(scenario, req)
+	// The container-derived target must be runnable here; otherwise the
+	// command is left to ffmpeg instead of failing as "no suitable encoder"
+	// (C-72: no rewrite when the family's software encoder is unavailable).
+	if req.SpecifiedEncoder == "" && (targetEncoder == "" || !req.HardwareCapabilities.HasEncoder(targetEncoder)) {
+		response.RewrittenArgs = req.OriginalArgs
+		return response, nil
+	}
 	if targetEncoder == "" {
 		response.Errors = append(response.Errors, RewriteError{
 			Code:    ErrNoSuitableEncoder,
@@ -222,6 +247,7 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 
 	response.OriginalEncoder = req.SpecifiedEncoder
 	response.TargetEncoder = targetEncoder
+	response.ContainerFormat = containerFormat
 
 	// Step 3: Translate parameters (if needed)
 	var translatedParams map[string]string
@@ -347,9 +373,9 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 
 	// Step 6: Generate notifications
 	// Notification message formats:
-	//   - Auto-hw upfront: [rffmpeg] auto-selected <encoder>
-	//   - Auto-hw upgrade: [rffmpeg] upgraded <original> → <target>
-	//   - True fallback:   [rffmpeg] <original> unavailable, fallback to <target>
+	//   - No encoder specified: [rffmpeg] auto-selected <target> (container <fmt>)
+	//   - Auto-hw upgrade:      [rffmpeg] upgraded <original> → <target>
+	//   - True fallback:        [rffmpeg] <original> unavailable, fallback to <target>
 	var notificationMsg string
 	switch scenario {
 	case ScenarioSpecifiedEncoderUnsupportedWithAlternative, ScenarioSpecifiedEncoderUnsupportedFallbackSoftware:
@@ -368,9 +394,10 @@ func (e *EngineCoordinator) Rewrite(ctx context.Context, req *EncoderRewriteRequ
 				e.formatEncoder(req.SpecifiedEncoder),
 				targetEncoder)
 		}
-	case ScenarioUnspecifiedEncoderWithHW:
-		// Auto-HW selection: no encoder specified, automatically selected best HW encoder
-		notificationMsg = fmt.Sprintf("[rffmpeg] auto-selected %s", targetEncoder)
+	case ScenarioUnspecifiedEncoderWithHW, ScenarioUnspecifiedEncoderNoHW:
+		// No encoder specified: the target family came from the output
+		// container, so the line records that container (C-74).
+		notificationMsg = fmt.Sprintf("[rffmpeg] auto-selected %s (container %s)", targetEncoder, containerFormat)
 
 	default:
 		notificationMsg = fmt.Sprintf(

@@ -106,7 +106,8 @@ func (h *HardwareInjectorImpl) GetRequiredParams(enc encoder.EncoderFamily) []st
 		return []string{"qsv_device", "async_depth"}
 	case encoder.GPUVendorAMD:
 		if enc == encoder.EncoderH264VAAPI || enc == encoder.EncoderHEVCVAAPI ||
-			enc == encoder.EncoderVP9VAAPI || enc == encoder.EncoderAV1VAAPI {
+			enc == encoder.EncoderVP9VAAPI || enc == encoder.EncoderAV1VAAPI ||
+			enc == encoder.EncoderVP8VAAPI || enc == encoder.EncoderMpeg2VAAPI {
 			return []string{"vaapi_device"}
 		}
 		return []string{"rc", "quality"}
@@ -154,7 +155,8 @@ func (h *HardwareInjectorImpl) getHardwareParamsForEncoder(enc encoder.EncoderFa
 	case encoder.GPUVendorAMD:
 		// Check if VAAPI or AMF
 		if enc == encoder.EncoderH264VAAPI || enc == encoder.EncoderHEVCVAAPI ||
-			enc == encoder.EncoderVP9VAAPI || enc == encoder.EncoderAV1VAAPI {
+			enc == encoder.EncoderVP9VAAPI || enc == encoder.EncoderAV1VAAPI ||
+			enc == encoder.EncoderVP8VAAPI || enc == encoder.EncoderMpeg2VAAPI {
 			// VAAPI parameters
 			if device != nil && device.Path != "" {
 				params["vaapi_device"] = device.Path

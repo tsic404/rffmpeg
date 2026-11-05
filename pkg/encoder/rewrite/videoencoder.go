@@ -167,20 +167,6 @@ func HasInlineVideoEncoderSyntax(args []string) bool {
 	return false
 }
 
-// HasNoVideoOutput reports whether args explicitly disable video output with
-// the -vn flag. Flags after "--" are passed through and do not count.
-func HasNoVideoOutput(args []string) bool {
-	for _, arg := range args {
-		if arg == "--" {
-			return false
-		}
-		if arg == "-vn" {
-			return true
-		}
-	}
-	return false
-}
-
 // ReplacePrimaryVideoEncoder returns args with the primary video encoder
 // declaration rewritten to enc, keeping that declaration's spelling and stream
 // specifier. It is the single in-place replacement used by retry and fallback

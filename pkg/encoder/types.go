@@ -3,14 +3,18 @@
 // parameter injection for NVIDIA, Intel, AMD, and Apple GPU vendors.
 package encoder
 
-// CodecFormat represents the codec format type (H.264, HEVC, VP9, AV1).
+// CodecFormat represents the codec format type (H.264, HEVC, VP9, AV1, VP8,
+// MPEG-2, MPEG-4).
 type CodecFormat string
 
 const (
-	CodecH264 CodecFormat = "h264"
-	CodecHEVC CodecFormat = "hevc"
-	CodecVP9  CodecFormat = "vp9"
-	CodecAV1  CodecFormat = "av1"
+	CodecH264  CodecFormat = "h264"
+	CodecHEVC  CodecFormat = "hevc"
+	CodecVP9   CodecFormat = "vp9"
+	CodecAV1   CodecFormat = "av1"
+	CodecVP8   CodecFormat = "vp8"
+	CodecMPEG2 CodecFormat = "mpeg2"
+	CodecMPEG4 CodecFormat = "mpeg4"
 )
 
 // String returns the string representation of the codec format.
@@ -67,6 +71,17 @@ const (
 	EncoderAV1NVENC  EncoderFamily = "av1_nvenc"
 	EncoderAV1QSV    EncoderFamily = "av1_qsv"
 	EncoderAV1VAAPI  EncoderFamily = "av1_vaapi"
+
+	// VP8 encoders
+	EncoderLibVPX8  EncoderFamily = "libvpx"
+	EncoderVP8VAAPI EncoderFamily = "vp8_vaapi"
+
+	// MPEG-2 encoders
+	EncoderMpeg2Video EncoderFamily = "mpeg2video"
+	EncoderMpeg2VAAPI EncoderFamily = "mpeg2_vaapi"
+
+	// MPEG-4 part 2 encoders
+	EncoderMpeg4 EncoderFamily = "mpeg4"
 )
 
 // String returns the string representation of the encoder family.
@@ -85,6 +100,12 @@ func (e EncoderFamily) CodecFormat() CodecFormat {
 		return CodecVP9
 	case EncoderLibSVTAV1, EncoderLibAOM, EncoderAV1NVENC, EncoderAV1QSV, EncoderAV1VAAPI:
 		return CodecAV1
+	case EncoderLibVPX8, EncoderVP8VAAPI:
+		return CodecVP8
+	case EncoderMpeg2Video, EncoderMpeg2VAAPI:
+		return CodecMPEG2
+	case EncoderMpeg4:
+		return CodecMPEG4
 	default:
 		return ""
 	}
@@ -96,7 +117,8 @@ func (e EncoderFamily) IsHardware() bool {
 	case EncoderH264NVENC, EncoderH264QSV, EncoderH264VAAPI, EncoderH264AMF, EncoderH264VT,
 		EncoderHEVCNVENC, EncoderHEVCQSV, EncoderHEVCVAAPI, EncoderHEVCAMF, EncoderHEVCVT,
 		EncoderVP9NVENC, EncoderVP9QSV, EncoderVP9VAAPI,
-		EncoderAV1NVENC, EncoderAV1QSV, EncoderAV1VAAPI:
+		EncoderAV1NVENC, EncoderAV1QSV, EncoderAV1VAAPI,
+		EncoderVP8VAAPI, EncoderMpeg2VAAPI:
 		return true
 	default:
 		return false
@@ -110,7 +132,8 @@ func (e EncoderFamily) GPUVendor() GPUVendor {
 		return GPUVendorNVIDIA
 	case EncoderH264QSV, EncoderHEVCQSV, EncoderVP9QSV, EncoderAV1QSV:
 		return GPUVendorIntel
-	case EncoderH264VAAPI, EncoderHEVCVAAPI, EncoderVP9VAAPI, EncoderAV1VAAPI:
+	case EncoderH264VAAPI, EncoderHEVCVAAPI, EncoderVP9VAAPI, EncoderAV1VAAPI,
+		EncoderVP8VAAPI, EncoderMpeg2VAAPI:
 		return GPUVendorAMD
 	case EncoderH264VT, EncoderHEVCVT:
 		return GPUVendorApple
