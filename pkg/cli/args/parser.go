@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	ErrNoInputFile     = errors.New("no input file specified")
+	ErrNoInputFile     = errors.New("no input file specified: pass the input with -i <file>")
 	ErrNoOutputFile    = errors.New("no output file specified")
 	ErrMultipleOutputs = errors.New("multiple output files are not supported")
 )
@@ -42,13 +42,15 @@ func NewParser() *Parser {
 // Parse parses command-line arguments into a ParseResult
 // ffmpeg syntax: ffmpeg [global_options] [-i input_file]... [output_options] output_file
 //
-// Three non-native input forms are kept deliberately:
+// Two non-native input forms are kept deliberately:
 //   - "-o <path>" is the output-target option the contract recognises and
 //     strips from the passthrough args; it is documented in the README.
 //   - "--input" is the long spelling of "-i"; the worker's argument builder
 //     accepts the same spelling, so both sides parse one grammar.
-//   - a positional argument seen before any -i is taken as the input, so an
-//     omitted -i still yields a real input stream instead of "no input".
+//
+// A positional argument is always an output candidate, never an input: only
+// -i / --input names the source, so an invocation without one is rejected
+// before submission.
 //
 // Native ffmpeg invocations are unaffected by these extensions.
 func (p *Parser) Parse(args []string) (*ParseResult, error) {
@@ -68,10 +70,17 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	// Find the last argument that looks like an output file (typically the
 	// last non-option argument, or an explicit -o value).
 	outputCandidateIdx := findOutputCandidate(args)
-	// A bare positional is ffmpeg's output syntax. The implicit-input fallback
-	// below only covers invocations that name no input at all; when any -i is
-	// present, a positional before it is a second output, not an input.
+	// A bare positional is ffmpeg's output syntax, never an input: only
+	// -i / --input names the source. A missing input outranks an extra output
+	// candidate — pointing at the absent -i is the actionable fix — so both
+	// rejections share one helper.
 	explicitInput := hasExplicitInput(args)
+	multipleOutputs := func(name string) error {
+		if !explicitInput {
+			return ErrNoInputFile
+		}
+		return fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, name)
+	}
 
 	// Parse arguments
 	i := 0
@@ -97,7 +106,7 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 				return nil, ErrNoOutputFile
 			}
 			if outputFile != "" {
-				return nil, fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, args[i+1])
+				return nil, multipleOutputs(args[i+1])
 			}
 			outputFile = args[i+1]
 			i += 2
@@ -108,7 +117,7 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 		// "-" is stdout (streaming output) — treat as output file, not a flag
 		if outputCandidateIdx >= 0 && i == outputCandidateIdx && (!strings.HasPrefix(arg, "-") || arg == "-") {
 			if outputFile != "" {
-				return nil, fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, arg)
+				return nil, multipleOutputs(arg)
 			}
 			outputFile = arg
 			i++
@@ -137,22 +146,11 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 			continue
 		}
 
-		// Non-option argument (input shorthand or output)
-		if len(inputFiles) == 0 && !explicitInput {
-			// No -i anywhere: the positional is the implicit input. Rewrite it
-			// into the same -i <INPUT_FILE> form the worker substitutes, so
-			// omitting -i still yields a real input stream.
-			inputFiles = append(inputFiles, arg)
-			allArgs = append(allArgs, "-i", "<INPUT_FILE>")
-		} else if outputFile == "" && i == outputCandidateIdx {
-			outputFile = arg
-		} else {
-			// ffmpeg accepts multiple outputs; rffmpeg produces exactly one.
-			// Dropping the extra output silently would report success for a
-			// file the user never gets.
-			return nil, fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, arg)
-		}
-		i++
+		// Non-option argument. The trailing positional already claimed the
+		// output above, so any other one is a second output: ffmpeg accepts
+		// multiple outputs, rffmpeg produces exactly one and refuses rather
+		// than drop the extra silently.
+		return nil, multipleOutputs(arg)
 	}
 
 	// Validate
@@ -186,9 +184,8 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 
 // hasExplicitInput reports whether args name an input with -i / --input.
 // ffmpeg has no implicit-input form: every bare positional is an output, so
-// the parser's implicit-input fallback must stay off as soon as one -i is
-// present — otherwise "a1.mp4 -i src.mp4 a3.mp4" treats a1.mp4 as an input
-// and silently drops it.
+// an invocation naming no -i is rejected instead of guessing which token is
+// the source.
 func hasExplicitInput(args []string) bool {
 	for _, arg := range args {
 		if arg == "-i" || arg == "--input" {
