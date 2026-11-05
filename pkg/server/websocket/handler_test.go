@@ -30,45 +30,61 @@ func jobLogRequest(t *testing.T, header http.Header) *http.Request {
 	return req
 }
 
-// TestHandleJobLogWithValidationUpgradeRequired reproduces the regression: a request
-// carrying Connection: Upgrade but no Upgrade header is not a WebSocket
-// handshake, so the server must answer 426 Upgrade Required (RFC 6455 §4.1)
-// instead of gorilla's default 400, with the Upgrade: websocket header and a
-// JSON error body matching the 405/404 shape.
+// TestHandleJobLogWithValidationUpgradeRequired pins the non-upgrade answers:
+// a bare GET (no Connection: Upgrade) and a request carrying Connection:
+// Upgrade without Upgrade are both not WebSocket handshakes, so the server
+// must answer 426 Upgrade Required (RFC 6455 §4.1) instead of gorilla's default
+// 400, with the Upgrade: websocket header and a JSON error body matching the
+// 405/404 shape.
 func TestHandleJobLogWithValidationUpgradeRequired(t *testing.T) {
-	req := jobLogRequest(t, http.Header{"Connection": []string{"Upgrade"}})
-	rec := httptest.NewRecorder()
-
-	HandleJobLogWithValidation(NewHub(), nil, rec, req)
-
-	if rec.Code != http.StatusUpgradeRequired {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUpgradeRequired, rec.Body.String())
-	}
-	if got := rec.Header().Get("Upgrade"); got != "websocket" {
-		t.Errorf("Upgrade header = %q, want websocket", got)
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", ct)
-	}
-	// gorilla's 400 path pre-sets these before the 426 rewrite; they must not
-	// leak into the rewritten response.
-	for _, h := range []string{"Sec-Websocket-Version", "X-Content-Type-Options"} {
-		if got := rec.Header().Get(h); got != "" {
-			t.Errorf("header %q = %q, want removed", h, got)
-		}
+	cases := []struct {
+		name   string
+		header http.Header
+	}{
+		{name: "bare GET", header: nil},
+		{
+			name:   "Connection Upgrade without Upgrade header",
+			header: http.Header{"Connection": []string{"Upgrade"}},
+		},
 	}
 
-	var resp protocol.ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode body: %v; body=%s", err, rec.Body.String())
-	}
-	if resp.Code != "upgrade_required" {
-		t.Errorf("code = %q, want upgrade_required", resp.Code)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := jobLogRequest(t, tc.header)
+			rec := httptest.NewRecorder()
+
+			HandleJobLogWithValidation(NewHub(), nil, rec, req)
+
+			if rec.Code != http.StatusUpgradeRequired {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUpgradeRequired, rec.Body.String())
+			}
+			if got := rec.Header().Get("Upgrade"); got != "websocket" {
+				t.Errorf("Upgrade header = %q, want websocket", got)
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			// gorilla's 400 path pre-sets these; they must not leak into the
+			// 426 response.
+			for _, h := range []string{"Sec-Websocket-Version", "X-Content-Type-Options"} {
+				if got := rec.Header().Get(h); got != "" {
+					t.Errorf("header %q = %q, want removed", h, got)
+				}
+			}
+
+			var resp protocol.ErrorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode body: %v; body=%s", err, rec.Body.String())
+			}
+			if resp.Code != "upgrade_required" {
+				t.Errorf("code = %q, want upgrade_required", resp.Code)
+			}
+		})
 	}
 }
 
-// TestHandleJobLogWithValidationUpgradeSucceeds exercises the success path the
-// wrapper also covers: a valid handshake must still reach 101 via Hijack and
+// TestHandleJobLogWithValidationUpgradeSucceeds pins the upgrade branch: a
+// request carrying both upgrade headers must still reach 101 via Hijack and
 // register the client with the hub.
 func TestHandleJobLogWithValidationUpgradeSucceeds(t *testing.T) {
 	hub := NewHub()
@@ -102,9 +118,10 @@ func TestHandleJobLogWithValidationUpgradeSucceeds(t *testing.T) {
 	}
 }
 
-// TestHandleJobLogWithValidationNon426HandshakeFailures pins the narrowed
-// rewrite scope: handshake failures other than a missing Upgrade header keep
-// gorilla's 400, per RFC 6455 §4.2.2.
+// TestHandleJobLogWithValidationNon426HandshakeFailures pins the malformed
+// handshake branch: once both upgrade headers are present, a bad
+// Sec-WebSocket-Key or a missing Sec-WebSocket-Version keeps gorilla's
+// plain-text 400, per RFC 6455 §4.2.2.
 func TestHandleJobLogWithValidationNon426HandshakeFailures(t *testing.T) {
 	cases := []struct {
 		name   string
