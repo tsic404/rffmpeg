@@ -302,7 +302,6 @@ func TestParseRejectsMultipleOutputs(t *testing.T) {
 		{"-i", "a.mp4", "o1.mp4", "-c:v", "libx264", "o2.mp4"},
 		{"-i", "a.mp4", "-o", "o1.mp4", "o2.mp4"},
 		{"-i", "a.mp4", "o1.mp4", "-o", "o2.mp4"},
-		{"-o", "o1.mp4", "-o", "o2.mp4"},
 		// A positional before -i is an output, not an implicit input:
 		// ffmpeg writes both positionals and rffmpeg must reject the extra.
 		{"o1.mp4", "-i", "src.mp4", "o2.mp4"},
@@ -364,29 +363,26 @@ func TestParseAllArgsPreserved(t *testing.T) {
 	}
 }
 
-func TestParseImplicitInputAllArgs(t *testing.T) {
+// TestParseRejectsInvocationWithoutInput pins the parse-time rejection: a
+// bare positional is an output, never a source, so an invocation naming no -i
+// is refused before submission. The error carries the -i fix, and a missing
+// input outranks an extra output candidate.
+func TestParseRejectsInvocationWithoutInput(t *testing.T) {
 	p := NewParser()
-	result, err := p.Parse([]string{"-c:v", "libx264", "input.mp4", "out.mp4"})
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
+	cases := [][]string{
+		{"input.mp4", "out.mp4"},
+		{"-c:v", "libx264", "input.mp4"},
+		{"input.mp4", "out1.mp4", "out2.mp4"},
+		{"-o", "out1.mp4", "-o", "out2.mp4"},
 	}
-
-	if len(result.InputFiles) != 1 || result.InputFiles[0] != "input.mp4" {
-		t.Errorf("InputFiles = %v, want [input.mp4]", result.InputFiles)
-	}
-	if result.OutputFile != "out.mp4" {
-		t.Errorf("OutputFile = %q, want out.mp4", result.OutputFile)
-	}
-
-	// The implicit input must be rewritten to the -i <INPUT_FILE> placeholder
-	// form so the worker can substitute the real path.
-	want := []string{"-c:v", "libx264", "-i", "<INPUT_FILE>"}
-	if len(result.AllArgs) != len(want) {
-		t.Fatalf("AllArgs = %v, want %v", result.AllArgs, want)
-	}
-	for i := range want {
-		if result.AllArgs[i] != want[i] {
-			t.Errorf("AllArgs[%d] = %q, want %q", i, result.AllArgs[i], want[i])
+	for _, args := range cases {
+		_, err := p.Parse(args)
+		if !errors.Is(err, ErrNoInputFile) {
+			t.Errorf("Parse(%v): error = %v, want ErrNoInputFile", args, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "-i") {
+			t.Errorf("Parse(%v): error = %q, want an -i repair hint", args, err)
 		}
 	}
 }

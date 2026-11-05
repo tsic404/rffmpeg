@@ -48,7 +48,7 @@ check_multiple_outputs() {
 }
 check_multiple_outputs positional -i "$MEDIA" "$TMP_ROOT/out1.mp4" "$TMP_ROOT/out2.mp4"
 check_multiple_outputs explicit-after-positional -i "$MEDIA" "$TMP_ROOT/out1.mp4" -o "$TMP_ROOT/out2.mp4"
-check_multiple_outputs explicit-twice -o "$TMP_ROOT/out1.mp4" -o "$TMP_ROOT/out2.mp4"
+check_multiple_outputs explicit-twice -i "$MEDIA" -o "$TMP_ROOT/out1.mp4" -o "$TMP_ROOT/out2.mp4"
 # A positional before -i is ffmpeg's output syntax, not an implicit input:
 # both positionals name outputs, so the extra one must be rejected.
 check_multiple_outputs positional-before-input "$TMP_ROOT/out1.mp4" -i "$MEDIA" "$TMP_ROOT/out2.mp4"
