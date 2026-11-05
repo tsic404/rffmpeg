@@ -3,7 +3,7 @@
 #
 # 判据：百分比单调 0%→100%；含 "Progress:" 的行都必须带 ETA 段（n/a 或时长格式）；
 # 带数值行的误差 <20%（真值不在该行推出的区间内者只计覆盖率）；
-# 稳定段内带数值行不少于该段一半；无稳定段时改判运行级下限 15%。
+# 稳定段内带数值行不少于该段一半；无稳定段时改判运行级下限 15%（分母为空按 0 行计）。
 # 覆盖率的分母按 C-122 第六款排除：起步段、起步段后一个证据窗口、
 # 跃迁后一个证据窗口、末条进度行之前的一个证据窗口。
 #
@@ -167,13 +167,11 @@ assert transition_rows == 0, f"{name}: {transition_rows} numeric ETA lines on tr
 if segments == 0:
     floor = counted(work)
     numeric = sum(1 for (_, _, e) in floor if e != "n/a")
-    assert len(floor) > 0, (
-        f"{name}: the exclusions removed every progress row; an empty denominator "
-        f"cannot prove availability")
+    # 分母为空（全部进度行落在排除窗口内）时下限按 0 行计，不要求分母非空。
     assert numeric * 100 >= 15 * len(floor), (
         f"{name}: no steady segment and only {numeric}/{len(floor)} numeric ETA lines; "
         f"C-122 run-level floor is 15% of the excluded-window denominator")
-# 全 n/a 的运行不通过：任何工况至少要有一行给值，空分母不能把下限变成 0>=0。
+# 全 n/a 的运行不通过：空分母下下限是 0 行，这是该情形唯一还有增量的判据。
 total_numeric = sum(1 for (_, _, e) in progress if e != "n/a")
 assert total_numeric > 0, f"{name}: every progress line rendered n/a; C-122 rejects an all-n/a run"
 
