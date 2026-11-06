@@ -310,6 +310,18 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		}
 	}
 
+	// A job's percent never goes backward, so a restarted attempt's frames are
+	// dropped instead of rewinding progress the CLI already displayed. The drop
+	// happens before the ETA evidence below: a row the CLI never renders is not
+	// rate evidence either (C-122, ADR-016). Frames with an unknown duration
+	// (-1) carry no percent to compare against and pass through untouched.
+	if frame.Percent >= 0 {
+		if p.maxPercent >= 0 && frame.Percent < p.maxPercent {
+			return nil
+		}
+		p.maxPercent = frame.Percent
+	}
+
 	// ETA from wall-clock throughput: remaining media time divided by the
 	// recent encode rate (media encoded per wall second). The rate comes from
 	// a rolling window so a drifting pace is not averaged into an outdated
@@ -327,20 +339,6 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		if float64(timeUs) >= etaSettleMediaSeconds*1_000_000 && p.attemptFrames >= etaSettleFrames {
 			frame.EtaSeconds = p.etaEstimate(now, timeUs, durationUs)
 		}
-	}
-
-	// A job's percent never goes backward, so a restarted attempt's frames are
-	// dropped instead of rewinding progress the CLI already displayed. The
-	// drop suppresses the push only: every frame still updated the attempt
-	// state above, so the displayed speed and the ETA stay live while the
-	// restarted attempt climbs back to the mark. Frames with an unknown
-	// duration (-1) carry no percent to compare against and pass through
-	// untouched.
-	if frame.Percent >= 0 {
-		if p.maxPercent >= 0 && frame.Percent < p.maxPercent {
-			return nil
-		}
-		p.maxPercent = frame.Percent
 	}
 
 	return frame
