@@ -2020,6 +2020,93 @@ func TestProgressRouterHandlerFiltersStatsLines(t *testing.T) {
 	}
 }
 
+// TestProgressRouter_RateWindowUsesRenderedRows: the router parses only the
+// rows it pushes, so the ETA rate window is built from the rows the CLI
+// renders. ffmpeg emits about two -stats lines per second and the throttle
+// drops half of them; a step visible between the rendered rows would be
+// averaged away if the dropped lines entered the window, and the row that
+// must render n/a would carry a number instead.
+func TestProgressRouter_RateWindowUsesRenderedRows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "worker-1", "")
+	router := NewProgressRouter(client, "job-1", func(string) {})
+	router.SetDuration(60_000_000)
+	router.sendDelay = time.Hour // keep the second line throttled regardless of test speed
+
+	h := router.Handler()
+	h(buildProgressLine(2_000_000, 2.0) + "\n")
+	h(buildProgressLine(3_000_000, 2.0) + "\n")
+
+	if got := len(router.parser.etaSamples); got != 1 {
+		t.Fatalf("ETA samples = %d, want 1: a line that is not rendered is not rate evidence", got)
+	}
+}
+
+// TestProgressRouter_UnparseableTimeDoesNotConsumePushSlot: ffmpeg's opening
+// -stats line carries "time=N/A", which yields no progress row. It must be
+// dropped before the throttle, or it spends the 1s push budget and delays the
+// first real row by a sample interval.
+func TestProgressRouter_UnparseableTimeDoesNotConsumePushSlot(t *testing.T) {
+	var mu sync.Mutex
+	pushes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req protocol.JobUpdateRequest
+		if err := json.Unmarshal(body, &req); err == nil && req.Progress > 0 {
+			mu.Lock()
+			pushes++
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "worker-1", "")
+	router := NewProgressRouter(client, "job-1", func(string) {})
+	router.SetDuration(60_000_000)
+	router.sendDelay = time.Hour // a second push would be throttled away
+
+	h := router.Handler()
+	h("frame=    0 fps=0.0 q=0.0 size=       0kB time=N/A bitrate=N/A speed=\n")
+	h(buildProgressLine(2_000_000, 2.0) + "\n")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if pushes != 1 {
+		t.Fatalf("pushed %d progress updates, want 1: an unparseable line must not spend the push slot", pushes)
+	}
+}
+
+// TestProgressParser_DroppedRewindFrameIsNotEvidence: a frame below the job's
+// monotonic floor is not pushed, so it must not enter the ETA rate window
+// either — the rate evidence is the rendered rows.
+func TestProgressParser_DroppedRewindFrameIsNotEvidence(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(60_000_000)
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	p.nowFunc = func() time.Time { return cur }
+
+	if f := p.ParseLine(buildProgressLine(30_000_000, 2.0)); f == nil {
+		t.Fatal("first frame dropped")
+	}
+	if got := len(p.etaSamples); got != 1 {
+		t.Fatalf("ETA samples after the first frame = %d, want 1", got)
+	}
+
+	cur = base.Add(time.Second)
+	if f := p.ParseLine(buildProgressLine(3_000_000, 2.0)); f != nil {
+		t.Fatal("rewind frame was rendered, want dropped")
+	}
+	if got := len(p.etaSamples); got != 1 {
+		t.Fatalf("ETA samples after a dropped rewind frame = %d, want 1: an unrendered row is not evidence", got)
+	}
+}
+
 // TestProgressRouter_ProgressNeverRegresses pins the job-level progress
 // contract: the percents pushed to the server never decrease. A retryable
 // ffmpeg death mid-encode (OOM/SIGABRT, process_crash) makes the worker's
@@ -2280,4 +2367,130 @@ func buildProgressLine(timeUs int64, speed float64) string {
 	totalKB := timeUs / 1000            // approximate size
 	return fmt.Sprintf("frame=%d fps=30 q=28.0 size=%dkB time=%02d:%02d:%02d.%02d bitrate=2045.0kbits/s speed=%.2fx",
 		totalSec*30, totalKB, h, m, s, ms, speed)
+}
+
+// TestPaceStepClosedInterval locks the C-122 step rule: two blocks are a step
+// only when their quantized rate intervals, taken as closed intervals, are
+// disjoint and the point estimates still differ by more than the rate
+// tolerance. The endpoints are compared exactly: one grid step is 0.1 of a
+// percentage point, so block i's interval is (dp_i ± 1)/span_i and touching
+// endpoints must intersect, not separate.
+func TestPaceStepClosedInterval(t *testing.T) {
+	const twoSeconds = 2 * time.Second
+	tests := []struct {
+		name string
+		prev etaBlock
+		cur  etaBlock
+		want bool
+	}{
+		{
+			// dp 2→4 over equal spans: intervals [1,3] and [3,5] touch at 3.
+			// The point ratio is 2 (far beyond 0.25), but closed intervals
+			// intersect, so the pair is not a step.
+			name: "touching endpoints intersect",
+			prev: etaBlock{dpTenths: 2, span: twoSeconds},
+			cur:  etaBlock{dpTenths: 4, span: twoSeconds},
+			want: false,
+		},
+		{
+			name: "strictly disjoint with a large ratio",
+			prev: etaBlock{dpTenths: 2, span: twoSeconds},
+			cur:  etaBlock{dpTenths: 6, span: twoSeconds},
+			want: true,
+		},
+		{
+			// Disjoint but only 5% apart: the rate tolerance still gates it.
+			name: "disjoint but inside the rate tolerance",
+			prev: etaBlock{dpTenths: 200, span: twoSeconds},
+			cur:  etaBlock{dpTenths: 210, span: twoSeconds},
+			want: false,
+		},
+		{
+			// Adjacent half-open intervals share their boundary value.
+			name: "overlapping intervals",
+			prev: etaBlock{dpTenths: 200, span: twoSeconds},
+			cur:  etaBlock{dpTenths: 201, span: twoSeconds},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		if got := paceStep(tc.prev, tc.cur); got != tc.want {
+			t.Errorf("%s: paceStep = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestProgressParser_ZeroRateBlockDoesNotBreakAdjacency pins the C-122 clause
+// that a block without progress does not cut the rate sequence: the only step
+// in this profile is the pair bridged across the stop. Rows 0-3s advance
+// 1.0pp/s (3.0 media-s/s), 6s and 9s add nothing, 10-12s advance 2.0pp/s
+// (6.0). The 10s row's block starts at the 9s row, so it measures the new pace
+// directly: bridging compares 3.0 with 6.0 (a step), while resetting the
+// adjacency at the zero blocks leaves no step at all.
+func TestProgressParser_ZeroRateBlockDoesNotBreakAdjacency(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(300 * 1_000_000)
+	base := time.Unix(0, 0)
+	p.attemptStartTime = base
+	now := base.Add(12 * time.Second)
+
+	rows := []struct {
+		at  float64
+		pct int64 // percent in tenths of a point
+	}{
+		{0, 0}, {1, 10}, {2, 20}, {3, 30}, // steady 3.0 media-s/s
+		{6, 30}, {9, 30}, // no progress: zero-rate blocks
+		{10, 50}, {11, 70}, {12, 90}, // steady 6.0 media-s/s
+	}
+	p.etaSamples = nil
+	for _, r := range rows {
+		p.etaSamples = append(p.etaSamples, etaSample{
+			wall:      base.Add(time.Duration(r.at * float64(time.Second))),
+			pctTenths: r.pct,
+		})
+	}
+
+	rates, ok := p.etaRateRange(now)
+	if !ok {
+		t.Fatal("etaRateRange reported no evidence; the window has measurable blocks")
+	}
+	if rates.settled {
+		t.Fatal("step across the zero-rate blocks was not seen; zero-rate blocks must not break adjacency")
+	}
+}
+
+// TestProgressParser_StepBetweenRenderedRowsRendersNa is the observable claim
+// of the rendered-row rate window: when the blocks of two consecutive rendered
+// rows form a step (their closed rate intervals are disjoint and the point
+// ratio exceeds the tolerance), the later row must render n/a even though the
+// window holds enough samples. The prior row is numeric, so the assertion
+// distinguishes "suppressed by the step" from "no ETA at all".
+func TestProgressParser_StepBetweenRenderedRowsRendersNa(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(300_000_000)
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	p.nowFunc = func() time.Time { return cur }
+	// The attempt is older than one rate window, so the sample-based gate is
+	// open for every row fed below.
+	p.attemptStartTime = base.Add(-20 * time.Second)
+
+	// Percent at one-second cadence: 10.0..12.7 advances ~0.9pp/s, then the
+	// pace jumps to ~2.5pp/s at 15.0. At 300s the blocks are ~2.7 and ~4.8
+	// media-seconds per wall-second, a ratio of 1.78 (> 0.25).
+	pcts := []float64{10.0, 10.9, 11.8, 12.7, 15.0, 17.5, 20.0}
+	frames := make([]*ProgressFrame, 0, len(pcts))
+	for i, pct := range pcts {
+		cur = base.Add(time.Duration(i) * time.Second)
+		timeUs := int64(pct / 100.0 * 300_000_000)
+		frames = append(frames, p.ParseLine(buildProgressLine(timeUs, 2.0)))
+	}
+
+	before, atStep := frames[3], frames[4]
+	if before == nil || before.EtaSeconds <= 0 {
+		t.Fatalf("row before the step: EtaSeconds = %v, want a numeric ETA", before)
+	}
+	if atStep == nil || atStep.EtaSeconds != 0 {
+		t.Fatalf("row on the step: EtaSeconds = %v, want 0 (n/a)", atStep)
+	}
 }

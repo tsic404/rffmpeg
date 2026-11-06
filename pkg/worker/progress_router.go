@@ -86,21 +86,35 @@ func (r *ProgressRouter) Handler() StderrHandler {
 		if !FilterProgressLine(line) {
 			return
 		}
-
-		// Parse the progress line
-		frame := r.parser.ParseLine(line)
-		if frame == nil {
+		// A line with time= but no parseable timestamp (ffmpeg's opening
+		// "time=N/A" stats line) can never become a rendered row; drop it before
+		// the throttle so it does not consume a push slot.
+		if !timeRegex.MatchString(line) {
 			return
 		}
 
-		// Throttle: only send updates at the configured interval
+		// Throttle first: a line that is not sent is never rendered, and the ETA
+		// rate window is measured on the rendered rows alone (C-122, ADR-016).
+		// Parsing every -stats line would give the estimator a finer stream than
+		// the reader sees, and a step visible between rendered rows would be
+		// averaged away before it could render n/a.
 		now := time.Now()
 		if now.Sub(r.lastSend) < r.sendDelay {
 			return
 		}
 		r.lastSend = now
 
-		// Only send if we have meaningful progress
+		// Parse the progress line. A frame below the job's monotonic floor (a
+		// retry climbing back to the displayed mark) is dropped and costs this
+		// slot: it would not be rendered either way and the climb is short.
+		frame := r.parser.ParseLine(line)
+		if frame == nil {
+			return
+		}
+
+		// Only send if we have meaningful progress. An unknown duration costs
+		// the slot too; it only occurs before Duration:/probe seeds the
+		// denominator, a bounded window at attempt start.
 		if frame.Percent < 0 {
 			return
 		}
