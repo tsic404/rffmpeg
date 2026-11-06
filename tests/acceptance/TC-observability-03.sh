@@ -70,6 +70,13 @@ W = 10.0      # 证据窗口（采样/管道属性）
 LAG = 5.0     # 输出延迟（媒体秒）
 FINALIZE = 0.75  # 收尾界（墙钟秒）
 START_UP = 18.0  # 管道实测起步时长上界（墙钟秒）
+# 跨度上界只还原 CLI 渲染侧的压缩：宿主把已排队的推送成批刷出时，块首行会
+# 回落到空档之前，块不再是 2s。Worker 侧 stderr 停顿造成的长块两侧同见，实现
+# 按它算均值、判据也保留，不在这里丢弃。
+MAX_BLOCK_SPAN = 3.0  # 2s 块 + 块首行落在起点之前一个采样间隔（C-122）
+# Worker 推送节流 ≥1s（C-102）：两条渲染行的墙钟差明显短于 1s 只可能是渲染
+# 时间被压缩（宿主把已排队的推送成批刷出），不是两次真实推送。
+MIN_RENDER_GAP = 0.9
 
 def media_rem(pct):
     return (100.0 - pct) / 100.0 * media_seconds
@@ -83,21 +90,25 @@ def line_rate(rows, i):
     return (rows[i][1] - rows[i - 1][1]) / 100.0 * media_seconds / dt
 
 # 完成之后的行（100%）不再有剩余工作量，按 C-23 渲染 n/a 是正确的，不参与可用性。
+# 判据与实现的取样集合同批：终态 100% 由 SendFinal 直推、不经 ParseLine，从不入
+# etaSamples；time= 略超 Duration 被钳到 100.0 的统计行虽入样本，也渲染 n/a 且恒在
+# 末段——判据丢掉这些行不改变任何可判行的窗口。
 work = [row for row in progress if row[1] < 100.0] or progress
 # 实现侧的速率序列是 2s 分块均值。稳定段、跃迁与起步边界都在这条序列上
 # 判定，判据与实现同源；逐行百分比内容抖动不再被当成跃迁（C-122 第四款
 # 在实现侧就是 2s 分块的粒度）。
 def chunk_rate(i, base=0):
     # 块的首行取距块起点（末行 − 2s）最近的一行（C-122）；窗口起点所在的
-    # 首块截短到窗口起点（base）。块内首末两行的实测墙钟差 <1s 或没有进度差
-    # 时不产生块速率。
+    # 首块截短到窗口起点（base）。块内首末两行的实测墙钟差 <1s、超过
+    # MAX_BLOCK_SPAN（首行已回落到一个采样间隔之外，不是 2s 块），或没有
+    # 进度差时，该块不产生块速率。
     if i <= base:
         return None
     start = work[i][0] - 2.0
     j = min(range(base, i), key=lambda k: abs(work[k][0] - start))
     dt = work[i][0] - work[j][0]
     dp = work[i][1] - work[j][1]
-    if dt < 1.0 or dp <= 0:
+    if dt < 1.0 or dt > MAX_BLOCK_SPAN or dp <= 0:
         return None
     return dp / 100.0 * media_seconds / dt
 
@@ -151,18 +162,50 @@ for seg in segs:
     assert numeric * 2 >= len(clipped), (
         f"{name}: steady segment [{clipped[0][0]:.1f}s, {clipped[-1][0]:.1f}s] carries "
         f"{numeric}/{len(clipped)} numeric ETA lines; C-122 requires at least half")
-# 判据二：跃迁段不给值（C-122 第二款）。断言锁「窗口内一次超过容差的
-# 阶跃」：窗口按实现同一序列重算（2s 分块），相邻块 |比−1| > 0.25 的
-# 断点之后一个证据窗口内不得给值。累计带宽那条是稳定段的段界判据，由下面
-# 的覆盖率核算判定。
-transition_rows = 0
+# 判据二：阶跃行不给值（C-122 第二款）。阶跃判在该行自己的 10s 窗口上：
+# 推得该行上下界的那批块由窗口内的行给出，窗口起点所在的首块截短到窗口
+# 起点，相邻可测块 |比−1| > 0.25 即为阶跃。全局块序列不是这批块——窗口
+# 左缘之外的行参与过的块不属于该行的证据。起步段按第二款排除。
+def window_step(t):
+    # 左缘闭合方向与实现一致：实现取 age <= W 的样本（now - wall <= 10s）。
+    batch = [i for i, row in enumerate(work) if t - W <= row[0] <= t]
+    prev = None
+    for i in batch:
+        r = chunk_rate(i, batch[0])
+        if r is None:
+            continue
+        if prev is not None and abs(r / prev[1] - 1) > TOL:
+            return (prev[0], prev[1], work[i][0], r)
+        prev = (work[i][0], r)
+    return None
+
+# 渲染时间压缩：宿主调度把已排队的多条推送挤在一起落盘时，行时间不再代表
+# 渲染节奏（一次 3.9s 空档后两行只差 1ms）。压缩对只污染包含它的那些窗口，
+# 因此按行弃判：该行 10s 窗口里存在压缩对时跳过该行，不关掉整个用例。落在
+# 起步段内的压缩对直接忽略——判据二本来就不判起步段行，也不该让它污染其后
+# 的窗口。
+taint = [(a[0], b[0]) for a, b in zip(work, work[1:])
+         if b[0] - a[0] < MIN_RENDER_GAP and b[0] > startup_end]
+
+def window_tainted(t):
+    return any(t - W <= a and b <= t for a, b in taint)
+
+transition_rows = crit2_judged = crit2_skipped = 0
 for (t, pct, eta) in progress:
-    if eta == "n/a":
+    if eta == "n/a" or t <= startup_end:
         continue
-    if any(t - W < b <= t for b in chunk_steps):
+    if window_tainted(t):
+        crit2_skipped += 1
+        print(f"{name}: criterion 2 skipped ETA {eta} at {t:.3f}s: a compressed "
+              f"render gap shares its window", file=sys.stderr)
+        continue
+    crit2_judged += 1
+    step = window_step(t)
+    if step is not None:
         transition_rows += 1
-        print(f"{name}: ETA {eta} at {t:.3f}s while a transition still shares the window",
-              file=sys.stderr)
+        print(f"{name}: ETA {eta} at {t:.3f}s while a step shares its window: "
+              f"blocks {step[0]:.3f}s={step[1]:.3f} -> {step[2]:.3f}s={step[3]:.3f} "
+              f"({step[3] / step[1] - 1:+.3f})", file=sys.stderr)
 assert transition_rows == 0, f"{name}: {transition_rows} numeric ETA lines on transition windows"
 if segments == 0:
     floor = counted(work)
@@ -192,7 +235,7 @@ for (t, pct, eta) in progress:
     # 判据与实现同一粒度（C-122 区间口径，ADR-016 证据粒度）：区间取该行窗口内
     # 的 2s 块速率，外加全窗口吞吐（媒体增量 ÷ 墙钟，含等值行占用的时间）作为
     # 慢端下限——等值行不得把速率抬高。
-    batch = [i for i, row in enumerate(work) if t - W < row[0] <= t]
+    batch = [i for i, row in enumerate(work) if t - W <= row[0] <= t]
     rates = []
     for i in batch:
         r = chunk_rate(i, batch[0])
@@ -232,7 +275,7 @@ for seg in segs:
     if len(clipped) < 2:
         continue
     seg_txt.append(f"{sum(1 for (_, _, e) in clipped if e != 'n/a')}/{len(clipped)}")
-print(f"METRICS {name} rows={len(work)} numeric={emitted} denom={denom} segs={','.join(seg_txt) or '-'} inrange={inrange} exempt={exempt}", file=sys.stderr)
+print(f"METRICS {name} rows={len(work)} numeric={emitted} denom={denom} segs={','.join(seg_txt) or '-'} inrange={inrange} exempt={exempt} crit2_judged={crit2_judged} crit2_skipped={crit2_skipped}", file=sys.stderr)
 print(f"{checked} {emitted} {segments} {inrange} {exempt}")
 PY
 }

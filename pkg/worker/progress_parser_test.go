@@ -2020,6 +2020,93 @@ func TestProgressRouterHandlerFiltersStatsLines(t *testing.T) {
 	}
 }
 
+// TestProgressRouter_RateWindowUsesRenderedRows: the router parses only the
+// rows it pushes, so the ETA rate window is built from the rows the CLI
+// renders. ffmpeg emits about two -stats lines per second and the throttle
+// drops half of them; a step visible between the rendered rows would be
+// averaged away if the dropped lines entered the window, and the row that
+// must render n/a would carry a number instead.
+func TestProgressRouter_RateWindowUsesRenderedRows(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "worker-1", "")
+	router := NewProgressRouter(client, "job-1", func(string) {})
+	router.SetDuration(60_000_000)
+	router.sendDelay = time.Hour // keep the second line throttled regardless of test speed
+
+	h := router.Handler()
+	h(buildProgressLine(2_000_000, 2.0) + "\n")
+	h(buildProgressLine(3_000_000, 2.0) + "\n")
+
+	if got := len(router.parser.etaSamples); got != 1 {
+		t.Fatalf("ETA samples = %d, want 1: a line that is not rendered is not rate evidence", got)
+	}
+}
+
+// TestProgressRouter_UnparseableTimeDoesNotConsumePushSlot: ffmpeg's opening
+// -stats line carries "time=N/A", which yields no progress row. It must be
+// dropped before the throttle, or it spends the 1s push budget and delays the
+// first real row by a sample interval.
+func TestProgressRouter_UnparseableTimeDoesNotConsumePushSlot(t *testing.T) {
+	var mu sync.Mutex
+	pushes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req protocol.JobUpdateRequest
+		if err := json.Unmarshal(body, &req); err == nil && req.Progress > 0 {
+			mu.Lock()
+			pushes++
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "worker-1", "")
+	router := NewProgressRouter(client, "job-1", func(string) {})
+	router.SetDuration(60_000_000)
+	router.sendDelay = time.Hour // a second push would be throttled away
+
+	h := router.Handler()
+	h("frame=    0 fps=0.0 q=0.0 size=       0kB time=N/A bitrate=N/A speed=\n")
+	h(buildProgressLine(2_000_000, 2.0) + "\n")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if pushes != 1 {
+		t.Fatalf("pushed %d progress updates, want 1: an unparseable line must not spend the push slot", pushes)
+	}
+}
+
+// TestProgressParser_DroppedRewindFrameIsNotEvidence: a frame below the job's
+// monotonic floor is not pushed, so it must not enter the ETA rate window
+// either — the rate evidence is the rendered rows.
+func TestProgressParser_DroppedRewindFrameIsNotEvidence(t *testing.T) {
+	p := NewProgressParser()
+	p.SetDuration(60_000_000)
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	p.nowFunc = func() time.Time { return cur }
+
+	if f := p.ParseLine(buildProgressLine(30_000_000, 2.0)); f == nil {
+		t.Fatal("first frame dropped")
+	}
+	if got := len(p.etaSamples); got != 1 {
+		t.Fatalf("ETA samples after the first frame = %d, want 1", got)
+	}
+
+	cur = base.Add(time.Second)
+	if f := p.ParseLine(buildProgressLine(3_000_000, 2.0)); f != nil {
+		t.Fatal("rewind frame was rendered, want dropped")
+	}
+	if got := len(p.etaSamples); got != 1 {
+		t.Fatalf("ETA samples after a dropped rewind frame = %d, want 1: an unrendered row is not evidence", got)
+	}
+}
+
 // TestProgressRouter_ProgressNeverRegresses pins the job-level progress
 // contract: the percents pushed to the server never decrease. A retryable
 // ffmpeg death mid-encode (OOM/SIGABRT, process_crash) makes the worker's
