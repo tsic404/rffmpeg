@@ -263,7 +263,7 @@ func TestProcessJob_RealDiskFull(t *testing.T) {
 	// the 8 MiB filesystem is exhausted within the first second of a 2 s input.
 	job := protocol.JobInfo{
 		ID:             "disk-full-real",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "rawvideo", "-pix_fmt", "yuv420p", "-s", "1920x1080"},
 		OutputFilename: "out.avi",
 	}

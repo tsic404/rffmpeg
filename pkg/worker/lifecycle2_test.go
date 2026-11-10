@@ -127,6 +127,9 @@ func TestDownloadInput_LimitReaderCapsResponse(t *testing.T) {
 	dest := filepath.Join(dir, "input.bin")
 
 	c := NewClient("http://localhost:1", "worker-1", "")
+	// The fixture server listens on loopback, which the C-128 address policy
+	// refuses; this test only exercises the streaming size cap.
+	c.remoteClient = c.dataClient
 	if err := c.DownloadInput(context.Background(), srv.URL, dest); err != nil {
 		t.Fatalf("DownloadInput failed: %v", err)
 	}

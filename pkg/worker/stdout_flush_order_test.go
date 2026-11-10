@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
@@ -122,6 +123,7 @@ func TestProcessJob_StreamingStdoutFlushedBeforeCompleted(t *testing.T) {
 		ffprobeExecutor:    NewFFprobeExecutor(""),
 		pixelFormatChecker: nil,
 		gpuDetector:        gpu.NewDetector(),
+		sharedFS:           pathutil.NewSpace(tmpDir),
 	}
 
 	ctx := context.Background()
@@ -130,7 +132,7 @@ func TestProcessJob_StreamingStdoutFlushedBeforeCompleted(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:              "test-job-streaming-stdout",
-		InputFiles:      []string{"input-001"},
+		InputFiles:      []string{testUploadID("input-001")},
 		Args:            []string{"-i", "<INPUT_FILE>", "-f", "mp4", "-"},
 		OutputFilename:  "-",
 		StreamingOutput: true,

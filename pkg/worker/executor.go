@@ -159,6 +159,12 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, e.ffmpegPath, args...)
+	// Run ffmpeg with the job workspace as its working directory: a relative
+	// path in the request's argument list then resolves inside the workspace
+	// instead of the worker process' own directory (C-126 / C-127).
+	if dir := workDirFrom(ctx); dir != "" {
+		cmd.Dir = dir
+	}
 
 	// Run ffmpeg in its own process group so ctx cancellation kills the whole
 	// process tree (filters may spawn helper processes that would otherwise
@@ -375,28 +381,31 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 // replacing <INPUT_FILE> placeholders with actual input file paths.
 // User-supplied -y / -n pass through verbatim: the worker never injects an
 // overwrite flag, and RetryExecutor removes partial output before retrying,
-// so a pre-existing file follows native ffmpeg behavior. jobArgs is a
-// trusted passthrough: unlike DirectPaths and OutputFilename, it is NOT
-// subject to the RFFMPEG_SHARED_FS_ALLOWED_PREFIX allow-list because args
-// carry paths in many forms; shared-FS mode trusts the submitting caller.
+// so a pre-existing file follows native ffmpeg behavior. jobArgs is not a
+// trusted passthrough: the job trust boundary (C-127) inspects it before ffmpeg
+// starts unattended, and an argument naming a host path outside the manifest and
+// the workspace fails the job.
 func BuildArgs(jobArgs []string, inputPaths []string, outputPath string) []string {
 	args := make([]string, 0, len(jobArgs)+1)
 
-	// Replace <INPUT_FILE> placeholders with actual input paths
+	// Replace <INPUT_FILE> only where it is an input option's value: the
+	// placeholder names a manifest input, never a position the request chose
+	// (C-127). jobargs.Check refuses such a job before execution; keeping the
+	// substitution positional here would turn a placeholder in an output slot
+	// into a write onto a manifest input.
 	inputIdx := 0
-	for _, arg := range jobArgs {
-		if arg == "<INPUT_FILE>" {
-			// Replace placeholder with actual input path
+	for i := 0; i < len(jobArgs); i++ {
+		arg := jobArgs[i]
+		if arg == "<INPUT_FILE>" && i > 0 && (jobArgs[i-1] == "-i" || jobArgs[i-1] == "--input") {
 			if inputIdx < len(inputPaths) {
 				args = append(args, inputPaths[inputIdx])
 				inputIdx++
 			} else {
-				// No more input paths, keep placeholder (should not happen in practice)
 				args = append(args, arg)
 			}
-		} else {
-			args = append(args, arg)
+			continue
 		}
+		args = append(args, arg)
 	}
 
 	// Check if user args contain the "--" separator
@@ -467,6 +476,12 @@ func hasOutputArg(args []string) bool {
 			continue
 		}
 		// Output section: "-" is stdout, any other bare token is an output file.
+		// A surviving placeholder is not one: it names no path, and the job it
+		// came from is refused before execution (C-127). Appending the real
+		// output keeps ffmpeg's failure from becoming a misplaced write.
+		if arg == "<INPUT_FILE>" {
+			continue
+		}
 		if arg == "-" || !strings.HasPrefix(arg, "-") {
 			return true
 		}
@@ -506,61 +521,6 @@ func splitProgressLines(data []byte, atEOF bool) (advance int, token []byte, err
 	return 0, nil, nil
 }
 
-// networkPrefixes contains URL scheme prefixes for ffmpeg network output protocols.
-// When ffmpeg outputs to a network URL (RTMP, RTSP, UDP, etc.), no local output file
-// is produced. File existence/size validation MUST be skipped for these outputs.
-var networkPrefixes = []string{
-	"rtmp://", "rtmps://", "rtmpe://", "rtmpt://", "rtmpts://", "rtmpte://",
-	"rtsp://", "rtsps://",
-	"udp://",
-	"tcp://",
-	"srt://",
-	"rtp://",
-	"rist://",
-	"icecast://",
-	"http://", "https://",
-}
-
-// isNetworkOutput checks if the output path or args indicate the output is a network URL.
-// Network outputs (RTMP, RTSP, UDP, etc.) do not produce local files, so the
-// output file existence/size validation in processJob and retry logic should be skipped.
-// It checks both the output path string (which may contain the URL in shared-FS mode)
-// and the args list (where the URL may appear after the -- separator in non-shared-FS mode).
-func isNetworkOutput(outputPath string, args []string) bool {
-	// Check output path for network URL prefixes. HasPrefix, not Contains: a
-	// local path that merely contains "http://" (e.g. /data/http://x.mp4) is
-	// not a network output and its file must still be validated.
-	for _, prefix := range networkPrefixes {
-		if strings.HasPrefix(outputPath, prefix) {
-			return true
-		}
-	}
-	// Check args for network URL output
-	afterSeparator := false
-	for _, arg := range args {
-		if arg == "--" {
-			afterSeparator = true
-			continue
-		}
-		if afterSeparator {
-			for _, prefix := range networkPrefixes {
-				if strings.HasPrefix(arg, prefix) {
-					return true
-				}
-			}
-		}
-	}
-	// Also check all args for network URLs (catch URLs that appear without -- separator)
-	for _, arg := range args {
-		for _, prefix := range networkPrefixes {
-			if strings.HasPrefix(arg, prefix) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // isFlagWithValue returns true if the given ffmpeg flag takes a value argument.
 // Boolean flags (like -vn, -an, -y) don't take values and should not consume the
 // next arg. Arity comes from the generated table in pkg/ffmpegopts.
@@ -571,4 +531,20 @@ func isFlagWithValue(flag string) bool {
 		return false
 	}
 	return !ffmpegopts.IsBoolean(flag)
+}
+
+// workDirKey carries the per-job working directory into the executor. It is a
+// context value because one Executor serves concurrent jobs: a struct field
+// would race, while the job context is already the per-job carrier.
+type workDirKey struct{}
+
+// withWorkDir marks ctx as running ffmpeg inside dir.
+func withWorkDir(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, workDirKey{}, dir)
+}
+
+// workDirFrom returns the working directory carried by ctx, or "".
+func workDirFrom(ctx context.Context) string {
+	dir, _ := ctx.Value(workDirKey{}).(string)
+	return dir
 }

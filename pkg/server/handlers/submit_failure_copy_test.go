@@ -78,8 +78,9 @@ func TestSubmitFailureCopy_EncoderUnavailable(t *testing.T) {
 	fileID := uploadTestFile(t, router)
 
 	jobBody, err := json.Marshal(protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "libx265", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "libx265", "-preset", "fast"},
 	})
 	if err != nil {
 		t.Fatalf("marshal job request: %v", err)

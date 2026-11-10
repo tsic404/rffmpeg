@@ -268,8 +268,9 @@ func TestUploadAndSubmitJob(t *testing.T) {
 
 	// Submit job
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -340,8 +341,9 @@ func TestListJobs(t *testing.T) {
 	// Submit three jobs with a remote URL input to skip the file-existence check.
 	submit := func() string {
 		jobReq := protocol.JobSubmitRequest{
-			InputFiles: []string{"http://example.com/in.mp4"},
-			Args:       []string{"-c:v", "libx264"},
+			OutputFilename: "output.mp4",
+			InputFiles:     []string{"http://example.com/in.mp4"},
+			Args:           []string{"-c:v", "libx264"},
 		}
 		jobBody, _ := json.Marshal(jobReq)
 		r := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -430,8 +432,9 @@ func TestUpdateJobStatus(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -530,8 +533,9 @@ func TestUpdateJobCachedFlag(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -585,8 +589,9 @@ func TestUpdateJobCachedFlag(t *testing.T) {
 
 	// A plain (non-cache) completion must leave cached=false.
 	jobReq2 := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody2, _ := json.Marshal(jobReq2)
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody2))
@@ -657,8 +662,9 @@ func TestUpdateJobCachedFlagCoercedOnFailure(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -734,8 +740,9 @@ func TestUpdateJobFailureClassification(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -946,8 +953,9 @@ func TestCancelJob(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -1009,8 +1017,9 @@ func TestCancelRunningJob(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -1091,8 +1100,9 @@ func TestUploadOutputAndDownload(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -1190,8 +1200,9 @@ func submitTestJob(t *testing.T, router *chi.Mux) string {
 	}
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, err := json.Marshal(jobReq)
 	if err != nil {
@@ -1319,9 +1330,12 @@ func TestSubmitJobWithInvalidFile(t *testing.T) {
 	_, router, cleanup := setupTest(t)
 	defer cleanup()
 
+	// A well-formed upload identifier with no stored blob is a missing object,
+	// not a form error (C-123 / C-43): 400 not_found.
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{"non-existent-file"},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -1333,6 +1347,13 @@ func TestSubmitJobWithInvalidFile(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400, got %d", w.Code)
+	}
+	var errResp protocol.ErrorResponse
+	if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+		t.Fatalf("Failed to decode error response: %v", err)
+	}
+	if errResp.Code != protocol.ErrCodeNotFound {
+		t.Errorf("Expected error code 'not_found', got '%s'", errResp.Code)
 	}
 }
 
@@ -2615,8 +2636,9 @@ func TestWorkerHealthStatusTracksJobLifecycle(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req = httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -2757,8 +2779,9 @@ func TestCancelCompletedJob(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -2842,8 +2865,9 @@ func TestHeartbeatReturnsCancelledJobs(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&uploadResp)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -2949,8 +2973,9 @@ func TestSubmitJobNoWorkerAvailable(t *testing.T) {
 
 	// Submit job WITHOUT registering any worker
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3008,8 +3033,9 @@ func TestSubmitJobNoWorkerWithEncoder(t *testing.T) {
 
 	// Submit job requesting libx265 encoder (not available)
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx265", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx265", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3073,8 +3099,9 @@ func TestSubmitJobUnknownEncoderPersistedAsUnavailable(t *testing.T) {
 	fileID := uploadTestFile(t, router)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "nonexistent_codec", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "nonexistent_codec", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3130,8 +3157,9 @@ func TestSubmitJobEncoderCheckDBErrorFailsClosed(t *testing.T) {
 	fileID := uploadTestFile(t, router)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "hevc_nvenc", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "hevc_nvenc", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3170,8 +3198,9 @@ func TestSubmitJobCreateFailedJobErrorReturns500(t *testing.T) {
 	}
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "hevc_nvenc", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "hevc_nvenc", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3236,8 +3265,9 @@ func TestSubmitJobConcurrentWriteConflictReturns429(t *testing.T) {
 	defer release()
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-i", "input.mp4"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-i", "<INPUT_FILE>"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -3341,8 +3371,9 @@ func TestSubmitJobBusyWorkerQueued(t *testing.T) {
 
 	// Submit a job while the only worker is busy
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3416,8 +3447,9 @@ func TestSubmitJobWithCompatibleEncoderFallback(t *testing.T) {
 
 	// Submit job requesting h264_nvenc (worker has libx264, same codec family)
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-i", "input.mp4", "-c:v", "h264_nvenc", "output.mp4"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "h264_nvenc"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3467,8 +3499,9 @@ func TestSubmitJobNoCompatibleEncoder(t *testing.T) {
 
 	// Submit job requesting hevc_nvenc (worker has libx264, DIFFERENT codec family)
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-i", "input.mp4", "-c:v", "hevc_nvenc", "output.mp4"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "hevc_nvenc"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3546,8 +3579,9 @@ func TestSubmitJobExactEncoderMatchPreferred(t *testing.T) {
 
 	// Submit job requesting h264_nvenc (exact match available)
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{uploadResp.FileID},
-		Args:       []string{"-i", "input.mp4", "-c:v", "h264_nvenc", "output.mp4"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{uploadResp.FileID},
+		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "h264_nvenc"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3589,8 +3623,9 @@ func TestSubmitJobStaleHeartbeatWorkerRejected(t *testing.T) {
 	fileID := uploadTestFile(t, router)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3627,8 +3662,9 @@ func TestSubmitJobFreshHeartbeatWorkerAccepted(t *testing.T) {
 	fileID := uploadTestFile(t, router)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3663,8 +3699,9 @@ func TestSubmitJobNoFreshnessCheckWhenDisabled(t *testing.T) {
 	fileID := uploadTestFile(t, router)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3707,8 +3744,9 @@ func TestSubmitJobStaleEncoderWorkerWithLiveOtherWorkerRejected(t *testing.T) {
 	fileID := uploadTestFile(t, router)
 
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	jobBody, _ := json.Marshal(jobReq)
 
@@ -3734,7 +3772,7 @@ func TestProbeNoWorkerFailsImmediately(t *testing.T) {
 
 	// No worker registered — the cluster is empty.
 
-	probeReq := protocol.ProbeRequest{Input: "rtmp://example.com/test"}
+	probeReq := protocol.ProbeRequest{Input: "http://example.test/test"}
 	body, _ := json.Marshal(probeReq)
 
 	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
@@ -3858,12 +3896,13 @@ func TestProbeWithLiveWorkerProceeds(t *testing.T) {
 // pass validation and reach the worker-availability guard (503 here, since
 // no worker is registered) instead of being rejected with 404.
 func TestProbeDirectPathExistsPassesInputValidation(t *testing.T) {
-	_, router, cleanup := setupTest(t)
+	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
 	// No worker registered: the probe can only reach 503 if the input
 	// validation passed.
 	dir := t.TempDir()
+	h.SetSharedFSRoots(dir)
 	absPath := filepath.Join(dir, "media.mp4")
 	if err := os.WriteFile(absPath, []byte("test video content"), 0644); err != nil {
 		t.Fatalf("Failed to create direct-path test file: %v", err)
@@ -3886,10 +3925,14 @@ func TestProbeDirectPathExistsPassesInputValidation(t *testing.T) {
 // worker-availability guard instead of answering from the server host's
 // filesystem, which would turn the endpoint into an existence oracle.
 func TestProbeDirectPathNotStatOnServer(t *testing.T) {
-	_, router, cleanup := setupTest(t)
+	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	probeReq := protocol.ProbeRequest{Input: filepath.Join(t.TempDir(), "missing.mp4")}
+	// The path is inside a declared root (a string judgement) but absent on
+	// disk — the server must not consult its own filesystem.
+	dir := t.TempDir()
+	h.SetSharedFSRoots(dir)
+	probeReq := protocol.ProbeRequest{Input: filepath.Join(dir, "missing.mp4")}
 	body, _ := json.Marshal(probeReq)
 	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -3976,10 +4019,13 @@ func TestProbeURLWithDotDotPassesValidation(t *testing.T) {
 // A "://" later in an absolute path is a filename character, not a scheme: the
 // input stays a shared-FS path (and is not treated as a remote URL).
 func TestProbePathWithSchemeMarkerPassesValidation(t *testing.T) {
-	_, router, cleanup := setupTest(t)
+	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
-	probeReq := protocol.ProbeRequest{Input: "/data/media/x://y.mp4"}
+	root := t.TempDir()
+	h.SetSharedFSRoots(root)
+
+	probeReq := protocol.ProbeRequest{Input: filepath.Join(root, "x://y.mp4")}
 	body, _ := json.Marshal(probeReq)
 	req := httptest.NewRequest("POST", "/api/v1/probe", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer test-token")
@@ -3992,18 +4038,21 @@ func TestProbePathWithSchemeMarkerPassesValidation(t *testing.T) {
 	}
 }
 
-// a SubmitJob direct path containing a ".." component must be
-// rejected server-side (same shared pathutil.ContainsPathTraversal the worker
-// uses), fail-fast before job creation — the opposite of dispatching it and
-// letting the worker reject it at runtime.
+// A SubmitJob pass-through path containing a ".." component is refused
+// server-side before the job exists: the whole string is not a member of the
+// declared space (C-123 / C-125).
 func TestSubmitJobDirectPathTraversalRejected(t *testing.T) {
-	_, router, cleanup := setupTest(t)
+	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
+	root := t.TempDir()
+	h.SetSharedFSRoots(root)
+
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{"dummy.mp4"},
-		DirectPath: []string{"../etc/passwd"},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		InputFiles:     []string{filepath.Join(root, "in.mp4")},
+		DirectPath:     []string{"../etc/passwd"},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: filepath.Join(root, "out.mp4"),
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -4024,20 +4073,26 @@ func TestSubmitJobDirectPathTraversalRejected(t *testing.T) {
 	}
 }
 
-// a legitimate dot-prefixed filename such as "my..video.mp4" must
-// not be false-positived by the component-level guard.
+// A pass-through path whose filename merely contains ".." is a legal member of
+// the declared space and must not be false-positived (C-107 membership is
+// judged per component, not by substring).
 func TestSubmitJobDirectPathDotFilenameAccepted(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
 	// No worker is registered: reaching the worker-availability guard proves
-	// the traversal validation passed (503) rather than being rejected (400).
+	// the trust-boundary validation passed (503) rather than rejecting (400).
 	h.SetHeartbeatTimeout(0)
 
+	root := t.TempDir()
+	h.SetSharedFSRoots(root)
+	mediaPath := filepath.Join(root, "my..video.mp4")
+
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{"my..video.mp4"},
-		DirectPath: []string{filepath.Join(t.TempDir(), "my..video.mp4")},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		InputFiles:     []string{mediaPath},
+		DirectPath:     []string{mediaPath},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: filepath.Join(root, "out.mp4"),
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -4047,20 +4102,22 @@ func TestSubmitJobDirectPathDotFilenameAccepted(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("Expected 503 worker_unavailable after traversal validation passed, got %d. Body: %s", w.Code, w.Body.String())
+		t.Fatalf("Expected 503 worker_unavailable after validation passed, got %d. Body: %s", w.Code, w.Body.String())
 	}
 }
 
-// a SubmitJob output filename containing a ".." component must be
-// rejected server-side in direct mode, symmetric with the worker's directMode
-// output guard — refused before dispatch instead of by the worker at runtime.
+// A pass-through output name with a ".." component is refused before dispatch
+// (C-125), so the worker is never asked to write it.
 func TestSubmitJobOutputFilenameTraversalRejected(t *testing.T) {
-	_, router, cleanup := setupTest(t)
+	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
+	root := t.TempDir()
+	h.SetSharedFSRoots(root)
+
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles:     []string{"dummy.mp4"},
-		DirectPath:     []string{"/srv/media/input.mp4"},
+		InputFiles:     []string{filepath.Join(root, "input.mp4")},
+		DirectPath:     []string{filepath.Join(root, "input.mp4")},
 		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 		OutputFilename: "../etc/passwd",
 	}
@@ -4083,57 +4140,73 @@ func TestSubmitJobOutputFilenameTraversalRejected(t *testing.T) {
 	}
 }
 
-// a remote output URL containing a ".." path segment must not be
-// false-positived by the component-level guard — the worker passes remote
-// outputs through unchanged, so the server mirrors that exemption.
-func TestSubmitJobOutputFilenameRemoteURLExempt(t *testing.T) {
-	h, router, cleanup := setupTest(t)
-	defer cleanup()
+// A protocol address output target is a class of its own (C-125 / C-129): the
+// submission side accepts it in non pass-through mode, so a network output is a
+// capability rather than a rejected file name. The worker writes to that address
+// and nothing lands in its workspace.
+func TestSubmitJobOutputFilenameProtocolAddressAccepted(t *testing.T) {
+	for _, target := range []string{
+		"rtmp://example.test/live/stream",
+		"rtmps://example.test/live/stream",
+		"srt://example.test:9000?mode=caller",
+		"udp://10.0.0.1:1234",
+		"rtmp://10.20.30.40:1935/live/../x",
+	} {
+		t.Run(target, func(t *testing.T) {
+			h, router, cleanup := setupTest(t)
+			defer cleanup()
+			// No worker is registered: reaching the worker-availability guard
+			// proves the trust-boundary validation passed (503) rather than
+			// rejecting (400).
+			h.SetHeartbeatTimeout(0)
 
-	// No worker is registered: reaching the worker-availability guard proves
-	// the traversal validation passed (503) rather than being rejected (400).
-	h.SetHeartbeatTimeout(0)
+			jobReq := protocol.JobSubmitRequest{
+				InputFiles:     []string{"http://example.test/in.mp4"},
+				Args:           []string{"-c:v", "libx264", "-preset", "fast", "-f", "flv"},
+				OutputFilename: target,
+			}
+			jobBody, _ := json.Marshal(jobReq)
+			req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
 
-	jobReq := protocol.JobSubmitRequest{
-		InputFiles:     []string{"dummy.mp4"},
-		DirectPath:     []string{"/srv/media/input.mp4"},
-		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
-		OutputFilename: "rtmp://example.com/live/../stream",
-	}
-	jobBody, _ := json.Marshal(jobReq)
-	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
-	req.Header.Set("Authorization", "Bearer test-token")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("Expected 503 worker_unavailable after traversal validation passed, got %d. Body: %s", w.Code, w.Body.String())
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("Expected 503 worker_unavailable after validation passed, got %d. Body: %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 
-// a "file://" output or a local path with a mid-string "://" must be
-// treated as local, not remote — the worker's IsRemoteURL predicate excludes the
-// file scheme and anchors the scheme at the start. Both must be rejected as
-// traversal server-side rather than being exempted and refused by the worker.
-func TestSubmitJobOutputFilenameLocalSchemeRejected(t *testing.T) {
-	cases := []struct {
-		name string
-		out  string
-	}{
-		{"file url traversal", "file:///etc/../tmp/x.mp4"},
-		{"mid-string scheme traversal", "/data/media/x://y/../../etc/passwd"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, router, cleanup := setupTest(t)
+// A protocol address target whose literal address is in the C-128 denied set is
+// refused on the submission side (C-129), so the job row never exists and the
+// target receives no connection.
+func TestSubmitJobOutputFilenameProtocolAddressDenied(t *testing.T) {
+	for _, target := range []string{
+		"rtmp://127.0.0.1:1935/live/x",   // loopback
+		"rtmp://[::1]:1935/live/x",       // IPv6 loopback
+		"udp://169.254.169.254:9/stream", // link-local
+		"srt://0.0.0.0:9000",             // unspecified
+		"udp://224.0.0.1:9/stream",       // multicast
+		"rtmp://100.64.0.1:1935/live/x",  // shared address space
+		// inet_aton numeric spellings: ffmpeg's C library resolves these to the
+		// same denied addresses.
+		"udp://127.1:9000/stream",      // 127.0.0.1
+		"udp://2130706433:9000/stream", // 127.0.0.1
+		"udp://0x7f000001:9000/stream", // 127.0.0.1
+		"udp://0xa9fea9fe:9/stream",    // 169.254.169.254
+	} {
+		t.Run(target, func(t *testing.T) {
+			h, router, cleanup := setupTest(t)
 			defer cleanup()
+			h.SetHeartbeatTimeout(0)
+			h.SetSharedFSRoots(t.TempDir())
 
 			jobReq := protocol.JobSubmitRequest{
-				InputFiles:     []string{"dummy.mp4"},
-				DirectPath:     []string{"/srv/media/input.mp4"},
+				InputFiles:     []string{"http://example.test/in.mp4"},
 				Args:           []string{"-c:v", "libx264", "-preset", "fast"},
-				OutputFilename: tc.out,
+				OutputFilename: target,
 			}
 			jobBody, _ := json.Marshal(jobReq)
 			req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -4143,7 +4216,7 @@ func TestSubmitJobOutputFilenameLocalSchemeRejected(t *testing.T) {
 			router.ServeHTTP(w, req)
 
 			if w.Code != http.StatusBadRequest {
-				t.Fatalf("Expected 400 for local-scheme traversal output, got %d. Body: %s", w.Code, w.Body.String())
+				t.Fatalf("Expected 400 for a denied protocol address target, got %d. Body: %s", w.Code, w.Body.String())
 			}
 			var errResp protocol.ErrorResponse
 			if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
@@ -4156,21 +4229,98 @@ func TestSubmitJobOutputFilenameLocalSchemeRejected(t *testing.T) {
 	}
 }
 
-// a legitimate dot-prefixed output filename such as "my..video.mp4"
-// must not be false-positived by the component-level guard in direct mode.
+// A protocol address target is not a pass-through target: direct mode keeps
+// requiring an absolute path inside the declared space (C-125).
+func TestSubmitJobDirectPathProtocolAddressRejected(t *testing.T) {
+	h, router, cleanup := setupTest(t)
+	defer cleanup()
+	h.SetHeartbeatTimeout(0)
+
+	root := t.TempDir()
+	h.SetSharedFSRoots(root)
+
+	jobReq := protocol.JobSubmitRequest{
+		InputFiles:     []string{filepath.Join(root, "in.mp4")},
+		DirectPath:     []string{filepath.Join(root, "in.mp4")},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "rtmp://10.0.0.1/live/x",
+	}
+	jobBody, _ := json.Marshal(jobReq)
+	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Expected 400 for a protocol target in pass-through mode, got %d. Body: %s", w.Code, w.Body.String())
+	}
+}
+
+// A "file://" output or a local path with a mid-string "://" is not a single
+// file name, so it is refused rather than exempted (C-125).
+func TestSubmitJobOutputFilenameLocalSchemeRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+	}{
+		{"file url", "file:///etc/x.mp4"},
+		{"mid-string scheme", "/data/media/x://y.mp4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, router, cleanup := setupTest(t)
+			defer cleanup()
+
+			root := t.TempDir()
+			h.SetSharedFSRoots(root)
+
+			jobReq := protocol.JobSubmitRequest{
+				InputFiles:     []string{filepath.Join(root, "input.mp4")},
+				DirectPath:     []string{filepath.Join(root, "input.mp4")},
+				Args:           []string{"-c:v", "libx264", "-preset", "fast"},
+				OutputFilename: tc.out,
+			}
+			jobBody, _ := json.Marshal(jobReq)
+			req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("Expected 400 for a non-file-name output, got %d. Body: %s", w.Code, w.Body.String())
+			}
+			var errResp protocol.ErrorResponse
+			if err := json.NewDecoder(w.Body).Decode(&errResp); err != nil {
+				t.Fatalf("Failed to decode error response: %v", err)
+			}
+			if errResp.Code != protocol.ErrCodeInvalidRequest {
+				t.Errorf("Expected error code 'invalid_request', got '%s'", errResp.Code)
+			}
+		})
+	}
+}
+
+// A legitimate dot-prefixed pass-through target such as "my..video.mp4" is a
+// legal member of the declared space and must not be false-positived.
 func TestSubmitJobOutputFilenameDotFilenameAccepted(t *testing.T) {
 	h, router, cleanup := setupTest(t)
 	defer cleanup()
 
 	// No worker is registered: reaching the worker-availability guard proves
-	// the traversal validation passed (503) rather than being rejected (400).
+	// the validation passed (503) rather than rejecting (400).
 	h.SetHeartbeatTimeout(0)
 
+	root := t.TempDir()
+	h.SetSharedFSRoots(root)
+	input := filepath.Join(root, "input.mp4")
+
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles:     []string{"dummy.mp4"},
-		DirectPath:     []string{"/srv/media/input.mp4"},
+		InputFiles:     []string{input},
+		DirectPath:     []string{input},
 		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
-		OutputFilename: "my..video.mp4",
+		OutputFilename: filepath.Join(root, "my..video.mp4"),
 	}
 	jobBody, _ := json.Marshal(jobReq)
 	req := httptest.NewRequest("POST", "/api/v1/jobs", bytes.NewReader(jobBody))
@@ -4180,7 +4330,7 @@ func TestSubmitJobOutputFilenameDotFilenameAccepted(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("Expected 503 worker_unavailable after traversal validation passed, got %d. Body: %s", w.Code, w.Body.String())
+		t.Fatalf("Expected 503 worker_unavailable after validation passed, got %d. Body: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -4196,6 +4346,7 @@ func TestProbeDirectPathStoredInJob(t *testing.T) {
 	registerTestWorker(t, router, []string{"libx264"})
 
 	dir := t.TempDir()
+	h.SetSharedFSRoots(dir)
 	absPath := filepath.Join(dir, "media.mp4")
 	if err := os.WriteFile(absPath, []byte("test video content"), 0644); err != nil {
 		t.Fatalf("Failed to create direct-path test file: %v", err)

@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -35,6 +37,15 @@ var testMediaMP4 []byte
 // slice is read-only; callers must not mutate it.
 func testMediaBytes() []byte {
 	return testMediaMP4
+}
+
+// testUploadID renders a well-formed upload identifier from a stable label: the
+// server issues 64 lowercase hexadecimal characters, and the execution side
+// classifies every input by its whole string (C-123), so a fixture that uses an
+// arbitrary label as an input identifier would be refused before any work.
+func testUploadID(label string) string {
+	sum := sha256.Sum256([]byte(label))
+	return hex.EncodeToString(sum[:])
 }
 
 // writeShellFixture writes body as a script interpreted by posixSh. The -n

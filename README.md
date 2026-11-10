@@ -503,7 +503,7 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `RFFMPEG_SHARED_FS` | 启用共享文件系统直通模式 | 未设置（禁用） |
-| `RFFMPEG_SHARED_FS_ALLOWED_PREFIX` | Worker 端允许访问的路径前缀白名单（逗号分隔） | 无限制 |
+| `RFFMPEG_SHARED_FS_ROOTS` | 共享文件系统的空间声明（逗号分隔的根路径）；Server 端同名 flag `--shared-fs-roots` | 空（无任何合法路径） |
 
 ##### `RFFMPEG_SHARED_FS`
 
@@ -511,14 +511,19 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 - **作用范围**：需同时在 CLI 端和 Worker 端设置。CLI 端控制是否跳过上传和结果下载，Worker 端控制是否跳过输入下载和输出上传。
 - **优先级**：环境变量 > 默认行为。如果环境变量已设置，配置文件中的相关字段会被忽略。
 
-##### `RFFMPEG_SHARED_FS_ALLOWED_PREFIX`（Worker 端）
+##### `RFFMPEG_SHARED_FS_ROOTS`（Server 与 Worker 端）
 
-限制 Worker 在直通模式下可访问的路径前缀。多个前缀用逗号分隔。如果设置，Worker 会验证传入的路径是否以任一允许的前缀开头，不匹配的请求将被拒绝。
+声明共享文件系统的空间：逗号分隔的根路径列表。Server 通过 `--shared-fs-roots`（或同名环境变量）接收同一份声明，Worker 通过环境变量接收。两侧必须声明相同的值。
+
+- **成员判定**：候选路径解析符号链接后位于任一已声明的根之下才算合法；只比较路径前缀字符串不算。
+- **未声明即无合法路径**：空声明下没有任何合法路径，直通请求一律 400 `invalid_request`，不会退化成「任意绝对路径」。
+- **归类唯一依据**：输入标识按整串归类为上传标识 / http(s) 远程 URL / 根内绝对路径三者之一，含 URL 样式子串但不成形、或同时像两种形态的标识一律 400 `invalid_request`。归类实现提交侧与执行侧共用一份（`pkg/pathutil`）。
 
 示例：
 ```bash
 # 允许访问 /data/media 和 /mnt/nfs 下的所有文件
-export RFFMPEG_SHARED_FS_ALLOWED_PREFIX="/data/media,/mnt/nfs"
+export RFFMPEG_SHARED_FS_ROOTS="/data/media,/mnt/nfs"
+./bin/rffmpeg-server --shared-fs-roots "/data/media,/mnt/nfs"
 ```
 
 #### 行为变化对比
@@ -568,7 +573,7 @@ export RFFMPEG_SHARED_FS=1
 
 # 机器 B (Worker 端)
 export RFFMPEG_SHARED_FS=1
-export RFFMPEG_SHARED_FS_ALLOWED_PREFIX="/mnt/media"
+export RFFMPEG_SHARED_FS_ROOTS="/mnt/media"
 export RFFMPEG_WORKER_NAME=nfs-worker
 ./bin/rffmpeg-worker --server-url http://localhost:8080
 ```
@@ -590,7 +595,7 @@ spec:
         env:
         - name: RFFMPEG_SHARED_FS
           value: "1"
-        - name: RFFMPEG_SHARED_FS_ALLOWED_PREFIX
+        - name: RFFMPEG_SHARED_FS_ROOTS
           value: "/shared/media"
         volumeMounts:
         - name: media
@@ -606,7 +611,7 @@ spec:
 Worker 在直通模式下会对传入路径进行验证：
 - 要求 `direct_path` 与输出路径为绝对路径
 - 拒绝包含 `..` 路径遍历的请求
-- 如果配置了 `RFFMPEG_SHARED_FS_ALLOWED_PREFIX`，解析符号链接后仅允许真实路径匹配前缀的路径
+- 解析符号链接后仅允许真实路径落在 `RFFMPEG_SHARED_FS_ROOTS` 声明的根之下；未声明根时没有任何合法路径
 - Worker 执行前通过 `stat` 检查输入文件是否存在，不存在则返回明确错误
 
 ##### 运行时验证
@@ -614,9 +619,9 @@ Worker 在直通模式下会对传入路径进行验证：
 Worker 在启动 ffmpeg 前会执行以下检查：
 1. 要求 `direct_path` 与输出路径为绝对路径
 2. 验证路径没有 `..` 遍历
-3. 如果设置了白名单前缀，解析符号链接后验证真实路径是否匹配
+3. 解析符号链接后验证真实路径位于声明的根之下
 4. `stat` 检查输入文件是否可读
-5. 输出路径解析父目录符号链接后校验仍位于白名单内
+5. 输出路径解析父目录符号链接后校验仍在声明的根之内
 
 任一检查失败，Worker 返回明确错误信息（包含失败原因），不会静默失败。
 
@@ -624,9 +629,9 @@ Worker 在启动 ffmpeg 前会执行以下检查：
 
 `RFFMPEG_SHARED_FS=1` 本质上是信任模式——用户需确保 CLI 和 Worker 之间的路径一致且可达，并且提交任务的一方（CLI）可信。建议：
 - 仅对受信任的网络环境启用（如内网、Kubernetes 集群内部）
-- 在生产环境中始终配置 `RFFMPEG_SHARED_FS_ALLOWED_PREFIX`，将直通输入路径（`direct_path` / `DirectPaths`）与输出文件名（`OutputFilename`）限制在允许的前缀内
+- 在生产环境中始终配置 `RFFMPEG_SHARED_FS_ROOTS`，将直通输入路径（`direct_path` / `DirectPaths`）与输出目标（`OutputFilename`）限制在声明的根之内
 
-`RFFMPEG_SHARED_FS_ALLOWED_PREFIX` 白名单**仅覆盖**上述两条路径字段，**不覆盖**用户 `Args` 内携带的路径：`Args` 是透传给 ffmpeg 的高级参数通道，ffmpeg 支持十余种协议与大量可携带路径的选项（多次 `-i`、`-map_metadata`、滤镜内路径等），穷举校验会重写透传语义，不可行。任何模式下 `Args` 内路径都不受白名单约束，唯一控制是保证 CLI 本身可信；如需真正限制，可在 worker 侧对 `Args` token 做校验（另开 issue）。
+作业参数不受信任：`Args` 里的输入只能来自输入清单的占位替换（`<INPUT_FILE>`），引入清单之外的输入项、合成输入（如 `-f lavfi`）、滤镜文件源（`movie=` / `subtitles=` 等）或在工作区之外写入的参数（`-progress`、`-passlogfile`、`-filter_script` 等）都会被拒绝——提交侧可判的返回 400 `invalid_request`，仅执行侧可判的在启动 ffmpeg 之前判为 `INFRA`。不在豁免范围内的本机路径，解析后只能落在该作业的工作区内；直通目标是该作业在工作区之外唯一允许写入的路径。
 
 #### 错误处理
 
@@ -647,7 +652,7 @@ Worker 在启动 ffmpeg 前会执行以下检查：
 - **路径一致性要求**：CLI 端传入的路径必须是 Worker 端可以访问的绝对路径。不支持相对路径自动转换。
 - **跨平台兼容性**：路径分隔符使用操作系统原生格式（Linux/macOS 使用 `/`）。Windows 路径支持取决于 Worker 运行环境。
 - **不支持混合模式**：同一任务中不能部分文件使用直通路径、部分使用上传。设置 `RFFMPEG_SHARED_FS=1` 后，所有 `-i` 输入和输出文件均走直通路径。
-- **安全性**：不设置 `RFFMPEG_SHARED_FS_ALLOWED_PREFIX` 时，Worker 可以访问宿主文件系统上任意路径（取决于 Worker 进程的权限）。
+- **安全性**：不声明 `RFFMPEG_SHARED_FS_ROOTS` 时没有任何合法直通路径，直通模式不可用；不要靠省略声明来放行任意路径。
 
 ## API 文档
 
@@ -863,6 +868,22 @@ Content-Type: application/json
 
 ```
 GET /api/v1/output/{fileId}
+```
+
+### 网络输出（协议地址目标）
+
+非直通模式下，输出名可以是带主机名的绝对协议地址（`rtmp://`、`rtmps://`、`srt://`、`udp://`、`http(s)://` 等；`file` scheme 不在此列）。这类目标由 Worker 交给 ffmpeg 直接写向该地址，不产生本地文件：作业不下载产物，缓存也不参与这类作业。
+
+推流地址与远程输入共用同一套地址判据：回环、链路本地、共享地址空间、未指定、组播广播与保留段一律拒绝，RFC1918 与 IPv6 唯一本地地址放行，判定按解析后的地址（字面地址按自身、主机名按解析结果、多地址任一命中即拒）。
+
+- 字面地址落在拒绝类别：提交即 400 `invalid_request`，作业不创建。字面地址的数值写法（`127.1`、`2130706433`、`0x7f000001`、`0xa9fea9fe` 等）按解析器归一化后的地址判定，与点分形式同一结论。
+- 主机名解析落在拒绝类别：作业失败 `INFRA`，在 ffmpeg 启动前拒绝，目标端收不到连接。
+- 目标地址判定不出（主机名解析失败，或写法无法归一为地址）：同样在连接前拒绝，作业失败 `INFRA`，不交给 ffmpeg 的解析器。
+- 直通模式的输出名仍按共享文件系统空间判定，协议地址不是直通目标。
+
+```bash
+# 推流到内网 RTMP 服务器
+rffmpeg -i input.mp4 -c:v libx264 -f flv rtmp://10.0.0.5:1935/live/stream
 ```
 
 ### Worker 接口

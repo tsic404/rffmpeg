@@ -147,7 +147,7 @@ func TestProcessJob_OutputOpenFailurePropagatesExitCode(t *testing.T) {
 	// the QA scenario where the output directory does not exist.
 	job := protocol.JobInfo{
 		ID:             "test-job-output-open-001",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-vn", "-c:a", "libmp3lame"},
 		OutputFilename: "out.mp3",
 	}

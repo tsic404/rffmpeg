@@ -6,46 +6,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/google/uuid"
 	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
-
-// maxInputBaseName caps the length of filenames derived from remote URLs so a
-// hostile URL can't produce absurdly long path components.
-const maxInputBaseName = 128
-
-// allowedExtraChars lists additional safe punctuation for input basenames.
-const allowedExtraChars = " ()[]"
-
-// sanitizeInputBaseName converts the last segment of a remote URL into a
-// filename that is safe to join under a job directory: restricted charset,
-// bounded length, never empty, never a dot-prefixed traversal fragment.
-func sanitizeInputBaseName(rawBase string) string {
-	base := rawBase
-	if base == "." || base == "/" || base == ".." {
-		base = ""
-	}
-	var b strings.Builder
-	for _, r := range base {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '.', r == '-', r == '_', strings.ContainsRune(allowedExtraChars, r):
-			b.WriteRune(r)
-		default:
-			b.WriteRune('_')
-		}
-		if b.Len() >= maxInputBaseName {
-			break
-		}
-	}
-	result := b.String()
-	if result == "" || result == "." || result == ".." {
-		return uuid.New().String()
-	}
-	return result
-}
 
 // ClassifyFailure categorizes an ffmpeg execution failure into one of the
 // FailureType values. stderr must be ffmpeg output — generic error text is
@@ -116,15 +79,14 @@ func ClassifyFailure(exitCode int, stderr string, errorMessage string, isTimeout
 // input kind and failure cause. A worker disk-full while writing the
 // downloaded input is always DISK_FULL, regardless of input kind: it is a
 // local out-of-space condition, not a channel or input problem. Otherwise, a
-// remote URL (see pathutil.IsRemoteURL) fetched directly from the
-// user-supplied source that cannot be reached is INPUT_UNREACHABLE, and a
-// server file ID failing over the worker↔server channel is INFRA (previously
-// misreported as FFMPEG_ERROR).
+// remote input URL that cannot be reached — including one refused by the
+// address policy (C-128) — is INPUT_UNREACHABLE, and a server file ID failing
+// over the worker↔server channel is INFRA.
 func ClassifyInputDownloadFailure(fileID string, downloadErr error) protocol.FailureType {
 	if isDiskFullError(downloadErr) {
 		return protocol.FailureDiskFull
 	}
-	if pathutil.IsRemoteURL(fileID) {
+	if pathutil.IsHTTPRemoteURL(fileID) {
 		return protocol.FailureInputUnreachable
 	}
 	return protocol.FailureInfra

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
@@ -70,6 +71,7 @@ func newDirectOutputWorker(t *testing.T, ffmpegPath string) (*Worker, *probeDire
 		// Any probe failure is fine; these tests only exercise ffmpeg output.
 		ffprobeExecutor: NewFFprobeExecutor("false"),
 		gpuDetector:     gpu.NewDetector(),
+		sharedFS:        pathutil.NewSpace(os.TempDir()),
 	}
 
 	return w, mockSrv
@@ -424,5 +426,110 @@ func assertNoStagingDirs(t *testing.T, dir string) {
 		if strings.HasPrefix(entry.Name(), ".rffmpeg-staging-") {
 			t.Fatalf("staging directory left behind: %s", entry.Name())
 		}
+	}
+}
+
+// TestProcessJob_DirectOutputStagesInsideWorkspace pins C-126's boundary: the
+// job writes its staged output inside its own workspace, and the only path it
+// creates beside the target is the target itself. A staging directory next to
+// the target would be a second path outside the workspace, which the pass-
+// through exception does not cover.
+func TestProcessJob_DirectOutputStagesInsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "staging-path")
+	script := filepath.Join(dir, "ffmpeg-record-staging")
+	if err := writeShellFixture(script, `output=""
+for arg in "$@"; do output="$arg"; done
+printf '%s\n' "$output" > '`+record+`'
+mkdir -p "$(dirname "$output")"
+printf 'ENCODED' > "$output"
+`); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, "shared")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+	inputPath := filepath.Join(dir, "input.mp4")
+	if err := os.WriteFile(inputPath, []byte("input"), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	outputPath := filepath.Join(targetDir, "out.mp4")
+
+	w, mockSrv := newDirectOutputWorker(t, script)
+	runJob(t, w, directOutputTestJob("direct-staging", inputPath, outputPath))
+
+	update := terminalUpdate(t, mockSrv)
+	if update.Status != protocol.JobStatusCompleted {
+		t.Fatalf("Status = %q, want completed (%s)", update.Status, update.Error)
+	}
+
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("fixture did not record its output path: %v", err)
+	}
+	ffmpegOutput := strings.TrimSpace(string(raw))
+	rel, err := filepath.Rel(w.tempDir, ffmpegOutput)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		t.Fatalf("ffmpeg wrote outside the job workspace: %s (workspace %s)", ffmpegOutput, w.tempDir)
+	}
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
+		t.Fatalf("read target dir: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "out.mp4" {
+			t.Fatalf("job created %q beside the target; only the target itself may appear (C-126)", entry.Name())
+		}
+	}
+}
+
+// TestProcessJob_DirectOutputPublishFailureLeavesNoResidue covers the publish
+// step: when the target directory refuses the move, neither the target nor a
+// partial copy remains.
+func TestProcessJob_DirectOutputPublishFailureLeavesNoResidue(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ffmpeg-writes-output")
+	if err := writeShellFixture(script, `output=""
+for arg in "$@"; do output="$arg"; done
+mkdir -p "$(dirname "$output")"
+printf 'ENCODED' > "$output"
+`); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	targetDir := filepath.Join(dir, "shared")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatalf("mkdir target dir: %v", err)
+	}
+	inputPath := filepath.Join(dir, "input.mp4")
+	if err := os.WriteFile(inputPath, []byte("input"), 0o644); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	outputPath := filepath.Join(targetDir, "out.mp4")
+
+	w, mockSrv := newDirectOutputWorker(t, script)
+	// Refuse the publish: the target directory accepts no new entry.
+	if err := os.Chmod(targetDir, 0o555); err != nil {
+		t.Fatalf("chmod target dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(targetDir, 0o755) })
+
+	runJob(t, w, directOutputTestJob("direct-publish-fail", inputPath, outputPath))
+
+	update := terminalUpdate(t, mockSrv)
+	if update.Status == protocol.JobStatusCompleted {
+		t.Fatal("publish failure was reported as completed")
+	}
+	if !strings.Contains(update.Error, "publish staged output") {
+		t.Fatalf("job failed for %q, want the publish step", update.Error)
+	}
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
+		t.Fatalf("read target dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("publish failure left %d entry/entries in the target directory", len(entries))
 	}
 }

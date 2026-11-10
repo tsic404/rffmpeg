@@ -94,11 +94,14 @@ func TestBuildArgs(t *testing.T) {
 			want:       []string{"-i", "/tmp/downloaded/video.mp4", "-i", "/tmp/downloaded/audio.m4a", "-c:v", "libx264", "-c:a", "aac", "-shortest", "/tmp/output/merged.mp4"},
 		},
 		{
-			name:       "input placeholder missing -i still gets server output appended",
+			// A placeholder is only an input option's value (C-127). One that
+			// stands bare stays literal: substituting it here would let a
+			// request address a manifest input from an output position.
+			name:       "bare input placeholder is not substituted",
 			jobArgs:    []string{"-c:v", "libx264", "<INPUT_FILE>"},
 			inputPaths: []string{"/tmp/downloaded/input.mp4"},
 			outputPath: "/tmp/output.mp4",
-			want:       []string{"-c:v", "libx264", "/tmp/downloaded/input.mp4", "/tmp/output.mp4"},
+			want:       []string{"-c:v", "libx264", "<INPUT_FILE>", "/tmp/output.mp4"},
 		},
 		{
 			name:       "explicit -y is passed through verbatim",
@@ -457,5 +460,26 @@ func TestExecutor_SignalDeathSegvExitCode(t *testing.T) {
 	if result.ExitCode != 139 {
 		t.Fatalf("SIGSEGV exit code = %d, want 139 (128+11); error=%v stderr=%q",
 			result.ExitCode, result.Error, result.Stderr)
+	}
+}
+
+// TestBuildArgsPlaceholderOnlyAtInputPositions pins the substitution rule:
+// a placeholder is replaced only as an input option's value. A placeholder in
+// an output position must survive verbatim instead of being mapped onto a
+// manifest input path (C-127: that input is a read-only source).
+func TestBuildArgsPlaceholderOnlyAtInputPositions(t *testing.T) {
+	got := BuildArgs(
+		[]string{"-i", "<INPUT_FILE>", "-c", "copy", "-y", "<INPUT_FILE>"},
+		[]string{"/ws/job/input-0", "/mnt/media/master.mkv"},
+		"/ws/job/out.mp4",
+	)
+	want := []string{"-i", "/ws/job/input-0", "-c", "copy", "-y", "<INPUT_FILE>", "/ws/job/out.mp4"}
+	if len(got) != len(want) {
+		t.Fatalf("BuildArgs() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("BuildArgs()[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
 	}
 }

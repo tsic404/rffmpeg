@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
@@ -84,6 +85,7 @@ func newRefuseOverwriteWorker(t *testing.T) (*Worker, *mockJobServer) {
 		ffprobeExecutor:    NewFFprobeExecutor(""),
 		pixelFormatChecker: nil,
 		gpuDetector:        gpu.NewDetector(),
+		sharedFS:           pathutil.NewSpace(tmpDir),
 	}
 
 	return w, mockSrv
@@ -106,7 +108,7 @@ func TestProcessJob_RemovesStaleOutputBeforeFFmpeg(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:             "job-restart-recovery",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 		OutputFilename: "out.mp4",
 	}
@@ -148,7 +150,7 @@ func TestProcessJob_PreservesExistingAbsoluteOutput(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:             "job-tsi-2964-boundary",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 		OutputFilename: existingOutput,
 	}
@@ -191,7 +193,7 @@ func TestProcessJob_RejectsTraversalJobID(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:             "..",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 		OutputFilename: "out.mp4",
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
@@ -52,7 +53,7 @@ func newRedispatchWorker(t *testing.T, allowedPrefix, serverURL string) *Worker 
 		lastHeartbeatTime: time.Now(),
 		ffprobeExecutor:   NewFFprobeExecutor("ffprobe"),
 		gpuDetector:       gpu.NewDetector(),
-		allowedPrefixes:   []string{allowedPrefix},
+		sharedFS:          pathutil.NewSpace(allowedPrefix),
 	}
 }
 

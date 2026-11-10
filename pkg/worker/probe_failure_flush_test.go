@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
@@ -20,20 +21,28 @@ import (
 // the terminal failed PATCH still goes out with the correct classification,
 // and the nil-func path must not panic.
 func TestProcessProbeJobDirectPathFailuresReportWithoutFlush(t *testing.T) {
+	root := t.TempDir()
 	cases := []struct {
 		name            string
 		directPath      string
+		wantType        protocol.FailureType
 		wantDetails     string
 		wantErrContains string
 	}{
 		{
+			// A ".." segment breaks the C-125 pass-through input form: the
+			// execution side judges it as a boundary violation (INFRA).
 			name:        "traversal rejected",
-			directPath:  "safe/../etc/passwd",
-			wantDetails: "path traversal rejected",
+			directPath:  root + "/safe/../etc/passwd",
+			wantType:    protocol.FailureInfra,
+			wantDetails: "path must not contain a '..' component",
 		},
 		{
+			// A reachable root with a missing member is the user's source
+			// being unreachable, not a boundary violation.
 			name:            "stat unreachable",
-			directPath:      filepath.Join(t.TempDir(), "does-not-exist.mkv"),
+			directPath:      filepath.Join(root, "does-not-exist.mkv"),
+			wantType:        protocol.FailureInputUnreachable,
 			wantErrContains: "input path unreachable",
 		},
 	}
@@ -67,7 +76,7 @@ func TestProcessProbeJobDirectPathFailuresReportWithoutFlush(t *testing.T) {
 			defer srv.Close()
 
 			client := NewClient(srv.URL, "worker-1", "")
-			w := &Worker{client: client, tempDir: t.TempDir()}
+			w := &Worker{client: client, tempDir: t.TempDir(), sharedFS: pathutil.NewSpace(root)}
 
 			job := protocol.JobInfo{
 				ID:          "probe-fail-001",
@@ -87,11 +96,11 @@ func TestProcessProbeJobDirectPathFailuresReportWithoutFlush(t *testing.T) {
 			if got.Status != protocol.JobStatusFailed {
 				t.Errorf("Status = %q, want %q", got.Status, protocol.JobStatusFailed)
 			}
-			if got.FailureType != string(protocol.FailureInputUnreachable) {
-				t.Errorf("FailureType = %q, want %q", got.FailureType, protocol.FailureInputUnreachable)
+			if got.FailureType != string(tc.wantType) {
+				t.Errorf("FailureType = %q, want %q", got.FailureType, tc.wantType)
 			}
-			if tc.wantDetails != "" && got.FailureDetails != tc.wantDetails {
-				t.Errorf("FailureDetails = %q, want %q", got.FailureDetails, tc.wantDetails)
+			if tc.wantDetails != "" && !strings.Contains(got.FailureDetails, tc.wantDetails) {
+				t.Errorf("FailureDetails = %q, want it to contain %q", got.FailureDetails, tc.wantDetails)
 			}
 			if tc.wantErrContains != "" && !strings.Contains(got.Error, tc.wantErrContains) {
 				t.Errorf("Error = %q, want it to contain %q", got.Error, tc.wantErrContains)

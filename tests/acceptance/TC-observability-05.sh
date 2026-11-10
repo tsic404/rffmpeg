@@ -34,7 +34,7 @@ LONG="$(make_media long.mp4 120 1280x720)"
 
 # --- INPUT_UNREACHABLE
 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
-	-i "http://127.0.0.1:9/unreachable.mp4" "$TMP_ROOT/u.mp4" >/dev/null 2>"$TMP_ROOT/u.log" || true
+	-i "$(unreachable_input_url)" "$TMP_ROOT/u.mp4" >/dev/null 2>"$TMP_ROOT/u.log" || true
 fail_job "$(job_id_of "$TMP_ROOT/u.log")" INPUT_UNREACHABLE false
 
 # --- ENCODER_UNAVAILABLE (submission guard)

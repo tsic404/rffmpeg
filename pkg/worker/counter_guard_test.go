@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
@@ -62,6 +63,7 @@ func newCounterTestWorker(t *testing.T, ffmpegPath string) *Worker {
 		ffprobeExecutor:    NewFFprobeExecutor(""),
 		pixelFormatChecker: nil,
 		gpuDetector:        gpu.NewDetector(),
+		sharedFS:           pathutil.NewSpace(tmpDir),
 	}
 }
 
@@ -155,7 +157,7 @@ func TestCacheMissMkdirAllFailureDoesNotAdvanceCounters(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "counter-miss-mkdir",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
 
@@ -190,7 +192,7 @@ func TestRunningUpdateFailureDoesNotAdvanceCounters(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "counter-running-fail",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
 
@@ -226,7 +228,7 @@ func TestDownloadFailureDoesNotAdvanceCounters(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "counter-download-fail",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
 
@@ -249,7 +251,7 @@ func TestJobCancelDoesNotAdvanceCounters(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "counter-cancel",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
 

@@ -53,7 +53,7 @@ func main() {
 
 	// Create worker
 	workerCfg := worker.Config{
-		SharedFSAllowedPrefix:       cfg.SharedFSAllowedPrefix,
+		SharedFSRoots:               cfg.SharedFSRoots,
 		ServerURL:                   cfg.ServerURL,
 		WorkerID:                    cfg.WorkerID,
 		Name:                        cfg.Name,

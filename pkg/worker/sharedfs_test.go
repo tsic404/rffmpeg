@@ -5,91 +5,34 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
 
-func TestParseAllowedPrefixes(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-		want []string
-	}{
-		{name: "empty", raw: "", want: nil},
-		{name: "whitespace only", raw: "   ", want: nil},
-		{name: "commas only", raw: ",,", want: nil},
-		{
-			name: "trims and drops empties",
-			raw:  " /data/media , , /mnt/nfs ",
-			want: []string{"/data/media", "/mnt/nfs"},
-		},
-		{
-			name: "cleans components",
-			raw:  "/data/media//movies",
-			want: []string{"/data/media/movies"},
-		},
-		{
-			name: "trailing slash",
-			raw:  "/data/media/",
-			want: []string{"/data/media"},
-		},
+// TestSpaceUndeclaredHasNoLegalPath locks the fail-closed default: an
+// undeclared space does not degrade to "any absolute path", so the pass-through
+// mode has no legal input or target at all (ADR-018 option A).
+func TestSpaceUndeclaredHasNoLegalPath(t *testing.T) {
+	w := &Worker{}
+	inside := filepath.Join(t.TempDir(), "in.mp4")
+	if v := w.validateDirectInputPath(inside); v == nil || !v.boundary {
+		t.Fatalf("validateDirectInputPath(undeclared space) = %v, want a boundary violation", v)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := parseAllowedPrefixes(tt.raw)
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("parseAllowedPrefixes(%q) = %v, want %v", tt.raw, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestPathAllowed(t *testing.T) {
-	w := &Worker{
-		allowedPrefixes: []string{
-			filepath.Clean("/data/media"),
-			filepath.Clean("/mnt/nfs"),
-		},
-	}
-
-	tests := []struct {
-		path string
-		want bool
-	}{
-		{"/data/media", true},            // exact prefix
-		{"/data/media/file.mp4", true},   // inside prefix
-		{"/data/media/sub/dir", true},    // nested
-		{"/data/media2/file.mp4", false}, // sibling sharing bare prefix
-		{"/mnt/nfs/file.mkv", true},      // second prefix
-		{"/other/file.mp4", false},       // outside
-		{"/", false},                     // root is not a configured prefix
-	}
-	for _, tt := range tests {
-		if got := w.pathAllowed(tt.path); got != tt.want {
-			t.Errorf("pathAllowed(%q) = %v, want %v", tt.path, got, tt.want)
-		}
-	}
-}
-
-func TestPathAllowedUnrestricted(t *testing.T) {
-	w := &Worker{} // nil allow-list: unrestricted, matching documented default
-	for _, p := range []string{"/anywhere", "relative/path", "/"} {
-		if !w.pathAllowed(p) {
-			t.Errorf("pathAllowed(%q) = false, want true (empty allow-list is unrestricted)", p)
-		}
+	if v := w.validateDirectOutputPath(inside); v == nil || !v.boundary {
+		t.Fatalf("validateDirectOutputPath(undeclared space) = %v, want a boundary violation", v)
 	}
 }
 
 // TestProcessProbeJob_DirectPathOutsideAllowedPrefixFails verifies the new
-// RFFMPEG_SHARED_FS_ALLOWED_PREFIX allow-list is enforced on shared-FS probe
-// inputs: a direct path outside every configured prefix must fail with
-// INPUT_UNREACHABLE before any ffprobe execution or HTTP input download.
+// declared path space is enforced on shared-FS probe inputs: a direct path
+// outside every declared root must fail with INFRA before any ffprobe
+// execution or HTTP input download.
 // The allow-list is meant to restore the security boundary documented in the
 // README, not merely to filter one job path — so rejection here proves the
 // worker-side check, not just the parse helper.
@@ -131,7 +74,7 @@ func TestProcessProbeJob_DirectPathOutsideAllowedPrefixFails(t *testing.T) {
 		ffprobeExecutor:   NewFFprobeExecutor("/usr/bin/ffprobe"),
 		gpuDetector:       gpu.NewDetector(),
 		// Allow-list pins probes to /mnt/nfs; the input lives in a temp dir.
-		allowedPrefixes: []string{"/mnt/nfs"},
+		sharedFS: pathutil.NewSpace("/mnt/nfs"),
 	}
 
 	job := protocol.JobInfo{
@@ -162,8 +105,8 @@ func TestProcessProbeJob_DirectPathOutsideAllowedPrefixFails(t *testing.T) {
 	if update.Status != protocol.JobStatusFailed {
 		t.Errorf("Status = %q, want %q (path outside allow-list must fail)", update.Status, protocol.JobStatusFailed)
 	}
-	if update.FailureType != string(protocol.FailureInputUnreachable) {
-		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInputUnreachable))
+	if update.FailureType != string(protocol.FailureInfra) {
+		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInfra))
 	}
 	if update.Error == "" {
 		t.Error("Error = empty, want a prefix-rejection message")
@@ -189,13 +132,16 @@ func TestValidateDirectInputPathRejectsSymlinkEscape(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	w := &Worker{allowedPrefixes: []string{inside}}
+	w := &Worker{sharedFS: pathutil.NewSpace(inside)}
 	v := w.validateDirectInputPath(link)
 	if v == nil {
 		t.Fatal("validateDirectInputPath allowed a symlink escape, want violation")
 	}
-	if v.details != "path not in allowed prefix" {
-		t.Errorf("details = %q, want %q", v.details, "path not in allowed prefix")
+	if !v.boundary {
+		t.Errorf("boundary = false, want true (resolved path left the declared space)")
+	}
+	if !strings.Contains(v.details, "outside the declared shared filesystem space") {
+		t.Errorf("details = %q, want an out-of-space judgement", v.details)
 	}
 }
 
@@ -217,13 +163,16 @@ func TestValidateDirectOutputPathRejectsSymlinkEscape(t *testing.T) {
 	}
 	output := filepath.Join(linkParent, "out.mp4")
 
-	w := &Worker{allowedPrefixes: []string{inside}}
+	w := &Worker{sharedFS: pathutil.NewSpace(inside)}
 	v := w.validateDirectOutputPath(output)
 	if v == nil {
 		t.Fatal("validateDirectOutputPath allowed a symlink-escaped parent, want violation")
 	}
-	if v.details != "path not in allowed prefix" {
-		t.Errorf("details = %q, want %q", v.details, "path not in allowed prefix")
+	if !v.boundary {
+		t.Errorf("boundary = false, want true (resolved path left the declared space)")
+	}
+	if !strings.Contains(v.details, "outside the declared shared filesystem space") {
+		t.Errorf("details = %q, want an out-of-space judgement", v.details)
 	}
 }
 
@@ -235,7 +184,7 @@ func TestValidateDirectOutputPathParentDirDoesNotExist(t *testing.T) {
 	}
 	output := filepath.Join(allowed, "missing", "out.mp4")
 
-	w := &Worker{allowedPrefixes: []string{allowed}}
+	w := &Worker{sharedFS: pathutil.NewSpace(allowed)}
 	v := w.validateDirectOutputPath(output)
 	if v == nil {
 		t.Fatal("validateDirectOutputPath allowed a path whose parent does not exist, want violation")
@@ -260,7 +209,7 @@ func TestValidateDirectOutputPathRejectsBrokenSymlink(t *testing.T) {
 		t.Fatalf("symlink broken: %v", err)
 	}
 
-	w := &Worker{allowedPrefixes: []string{allowed}}
+	w := &Worker{sharedFS: pathutil.NewSpace(allowed)}
 	v := w.validateDirectOutputPath(output)
 	if v == nil {
 		t.Fatal("validateDirectOutputPath allowed a broken-symlink output, want violation")
@@ -274,45 +223,24 @@ func TestValidateDirectOutputPathRejectsBrokenSymlink(t *testing.T) {
 }
 
 func TestValidateDirectInputPathRejectsRelative(t *testing.T) {
-	w := &Worker{allowedPrefixes: []string{"relative/prefix"}}
+	w := &Worker{sharedFS: pathutil.NewSpace("relative/prefix")}
 	v := w.validateDirectInputPath("relative/prefix/file.mp4")
 	if v == nil {
 		t.Fatal("validateDirectInputPath allowed a relative path, want violation")
 	}
-	if v.details != "non-absolute direct path" {
-		t.Errorf("details = %q, want %q", v.details, "non-absolute direct path")
+	if !v.boundary {
+		t.Error("a relative pass-through path is a path-space violation, want boundary=true")
 	}
 }
 
 func TestValidateDirectOutputPathRejectsRelative(t *testing.T) {
-	w := &Worker{allowedPrefixes: []string{"relative/prefix"}}
+	w := &Worker{sharedFS: pathutil.NewSpace("relative/prefix")}
 	v := w.validateDirectOutputPath("relative/prefix/out.mp4")
 	if v == nil {
 		t.Fatal("validateDirectOutputPath allowed a relative path, want violation")
 	}
-	if v.details != "non-absolute direct output path" {
-		t.Errorf("details = %q, want %q", v.details, "non-absolute direct output path")
-	}
-}
-
-func TestParseAllowedPrefixesResolvesSymlink(t *testing.T) {
-	base := t.TempDir()
-	real := filepath.Join(base, "real")
-	if err := os.MkdirAll(real, 0755); err != nil {
-		t.Fatalf("mkdir real: %v", err)
-	}
-	link := filepath.Join(base, "link")
-	if err := os.Symlink(real, link); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-	resolved, err := filepath.EvalSymlinks(link)
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-
-	got := parseAllowedPrefixes(link)
-	if len(got) != 1 || got[0] != resolved {
-		t.Errorf("parseAllowedPrefixes(%q) = %v, want [%q]", link, got, resolved)
+	if !v.boundary {
+		t.Error("a relative pass-through target is a path-space violation, want boundary=true")
 	}
 }
 
@@ -359,7 +287,7 @@ func TestProcessJob_DirectOutputOutsideAllowedPrefixFails(t *testing.T) {
 		lastHeartbeatTime: time.Now(),
 		ffprobeExecutor:   NewFFprobeExecutor("/usr/bin/ffprobe"),
 		gpuDetector:       gpu.NewDetector(),
-		allowedPrefixes:   []string{allowed},
+		sharedFS:          pathutil.NewSpace(allowed),
 	}
 
 	job := protocol.JobInfo{
@@ -387,8 +315,8 @@ func TestProcessJob_DirectOutputOutsideAllowedPrefixFails(t *testing.T) {
 	if update.Status != protocol.JobStatusFailed {
 		t.Errorf("Status = %q, want %q", update.Status, protocol.JobStatusFailed)
 	}
-	if update.FailureType != string(protocol.FailureInputUnreachable) {
-		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInputUnreachable))
+	if update.FailureType != string(protocol.FailureInfra) {
+		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInfra))
 	}
 	if !strings.Contains(update.Error, outside) {
 		t.Errorf("Error = %q, want mention of output path %q", update.Error, outside)
@@ -444,7 +372,7 @@ func TestProcessJob_DirectOutputFileURLRejected(t *testing.T) {
 		lastHeartbeatTime: time.Now(),
 		ffprobeExecutor:   NewFFprobeExecutor("/usr/bin/ffprobe"),
 		gpuDetector:       gpu.NewDetector(),
-		allowedPrefixes:   []string{allowed},
+		sharedFS:          pathutil.NewSpace(allowed),
 	}
 
 	job := protocol.JobInfo{
@@ -472,8 +400,8 @@ func TestProcessJob_DirectOutputFileURLRejected(t *testing.T) {
 	if update.Status != protocol.JobStatusFailed {
 		t.Errorf("Status = %q, want %q", update.Status, protocol.JobStatusFailed)
 	}
-	if update.FailureType != string(protocol.FailureInputUnreachable) {
-		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInputUnreachable))
+	if update.FailureType != string(protocol.FailureInfra) {
+		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInfra))
 	}
 	if !strings.Contains(update.Error, outputPath) {
 		t.Errorf("Error = %q, want mention of output path %q", update.Error, outputPath)
@@ -525,7 +453,7 @@ func TestProcessProbeJob_DirectInputInfixURLRejected(t *testing.T) {
 		lastHeartbeatTime: time.Now(),
 		ffprobeExecutor:   NewFFprobeExecutor("/usr/bin/ffprobe"),
 		gpuDetector:       gpu.NewDetector(),
-		allowedPrefixes:   []string{allowed},
+		sharedFS:          pathutil.NewSpace(allowed),
 	}
 
 	job := protocol.JobInfo{
@@ -609,7 +537,7 @@ func TestProcessJob_DirectOutputInfixURLRejected(t *testing.T) {
 		lastHeartbeatTime: time.Now(),
 		ffprobeExecutor:   NewFFprobeExecutor("/usr/bin/ffprobe"),
 		gpuDetector:       gpu.NewDetector(),
-		allowedPrefixes:   []string{allowed},
+		sharedFS:          pathutil.NewSpace(allowed),
 	}
 
 	job := protocol.JobInfo{
@@ -637,8 +565,8 @@ func TestProcessJob_DirectOutputInfixURLRejected(t *testing.T) {
 	if update.Status != protocol.JobStatusFailed {
 		t.Errorf("Status = %q, want %q (infix URL output path must fail closed)", update.Status, protocol.JobStatusFailed)
 	}
-	if update.FailureType != string(protocol.FailureInputUnreachable) {
-		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInputUnreachable))
+	if update.FailureType != string(protocol.FailureInfra) {
+		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInfra))
 	}
 	if !strings.Contains(update.Error, filepath.Dir(outputPath)) {
 		t.Errorf("Error = %q, want mention of output parent directory %q", update.Error, filepath.Dir(outputPath))
@@ -693,7 +621,7 @@ func TestProcessJob_DirectOutputTraversalRejected(t *testing.T) {
 		lastHeartbeatTime: time.Now(),
 		ffprobeExecutor:   NewFFprobeExecutor("/usr/bin/ffprobe"),
 		gpuDetector:       gpu.NewDetector(),
-		allowedPrefixes:   []string{allowed},
+		sharedFS:          pathutil.NewSpace(allowed),
 	}
 
 	job := protocol.JobInfo{
@@ -721,10 +649,10 @@ func TestProcessJob_DirectOutputTraversalRejected(t *testing.T) {
 	if update.Status != protocol.JobStatusFailed {
 		t.Errorf("Status = %q, want %q", update.Status, protocol.JobStatusFailed)
 	}
-	if update.FailureType != string(protocol.FailureInputUnreachable) {
-		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInputUnreachable))
+	if update.FailureType != string(protocol.FailureInfra) {
+		t.Errorf("FailureType = %q, want %q", update.FailureType, string(protocol.FailureInfra))
 	}
-	if !strings.Contains(update.Error, "traversal") {
-		t.Errorf("Error = %q, want traversal-rejection mention", update.Error)
+	if !strings.Contains(update.Error, "'..' component") {
+		t.Errorf("Error = %q, want an upward-segment rejection", update.Error)
 	}
 }

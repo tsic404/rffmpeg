@@ -227,7 +227,7 @@ func runStreamingMp4(t *testing.T, ffmpegPath, ffprobePath string, inputBytes []
 	// excluded and StreamingOutput is set; the worker appends the resolved "-".
 	job := protocol.JobInfo{
 		ID:              "stream-mp4-real",
-		InputFiles:      []string{"input-001"},
+		InputFiles:      []string{testUploadID("input-001")},
 		Args:            []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4"},
 		OutputFilename:  outputFilename,
 		StreamingOutput: true,

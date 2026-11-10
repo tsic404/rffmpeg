@@ -11,7 +11,6 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
-	"github.com/tsic404/rffmpeg/pkg/server/storage"
 )
 
 // probeInputClass identifies how a probe input is resolved.
@@ -23,22 +22,24 @@ const (
 	probeInputPath
 )
 
-// classifyProbeInput closes the probe input taxonomy: a valid storage file ID,
-// a remote URL, or a path. Anything else non-empty is a path. Traversal is
-// rejected for paths only — a URL's path segments are resolved by the remote
-// server, not against the server's filesystem — and the rejection is a形态
-// error, hence invalid_request, while a well-formed ID with no stored file is
-// not_found.
-func classifyProbeInput(input string) (probeInputClass, *protocol.ProtocolError) {
-	switch {
-	case storage.ValidateFileID(input):
-		return probeInputFileID, nil
-	case pathutil.IsRemoteURL(input):
-		return probeInputRemoteURL, nil
-	case pathutil.ContainsPathTraversal(input):
+// classifyProbeInput classifies a probe input with the same whole-string
+// taxonomy the job path uses (C-123): an upload identifier, an http/https URL,
+// or an absolute path inside the declared shared filesystem space. A relative
+// path, a path outside every declared root, a path carrying "..", or any other
+// scheme matches no form and is rejected as invalid_request. A well-formed
+// upload identifier with no stored file is a separate not_found.
+func (h *Handler) classifyProbeInput(input string) (probeInputClass, *protocol.ProtocolError) {
+	form, err := pathutil.ClassifyInput(input, h.sharedFSSpace())
+	if err != nil {
 		return probeInputPath, protocol.NewProtocolError(
-			protocol.ErrCodeInvalidRequest, "input path contains a '..' component", nil,
+			protocol.ErrCodeInvalidRequest, err.Error(), nil,
 		)
+	}
+	switch form {
+	case pathutil.InputUpload:
+		return probeInputFileID, nil
+	case pathutil.InputRemoteURL:
+		return probeInputRemoteURL, nil
 	default:
 		return probeInputPath, nil
 	}
@@ -70,7 +71,7 @@ func (h *Handler) Probe(w http.ResponseWriter, r *http.Request) {
 	// Registered IDs are checked before any job is created; URLs and paths are
 	// left to the Worker, which is the only side that can resolve them.
 	// Traversal is a malformed path, not a missing object.
-	inputClass, inputErr := classifyProbeInput(req.Input)
+	inputClass, inputErr := h.classifyProbeInput(req.Input)
 	if inputErr != nil {
 		writeError(w, http.StatusBadRequest, inputErr)
 		return

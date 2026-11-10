@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # TC-observability-06: probe 输入拒绝的两条分支（AC-50）
 # 判据：遍历路径 → HTTP 400 invalid_request、作业列表无新增行；
-#       缺失直传路径 → 服务端不拒绝，probe 落库后 500 probe_failed、作业列表新增一条失败行。
+#       根内缺失直传路径 → 服务端不拒绝（不判断存在性），probe 落库后
+#       500 probe_failed、作业列表新增一条失败行。
+# 前置：共享文件系统的空间根已声明——未声明时绝对路径不属于任何形态，
+#       在建作业前就是 400 invalid_request（C-123 / C-51）。
 set -euo pipefail
 PORT="${PORT:-18999}"
 ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$ENV_DIR/_env.sh"
 
 build_binaries
-start_server
+# 声明空间根：缺失路径必须是形态合法的绝对路径，才能走到执行侧的探测失败。
+PROBE_ROOT="$TMP_ROOT/probe-space"
+mkdir -p "$PROBE_ROOT"
+SERVER_EXTRA_FLAGS="--shared-fs-roots $PROBE_ROOT" start_server
 wait_server_ready
 
 API="$(acceptance_server_url)/api/v1"
@@ -35,10 +41,10 @@ AFTER="$(jobs_count)"
 [[ "$BEFORE" == "$AFTER" ]] || fail "rejected traversal probe created a job ($BEFORE -> $AFTER)"
 
 # --- Branch 2: a missing shared-FS path reaches the Worker and fails there -----
-start_worker
+start_worker "acceptance-worker-$PORT" RFFMPEG_SHARED_FS_ROOTS="$PROBE_ROOT"
 wait_ready
 
-MISSING="$TMP_ROOT/does-not-exist-$PORT.mp4"
+MISSING="$PROBE_ROOT/does-not-exist-$PORT.mp4"
 [[ ! -e "$MISSING" ]] || fail "fixture path unexpectedly exists: $MISSING"
 BEFORE="$(jobs_count)"
 BODY="$TMP_ROOT/missing-path.json"

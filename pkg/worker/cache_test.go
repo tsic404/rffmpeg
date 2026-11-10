@@ -259,7 +259,7 @@ func TestCacheLRUEviction(t *testing.T) {
 	if err := os.WriteFile(srcPath1, data, 0644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
-	key1 := GenerateCacheKey([]string{"file-1"}, []string{"-c:v", "libx264"}, false, "", "")
+	key1 := GenerateCacheKey([]string{testUploadID("file-1")}, []string{"-c:v", "libx264"}, false, "", "")
 	if err := cache.Put(key1, srcPath1); err != nil {
 		t.Fatalf("Put key1 failed: %v", err)
 	}

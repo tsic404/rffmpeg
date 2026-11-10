@@ -88,7 +88,7 @@ func TestProcessJob_StreamingMp4SingleOutputDash(t *testing.T) {
 	// and StreamingOutput is set. The worker must append exactly one "-".
 	job := protocol.JobInfo{
 		ID:              "stream-mp4-1",
-		InputFiles:      []string{"input-001"},
+		InputFiles:      []string{testUploadID("input-001")},
 		Args:            []string{"-i", "<INPUT_FILE>", "-f", "mp4"},
 		OutputFilename:  "",
 		StreamingOutput: true,

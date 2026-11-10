@@ -103,7 +103,7 @@ exit 1
 
 	job := protocol.JobInfo{
 		ID:         "tsi-2581-fastfail",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 	jobCtx, cancel := context.WithCancel(context.Background())

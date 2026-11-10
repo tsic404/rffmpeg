@@ -11,7 +11,7 @@ start_server
 start_worker
 wait_ready
 
-URL="http://127.0.0.1:9/definitely-unreachable.mp4"
+URL="$(unreachable_input_url)"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
