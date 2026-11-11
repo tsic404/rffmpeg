@@ -55,7 +55,7 @@ LOG="$TMP_ROOT/cli.log"
 OUT="$TMP_ROOT/healed.mp4"
 
 # 1800s 只是挂起进程的守卫，不是判据：AC-43 不对端到端总壁钟设上限。
-( timeout 1800 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+( timeout 1800 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -preset veryslow "$OUT" >/dev/null 2>"$LOG" ) &
 CLI_PID=$!
 trap 'kill "$CLI_PID" 2>/dev/null || true; acceptance_cleanup' EXIT

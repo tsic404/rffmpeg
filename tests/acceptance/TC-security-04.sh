@@ -16,7 +16,7 @@ wait_ready
 MEDIA="$(make_media ratelimit.mp4 120 1280x720)"
 
 # Upload the input once (through a normal completed run) and harvest its id.
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -preset veryfast "$TMP_ROOT/seed.mp4" \
 	>/dev/null 2>"$TMP_ROOT/seed.log"
 FILE_ID="$(grep -oE 'Uploaded: .* -> [0-9a-f]+' "$TMP_ROOT/seed.log" | awk '{print $NF}' || true)"
@@ -42,7 +42,7 @@ CLI_PIDS=()
 for i in 1 2 3 4; do
 	(
 		set +e
-		"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+		"$RFFMPEG_BIN/rffmpeg" \
 			-i "$MEDIA" -c:v libx264 -preset veryslow "$TMP_ROOT/out-$i.mp4" \
 			>/dev/null 2>"$TMP_ROOT/cli-$i.log"
 		echo "$? $i" >>"$RC_FILE"

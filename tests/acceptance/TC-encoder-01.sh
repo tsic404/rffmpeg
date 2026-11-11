@@ -17,7 +17,7 @@ OUT="$TMP_ROOT/auto.mp4"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" "$OUT" 2>"$LOG"
 RC=$?
 set -e

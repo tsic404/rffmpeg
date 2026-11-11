@@ -65,11 +65,41 @@ func captureStderr(f func()) string {
 	return buf.String()
 }
 
+// isolateRunEnvironment pins the configuration plane to a scratch home and a
+// scratch working directory so a developer's own config files cannot decide
+// what run() sees, and blanks every rffmpeg variable before a case sets the
+// ones it is about.
+func isolateRunEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(wd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+	for _, name := range []string{
+		config.EnvServerURL, config.EnvToken, config.EnvSharedFS, config.EnvQuiet,
+		config.EnvAutoHW, config.EnvRetry, config.EnvJobTimeout, config.EnvPollTimeout,
+		config.EnvMaxRetries, config.EnvServerLossTimeout, config.EnvInfoFormat,
+		config.EnvLocalFallback, config.EnvLogFile, config.EnvJobID,
+	} {
+		t.Setenv(name, "")
+	}
+}
+
 // TestRun_NoArgsReturnsError pins the contract: invoking rffmpeg with no
 // arguments must exit non-zero so callers can still detect a missing command,
 // and must print the full help — the same text as -h — so the operator sees
 // the option list instead of a bare usage line.
 func TestRun_NoArgsReturnsError(t *testing.T) {
+	isolateRunEnvironment(t)
 	orig := os.Args
 	defer func() { os.Args = orig }()
 	os.Args = []string{"rffmpeg"}
@@ -101,9 +131,11 @@ func TestRun_NoArgsReturnsError(t *testing.T) {
 // operator can tell where the bad URL came from instead of a bare
 // "unsupported protocol scheme" error.
 func TestRun_HealthCheckFailurePrintsBanner(t *testing.T) {
+	isolateRunEnvironment(t)
+	t.Setenv(config.EnvServerURL, "bad-scheme")
 	orig := os.Args
 	defer func() { os.Args = orig }()
-	os.Args = []string{"rffmpeg", "--server", "bad-scheme", "-i", "in.mp4", "out.mp4"}
+	os.Args = []string{"rffmpeg", "-i", "in.mp4", "out.mp4"}
 
 	code := ExitSuccess
 	stderr := captureStderr(func() {
@@ -112,7 +144,7 @@ func TestRun_HealthCheckFailurePrintsBanner(t *testing.T) {
 	if code != ExitError {
 		t.Errorf("run() with malformed server URL = %d, want %d", code, ExitError)
 	}
-	if !strings.Contains(stderr, "Server: bad-scheme (flag)") {
+	if !strings.Contains(stderr, "Server: bad-scheme (env)") {
 		t.Errorf("run() stderr = %q, want banner Server line with source", stderr)
 	}
 	if !strings.Contains(stderr, "server health check failed") {
@@ -126,8 +158,7 @@ func TestRun_HealthCheckFailurePrintsBanner(t *testing.T) {
 // and the two ways out. Without it the operator only sees a bare
 // "connection refused" and cannot tell where the URL came from.
 func TestRun_HealthCheckFailureHintsDefaultServerURL(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())      // no ~/.rffmpeg.json to supply a URL
-	t.Setenv("RFFMPEG_SERVER_URL", "") // empty is treated as unset, keeping the default source
+	isolateRunEnvironment(t) // no config file and no variable supplies a URL
 	// The default URL is a fixed address this test cannot relocate, so it can
 	// only assert the default-source path where that address is not already
 	// serving a healthy rffmpeg instance — otherwise run() would pass the health
@@ -147,7 +178,7 @@ func TestRun_HealthCheckFailureHintsDefaultServerURL(t *testing.T) {
 	if code != ExitError {
 		t.Errorf("run() without a configured server URL = %d, want %d", code, ExitError)
 	}
-	if !strings.Contains(stderr, "Server: "+config.DefaultServerURL+" (default)") {
+	if !strings.Contains(stderr, "Server: "+config.DefaultServerURL+" (built-in default)") {
 		t.Errorf("run() stderr = %q, want banner Server line reporting the default source", stderr)
 	}
 	if !strings.Contains(stderr, "no server URL configured") || !strings.Contains(stderr, "RFFMPEG_SERVER_URL") {
@@ -169,25 +200,27 @@ func healthCheckAnswersOK(url string) bool {
 }
 
 // TestRun_HealthCheckFailureOmitsHintForExplicitServerURL pins the other half:
-// an explicit --server URL is a deliberate choice, so its failure must not be
+// a configured server URL is a deliberate choice, so its failure must not be
 // second-guessed with the unconfigured-URL hint.
 func TestRun_HealthCheckFailureOmitsHintForExplicitServerURL(t *testing.T) {
+	isolateRunEnvironment(t)
 	// A closed httptest server yields a well-formed but refused URL: the same
 	// failure class the hint addresses, minus the default-URL source.
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	unreachable := srv.URL
 	srv.Close()
 
+	t.Setenv(config.EnvServerURL, unreachable)
 	orig := os.Args
 	defer func() { os.Args = orig }()
-	os.Args = []string{"rffmpeg", "--server", unreachable, "-i", "in.mp4", "out.mp4"}
+	os.Args = []string{"rffmpeg", "-i", "in.mp4", "out.mp4"}
 
 	code := ExitSuccess
 	stderr := captureStderr(func() {
 		code = run()
 	})
 	if code != ExitError {
-		t.Errorf("run() with unreachable --server = %d, want %d", code, ExitError)
+		t.Errorf("run() with an unreachable configured server = %d, want %d", code, ExitError)
 	}
 	if !strings.Contains(stderr, "server health check failed") {
 		t.Errorf("run() stderr = %q, want health check failure", stderr)
@@ -197,14 +230,15 @@ func TestRun_HealthCheckFailureOmitsHintForExplicitServerURL(t *testing.T) {
 	}
 }
 
-// TestRun_QuietSuppressesBannerOnRateLimit pins the --quiet contract on the
-// error path: a rate-limited submission under --quiet must emit exactly the
+// TestRun_QuietSuppressesBannerOnRateLimit pins the quiet contract on the error
+// path: a rate-limited submission with quiet configured must emit exactly the
 // single "Error submitting job: job submission failed [rate_limit_exceeded]:
 // …" line — no identity banner (version/Server), no "Input files"/"Output
 // file" lines, no "Submitting job..." or upload progress noise. Automation
-// asserting a one-line error message relies on --quiet suppressing the
-// pre-error banner; the terminal error itself is never suppressed.
+// asserting a one-line error message relies on quiet suppressing the pre-error
+// banner; the terminal error itself is never suppressed.
 func TestRun_QuietSuppressesBannerOnRateLimit(t *testing.T) {
+	isolateRunEnvironment(t)
 	input := filepath.Join(t.TempDir(), "in.mp4")
 	if err := os.WriteFile(input, []byte("dummy"), 0o644); err != nil {
 		t.Fatal(err)
@@ -243,24 +277,26 @@ func TestRun_QuietSuppressesBannerOnRateLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv(config.EnvQuiet, "1")
+	t.Setenv(config.EnvServerURL, srv.URL)
 	orig := os.Args
 	defer func() { os.Args = orig }()
-	os.Args = []string{"rffmpeg", "--quiet", "--server", srv.URL, "-i", input, "-c:v", "libx264", "out.mp4"}
+	os.Args = []string{"rffmpeg", "-i", input, "-c:v", "libx264", "out.mp4"}
 
 	code := ExitSuccess
 	stderr := captureStderr(func() {
 		code = run()
 	})
 	if code != ExitError {
-		t.Errorf("run() --quiet rate-limit = %d, want %d", code, ExitError)
+		t.Errorf("run() quiet rate-limit = %d, want %d", code, ExitError)
 	}
 	// The reported current count is not stable: a slot can be released between
 	// the server's limit check and its response, so the same rejection may read
 	// 9/10 or 10/10. Only the message shape is fixed, so match that and not the
-	// count — the anchored pattern still pins the single-line --quiet contract.
+	// count — the anchored pattern still pins the single-line quiet contract.
 	wantPattern := regexp.MustCompile(`^Error submitting job: job submission failed \[rate_limit_exceeded\]: rate limit exceeded: \d+/10 concurrent jobs\n$`)
 	if !wantPattern.MatchString(stderr) {
-		t.Errorf("run() --quiet rate-limit stderr = %q, want exactly one %q line", stderr, wantPattern)
+		t.Errorf("run() quiet rate-limit stderr = %q, want exactly one %q line", stderr, wantPattern)
 	}
 }
 
@@ -370,6 +406,8 @@ func TestEnforceOverwritePolicy(t *testing.T) {
 // touching the server beyond the health check, while -y reaches the upload —
 // so the zero-request assertion cannot pass vacuously.
 func TestRun_OverwriteRefusalSkipsUploadAndSubmit(t *testing.T) {
+	isolateRunEnvironment(t)
+	t.Setenv(config.EnvQuiet, "1")
 	var uploads, submits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -398,11 +436,12 @@ func TestRun_OverwriteRefusalSkipsUploadAndSubmit(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	t.Setenv(config.EnvServerURL, srv.URL)
 	orig := os.Args
 	defer func() { os.Args = orig }()
 
 	t.Run("no -y refuses before upload", func(t *testing.T) {
-		os.Args = []string{"rffmpeg", "-q", "--server", srv.URL, "-i", input, "-c:v", "libx264", outPath}
+		os.Args = []string{"rffmpeg", "-i", input, "-c:v", "libx264", outPath}
 		code := ExitSuccess
 		stderr := captureStderr(func() { code = run() })
 		if code != ExitError {
@@ -421,7 +460,7 @@ func TestRun_OverwriteRefusalSkipsUploadAndSubmit(t *testing.T) {
 
 	t.Run("-y -n refuses before upload", func(t *testing.T) {
 		uploadsBefore, submitsBefore := uploads, submits
-		os.Args = []string{"rffmpeg", "-q", "-y", "-n", "--server", srv.URL, "-i", input, "-c:v", "libx264", outPath}
+		os.Args = []string{"rffmpeg", "-y", "-n", "-i", input, "-c:v", "libx264", outPath}
 		code := ExitSuccess
 		stderr := captureStderr(func() { code = run() })
 		if code != ExitError {
@@ -440,7 +479,7 @@ func TestRun_OverwriteRefusalSkipsUploadAndSubmit(t *testing.T) {
 	})
 
 	t.Run("-y reaches upload", func(t *testing.T) {
-		os.Args = []string{"rffmpeg", "-q", "-y", "--server", srv.URL, "-i", input, "-c:v", "libx264", outPath}
+		os.Args = []string{"rffmpeg", "-y", "-i", input, "-c:v", "libx264", outPath}
 		code := ExitSuccess
 		captureStderr(func() { code = run() })
 		if code != ExitError {
@@ -766,7 +805,7 @@ func TestPrintEncoderDecoderHeader(t *testing.T) {
 var capabilityQueryCases = []struct {
 	flag    string
 	jsonKey string
-	run     func(serverURL, token string, jsonOut bool) int
+	run     func(cfg *config.Config) int
 }{
 	{"-encoders", "encoders", runEncoders},
 	{"-decoders", "decoders", runDecoders},
@@ -784,20 +823,21 @@ var capabilityQueryCases = []struct {
 func TestCapabilityQuery_ServerUnavailableFails(t *testing.T) {
 	for _, tc := range capabilityQueryCases {
 		t.Run(tc.flag, func(t *testing.T) {
-			for _, jsonOut := range []bool{false, true} {
+			for _, format := range []string{config.InfoFormatText, config.InfoFormatJSON} {
+				cfg := &config.Config{ServerURL: "http://127.0.0.1:1", InfoFormat: format}
 				var code int
 				stderr := ""
 				stdout := captureStdout(func() {
-					stderr = captureStderr(func() { code = tc.run("http://127.0.0.1:1", "", jsonOut) })
+					stderr = captureStderr(func() { code = tc.run(cfg) })
 				})
 				if code != ExitError {
-					t.Errorf("json=%v: exit code = %d, want %d", jsonOut, code, ExitError)
+					t.Errorf("format=%s: exit code = %d, want %d", format, code, ExitError)
 				}
 				if strings.TrimSpace(stdout) != "" {
-					t.Errorf("json=%v: leaked a capability list without a server: %q", jsonOut, stdout)
+					t.Errorf("format=%s: leaked a capability list without a server: %q", format, stdout)
 				}
-				if !strings.Contains(stderr, tc.flag) || !strings.Contains(stderr, localFallbackEnv) {
-					t.Errorf("json=%v: stderr must name the query and the opt-in: %q", jsonOut, stderr)
+				if !strings.Contains(stderr, tc.flag) || !strings.Contains(stderr, config.EnvLocalFallback) {
+					t.Errorf("format=%s: stderr must name the query and the opt-in: %q", format, stderr)
 				}
 			}
 		})
@@ -807,13 +847,13 @@ func TestCapabilityQuery_ServerUnavailableFails(t *testing.T) {
 // TestCapabilityQuery_LocalFallbackOptIn covers the other half: with the opt-in
 // the degradation is kept, but it is announced on stderr instead of silent.
 func TestCapabilityQuery_LocalFallbackOptIn(t *testing.T) {
-	t.Setenv(localFallbackEnv, "1")
 	for _, tc := range capabilityQueryCases {
 		t.Run(tc.flag, func(t *testing.T) {
+			cfg := &config.Config{ServerURL: "http://127.0.0.1:1", InfoFormat: config.InfoFormatText, LocalFallback: true}
 			var code int
 			stderr := ""
 			stdout := captureStdout(func() {
-				stderr = captureStderr(func() { code = tc.run("http://127.0.0.1:1", "", false) })
+				stderr = captureStderr(func() { code = tc.run(cfg) })
 			})
 			if code != ExitSuccess {
 				t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitSuccess, stderr)
@@ -828,15 +868,15 @@ func TestCapabilityQuery_LocalFallbackOptIn(t *testing.T) {
 	}
 }
 
-// TestCapabilityQuery_LocalFallbackJSON pins that the opt-in keeps --json output
+// TestCapabilityQuery_LocalFallbackJSON pins that the opt-in keeps JSON output
 // parseable: the warning lands on stderr, stdout stays a single JSON document.
 func TestCapabilityQuery_LocalFallbackJSON(t *testing.T) {
-	t.Setenv(localFallbackEnv, "1")
 	for _, tc := range capabilityQueryCases {
 		t.Run(tc.flag, func(t *testing.T) {
+			cfg := &config.Config{ServerURL: "http://127.0.0.1:1", InfoFormat: config.InfoFormatJSON, LocalFallback: true}
 			var code int
 			stdout := captureStdout(func() {
-				captureStderr(func() { code = tc.run("http://127.0.0.1:1", "", true) })
+				captureStderr(func() { code = tc.run(cfg) })
 			})
 			if code != ExitSuccess {
 				t.Fatalf("exit code = %d, want %d", code, ExitSuccess)
@@ -1315,11 +1355,11 @@ func TestOutputFormat_EncodersVsFfmpeg(t *testing.T) {
 	// The rffmpeg encoder output format should match ffmpeg's
 	// Verify the format: "{flags} {name:22} {description}"
 	// The local list is the fixture here, so enable the opt-in.
-	t.Setenv(localFallbackEnv, "1")
+	cfg := &config.Config{ServerURL: "http://127.0.0.1:1", LocalFallback: true, InfoFormat: config.InfoFormatText}
 
 	// Capture rffmpeg output (via the opt-in local ffmpeg fallback)
 	rffmpegOutput := captureStdout(func() {
-		exitCode := runEncoders("http://127.0.0.1:1", "", false)
+		exitCode := runEncoders(cfg)
 		if exitCode != ExitSuccess {
 			t.Fatalf("rffmpeg fallback failed: exit code %d", exitCode)
 		}
@@ -1367,9 +1407,9 @@ func TestOutputFormat_EncodersVsFfmpeg(t *testing.T) {
 }
 
 func TestOutputFormat_DecodersVsFfmpeg(t *testing.T) {
-	t.Setenv(localFallbackEnv, "1")
+	cfg := &config.Config{ServerURL: "http://127.0.0.1:1", LocalFallback: true, InfoFormat: config.InfoFormatText}
 	rffmpegOutput := captureStdout(func() {
-		exitCode := runDecoders("http://127.0.0.1:1", "", false)
+		exitCode := runDecoders(cfg)
 		if exitCode != ExitSuccess {
 			t.Fatalf("rffmpeg fallback failed: exit code %d", exitCode)
 		}
@@ -1403,9 +1443,9 @@ func TestOutputFormat_DecodersVsFfmpeg(t *testing.T) {
 
 func TestOutputFormat_HwaccelsVsFfmpeg(t *testing.T) {
 	// ffmpeg -hwaccels output is a simple list
-	t.Setenv(localFallbackEnv, "1")
+	cfg := &config.Config{ServerURL: "http://127.0.0.1:1", LocalFallback: true, InfoFormat: config.InfoFormatText}
 	rffmpegOutput := captureStdout(func() {
-		exitCode := runHwaccels("http://127.0.0.1:1", "", false)
+		exitCode := runHwaccels(cfg)
 		if exitCode != ExitSuccess {
 			t.Fatalf("rffmpeg fallback failed: exit code %d", exitCode)
 		}
@@ -1431,9 +1471,9 @@ func TestOutputFormat_HwaccelsVsFfmpeg(t *testing.T) {
 }
 
 func TestOutputFormat_FiltersVsFfmpeg(t *testing.T) {
-	t.Setenv(localFallbackEnv, "1")
+	cfg := &config.Config{ServerURL: "http://127.0.0.1:1", LocalFallback: true, InfoFormat: config.InfoFormatText}
 	rffmpegOutput := captureStdout(func() {
-		exitCode := runFilters("http://127.0.0.1:1", "", false)
+		exitCode := runFilters(cfg)
 		if exitCode != ExitSuccess {
 			t.Fatalf("rffmpeg fallback failed: exit code %d", exitCode)
 		}
@@ -2600,14 +2640,14 @@ func (f *fakeResumeClient) DownloadOutput(fileID, outputPath string) error {
 
 // runResumeForTest drives runResume with a fake client and returns its exit
 // code plus captured stderr.
-func runResumeForTest(t *testing.T, fake *fakeResumeClient, opts *Options) (int, string) {
+func runResumeForTest(t *testing.T, fake *fakeResumeClient, cfg *config.Config, opts *Options) (int, string) {
 	t.Helper()
 	jobSubmitted = false
 	defer func() { jobSubmitted = false }()
 
 	var code int
 	stderr := captureStderr(func() {
-		code = runResume(fake, &config.Config{}, opts, &stderrTee{})
+		code = runResume(fake, cfg, opts, &stderrTee{})
 	})
 	return code, stderr
 }
@@ -2630,7 +2670,7 @@ func TestRunResume_DownloadsCompletedJob(t *testing.T) {
 		payload: payload,
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-1"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-1"})
 
 	if code != ExitSuccess {
 		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
@@ -2673,7 +2713,7 @@ func TestRunResume_ExplicitTargetWins(t *testing.T) {
 		payload: "explicit-target",
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-2", ResumeOutput: target})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-2", ResumeOutput: target})
 
 	if code != ExitSuccess {
 		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
@@ -2708,7 +2748,7 @@ func TestRunResume_WaitsForRunningJob(t *testing.T) {
 		payload: "late-output",
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-3"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-3"})
 
 	if code != ExitSuccess {
 		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
@@ -2737,7 +2777,8 @@ func TestRunResume_GiveUpDetaches(t *testing.T) {
 		},
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-4", Timeout: 50 * time.Millisecond})
+	budget := config.Duration(50 * time.Millisecond)
+	code, stderr := runResumeForTest(t, fake, &config.Config{JobTimeout: &budget}, &Options{ResumeJobID: "job-resume-4"})
 
 	if code != ExitDisconnected {
 		t.Fatalf("code = %d, want ExitDisconnected; stderr: %s", code, stderr)
@@ -2748,7 +2789,7 @@ func TestRunResume_GiveUpDetaches(t *testing.T) {
 	if len(fake.downloads) != 0 {
 		t.Errorf("downloads = %v, want none", fake.downloads)
 	}
-	if !strings.Contains(stderr, "--resume job-resume-4") {
+	if !strings.Contains(stderr, config.EnvJobID+"=job-resume-4") {
 		t.Errorf("stderr missing re-attach hint: %s", stderr)
 	}
 }
@@ -2766,7 +2807,7 @@ func TestRunResume_FailedJobReportsTerminalFailure(t *testing.T) {
 		},
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-5"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-5"})
 
 	if code != ExitError {
 		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
@@ -2784,7 +2825,7 @@ func TestRunResume_FailedJobReportsTerminalFailure(t *testing.T) {
 func TestRunResume_UnknownJob(t *testing.T) {
 	fake := &fakeResumeClient{getErr: errors.New("job not found: 404")}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-missing"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-missing"})
 
 	if code != ExitError {
 		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
@@ -2806,7 +2847,7 @@ func TestRunResume_StreamingJobRejected(t *testing.T) {
 		},
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-6"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-6"})
 
 	if code != ExitError {
 		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
@@ -2832,7 +2873,7 @@ func TestRunResume_SharedFSJobReportsPath(t *testing.T) {
 		},
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-7"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-7"})
 
 	if code != ExitSuccess {
 		t.Fatalf("code = %d, want ExitSuccess; stderr: %s", code, stderr)
@@ -2857,7 +2898,7 @@ func TestRunResume_NoServerSideOutput(t *testing.T) {
 		},
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-8"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-8"})
 
 	if code != ExitError {
 		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
@@ -2892,7 +2933,7 @@ func TestRunResume_OverwriteRefusalPrecedesWait(t *testing.T) {
 		payload: "downloaded",
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-9"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-9"})
 
 	if code != ExitError {
 		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
@@ -2925,7 +2966,7 @@ func TestRunResume_SharedFSJobRejectsExplicitTarget(t *testing.T) {
 		},
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-10", ResumeOutput: filepath.Join(t.TempDir(), "want.mp4")})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-10", ResumeOutput: filepath.Join(t.TempDir(), "want.mp4")})
 
 	if code != ExitError {
 		t.Fatalf("code = %d, want ExitError; stderr: %s", code, stderr)
@@ -2964,7 +3005,7 @@ func TestRunResume_RelativeRecordedNameReportsAbsoluteTarget(t *testing.T) {
 		payload: "cwd-output",
 	}
 
-	code, stderr := runResumeForTest(t, fake, &Options{ResumeJobID: "job-resume-11"})
+	code, stderr := runResumeForTest(t, fake, &config.Config{}, &Options{ResumeJobID: "job-resume-11"})
 
 	want, err := filepath.Abs("recorded.mp4")
 	if err != nil {

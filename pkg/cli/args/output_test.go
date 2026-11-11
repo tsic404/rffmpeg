@@ -40,8 +40,11 @@ func TestOutputExtensionWarning(t *testing.T) {
 			wantSubstr: "not a recognized muxer extension",
 		},
 		{
-			name:       "unknown extension via -o warns",
-			args:       []string{"-i", "in.mp4", "-o", "out.out"},
+			// A token the native tool does not define consumes no value, so the
+			// trailing token is the output candidate (and its extension is what
+			// the warning is about).
+			name:       "unknown native name keeps the output candidate",
+			args:       []string{"-i", "in.mp4", "--verbose", "out.out"},
 			wantSubstr: "not a recognized muxer extension",
 		},
 		{

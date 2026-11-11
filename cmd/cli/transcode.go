@@ -19,29 +19,15 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// runTranscode submits the transcoding job described by opts/ffmpegArgs and
-// waits for it, streaming logs and downloading outputs.
-func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegArgs []string, sharedFS bool, tee *stderrTee) int {
-	quiet := opts.Quiet
-	autoHW := opts.AutoHW
-	timeout := opts.Timeout
-	pollTimeout := pollTimeoutBudget(cfg, opts)
-
-	parser := args.NewParser()
-	result, err := parser.Parse(ffmpegArgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing arguments: %v\n", err)
-		return ExitError
-	}
-
-	if msg := args.StreamingOutputError(result); msg != "" {
-		fmt.Fprintln(os.Stderr, msg)
-		return ExitError
-	}
-
-	if msg := args.OutputExtensionWarning(result); msg != "" {
-		fmt.Fprintln(os.Stderr, msg)
-	}
+// runTranscode submits the transcoding job described by result and waits for
+// it, streaming logs and downloading outputs.
+func runTranscode(cli *client.Client, cfg *config.Config, result *args.ParseResult, tee *stderrTee) int {
+	quiet := cfg.Quiet
+	autoHW := cfg.AutoHW
+	timeout := jobTimeoutBudget(cfg)
+	pollTimeout := pollTimeoutBudget(cfg)
+	sharedFS := cfg.IsSharedFS()
+	ffmpegArgs := result.RawArgs
 
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "Input files: %v\n", result.InputFiles)
@@ -213,6 +199,7 @@ func runTranscode(cli *client.Client, cfg *config.Config, opts *Options, ffmpegA
 
 	outputFilename := ""
 	if result.OutputFile != "" {
+		var err error
 		outputFilename, err = resolveOutputFilename(result.OutputFile, sharedFS)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving output path %s: %v\n", result.OutputFile, err)
@@ -317,7 +304,7 @@ type outputDownloader interface {
 	DownloadOutput(fileID, outputPath string) error
 }
 
-// jobResumeClient is the client surface --resume needs: the wait primitives
+// jobResumeClient is the client surface a re-attach needs: the wait primitives
 // (shared with the submit path) plus the output download.
 type jobResumeClient interface {
 	jobWaitClient
@@ -358,12 +345,13 @@ func downloadJobOutputs(cli outputDownloader, job *protocol.JobInfo, outputFile 
 }
 
 // runResume re-attaches to a job an earlier CLI run submitted — typically one
-// that gave up waiting with ExitDisconnected — and delivers its output. It
-// never cancels the job: a client-side give-up here leaves the work running
-// server-side, so the operator can attach again later.
+// that gave up waiting with ExitDisconnected — and delivers its output. The
+// trigger comes from the configuration plane's job-id variable, never from the
+// command line. It never cancels the job: a client-side give-up here leaves the
+// work running server-side, so the operator can attach again later.
 func runResume(cli jobResumeClient, cfg *config.Config, opts *Options, tee *stderrTee) int {
 	jobID := opts.ResumeJobID
-	quiet := opts.Quiet
+	quiet := cfg.Quiet
 
 	job, err := cli.GetJob(jobID)
 	if err != nil {
@@ -385,7 +373,7 @@ func runResume(cli jobResumeClient, cfg *config.Config, opts *Options, tee *stde
 		outputFile = job.OutputFilename
 	}
 	if outputFile == "" {
-		fmt.Fprintf(os.Stderr, "Error: job %s records no output filename; pass the target explicitly: rffmpeg --resume %s <output-path>\n", jobID, jobID)
+		fmt.Fprintf(os.Stderr, "Error: job %s records no output filename; pass the target explicitly: %s=%s rffmpeg <output-path>\n", jobID, config.EnvJobID, jobID)
 		return ExitError
 	}
 
@@ -416,7 +404,7 @@ func runResume(cli jobResumeClient, cfg *config.Config, opts *Options, tee *stde
 			fmt.Fprintln(os.Stderr, "Waiting for completion...")
 		}
 		var code int
-		job, code = waitForJobLoop(cli, jobID, opts.Timeout, pollTimeoutBudget(cfg, opts), false, quiet, giveUpDetaches)
+		job, code = waitForJobLoop(cli, jobID, jobTimeoutBudget(cfg), pollTimeoutBudget(cfg), false, quiet, giveUpDetaches)
 		if code != ExitSuccess {
 			return code
 		}

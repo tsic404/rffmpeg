@@ -5,9 +5,9 @@ import "strings"
 // noticePrefix marks rffmpeg's own notification lines — cache hit, encoder
 // rewrite, software fallback, and the worker's other [rffmpeg]-prefixed
 // observability messages. These travel the same stderr stream as ffmpeg's raw
-// output, but --quiet must not suppress them: they are the project's
+// output, but RFFMPEG_QUIET must not suppress them: they are the project's
 // notification channel, and a quiet run still needs them (e.g. cache-hit
-// confirmation for automation). Under --quiet every other stderr line is
+// confirmation for automation). Under RFFMPEG_QUIET every other stderr line is
 // dropped — ffmpeg's own log, warnings and errors included; hard failures are
 // still surfaced through the CLI's terminal "Job failed:" verdict.
 const noticePrefix = "[rffmpeg]"

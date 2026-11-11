@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-// diagLogFileEnv names the file where the CLI appends a diagnostic record when
-// it exits before submitting a job. Empty (the default) disables capture
-// entirely: as a drop-in ffmpeg replacement the CLI must leave its stderr
-// stream and the filesystem untouched unless explicitly asked to log.
-const diagLogFileEnv = "RFFMPEG_LOG_FILE"
-
 // maxDiagBytes bounds the stderr mirror so a long-running transcode that keeps
 // streaming progress to stderr cannot grow memory without limit. Pre-submit
 // failures only emit a few lines, so the trailing tail is more than enough.
@@ -71,6 +65,7 @@ func (w teeWriter) Write(p []byte) (int, error) {
 type stderrTee struct {
 	mu       sync.Mutex
 	logPath  string
+	token    string
 	buf      *tailBuffer
 	orig     *os.File
 	w        *os.File
@@ -80,12 +75,12 @@ type stderrTee struct {
 	recorded bool
 }
 
-// startStderrTee begins mirroring os.Stderr when diagLogFileEnv is set. It
-// always returns a tee; when the variable is unset or the pipe cannot be
-// created, the returned tee is disabled and stderr is left untouched.
-func startStderrTee() *stderrTee {
-	logPath := os.Getenv(diagLogFileEnv)
-	t := &stderrTee{logPath: logPath}
+// startStderrTee begins mirroring os.Stderr when logPath is set — the
+// configuration plane names the file and nothing else can. It always returns a
+// tee; when the path is empty or the pipe cannot be created, the returned tee
+// is disabled and stderr is left untouched.
+func startStderrTee(logPath, token string) *stderrTee {
+	t := &stderrTee{logPath: logPath, token: token}
 	if logPath == "" {
 		return t
 	}
@@ -148,7 +143,7 @@ func (t *stderrTee) record(exitCode int, serverURL string) {
 	}
 	t.drain()
 	t.recorded = true
-	_ = appendDiagRecord(t.logPath, exitCode, serverURL, t.buf.String())
+	_ = appendDiagRecord(t.logPath, exitCode, serverURL, t.buf.String(), t.token)
 }
 
 // drain closes the pipe write end and waits for the drain goroutine to finish.
@@ -163,7 +158,7 @@ func (t *stderrTee) drain() {
 }
 
 // appendDiagRecord writes one diagnostic entry to logPath (0600, append).
-func appendDiagRecord(logPath string, exitCode int, serverURL, stderr string) error {
+func appendDiagRecord(logPath string, exitCode int, serverURL, stderr, token string) error {
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
@@ -173,7 +168,7 @@ func appendDiagRecord(logPath string, exitCode int, serverURL, stderr string) er
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "%s rffmpeg[%d] exit=%d pre-submit-failure server=%s\n",
 		time.Now().UTC().Format(time.RFC3339), os.Getpid(), exitCode, serverURL)
-	fmt.Fprintf(&b, "argv: %s\n", redactSecrets(os.Args))
+	fmt.Fprintf(&b, "argv: %s\n", redactSecrets(token))
 	if stderr != "" {
 		fmt.Fprintf(&b, "--- captured stderr ---\n%s", stderr)
 		if !strings.HasSuffix(stderr, "\n") {
@@ -184,23 +179,29 @@ func appendDiagRecord(logPath string, exitCode int, serverURL, stderr string) er
 	return err
 }
 
-// redactSecrets renders argv for the diagnostic log, masking the value of any
-// --token/-token flag so an auth token never lands on disk.
-func redactSecrets(argv []string) string {
-	out := make([]string, 0, len(argv))
-	for i := 0; i < len(argv); i++ {
-		a := argv[i]
+// redactSecrets renders argv for the diagnostic log with two masks, so a
+// credential never lands on disk however it reached the command line: every
+// occurrence of the configured token value, and the payload after an inline
+// `--token=` / `-token=` prefix. Masking a spelling is log rendering only —
+// the parser still treats those tokens as ordinary job arguments (C-7).
+func redactSecrets(token string) string {
+	masked := make([]string, 0, len(os.Args))
+	for i := 0; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if token != "" {
+			arg = strings.ReplaceAll(arg, token, "<redacted>")
+		}
 		switch {
-		case a == "--token" || a == "-token":
-			out = append(out, a, "<redacted>")
-			if i+1 < len(argv) {
+		case arg == "--token" || arg == "-token":
+			masked = append(masked, arg, "<redacted>")
+			if i+1 < len(os.Args) {
 				i++
 			}
-		case strings.HasPrefix(a, "--token=") || strings.HasPrefix(a, "-token="):
-			out = append(out, a[:strings.IndexByte(a, '=')]+"=<redacted>")
+		case strings.HasPrefix(arg, "--token=") || strings.HasPrefix(arg, "-token="):
+			masked = append(masked, arg[:strings.IndexByte(arg, '=')]+"=<redacted>")
 		default:
-			out = append(out, a)
+			masked = append(masked, arg)
 		}
 	}
-	return strings.Join(out, " ")
+	return strings.Join(masked, " ")
 }

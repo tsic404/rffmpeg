@@ -1,406 +1,432 @@
 package config
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
-func TestLoadDefault(t *testing.T) {
-	// Isolate test environment from external config files
-	t.Setenv("HOME", t.TempDir())
-
-	// Clear env vars
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-	os.Unsetenv("RFFMPEG_TOKEN")
-	os.Unsetenv("RFFMPEG_SHARED_FS")
-	os.Unsetenv("RFFMPEG_MAX_RETRIES")
-	os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if cfg.ServerURL != DefaultServerURL {
-		t.Errorf("Load() ServerURL = %v, want %v", cfg.ServerURL, DefaultServerURL)
-	}
-	if cfg.SharedFS {
-		t.Errorf("Load() SharedFS = true, want false (default)")
+// clearEnv blanks every configuration-plane variable so ambient values from
+// the developer's shell or another test cannot leak into a case. An empty
+// value is the documented "unset" spelling for all of them.
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		EnvServerURL, EnvToken, EnvSharedFS, EnvQuiet, EnvAutoHW, EnvRetry,
+		EnvJobTimeout, EnvPollTimeout, EnvMaxRetries, EnvServerLossTimeout,
+		EnvInfoFormat, EnvLocalFallback, EnvLogFile, EnvJobID,
+	} {
+		t.Setenv(name, "")
 	}
 }
 
-func TestLoadEnvOverride(t *testing.T) {
-	os.Setenv("RFFMPEG_SERVER_URL", "http://test.example.com")
-	os.Setenv("RFFMPEG_TOKEN", "test-token")
-	defer func() {
-		os.Unsetenv("RFFMPEG_SERVER_URL")
-		os.Unsetenv("RFFMPEG_TOKEN")
-	}()
-
-	cfg, err := Load()
+// captureStderr redirects os.Stderr for the duration of a load and returns the
+// collected text once the caller closes over it.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("pipe: %v", err)
 	}
-
-	if cfg.ServerURL != "http://test.example.com" {
-		t.Errorf("Load() ServerURL = %v, want http://test.example.com", cfg.ServerURL)
-	}
-	if cfg.Token != "test-token" {
-		t.Errorf("Load() Token = %v, want test-token", cfg.Token)
-	}
-}
-
-func TestLoadMaxRetriesEnv(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	os.Unsetenv("RFFMPEG_MAX_RETRIES")
-
-	if cfg, _ := Load(); cfg.MaxRetries != nil {
-		t.Errorf("Load() MaxRetries = %v, want nil when unset", cfg.MaxRetries)
-	}
-
-	os.Setenv("RFFMPEG_MAX_RETRIES", "7")
-	defer os.Unsetenv("RFFMPEG_MAX_RETRIES")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.MaxRetries == nil || *cfg.MaxRetries != 7 {
-		t.Errorf("Load() MaxRetries = %v, want 7", cfg.MaxRetries)
-	}
-
-	// Non-numeric values are ignored, leaving the field unset.
-	os.Setenv("RFFMPEG_MAX_RETRIES", "abc")
-	if cfg, _ := Load(); cfg.MaxRetries != nil {
-		t.Errorf("Load() MaxRetries = %v, want nil for non-numeric env", cfg.MaxRetries)
-	}
-
-	// 0 = no retries: it must be honored, not ignored.
-	os.Setenv("RFFMPEG_MAX_RETRIES", "0")
-	if cfg, _ := Load(); cfg.MaxRetries == nil || *cfg.MaxRetries != 0 {
-		t.Errorf("Load() MaxRetries = %v, want 0 for zero env", cfg.MaxRetries)
-	}
-}
-
-func TestLoadServerLossTimeoutEnv(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
-
-	// Unset -> nil (the caller falls back to DefaultServerLossTimeout).
-	if cfg, _ := Load(); cfg.ServerLossTimeout != nil {
-		t.Errorf("Load() ServerLossTimeout = %v, want nil when unset", cfg.ServerLossTimeout)
-	}
-
-	// Valid duration overrides.
-	os.Setenv("RFFMPEG_SERVER_LOSS_TIMEOUT", "30s")
-	defer os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
-	if cfg, _ := Load(); cfg.ServerLossTimeout == nil || time.Duration(*cfg.ServerLossTimeout) != 30*time.Second {
-		t.Errorf("Load() ServerLossTimeout = %v, want 30s", cfg.ServerLossTimeout)
-	}
-
-	// 0 = cap disabled: it must be honored, not ignored.
-	os.Setenv("RFFMPEG_SERVER_LOSS_TIMEOUT", "0s")
-	if cfg, _ := Load(); cfg.ServerLossTimeout == nil || *cfg.ServerLossTimeout != 0 {
-		t.Errorf("Load() ServerLossTimeout = %v, want 0 (cap disabled) for zero env", cfg.ServerLossTimeout)
-	}
-
-	// Invalid or negative durations are ignored, leaving the field unset.
-	for _, v := range []string{"abc", "-5s"} {
-		os.Setenv("RFFMPEG_SERVER_LOSS_TIMEOUT", v)
-		if cfg, _ := Load(); cfg.ServerLossTimeout != nil {
-			t.Errorf("Load() ServerLossTimeout = %v for env %q, want nil", cfg.ServerLossTimeout, v)
+	os.Stderr = w
+	return func() string {
+		t.Helper()
+		os.Stderr = old
+		if err := w.Close(); err != nil {
+			t.Fatalf("close: %v", err)
 		}
-	}
-}
-
-func TestLoadPollTimeoutEnv(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
-
-	// Unset -> nil (the caller falls back to DefaultPollTimeout).
-	if cfg, _ := Load(); cfg.PollTimeout != nil {
-		t.Errorf("Load() PollTimeout = %v, want nil when unset", cfg.PollTimeout)
-	}
-
-	// Valid duration overrides.
-	os.Setenv("RFFMPEG_POLL_TIMEOUT", "25m")
-	defer os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
-	if cfg, _ := Load(); cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 25*time.Minute {
-		t.Errorf("Load() PollTimeout = %v, want 25m", cfg.PollTimeout)
-	}
-
-	// 0 = opt out: it must be honored, not ignored.
-	os.Setenv("RFFMPEG_POLL_TIMEOUT", "0s")
-	if cfg, _ := Load(); cfg.PollTimeout == nil || *cfg.PollTimeout != 0 {
-		t.Errorf("Load() PollTimeout = %v, want 0 (opt out) for zero env", cfg.PollTimeout)
-	}
-
-	// Invalid or negative durations are ignored, leaving the field unset.
-	for _, v := range []string{"abc", "-5m"} {
-		os.Setenv("RFFMPEG_POLL_TIMEOUT", v)
-		if cfg, _ := Load(); cfg.PollTimeout != nil {
-			t.Errorf("Load() PollTimeout = %v for env %q, want nil", cfg.PollTimeout, v)
+		data, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("read: %v", err)
 		}
+		return string(data)
 	}
 }
 
-func TestLoadConfigFile(t *testing.T) {
-	// Create temp config file
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "rffmpeg.json")
-	configContent := `{"server_url": "http://config.example.com", "token": "config-token", "max_retries": 7}`
-	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
-		t.Fatalf("Failed to write config file: %v", err)
+// writeLayer writes a config file with mode and returns its path.
+func writeLayer(t *testing.T, dir, name, body string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), mode); err != nil {
+		t.Fatalf("write %s: %v", path, err)
 	}
-
-	// Change to temp dir
-	oldDir, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldDir)
-
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-	os.Unsetenv("RFFMPEG_TOKEN")
-	os.Unsetenv("RFFMPEG_SHARED_FS")
-	os.Unsetenv("RFFMPEG_MAX_RETRIES")
-	os.Unsetenv("RFFMPEG_SERVER_LOSS_TIMEOUT")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+	// WriteFile honors the umask; force the exact mode the case needs.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("chmod %s: %v", path, err)
 	}
-
-	if cfg.ServerURL != "http://config.example.com" {
-		t.Errorf("Load() ServerURL = %v, want http://config.example.com", cfg.ServerURL)
-	}
-	if cfg.MaxRetries == nil || *cfg.MaxRetries != 7 {
-		t.Errorf("Load() MaxRetries = %v, want 7 from config file", cfg.MaxRetries)
-	}
+	return path
 }
 
-func TestLoadPollTimeoutConfigFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "rffmpeg.json")
-
-	oldDir, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldDir)
-	os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
-
-	// String form: "5m" must parse, not silently no-op.
-	if err := os.WriteFile(configPath, []byte(`{"poll_timeout": "5m"}`), 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 5*time.Minute {
-		t.Errorf("Load() PollTimeout = %v, want 5m from config file", cfg.PollTimeout)
-	}
-
-	// 0 in the config file is the opt-out value, not "unset".
-	if err := os.WriteFile(configPath, []byte(`{"poll_timeout": "0s"}`), 0600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg, err = Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.PollTimeout == nil || *cfg.PollTimeout != 0 {
-		t.Errorf("Load() PollTimeout = %v, want 0 (opt out) from config file", cfg.PollTimeout)
-	}
-
-	// Env overrides the config-file value.
-	os.Setenv("RFFMPEG_POLL_TIMEOUT", "30m")
-	defer os.Unsetenv("RFFMPEG_POLL_TIMEOUT")
-	cfg, err = Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 30*time.Minute {
-		t.Errorf("Load() PollTimeout = %v, want 30m from env override", cfg.PollTimeout)
-	}
-}
-
-func TestSave(t *testing.T) {
-	cfg := &Config{
-		ServerURL: "http://save.example.com",
-		Token:     "save-token",
-	}
-
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.json")
-
-	if err := cfg.Save(configPath); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	// Read back and verify
-	loaded, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	_ = loaded // Config file in temp dir won't be loaded by default Load()
-}
-
-func TestLoadSharedFS_EnvSetTo1(t *testing.T) {
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-	os.Unsetenv("RFFMPEG_TOKEN")
-	os.Setenv("RFFMPEG_SHARED_FS", "1")
-	defer os.Unsetenv("RFFMPEG_SHARED_FS")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.SharedFS {
-		t.Errorf("Load() SharedFS = false, want true (RFFMPEG_SHARED_FS=1)")
-	}
-	if !cfg.IsSharedFS() {
-		t.Errorf("IsSharedFS() = false, want true")
-	}
-}
-
-func TestLoadSharedFS_EnvSetToTrue(t *testing.T) {
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-	os.Unsetenv("RFFMPEG_TOKEN")
-	os.Setenv("RFFMPEG_SHARED_FS", "true")
-	defer os.Unsetenv("RFFMPEG_SHARED_FS")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.SharedFS {
-		t.Errorf("Load() SharedFS = false, want true (RFFMPEG_SHARED_FS=true)")
-	}
-}
-
-func TestLoadSharedFS_EnvSetTo0(t *testing.T) {
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-	os.Unsetenv("RFFMPEG_TOKEN")
-	os.Setenv("RFFMPEG_SHARED_FS", "0")
-	defer os.Unsetenv("RFFMPEG_SHARED_FS")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.SharedFS {
-		t.Errorf("Load() SharedFS = true, want false (RFFMPEG_SHARED_FS=0)")
-	}
-}
-
-func TestLoadSharedFS_EnvUnset(t *testing.T) {
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-	os.Unsetenv("RFFMPEG_TOKEN")
-	os.Unsetenv("RFFMPEG_SHARED_FS")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.SharedFS {
-		t.Errorf("Load() SharedFS = true, want false (RFFMPEG_SHARED_FS unset)")
-	}
-}
-
-func TestLoadSharedFS_FromConfigFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	configContent := `{"server_url": "http://localhost:8080", "shared_fs": true}`
-	if err := os.WriteFile(filepath.Join(tmpDir, "rffmpeg.json"), []byte(configContent), 0600); err != nil {
-		t.Fatalf("Failed to write config file: %v", err)
-	}
-
-	oldDir, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldDir)
-
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-	os.Unsetenv("RFFMPEG_TOKEN")
-	os.Unsetenv("RFFMPEG_SHARED_FS")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if !cfg.SharedFS {
-		t.Errorf("Load() SharedFS = false, want true (from config file)")
-	}
-}
-
-func TestLoadServerURLSource(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	os.Unsetenv("RFFMPEG_SERVER_URL")
-
+func emptyPaths(t *testing.T) Paths {
+	t.Helper()
 	dir := t.TempDir()
-	oldDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
+	return Paths{
+		CurrentDir: filepath.Join(dir, "cwd.json"),
+		Home:       filepath.Join(dir, "home.json"),
+		System:     filepath.Join(dir, "system.json"),
 	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir: %v", err)
-	}
-	defer os.Chdir(oldDir)
+}
 
-	// No config file, no env -> default.
-	cfg, err := Load()
+func TestLoadDefaults(t *testing.T) {
+	clearEnv(t)
+	cfg, err := load(emptyPaths(t))
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ServerURL != DefaultServerURL {
+		t.Errorf("ServerURL = %q, want %q", cfg.ServerURL, DefaultServerURL)
 	}
 	if cfg.ServerURLSource != ServerURLSourceDefault {
 		t.Errorf("ServerURLSource = %q, want %q", cfg.ServerURLSource, ServerURLSourceDefault)
 	}
-
-	// Config file sets server_url. The source must read "config file" even
-	// when the value equals the default, or the banner would mislabel it.
-	configContent := `{"server_url": "` + DefaultServerURL + `"}`
-	if err := os.WriteFile(filepath.Join(dir, "rffmpeg.json"), []byte(configContent), 0600); err != nil {
-		t.Fatalf("Failed to write config file: %v", err)
+	if cfg.InfoFormat != InfoFormatText {
+		t.Errorf("InfoFormat = %q, want %q", cfg.InfoFormat, InfoFormatText)
 	}
-	cfg, err = Load()
+	if cfg.Quiet || cfg.AutoHW || cfg.Retry || cfg.SharedFS || cfg.LocalFallback {
+		t.Errorf("boolean defaults are not all off: %+v", cfg)
+	}
+	if cfg.JobTimeout != nil || cfg.PollTimeout != nil || cfg.MaxRetries != nil || cfg.ServerLossTimeout != nil {
+		t.Errorf("budget defaults are not unset: %+v", cfg)
+	}
+}
+
+// TestLoadLayerPrecedence pins the documented order: environment, current
+// directory, user home, system, defaults — each layer overriding only the keys
+// it sets.
+func TestLoadLayerPrecedence(t *testing.T) {
+	clearEnv(t)
+	paths := emptyPaths(t)
+	writeLayer(t, filepath.Dir(paths.System), "system.json",
+		`{"server_url":"http://system","token":"system-token","quiet":true,"max_retries":3}`, 0o644)
+	writeLayer(t, filepath.Dir(paths.Home), "home.json",
+		`{"server_url":"http://home","max_retries":7,"auto_hw":true}`, 0o644)
+	writeLayer(t, filepath.Dir(paths.CurrentDir), "cwd.json",
+		`{"poll_timeout":"3m","retry":true}`, 0o644)
+
+	cfg, err := load(paths)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("load: %v", err)
 	}
-	if cfg.ServerURLSource != ServerURLSourceConfig {
-		t.Errorf("ServerURLSource = %q, want %q", cfg.ServerURLSource, ServerURLSourceConfig)
+	if cfg.ServerURL != "http://home" || cfg.ServerURLSource != ServerURLSourceHome {
+		t.Errorf("server URL = %q (%q), want http://home (%q)", cfg.ServerURL, cfg.ServerURLSource, ServerURLSourceHome)
+	}
+	if cfg.Token != "system-token" {
+		t.Errorf("Token = %q, want the system layer's value (no higher layer sets it)", cfg.Token)
+	}
+	if !cfg.Quiet {
+		t.Error("Quiet = false, want the system layer's true")
+	}
+	if !cfg.AutoHW {
+		t.Error("AutoHW = false, want the home layer's true")
+	}
+	if cfg.MaxRetries == nil || *cfg.MaxRetries != 7 {
+		t.Errorf("MaxRetries = %v, want the home layer's 7", cfg.MaxRetries)
+	}
+	if !cfg.Retry {
+		t.Error("Retry = false, want the current-directory layer's true")
+	}
+	if cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 3*time.Minute {
+		t.Errorf("PollTimeout = %v, want the current-directory layer's 3m", cfg.PollTimeout)
 	}
 
-	// An explicit empty server_url must still read as "config file", never
-	// "default". "" overwrites the default with an empty URL; null is a
-	// JSON no-op for a string field and leaves the default value in place, but
-	// both are key-present and so share the "config file" label.
-	for _, tc := range []struct {
-		content string
+	t.Setenv(EnvServerURL, "http://env")
+	cfg, err = load(paths)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ServerURL != "http://env" || cfg.ServerURLSource != ServerURLSourceEnv {
+		t.Errorf("server URL = %q (%q), want the env layer", cfg.ServerURL, cfg.ServerURLSource)
+	}
+}
+
+// TestCurrentDirTrust covers the current-directory adoption rules: regular
+// file, owner, then group/other writability, judged by a symlink's target.
+func TestCurrentDirTrust(t *testing.T) {
+	clearEnv(t)
+
+	trusted := `{"server_url":"http://trusted"}`
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, dir string, path string)
 		wantURL string
+		wantSrc ServerURLSource
+		warn    string // empty = no warning expected
 	}{
-		{`{"server_url": ""}`, ""},
-		{`{"server_url": null}`, DefaultServerURL},
-	} {
-		if err := os.WriteFile(filepath.Join(dir, "rffmpeg.json"), []byte(tc.content), 0600); err != nil {
-			t.Fatalf("Failed to write config file: %v", err)
-		}
-		cfg, err = Load()
-		if err != nil {
-			t.Fatalf("Load() error = %v", err)
-		}
-		if cfg.ServerURL != tc.wantURL {
-			t.Errorf("ServerURL = %q, want %q for %s", cfg.ServerURL, tc.wantURL, tc.content)
-		}
-		if cfg.ServerURLSource != ServerURLSourceConfig {
-			t.Errorf("ServerURLSource = %q, want %q for %s", cfg.ServerURLSource, ServerURLSourceConfig, tc.content)
-		}
+		{
+			name: "regular file is adopted",
+			prepare: func(t *testing.T, dir, path string) {
+				writeLayer(t, dir, filepath.Base(path), trusted, 0o644)
+			},
+			wantURL: "http://trusted",
+			wantSrc: ServerURLSourceCWD,
+		},
+		{
+			name: "group writable is skipped",
+			prepare: func(t *testing.T, dir, path string) {
+				writeLayer(t, dir, filepath.Base(path), trusted, 0o664)
+			},
+			wantURL: DefaultServerURL,
+			wantSrc: ServerURLSourceDefault,
+			warn:    reasonWritable,
+		},
+		{
+			name: "world writable is skipped",
+			prepare: func(t *testing.T, dir, path string) {
+				writeLayer(t, dir, filepath.Base(path), trusted, 0o646)
+			},
+			wantURL: DefaultServerURL,
+			wantSrc: ServerURLSourceDefault,
+			warn:    reasonWritable,
+		},
+		{
+			name: "directory is skipped",
+			prepare: func(t *testing.T, dir, path string) {
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			},
+			wantURL: DefaultServerURL,
+			wantSrc: ServerURLSourceDefault,
+			warn:    reasonNotRegularFile,
+		},
+		{
+			name: "fifo is skipped",
+			prepare: func(t *testing.T, dir, path string) {
+				if err := syscall.Mkfifo(path, 0o644); err != nil {
+					t.Fatalf("mkfifo: %v", err)
+				}
+			},
+			wantURL: DefaultServerURL,
+			wantSrc: ServerURLSourceDefault,
+			warn:    reasonNotRegularFile,
+		},
+		{
+			name: "dangling symlink is skipped as not a regular file",
+			prepare: func(t *testing.T, dir, path string) {
+				if err := os.Symlink(filepath.Join(dir, "missing"), path); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+			wantURL: DefaultServerURL,
+			wantSrc: ServerURLSourceDefault,
+			warn:    reasonNotRegularFile,
+		},
+		{
+			name: "symlink to an untrusted target is judged by the target",
+			prepare: func(t *testing.T, dir, path string) {
+				target := writeLayer(t, dir, "target.json", trusted, 0o664)
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+			wantURL: DefaultServerURL,
+			wantSrc: ServerURLSourceDefault,
+			warn:    reasonWritable,
+		},
+		{
+			name: "symlink to a trusted target is adopted",
+			prepare: func(t *testing.T, dir, path string) {
+				target := writeLayer(t, dir, "target.json", trusted, 0o644)
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+			wantURL: "http://trusted",
+			wantSrc: ServerURLSourceCWD,
+		},
+		{
+			name:    "missing file is an absent layer",
+			prepare: func(t *testing.T, dir, path string) {},
+			wantURL: DefaultServerURL,
+			wantSrc: ServerURLSourceDefault,
+		},
 	}
 
-	// Env overrides config file -> env.
-	os.Setenv("RFFMPEG_SERVER_URL", "http://env.example.com")
-	defer os.Unsetenv("RFFMPEG_SERVER_URL")
-	cfg, err = Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "cwd.json")
+			tc.prepare(t, dir, path)
+
+			done := captureStderr(t)
+			cfg, err := load(Paths{CurrentDir: path, Home: filepath.Join(dir, "home.json"), System: filepath.Join(dir, "system.json")})
+			stderr := done()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.ServerURL != tc.wantURL || cfg.ServerURLSource != tc.wantSrc {
+				t.Errorf("server URL = %q (%q), want %q (%q)", cfg.ServerURL, cfg.ServerURLSource, tc.wantURL, tc.wantSrc)
+			}
+			if tc.warn == "" {
+				if stderr != "" {
+					t.Errorf("unexpected warning: %q", stderr)
+				}
+				return
+			}
+			want := "Warning: ignoring config file " + path + ": " + tc.warn + "\n"
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr = %q, want the warning %q", stderr, want)
+			}
+			if strings.Count(stderr, "\n") != 1 {
+				t.Errorf("stderr has more than one line: %q", stderr)
+			}
+		})
 	}
-	if cfg.ServerURLSource != ServerURLSourceEnv {
-		t.Errorf("ServerURLSource = %q, want %q", cfg.ServerURLSource, ServerURLSourceEnv)
+}
+
+// TestCurrentDirOwnerMismatch pins the owner condition. Creating a file owned
+// by another user needs root, so the case swaps the effective uid instead.
+func TestCurrentDirOwnerMismatch(t *testing.T) {
+	clearEnv(t)
+	owner, ok := fileOwnerUID(mustStat(t, writeLayer(t, t.TempDir(), "probe.json", "{}", 0o644)))
+	if !ok {
+		t.Skip("this platform reports no file owner")
+	}
+	original := currentEUID
+	currentEUID = func() uint32 { return owner + 1 }
+	t.Cleanup(func() { currentEUID = original })
+
+	dir := t.TempDir()
+	path := writeLayer(t, dir, "cwd.json", `{"server_url":"http://trusted"}`, 0o644)
+
+	done := captureStderr(t)
+	cfg, err := load(Paths{CurrentDir: path, Home: filepath.Join(dir, "home.json"), System: filepath.Join(dir, "system.json")})
+	stderr := done()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ServerURL != DefaultServerURL {
+		t.Errorf("ServerURL = %q, want the built-in default", cfg.ServerURL)
+	}
+	if !strings.Contains(stderr, reasonOwnerMismatch) {
+		t.Errorf("stderr = %q, want the %q reason", stderr, reasonOwnerMismatch)
+	}
+}
+
+// mustStat is a helper for the owner-check fixture.
+func mustStat(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return fi
+}
+
+func TestLoadEnvValues(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(EnvServerURL, "http://env")
+	t.Setenv(EnvToken, "env-token")
+	t.Setenv(EnvQuiet, "true")
+	t.Setenv(EnvAutoHW, "1")
+	t.Setenv(EnvRetry, "1")
+	t.Setenv(EnvJobTimeout, "45m")
+	t.Setenv(EnvPollTimeout, "0")
+	t.Setenv(EnvMaxRetries, "0")
+	t.Setenv(EnvServerLossTimeout, "0")
+	t.Setenv(EnvInfoFormat, "json")
+	t.Setenv(EnvLocalFallback, "1")
+	t.Setenv(EnvSharedFS, "true")
+	t.Setenv(EnvLogFile, "/tmp/diag.log")
+
+	cfg, err := load(emptyPaths(t))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ServerURL != "http://env" || cfg.ServerURLSource != ServerURLSourceEnv {
+		t.Errorf("server URL = %q (%q)", cfg.ServerURL, cfg.ServerURLSource)
+	}
+	if cfg.Token != "env-token" {
+		t.Errorf("Token = %q", cfg.Token)
+	}
+	if !cfg.Quiet || !cfg.AutoHW || !cfg.Retry || !cfg.SharedFS || !cfg.LocalFallback {
+		t.Errorf("boolean env values not applied: %+v", cfg)
+	}
+	if cfg.JobTimeout == nil || time.Duration(*cfg.JobTimeout) != 45*time.Minute {
+		t.Errorf("JobTimeout = %v, want 45m", cfg.JobTimeout)
+	}
+	if cfg.PollTimeout == nil || time.Duration(*cfg.PollTimeout) != 0 {
+		t.Errorf("PollTimeout = %v, want an explicit 0", cfg.PollTimeout)
+	}
+	if cfg.MaxRetries == nil || *cfg.MaxRetries != 0 {
+		t.Errorf("MaxRetries = %v, want an explicit 0", cfg.MaxRetries)
+	}
+	if cfg.ServerLossTimeout == nil || time.Duration(*cfg.ServerLossTimeout) != 0 {
+		t.Errorf("ServerLossTimeout = %v, want an explicit 0", cfg.ServerLossTimeout)
+	}
+	if !cfg.IsJSON() {
+		t.Errorf("InfoFormat = %q, want json", cfg.InfoFormat)
+	}
+	if cfg.LogFile != "/tmp/diag.log" {
+		t.Errorf("LogFile = %q", cfg.LogFile)
+	}
+}
+
+// TestLoadRejectsInvalidValues pins C-13: an unusable job budget is rejected
+// before anything is submitted, never silently replaced by a default.
+func TestLoadRejectsInvalidValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   string
+		value string
+		want  string
+	}{
+		{"job timeout zero", EnvJobTimeout, "0", "positive duration"},
+		{"job timeout negative", EnvJobTimeout, "-5m", "positive duration"},
+		{"job timeout unparsable", EnvJobTimeout, "not-a-duration", "positive duration"},
+		{"poll timeout negative", EnvPollTimeout, "-1s", "non-negative duration"},
+		{"max retries negative", EnvMaxRetries, "-1", "non-negative integer"},
+		{"server loss negative", EnvServerLossTimeout, "-1s", "non-negative duration"},
+		{"info format unknown", EnvInfoFormat, "yaml", "info_format"},
+		{"quiet not boolean", EnvQuiet, "maybe", "must be one of"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(tc.env, tc.value)
+			_, err := load(emptyPaths(t))
+			if err == nil {
+				t.Fatalf("load accepted %s=%q", tc.env, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestJobTimeoutConfigFileValidation covers the same C-13 rejection for the
+// file layer.
+func TestJobTimeoutConfigFileValidation(t *testing.T) {
+	clearEnv(t)
+	paths := emptyPaths(t)
+	writeLayer(t, filepath.Dir(paths.Home), "home.json", `{"job_timeout":"0s"}`, 0o644)
+	if _, err := load(paths); err == nil || !strings.Contains(err.Error(), "job_timeout") {
+		t.Fatalf("load error = %v, want a job_timeout rejection", err)
+	}
+}
+
+func TestSaveRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "saved.json")
+	cfg := &Config{ServerURL: "http://saved", Token: "t", InfoFormat: InfoFormatJSON, Quiet: true}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, want := range []string{`"server_url": "http://saved"`, `"quiet": true`, `"info_format": "json"`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("saved file lacks %q:\n%s", want, data)
+		}
+	}
+	if strings.Contains(string(data), `"server_url_source"`) {
+		t.Errorf("saved file carries the derived source:\n%s", data)
 	}
 }

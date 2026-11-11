@@ -17,7 +17,7 @@ OUT="$TMP_ROOT/merged.mp4"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$VIDEO" -i "$AUDIO" -c:v copy -c:a aac -shortest "$OUT" 2>"$LOG"
 RC=$?
 set -e

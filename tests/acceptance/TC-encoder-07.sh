@@ -41,7 +41,7 @@ run_explicit() {
 	local label="$1" flag="$2" value="$3"
 	local out="$TMP_ROOT/$label.mp4" log="$TMP_ROOT/$label.log"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$MEDIA" -t 1 "$flag" "$value" "$out" 2>"$log"
 	local rc=$?
 	set -e
@@ -81,7 +81,7 @@ run_copy() {
 	local label="$1" flag="$2"
 	local out="$TMP_ROOT/$label.mp4" log="$TMP_ROOT/$label.log"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$MEDIA" -t 1 "$flag" copy "$out" 2>"$log"
 	local rc=$?
 	set -e

@@ -124,15 +124,15 @@ func TestParseBasicInput(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "streaming output with -o -",
-			args:       []string{"-i", "input.mp4", "-c:v", "libx264", "-o", "-"},
+			name:       "output after the separator",
+			args:       []string{"-i", "input.mp4", "-c:v", "libx264", "--", "-"},
 			wantInputs: []string{"input.mp4"},
 			wantOutput: "-",
 			wantErr:    false,
 		},
 		{
-			name:       "explicit output with -o flag",
-			args:       []string{"-i", "input.mp4", "-o", "output.mp4", "-c:v", "libx264"},
+			name:       "output before the separator",
+			args:       []string{"-i", "input.mp4", "-c:v", "libx264", "output.mp4", "--"},
 			wantInputs: []string{"input.mp4"},
 			wantOutput: "output.mp4",
 			wantErr:    false,
@@ -300,8 +300,10 @@ func TestParseRejectsMultipleOutputs(t *testing.T) {
 	cases := [][]string{
 		{"-i", "a.mp4", "o1.mp4", "o2.mp4"},
 		{"-i", "a.mp4", "o1.mp4", "-c:v", "libx264", "o2.mp4"},
-		{"-i", "a.mp4", "-o", "o1.mp4", "o2.mp4"},
-		{"-i", "a.mp4", "o1.mp4", "-o", "o2.mp4"},
+		// A double-dash token is not a native option name, so it consumes no
+		// value and the URL-shaped token stays an output candidate.
+		{"-i", "a.mp4", "o1.mp4", "--server", "http://host:8080"},
+		{"-i", "a.mp4", "--quiet", "o1.mp4", "o2.mp4"},
 		// A positional before -i is an output, not an implicit input:
 		// ffmpeg writes both positionals and rffmpeg must reject the extra.
 		{"o1.mp4", "-i", "src.mp4", "o2.mp4"},
@@ -394,7 +396,7 @@ func TestParseStreamingDashExcludedFromAllArgs(t *testing.T) {
 		args []string
 	}{
 		{name: "format then stdout", args: []string{"-i", "input.mp4", "-f", "mp4", "-"}},
-		{name: "explicit -o stdout", args: []string{"-i", "input.mp4", "-o", "-"}},
+		{name: "separator then stdout", args: []string{"-i", "input.mp4", "--", "-"}},
 		{name: "bare stdout", args: []string{"-i", "input.mp4", "-"}},
 	}
 
@@ -433,7 +435,7 @@ func TestParsePipe1NormalizedToStreamingOutput(t *testing.T) {
 		{name: "positional pipe:1", args: []string{"-i", "input.mp4", "-f", "mp4", "pipe:1"}},
 		{name: "positional PIPE:1", args: []string{"-i", "input.mp4", "-f", "mp4", "PIPE:1"}},
 		{name: "positional Pipe:1", args: []string{"-i", "input.mp4", "-f", "mp4", "Pipe:1"}},
-		{name: "explicit -o pipe:1", args: []string{"-i", "input.mp4", "-f", "mp4", "-o", "pipe:1"}},
+		{name: "positional pipe:1 after -f", args: []string{"-i", "input.mp4", "-f", "mp4", "pipe:1"}},
 		{name: "bare pipe:1 without -f", args: []string{"-i", "input.mp4", "pipe:1"}},
 	}
 
@@ -464,12 +466,66 @@ func TestParsePipe1NormalizedToStreamingOutput(t *testing.T) {
 	}
 }
 
-func TestParsePipeStdinNotNormalized(t *testing.T) {
+// TestParseBarePipeNormalizedToStreamingOutput pins C-7's stdout-target rule
+// for the fd-less spelling: measured on the bundled ffmpeg, `-f mpegts pipe:`
+// writes to the process stdout and creates no such file, so it is the same
+// streaming target as "pipe:1" and must normalize to the bare pipeline.
+func TestParseBarePipeNormalizedToStreamingOutput(t *testing.T) {
 	p := NewParser()
-	// "pipe:" (no fd, or fd 0) is stdin, NOT stdout: it must not be mistaken
-	// for a streaming output and rewritten to "-".
-	for _, out := range []string{"pipe:", "pipe:0"} {
-		result, err := p.Parse([]string{"-i", "input.mp4", "-f", "mp4", out})
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "positional pipe:", args: []string{"-i", "input.mp4", "-f", "mpegts", "pipe:"}},
+		{name: "positional PIPE:", args: []string{"-i", "input.mp4", "-f", "mpegts", "PIPE:"}},
+		{name: "positional Pipe:", args: []string{"-i", "input.mp4", "-f", "mpegts", "Pipe:"}},
+		{name: "bare pipe: without -f", args: []string{"-i", "input.mp4", "pipe:"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := p.Parse(tt.args)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if !result.StreamingOutput {
+				t.Errorf("StreamingOutput = false, want true for stdout target %q", tt.args[len(tt.args)-1])
+			}
+			if result.OutputFile != "-" {
+				t.Errorf("OutputFile = %q, want '-'", result.OutputFile)
+			}
+			for _, arg := range result.AllArgs {
+				if strings.EqualFold(arg, "pipe:") || arg == "-" {
+					t.Errorf("AllArgs must not contain the output token %q: %v", arg, result.AllArgs)
+				}
+			}
+		})
+	}
+}
+
+// TestParseNonStdoutPipeNotNormalized pins the other side: fd 0 and fd 2 are
+// not stdout targets (measured: pipe:2 writes to stderr), so they stay verbatim
+// tokens rather than turning into a streaming job.
+func TestParseIsStdoutPipeAliasCoversResumePath(t *testing.T) {
+	// The re-attach path refuses a stdout target with the same predicate the
+	// submit path normalizes with; both spellings must answer yes so a bare
+	// "pipe:" cannot slip through and be downloaded as a file named "pipe:".
+	for _, tok := range []string{"pipe:", "pipe:1", "PIPE:", "Pipe:1"} {
+		if !IsStdoutPipeAlias(tok) {
+			t.Errorf("IsStdoutPipeAlias(%q) = false, want true", tok)
+		}
+	}
+	for _, tok := range []string{"pipe:0", "pipe:2", "-", "pipe:1.mp4", "output.mp4"} {
+		if IsStdoutPipeAlias(tok) {
+			t.Errorf("IsStdoutPipeAlias(%q) = true, want false", tok)
+		}
+	}
+}
+
+func TestParseNonStdoutPipeNotNormalized(t *testing.T) {
+	p := NewParser()
+	for _, out := range []string{"pipe:0", "pipe:2"} {
+		result, err := p.Parse([]string{"-i", "input.mp4", "-f", "mpegts", out})
 		if err != nil {
 			t.Fatalf("Parse(%q) error = %v", out, err)
 		}
@@ -685,5 +741,89 @@ func TestValidateFileExists(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestParsePrivateOptionNamesStayInArgs pins C-6 / C-7 for the job arguments:
+// names rffmpeg used to consume are ordinary tokens now, they keep their values
+// out of the output-candidate set, and the single output target is still
+// recognised.
+func TestParsePrivateOptionNamesStayInArgs(t *testing.T) {
+	p := NewParser()
+	cases := []struct {
+		name   string
+		args   []string
+		output string
+		want   []string
+	}{
+		{
+			name:   "inline credential token",
+			args:   []string{"-i", "in.mp4", "--token=SECRET", "out.mp4"},
+			output: "out.mp4",
+			want:   []string{"-i", "<INPUT_FILE>", "--token=SECRET"},
+		},
+		{
+			name:   "fixed quality keeps its value",
+			args:   []string{"-i", "in.mp4", "-c:v", "mjpeg", "-q", "2", "out.jpg"},
+			output: "out.jpg",
+			want:   []string{"-i", "<INPUT_FILE>", "-c:v", "mjpeg", "-q", "2"},
+		},
+		{
+			name:   "quiet shape is a plain token",
+			args:   []string{"-i", "in.mp4", "-c:v", "libx264", "--quiet", "out.mp4"},
+			output: "out.mp4",
+			want:   []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "--quiet"},
+		},
+		{
+			name:   "server-shaped pair",
+			args:   []string{"-i", "in.mp4", "-c:v", "libx264", "--server=http://host:8080", "out.mp4"},
+			output: "out.mp4",
+			want:   []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "--server=http://host:8080"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := p.Parse(tc.args)
+			if err != nil {
+				t.Fatalf("Parse(%v) error = %v", tc.args, err)
+			}
+			if result.OutputFile != tc.output {
+				t.Errorf("OutputFile = %q, want %q", result.OutputFile, tc.output)
+			}
+			if got, want := strings.Join(result.AllArgs, " "), strings.Join(tc.want, " "); got != want {
+				t.Errorf("AllArgs = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestParseSeparator covers C-7's "--" semantics: after the separator no token
+// is an option, so an -i there is a positional, and the non-option positionals
+// are output candidates for C-6.
+func TestParseSeparator(t *testing.T) {
+	p := NewParser()
+
+	result, err := p.Parse([]string{"-i", "in.mp4", "-c:v", "libx264", "--", "out.mp4"})
+	if err != nil {
+		t.Fatalf("Parse error = %v", err)
+	}
+	if result.OutputFile != "out.mp4" {
+		t.Errorf("OutputFile = %q, want out.mp4", result.OutputFile)
+	}
+	if got := strings.Join(result.AllArgs, " "); got != "-i <INPUT_FILE> -c:v libx264 --" {
+		t.Errorf("AllArgs = %q, want the separator kept before the output", got)
+	}
+
+	// Two positional tokens after the separator: both are output candidates.
+	_, err = p.Parse([]string{"-i", "in.mp4", "--", "o1.mp4", "o2.mp4"})
+	if !errors.Is(err, ErrMultipleOutputs) {
+		t.Errorf("Parse(post-separator doubles) error = %v, want ErrMultipleOutputs", err)
+	}
+
+	// A post-separator -i is a positional, not an input reference.
+	_, err = p.Parse([]string{"--", "-i", "in.mp4", "out.mp4"})
+	if !errors.Is(err, ErrMultipleOutputs) && !errors.Is(err, ErrNoInputFile) {
+		t.Errorf("Parse(post-separator -i) error = %v, want a rejection", err)
 	}
 }

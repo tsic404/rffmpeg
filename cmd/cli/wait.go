@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tsic404/rffmpeg/pkg/cli/client"
+	"github.com/tsic404/rffmpeg/pkg/cli/config"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
@@ -22,7 +23,7 @@ type jobWaitClient interface {
 }
 
 // giveUpPolicy says what a client-side wait give-up does to the server-side
-// job. The submit path owns the job it just created, so it cancels; --resume
+// job. The submit path owns the job it just created, so it cancels; re-attach
 // attaches to a job from an earlier run, so it detaches and leaves it running.
 type giveUpPolicy int
 
@@ -34,14 +35,14 @@ const (
 // waitForJobLoop waits for the job to reach a terminal status and returns it,
 // or gives up on it when the client-side bound exhausts: onGiveUp decides
 // whether that give-up cancels the server-side job (submit path) or leaves it
-// running for a later --resume (detach path). It loops
+// running for a later re-attach (detach path). It loops
 // because the server's NO_WORKER_AVAILABLE verdict deadline is only attached
 // to pending/unassigned jobs: a job queued at submit time carries none, but
 // reverts to pending if its worker dies. Re-reading the deadline each
 // iteration lets the client extend its wait to a freshly attached verdict
 // instead of giving up before the server can emit it. pollTimeout is the
 // client-side cap on the wait-for-worker (pending) phase, applied only when no
-// --timeout budget and no server verdict deadline bound it.
+// job budget and no server verdict deadline bound it.
 func waitForJobLoop(cli jobWaitClient, jobID string, timeout, pollTimeout time.Duration, streamingOutput, quiet bool, onGiveUp giveUpPolicy) (*protocol.JobInfo, int) {
 	var job *protocol.JobInfo
 	for {
@@ -101,7 +102,7 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout, pollTimeout time.D
 		budget := giveUpBudget(waitDeadline, finalJob, timeout, pollTimeout)
 
 		if onGiveUp == giveUpDetaches {
-			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s; it keeps running server-side — re-run with --resume %s to attach again\n", jobID, budget, jobID)
+			fmt.Fprintf(os.Stderr, "Error: job %s did not complete within %s; it keeps running server-side — re-run with %s=%s to attach again\n", jobID, budget, config.EnvJobID, jobID)
 			return nil, ExitDisconnected
 		}
 
@@ -127,19 +128,19 @@ func waitForJobLoop(cli jobWaitClient, jobID string, timeout, pollTimeout time.D
 // cancels before the server can emit its verdict. Returns false when neither
 // bound exists.
 //
-// --timeout is a worker-side execution budget, not a wall-clock bound. It
+// The job budget is a worker-side execution budget, not a wall-clock bound. It
 // bounds the client's wait only for pending jobs (anchored to now — the "did
-// not start within --timeout" give-up) and running jobs (anchored to started_at
+// not start within the budget" give-up) and running jobs (anchored to started_at
 // so pre-exec latency is not charged and the worker's TIMEOUT verdict stays
 // observable).
 //
 // A queued job is already claimed by a worker and spends its pre-exec phase
 // (download, duration probe) in the queued state; that phase is bounded by the
 // worker's own timeouts (30m dataClient download + ffprobe executor), not by
-// --timeout, so the client must not cancel it before ffmpeg starts.
+// the job budget, so the client must not cancel it before ffmpeg starts.
 //
 // The old code computed timeout+clientVerdictGrace as a duration sum, which
-// overflowed negative for a --timeout near math.MaxInt64 and made
+// overflowed negative for a budget near math.MaxInt64 and made
 // context.WithTimeout expire immediately. The bounds are added to wall-clock
 // times separately; a duration near MaxInt64 (~292 years) plus a 5s grace
 // cannot wrap a time.Time anchored at the present (year ~2318), so no
@@ -185,11 +186,11 @@ func extendWaitForNoWorkerDeadline(exhaustedDeadline time.Time, noWorkerDeadline
 
 // extendWaitForStartedAt reports whether the client should extend its wait
 // after the client-side deadline fired because the job just started running.
-// With --timeout set, the first wait was anchored to submit time (started_at
+// With a job budget set, the first wait was anchored to submit time (started_at
 // was nil) but the worker's ffmpeg budget only begins at started_at, so the
 // TIMEOUT verdict is still ahead of the exhausted bound; the re-anchored bound
 // (started_at + timeout + grace) is fixed — started_at never advances — so the
-// extension fires at most once. With --timeout unset the fired bound was the
+// extension fires at most once. With no job budget the fired bound was the
 // client-side poll cap, which bounds only the wait-for-worker phase; a running
 // job is past that phase, so extend unconditionally and let the worker's own
 // timeout bound it from here.
@@ -206,7 +207,7 @@ func extendWaitForStartedAt(exhaustedDeadline time.Time, startedAt *time.Time, t
 
 // extendWaitForQueued reports whether the client should extend its wait after
 // the client-side deadline fired because the job was just claimed by a worker
-// (pending → queued). A queued job spends --timeout on its pre-exec phase
+// (pending → queued). A queued job spends its pre-exec phase
 // (download/probe), which the worker bounds independently, so the client must
 // not cancel it as if it had never started.
 func extendWaitForQueued(status protocol.JobStatus) bool {
@@ -220,7 +221,7 @@ func extendWaitForQueued(status protocol.JobStatus) bool {
 // (no_worker_job_timeout + check interval, approximated by
 // NoWorkerDeadline−CreatedAt) instead of the poll cap — otherwise a job whose
 // wait was really bounded by the server prints a misleading "10m0s". Otherwise
-// report --timeout when set, else the poll cap.
+// report the configured job budget when set, else the poll cap.
 func giveUpBudget(waitDeadline time.Time, job *protocol.JobInfo, timeout, pollTimeout time.Duration) time.Duration {
 	if job != nil && job.NoWorkerDeadline != nil && job.NoWorkerDeadline.Add(clientVerdictGrace).Equal(waitDeadline) {
 		if d := job.NoWorkerDeadline.Sub(job.CreatedAt); d > 0 {

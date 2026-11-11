@@ -16,10 +16,21 @@ var (
 	ErrMultipleOutputs = errors.New("multiple output files are not supported")
 )
 
-// isBooleanFlag checks if an option is a boolean flag (doesn't take a value),
-// using the generated FFmpeg arity table in pkg/ffmpegopts.
-func isBooleanFlag(arg string) bool {
-	return ffmpegopts.IsBoolean(arg)
+// takesValue reports whether an option token consumes the following token as
+// its value.
+//
+// Native ffmpeg options are single-dash names, and the arity table lists the
+// ones that take no value; a name the table does not list is assumed to take
+// one. That default is the safe direction: a value wrongly taken as an output
+// candidate would be rejected as a second output, while an unknown name is
+// rejected by the native tool either way. A double-dash token is not a native
+// option name at all (only the bare "--" separator is), so it never consumes
+// the next token — a "--flag value" pair leaves "value" as a positional.
+func takesValue(arg string) bool {
+	if strings.HasPrefix(arg, "--") {
+		return false
+	}
+	return !ffmpegopts.IsBoolean(arg)
 }
 
 // ParseResult contains parsed ffmpeg arguments
@@ -39,20 +50,18 @@ func NewParser() *Parser {
 	return &Parser{}
 }
 
-// Parse parses command-line arguments into a ParseResult
-// ffmpeg syntax: ffmpeg [global_options] [-i input_file]... [output_options] output_file
+// Parse parses command-line arguments into a ParseResult.
 //
-// Two non-native input forms are kept deliberately:
-//   - "-o <path>" is the output-target option the contract recognises and
-//     strips from the passthrough args; it is documented in the README.
-//   - "--input" is the long spelling of "-i"; the worker's argument builder
-//     accepts the same spelling, so both sides parse one grammar.
+// The grammar is the native tool's: ffmpeg [global_options] [-i input]...
+// [output_options] output. rffmpeg interprets two things only — the input
+// identifier (-i and its value) and the single output target. Every other
+// token, including native names whose behaviour the CLI looks at before
+// submitting (-y/-n, -f, encoder names, -map), is kept verbatim in AllArgs.
 //
-// A positional argument is always an output candidate, never an input: only
-// -i / --input names the source, so an invocation without one is rejected
-// before submission.
-//
-// Native ffmpeg invocations are unaffected by these extensions.
+// A positional argument is always an output candidate, never an input: only -i
+// names the source, so an invocation without one is rejected before submission.
+// A bare "--" ends option parsing: later tokens are never interpreted as
+// options, and the non-option ones among them are output candidates too.
 func (p *Parser) Parse(args []string) (*ParseResult, error) {
 	result := &ParseResult{
 		RawArgs: args,
@@ -62,165 +71,116 @@ func (p *Parser) Parse(args []string) (*ParseResult, error) {
 		return nil, ErrNoInputFile
 	}
 
-	// Track state
 	var inputFiles []string
-	var outputFile string
 	var allArgs []string
+	var outputFile string
+	haveOutput := false
+	afterSeparator := false
 
-	// Find the last argument that looks like an output file (typically the
-	// last non-option argument, or an explicit -o value).
-	outputCandidateIdx := findOutputCandidate(args)
-	// A bare positional is ffmpeg's output syntax, never an input: only
-	// -i / --input names the source. A missing input outranks an extra output
-	// candidate — pointing at the absent -i is the actionable fix — so both
-	// rejections share one helper.
-	explicitInput := hasExplicitInput(args)
+	// A second output candidate outranks nothing: a missing input is the more
+	// actionable report, so both rejections share one helper.
 	multipleOutputs := func(name string) error {
-		if !explicitInput {
+		if !hasExplicitInput(args) {
 			return ErrNoInputFile
 		}
 		return fmt.Errorf("%w: unexpected output %q", ErrMultipleOutputs, name)
 	}
 
-	// Parse arguments
-	i := 0
-	for i < len(args) {
+	setOutput := func(tok string) error {
+		if haveOutput {
+			return multipleOutputs(tok)
+		}
+		outputFile = tok
+		haveOutput = true
+		return nil
+	}
+
+	for i := 0; i < len(args); i++ {
 		arg := args[i]
 
-		// Handle -i option for input files
-		if arg == "-i" || arg == "--input" {
+		switch {
+		case !afterSeparator && arg == "--":
+			// The native separator: keep it in the job arguments so the worker's
+			// ffmpeg sees the same boundary, and stop interpreting options.
+			allArgs = append(allArgs, arg)
+			afterSeparator = true
+
+		case !afterSeparator && arg == "-i":
 			if i+1 >= len(args) {
 				return nil, ErrNoInputFile
 			}
-			inputFile := args[i+1]
-			inputFiles = append(inputFiles, inputFile)
-			// Add -i <INPUT_FILE> to allArgs - Worker will replace <INPUT_FILE> with actual path
+			inputFiles = append(inputFiles, args[i+1])
+			// The Worker replaces the placeholder with the resolved path, so the
+			// input reference keeps its position in the argument sequence.
 			allArgs = append(allArgs, "-i", "<INPUT_FILE>")
-			i += 2
-			continue
-		}
-
-		// Handle -o option for explicit output file specification (e.g. -o - for streaming output)
-		if arg == "-o" {
-			if i+1 >= len(args) {
-				return nil, ErrNoOutputFile
-			}
-			if outputFile != "" {
-				return nil, multipleOutputs(args[i+1])
-			}
-			outputFile = args[i+1]
-			i += 2
-			continue
-		}
-
-		// Check if this is the output file
-		// "-" is stdout (streaming output) — treat as output file, not a flag
-		if outputCandidateIdx >= 0 && i == outputCandidateIdx && (!strings.HasPrefix(arg, "-") || arg == "-") {
-			if outputFile != "" {
-				return nil, multipleOutputs(arg)
-			}
-			outputFile = arg
 			i++
-			continue
-		}
-		// Handle other options
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			// Boolean flag: takes no value; leave the following argument
-			// (often the output file) untouched.
-			if isBooleanFlag(arg) {
-				allArgs = append(allArgs, arg)
+
+		case !afterSeparator && strings.HasPrefix(arg, "-") && arg != "-":
+			if takesValue(arg) {
+				if i+1 >= len(args) {
+					return nil, fmt.Errorf("option %s requires a value", arg)
+				}
+				allArgs = append(allArgs, arg, args[i+1])
 				i++
 				continue
 			}
-			// Value-taking option: consume the next token unconditionally,
-			// matching ffmpeg — a value may itself begin with "-" (e.g.
-			// "-map -1", "-ss -10", "-itsoffset -5"). Only a missing next
-			// token is a hard error, so "-c:v" with no codec reports the
-			// real problem instead of a misleading
-			// "no input/output file specified".
-			if i+1 >= len(args) {
-				return nil, fmt.Errorf("option %s requires a value", arg)
-			}
-			allArgs = append(allArgs, arg, args[i+1])
-			i += 2
-			continue
-		}
+			allArgs = append(allArgs, arg)
 
-		// Non-option argument. The trailing positional already claimed the
-		// output above, so any other one is a second output: ffmpeg accepts
-		// multiple outputs, rffmpeg produces exactly one and refuses rather
-		// than drop the extra silently.
-		return nil, multipleOutputs(arg)
+		default:
+			// A positional — before or after the separator.
+			if err := setOutput(arg); err != nil {
+				return nil, err
+			}
+		}
 	}
 
-	// Validate
 	if len(inputFiles) == 0 {
 		return nil, ErrNoInputFile
 	}
 	if outputFile == "" {
 		return nil, ErrNoOutputFile
 	}
-	// ffmpeg treats "-" as shorthand for "pipe:1" (stdout) on output. rffmpeg
-	// only recognizes "-" as a streaming job, so normalize "pipe:1" here:
-	// otherwise it is treated as a literal output filename, the worker's
-	// ffmpeg writes the stream to its own stdout (never captured), and the
-	// job yields a 0-byte output the downloader reports as "moov atom not
-	// found". The comparison is case-insensitive because ffmpeg
-	// protocol names are matched without regard to case ("PIPE:1" == "pipe:1").
-	if strings.EqualFold(outputFile, "pipe:1") {
+	// An output that names the pipe protocol without an fd, or with fd 1, is
+	// ffmpeg's stdout target — measured on the bundled tool: `-f mpegts pipe:`
+	// and `-f mpegts pipe:1` both write their bytes to the process stdout and
+	// create no such file. rffmpeg carries streaming output as the bare "-"
+	// (C-7), so normalize every stdout alias here; otherwise the token becomes
+	// a literal output filename, the worker's ffmpeg writes the stream to its
+	// own stdout (never captured), and the job yields a 0-byte output the
+	// downloader reports as "moov atom not found". `pipe:0` names fd 0 and
+	// `pipe:2` names stderr, so neither is a stdout target and both stay
+	// verbatim. Matching is case-insensitive, as the pre-existing handling was.
+	if IsStdoutPipeAlias(outputFile) {
 		outputFile = "-"
 	}
 
-	// Detect streaming output mode (output is "-")
-	streamingOutput := outputFile == "-"
-
 	result.InputFiles = inputFiles
 	result.OutputFile = outputFile
-	result.StreamingOutput = streamingOutput
+	result.StreamingOutput = outputFile == "-"
 	result.AllArgs = allArgs
 
 	return result, nil
 }
 
-// hasExplicitInput reports whether args name an input with -i / --input.
-// ffmpeg has no implicit-input form: every bare positional is an output, so
-// an invocation naming no -i is rejected instead of guessing which token is
-// the source.
+// IsStdoutPipeAlias reports whether a token names the process stdout through
+// ffmpeg's pipe protocol: the bare "pipe:" (fd 1 is the default for an output)
+// or "pipe:1". "-" is the same target and is handled by callers alongside this.
+func IsStdoutPipeAlias(tok string) bool {
+	return strings.EqualFold(tok, "pipe:") || strings.EqualFold(tok, "pipe:1")
+}
+
+// hasExplicitInput reports whether args name an input with -i before any "--"
+// separator. A post-separator -i is a positional token, not an input.
 func hasExplicitInput(args []string) bool {
 	for _, arg := range args {
-		if arg == "-i" || arg == "--input" {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-i" {
 			return true
 		}
 	}
 	return false
-}
-
-// findOutputCandidate returns the index of the last positional argument,
-// which ffmpeg treats as the output file. It scans left-to-right so a
-// value-taking option consumes its next token even when that value begins
-// with "-" (e.g. "-map -1"); a right-to-left scan mistakes "-1" for an
-// option and skips the real output file.
-func findOutputCandidate(args []string) int {
-	candidate := -1
-	for i := 0; i < len(args); {
-		arg := args[i]
-		switch {
-		case arg == "-i" || arg == "--input":
-			i += 2 // input flag and its value
-		case arg == "-o":
-			i += 2 // explicit output flag and its value
-		case strings.HasPrefix(arg, "-") && arg != "-":
-			if isBooleanFlag(arg) {
-				i++
-			} else {
-				i += 2 // value-taking option and its value
-			}
-		default:
-			candidate = i // positional argument
-			i++
-		}
-	}
-	return candidate
 }
 
 // StripFileScheme removes the "file://" prefix from a URI and returns the raw path.
