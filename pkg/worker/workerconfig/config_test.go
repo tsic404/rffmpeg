@@ -276,14 +276,14 @@ func TestLoadFromEnv(t *testing.T) {
 	os.Setenv("RFFMPEG_WORKER_ID", "env-worker-id")
 	os.Setenv("RFFMPEG_WORKER_NAME", "env-worker-name")
 	os.Setenv("RFFMPEG_MAX_CONCURRENT", "8")
-	os.Setenv("RFFMPEG_SHARED_FS_ALLOWED_PREFIX", "/data/media, /mnt/nfs")
+	os.Setenv("RFFMPEG_SHARED_FS_ROOTS", "/data/media, /mnt/nfs")
 	os.Setenv("RFFMPEG_AUTO_DETECT_GPU", "false")
 	defer func() {
 		os.Unsetenv("RFFMPEG_SERVER_URL")
 		os.Unsetenv("RFFMPEG_WORKER_ID")
 		os.Unsetenv("RFFMPEG_WORKER_NAME")
 		os.Unsetenv("RFFMPEG_MAX_CONCURRENT")
-		os.Unsetenv("RFFMPEG_SHARED_FS_ALLOWED_PREFIX")
+		os.Unsetenv("RFFMPEG_SHARED_FS_ROOTS")
 		os.Unsetenv("RFFMPEG_AUTO_DETECT_GPU")
 	}()
 
@@ -301,8 +301,8 @@ func TestLoadFromEnv(t *testing.T) {
 	if config.MaxConcurrent != 8 {
 		t.Errorf("MaxConcurrent = %d, want 8", config.MaxConcurrent)
 	}
-	if config.SharedFSAllowedPrefix != "/data/media, /mnt/nfs" {
-		t.Errorf("SharedFSAllowedPrefix = %q, want %q", config.SharedFSAllowedPrefix, "/data/media, /mnt/nfs")
+	if config.SharedFSRoots != "/data/media, /mnt/nfs" {
+		t.Errorf("SharedFSRoots = %q, want %q", config.SharedFSRoots, "/data/media, /mnt/nfs")
 	}
 	if config.AutoDetectGPU {
 		t.Error("AutoDetectGPU should be false")
@@ -311,26 +311,26 @@ func TestLoadFromEnv(t *testing.T) {
 
 func TestMerge(t *testing.T) {
 	fileConfig := &Config{
-		ServerURL:             "http://file:8080/api/v1",
-		WorkerID:              "file-worker-id",
-		MaxConcurrent:         2,
-		AutoDetectGPU:         true,
-		EncoderPriority:       []string{"h264_nvenc", "libx264"},
-		SharedFSAllowedPrefix: "/data/media",
+		ServerURL:       "http://file:8080/api/v1",
+		WorkerID:        "file-worker-id",
+		MaxConcurrent:   2,
+		AutoDetectGPU:   true,
+		EncoderPriority: []string{"h264_nvenc", "libx264"},
+		SharedFSRoots:   "/data/media",
 	}
 
 	envConfig := &Config{
-		ServerURL:             "http://env:8080/api/v1",
-		WorkerID:              "env-worker-id",
-		MaxConcurrent:         4,
-		AutoDetectGPU:         false,
-		SharedFSAllowedPrefix: "/mnt/nfs",
+		ServerURL:     "http://env:8080/api/v1",
+		WorkerID:      "env-worker-id",
+		MaxConcurrent: 4,
+		AutoDetectGPU: false,
+		SharedFSRoots: "/mnt/nfs",
 		setKeys: map[string]bool{
-			envServerURL:             true,
-			envWorkerID:              true,
-			envMaxConcurrent:         true,
-			envAutoDetectGPU:         true,
-			envSharedFSAllowedPrefix: true,
+			envServerURL:     true,
+			envWorkerID:      true,
+			envMaxConcurrent: true,
+			envAutoDetectGPU: true,
+			envSharedFSRoots: true,
 		},
 	}
 
@@ -349,8 +349,8 @@ func TestMerge(t *testing.T) {
 	if merged.AutoDetectGPU {
 		t.Error("AutoDetectGPU should be false (env override)")
 	}
-	if merged.SharedFSAllowedPrefix != "/mnt/nfs" {
-		t.Errorf("SharedFSAllowedPrefix = %q, want %q (env override)", merged.SharedFSAllowedPrefix, "/mnt/nfs")
+	if merged.SharedFSRoots != "/mnt/nfs" {
+		t.Errorf("SharedFSRoots = %q, want %q (env override)", merged.SharedFSRoots, "/mnt/nfs")
 	}
 	// File values should be preserved if not overridden
 	if len(merged.EncoderPriority) != 2 {

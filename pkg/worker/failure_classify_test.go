@@ -317,10 +317,11 @@ func TestClassifyFailureEncoderUnsupported(t *testing.T) {
 // of a remote-URL input is the user's input being unreachable (INPUT_UNREACHABLE),
 // while a failed server-file fetch is worker↔server infrastructure (INFRA).
 func TestClassifyInputDownloadFailure(t *testing.T) {
+	// Only http/https whole strings are remote inputs (C-123); a download
+	// failure on one of them is the user's source being unreachable.
 	remoteURLs := []string{
 		"http://example.com/video.mp4",
 		"https://cdn.example.com/a/b/c.mkv",
-		"ftp://files.example.com/media.avi",
 		"http://10.0.0.1:8080/stream",
 	}
 	for _, url := range remoteURLs {
@@ -329,9 +330,13 @@ func TestClassifyInputDownloadFailure(t *testing.T) {
 		}
 	}
 
+	// A non-http scheme is not an input identifier form at all, so it never
+	// reaches the remote download path; the same call on a server-side
+	// identifier describes an infrastructure failure over that channel.
 	serverFileIDs := []string{
 		"abc123",
 		"0f8b3c2e-1d4a-4e5f-9a6b-upload0042",
+		"ftp://files.example.com/media.avi",
 		"",
 	}
 	for _, id := range serverFileIDs {

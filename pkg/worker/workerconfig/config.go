@@ -37,7 +37,7 @@ const (
 	envMaxConcurrent           = "RFFMPEG_MAX_CONCURRENT"
 	envAutoDetectGPU           = "RFFMPEG_AUTO_DETECT_GPU"
 	envAutoDetectCodecs        = "RFFMPEG_AUTO_DETECT_CODECS"
-	envSharedFSAllowedPrefix   = "RFFMPEG_SHARED_FS_ALLOWED_PREFIX"
+	envSharedFSRoots           = "RFFMPEG_SHARED_FS_ROOTS"
 	envCacheEnabled            = "RFFMPEG_CACHE_ENABLED"
 	envCacheDir                = "RFFMPEG_CACHE_DIR"
 	envCacheTTL                = "RFFMPEG_CACHE_TTL"
@@ -151,8 +151,10 @@ type Config struct {
 	RetryUseExponentialBackoff  bool     `json:"retry_use_exponential_backoff" yaml:"retry_use_exponential_backoff"`
 	RetryMaxInterval            Duration `json:"retry_max_interval" yaml:"retry_max_interval"`
 	RetryEnableSoftwareFallback bool     `json:"retry_enable_software_fallback" yaml:"retry_enable_software_fallback"`
-	// Shared filesystem mode
-	SharedFSAllowedPrefix string `json:"shared_fs_allowed_prefix" yaml:"shared_fs_allowed_prefix"` // Comma-separated path prefixes allowed in pass-through mode; empty = unlimited
+	// SharedFSRoots declares the shared filesystem path space (C-108): the same
+	// comma-separated root list the server is given. Empty declares nothing, and
+	// the pass-through mode then has no legal path at all.
+	SharedFSRoots string `json:"shared_fs_roots" yaml:"shared_fs_roots"`
 
 	// setKeys records which environment variables LoadFromEnv observed as an
 	// explicit override. Merge consults only this map — never os.Getenv — so
@@ -468,10 +470,10 @@ func LoadFromEnv() *Config {
 		}
 	}
 
-	// Shared filesystem mode
-	if prefix := os.Getenv(envSharedFSAllowedPrefix); prefix != "" {
-		config.SharedFSAllowedPrefix = prefix
-		config.setKeys[envSharedFSAllowedPrefix] = true
+	// Shared filesystem path space
+	if roots := os.Getenv(envSharedFSRoots); roots != "" {
+		config.SharedFSRoots = roots
+		config.setKeys[envSharedFSRoots] = true
 	}
 
 	// Retry environment variables
@@ -568,9 +570,9 @@ func MergeAndReport(fileConfig, envConfig *Config) (*Config, []string) {
 			result.TempDir = envConfig.TempDir
 			applied = append(applied, envTempDir)
 		}
-		if envConfig.setKeys[envSharedFSAllowedPrefix] && envConfig.SharedFSAllowedPrefix != result.SharedFSAllowedPrefix {
-			result.SharedFSAllowedPrefix = envConfig.SharedFSAllowedPrefix
-			applied = append(applied, envSharedFSAllowedPrefix)
+		if envConfig.setKeys[envSharedFSRoots] && envConfig.SharedFSRoots != result.SharedFSRoots {
+			result.SharedFSRoots = envConfig.SharedFSRoots
+			applied = append(applied, envSharedFSRoots)
 		}
 		if envConfig.setKeys[envFFmpegPath] && envConfig.FFmpegPath != result.FFmpegPath {
 			result.FFmpegPath = envConfig.FFmpegPath

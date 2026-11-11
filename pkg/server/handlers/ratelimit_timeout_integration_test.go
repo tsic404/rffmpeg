@@ -203,8 +203,9 @@ func uploadTestFile(t *testing.T, router *chi.Mux) string {
 func submitJobWithAuth(t *testing.T, router *chi.Mux, fileID string) *httptest.ResponseRecorder {
 	t.Helper()
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{fileID},
-		Args:       []string{"-c:v", "libx264", "-preset", "fast"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{fileID},
+		Args:           []string{"-c:v", "libx264", "-preset", "fast"},
 	}
 	body, _ := json.Marshal(jobReq)
 	req := makeAuthRequest("POST", "/api/v1/jobs", body)
@@ -373,9 +374,12 @@ func TestIntegration_RateLimit_RollbackOnFailure(t *testing.T) {
 
 	registerWorkerWithAuth(t, router, "worker-1", []string{"libx264"})
 
+	// A well-formed identifier with no stored blob is a missing object: the
+	// submission is refused and the reserved rate-limit slot must be released.
 	jobReq := protocol.JobSubmitRequest{
-		InputFiles: []string{"non-existent-file-id"},
-		Args:       []string{"-c:v", "libx264"},
+		OutputFilename: "output.mp4",
+		InputFiles:     []string{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+		Args:           []string{"-c:v", "libx264"},
 	}
 	body, _ := json.Marshal(jobReq)
 	req := makeAuthRequest("POST", "/api/v1/jobs", body)

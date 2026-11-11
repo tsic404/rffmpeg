@@ -13,7 +13,7 @@ wait_ready
 
 MEDIA="$(make_media remote.mp4 4)"
 start_http_fileserver "$MEDIA_DIR"
-URL="http://127.0.0.1:$HTTP_PORT/$(basename "$MEDIA")"
+URL="$(media_url_base)/$(basename "$MEDIA")"
 LOG="$TMP_ROOT/cli.log"
 OUT="$TMP_ROOT/remote-out.mp4"
 

@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tsic404/rffmpeg/pkg/audit"
 	"github.com/tsic404/rffmpeg/pkg/ffmpegopts"
+	"github.com/tsic404/rffmpeg/pkg/jobargs"
 	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
@@ -72,7 +73,7 @@ type Worker struct {
 	auditRecorder      audit.AuditRecorder
 	auditNotifier      audit.Notifier
 	gpuDetector        *gpu.Detector
-	allowedPrefixes    []string // Parsed RFFMPEG_SHARED_FS_ALLOWED_PREFIX allow-list (nil = unlimited)
+	sharedFS           *pathutil.Space // Declared shared filesystem path space (C-108); none declared = no legal path
 
 	// regMu guards id/client.workerID updates and serializes re-registration:
 	// poll failures and heartbeat failures can both trigger reregister()
@@ -106,7 +107,7 @@ type Config struct {
 	StreamingCancelPollInterval time.Duration
 	CacheConfig                 CacheConfig  // Cache configuration
 	RetryConfig                 *RetryConfig // Retry configuration
-	SharedFSAllowedPrefix       string       // Comma-separated path prefixes allowed in pass-through mode; empty = unlimited
+	SharedFSRoots               string       // Comma-separated roots of the shared filesystem path space (same declaration as the server)
 }
 
 // New creates a new worker
@@ -186,10 +187,10 @@ func New(cfg Config) (*Worker, error) {
 	ffprobeExecutor := NewFFprobeExecutor("")
 	pixelFormatChecker := NewPixelFormatChecker(ffprobeExecutor)
 	hwCodecChecker := NewHardwareCodecChecker(cfg.FFmpegPath)
-	// Parse the pass-through path allow-list once. Empty entries and
-	// surrounding whitespace are dropped so an env value like
-	// "/data/media, /mnt/nfs" behaves as the two intended prefixes.
-	allowedPrefixes := parseAllowedPrefixes(cfg.SharedFSAllowedPrefix)
+	// Parse the shared filesystem space declaration once. Empty entries are
+	// dropped so an env value like "/data/media, /mnt/nfs" behaves as the two
+	// intended roots; an empty declaration leaves the mode with no legal path.
+	sharedFS := pathutil.NewSpace(cfg.SharedFSRoots)
 
 	return &Worker{
 		id:                          cfg.WorkerID,
@@ -202,7 +203,7 @@ func New(cfg Config) (*Worker, error) {
 		tempDir:                     cfg.TempDir,
 		activeJobs:                  make(map[string]context.CancelFunc),
 		heartbeatInterval:           cfg.HeartbeatInterval,
-		allowedPrefixes:             allowedPrefixes,
+		sharedFS:                    sharedFS,
 		pollInterval:                cfg.PollInterval,
 		streamingCancelPollInterval: cfg.StreamingCancelPollInterval,
 		lastHeartbeatTime:           time.Now(),
@@ -653,30 +654,59 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		log.Printf("Job %s: using per-job timeout %v", job.ID, execTimeout)
 	}
 
-	// Check for direct paths (shared FS mode)
+	// Trust boundary (C-123 – C-127). Classification is the only basis on
+	// which the execution side obtains inputs, so it runs before the workspace
+	// exists: an identifier that matches no form must not leave a file behind.
 	directMode := len(job.DirectPaths) > 0
 	if directMode {
-		// Validate direct paths: reject path traversal, resolve symlinks, and
-		// enforce the allow-list against the real path. The symlink resolution
-		// closes the bypass where a symlink inside an allowed prefix pointed at
-		// a path outside every prefix.
+		// Pass-through inputs are read in place (C-92); each must be a
+		// shared-filesystem path and reachable, otherwise the job is refused
+		// before ffmpeg starts.
 		for _, path := range job.DirectPaths {
-			if pathutil.ContainsPathTraversal(path) {
-				jobFailed = true
-				w.reportFailureWithType(job.ID, 1,
-					fmt.Sprintf("direct path contains '..' traversal: %s", path),
-					string(protocol.FailureInputUnreachable),
-					"path traversal rejected", flushStderr)
-				return
-			}
 			if v := w.validateDirectInputPath(path); v != nil {
 				jobFailed = true
-				w.reportFailureWithType(job.ID, 1, v.msg,
-					string(protocol.FailureInputUnreachable), v.details, flushStderr)
+				// A path outside the declared space is a boundary violation
+				// (INFRA); a missing input is the user's source being
+				// unreachable.
+				failureType := protocol.FailureInputUnreachable
+				if v.boundary {
+					failureType = protocol.FailureInfra
+				}
+				w.reportFailureWithType(job.ID, 1, v.msg, string(failureType), v.details, flushStderr)
 				return
 			}
 		}
 		log.Printf("Job %s: direct paths mode, %d input(s)", job.ID, len(job.DirectPaths))
+	}
+	plannedInputs, planFailure := w.planJobInputs(job, directMode)
+	if planFailure != nil {
+		jobFailed = true
+		w.reportFailureWithType(job.ID, 1, planFailure.msg, string(protocol.FailureInfra), planFailure.details, flushStderr)
+		return
+	}
+
+	plannedOutput, outputFailure := w.planJobOutput(ctx, job, directMode)
+	if outputFailure != nil {
+		jobFailed = true
+		w.reportFailureWithType(job.ID, 1, outputFailure.msg, string(protocol.FailureInfra), outputFailure.details, flushStderr)
+		return
+	}
+
+	// C-127: a job's arguments may only reach its manifest inputs and paths
+	// inside the workspace (plus the pass-through target). The judgement runs
+	// before any download so a rejected job leaves nothing behind.
+	argPolicy := jobargs.Policy{
+		InputCount: len(plannedInputs),
+		Workspace:  filepath.Join(w.tempDir, job.ID),
+	}
+	if directMode {
+		argPolicy.Target = plannedOutput.target
+	}
+	if violation := jobargs.Check(job.Args, argPolicy); violation != nil {
+		jobFailed = true
+		w.reportFailureWithType(job.ID, 1, violation.Error(),
+			string(protocol.FailureInfra), "argument reaches outside the job boundary", flushStderr)
+		return
 	}
 
 	// Compute cache key from input files + original args, keyed on the
@@ -690,9 +720,9 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		filepath.Ext(job.OutputFilename), w.rewriteAdapter.ResolveTargetEncoder(job.Args, job.AutoHW))
 	cached := false
 
-	// Check if output is a network URL (rtmp://, udp://, etc.)
-	// Cache is not applicable for streaming/network outputs
-	isNetOutput := pathutil.IsRemoteURL(job.OutputFilename)
+	// A protocol address target writes to the network: no file lands in the
+	// workspace, so cache lookup and store do not apply (C-96 / C-129).
+	isNetOutput := plannedOutput.form == pathutil.OutputTargetProtocolAddress
 
 	// Check cache before any work (skip for direct mode, network outputs, and
 	// streaming outputs — stdout has no local file to cache)
@@ -721,16 +751,14 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			}
 			defer w.cleanupJobDir(jobDir)
 
-			// Copy cached file to output path
-			outputFilename := job.OutputFilename
-			if outputFilename == "" {
-				outputFilename = "output"
-			}
-			var outputPath string
-			if filepath.IsAbs(outputFilename) {
-				outputPath = outputFilename
-			} else {
-				outputPath = filepath.Join(jobDir, outputFilename)
+			// Copy cached file to output path. A cache hit is only reachable in
+			// non pass-through mode, so the target is the workspace file name
+			// judged by planJobOutput — never an absolute path from the job row.
+			outputPath := filepath.Join(jobDir, plannedOutput.target)
+			if !pathutil.Within(jobDir, outputPath) {
+				w.reportInfraFailure(job.ID, 1,
+					fmt.Sprintf("output path escapes the job workspace: %s", outputPath))
+				return
 			}
 
 			// Overwrite-policy guard: a cache hit must never
@@ -787,11 +815,18 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			}
 		}
 	} else {
-		log.Printf("Job %s: cache bypassed (direct paths mode)", job.ID)
+		reason := "direct paths mode"
+		switch {
+		case isNetOutput:
+			reason = "protocol address target"
+		case job.StreamingOutput:
+			reason = "streaming output"
+		}
+		log.Printf("Job %s: cache bypassed (%s)", job.ID, reason)
 	}
 
 	// Cache miss — proceed with normal processing
-	if !directMode {
+	if !directMode && !isNetOutput && !job.StreamingOutput {
 		log.Printf("Job %s: cache MISS (key=%s)", job.ID, cacheKey[:16])
 	}
 
@@ -826,42 +861,43 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		return
 	}
 	defer w.cleanupJobDir(jobDir)
+	// ffmpeg runs inside the workspace so a relative path in the argument list
+	// resolves there rather than in the worker process' own directory (C-126).
+	jobCtx = withWorkDir(jobCtx, jobDir)
 
 	// Note: the job stays queued through the pre-execution pipeline below
 	// (download, probe, classification). The running/started_at transition is
 	// reported at the ffmpeg execution boundary so the server's started_at
 	// matches where the --timeout budget actually begins.
 
-	// Download input files (skip in direct mode)
-	inputPaths := make([]string, 0, len(job.InputFiles))
-	if directMode {
-		inputPaths = job.DirectPaths
-	} else {
-		for _, fileID := range job.InputFiles {
-			// Generate a safe filename for the downloaded file.
-			// For remote URLs (http://, https://, etc.), extract the base filename
-			// from the URL path. For server file IDs, use the fileID directly.
-			var inputPath string
-			if pathutil.IsRemoteURL(fileID) {
-				// Remote URL: sanitize the last path segment — hostile URLs
-				// must not inject path separators or oversized names.
-				baseName := sanitizeInputBaseName(filepath.Base(fileID))
-				inputPath = filepath.Join(jobDir, "input-"+baseName)
-			} else {
-				inputPath = filepath.Join(jobDir, "input-"+fileID)
-			}
-			if err := w.client.DownloadInput(ctx, fileID, inputPath); err != nil {
-				jobFailed = true
-				if ctx.Err() == context.Canceled {
-					w.reportJobCancelled(job.ID)
-					return
-				}
-				w.reportInputDownloadFailure(job.ID, fileID, err)
+	// Obtain the inputs. Only the upload and remote-URL forms are downloaded;
+	// a shared filesystem path is read in place (C-92). The landing name comes
+	// from the input's position, never from the identifier text (C-126).
+	inputPaths := make([]string, 0, len(plannedInputs))
+	for index, input := range plannedInputs {
+		if input.form == pathutil.InputSharedPath {
+			inputPaths = append(inputPaths, input.identifier)
+			continue
+		}
+		inputPath, contained := inputLandingPath(jobDir, index)
+		if !contained {
+			jobFailed = true
+			w.reportFailureWithType(job.ID, 1,
+				fmt.Sprintf("input landing path escapes the job workspace: %s", inputPath),
+				string(protocol.FailureInfra), "workspace boundary violation", flushStderr)
+			return
+		}
+		if err := w.client.DownloadInput(ctx, input.identifier, inputPath); err != nil {
+			jobFailed = true
+			if ctx.Err() == context.Canceled {
+				w.reportJobCancelled(job.ID)
 				return
 			}
-			inputPaths = append(inputPaths, inputPath)
-			log.Printf("Downloaded input file %s to %s", fileID, inputPath)
+			w.reportInputDownloadFailure(job.ID, input.identifier, err)
+			return
 		}
+		inputPaths = append(inputPaths, inputPath)
+		log.Printf("Downloaded input %s to %s", input.identifier, inputPath)
 	}
 	// Cancellation may have landed during the download: stop before paying for
 	// the duration probe, encoder rewrite, and ffmpeg startup.
@@ -870,51 +906,20 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		w.reportJobCancelled(job.ID)
 		return
 	}
-	// Prepare output path.
-	// Streaming jobs must write to stdout ("-") so ffmpeg's transcoded data
-	// reaches the stdoutBatcher; defaulting an empty filename to a regular
-	// file makes ffmpeg produce a local file and the CLI receive nothing.
-	outputFilename := job.OutputFilename
-	if job.StreamingOutput {
-		// "pipe:1" is ffmpeg's explicit stdout alias; mirror the CLI's
-		// normalization so a streaming job never falls through to a literal
-		// file named "pipe:1" in the job dir (which would skip the movflags
-		// injection and starve the stdoutBatcher).
-		if outputFilename == "" || pathutil.IsRemoteURL(outputFilename) || strings.EqualFold(outputFilename, "pipe:1") {
-			outputFilename = "-"
-		}
-	} else if outputFilename == "" {
-		outputFilename = "output"
-	}
-	// Validate the direct output path BEFORE computing outputPath and building
-	// args. A relative output used to be joined to jobDir and silently skipped
-	// the allow-list check; it is now rejected as non-absolute.
-	if directMode && outputFilename != "-" && !pathutil.IsRemoteURL(outputFilename) {
-		// Defense in depth: traversal must be rejected independently of the
-		// allow-list so the check never depends on the path not existing.
-		if pathutil.ContainsPathTraversal(outputFilename) {
+	// The output target was judged by planJobOutput before the workspace
+	// existed: a pass-through target is the validated absolute path, every
+	// other job writes a single file name inside its workspace (C-125).
+	outputFilename := plannedOutput.target
+	outputPath := outputFilename
+	if !directMode && outputFilename != "-" && plannedOutput.form == pathutil.OutputTargetFile {
+		outputPath = filepath.Join(jobDir, outputFilename)
+		if !pathutil.Within(jobDir, outputPath) {
 			jobFailed = true
 			w.reportFailureWithType(job.ID, 1,
-				fmt.Sprintf("output path contains '..' traversal: %s", outputFilename),
-				string(protocol.FailureInputUnreachable),
-				"path traversal rejected", flushStderr)
+				fmt.Sprintf("output path escapes the job workspace: %s", outputPath),
+				string(protocol.FailureInfra), "workspace boundary violation", flushStderr)
 			return
 		}
-		if v := w.validateDirectOutputPath(outputFilename); v != nil {
-			jobFailed = true
-			w.reportFailureWithType(job.ID, 1, v.msg,
-				string(protocol.FailureInputUnreachable), v.details, flushStderr)
-			return
-		}
-	}
-	var outputPath string
-	if outputFilename == "-" || pathutil.IsRemoteURL(outputFilename) {
-		// ffmpeg stdout ("-") or network URL (rtmp://, udp://, etc.) — pass directly
-		outputPath = outputFilename
-	} else if filepath.IsAbs(outputFilename) {
-		outputPath = outputFilename
-	} else {
-		outputPath = filepath.Join(jobDir, outputFilename)
 	}
 
 	// Re-dispatch cleanup: a job migrated off a failed worker (retry count > 0)
@@ -927,7 +932,16 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// ffmpeg to reject. Otherwise size/mtime are logged first.
 	policy := ffmpegopts.OverwritePolicy(job.Args)
 	preservesOutput := policy == ffmpegopts.OverwriteNever || policy == ffmpegopts.OverwriteConflict
-	if job.RetryCount > 0 && outputPath != "" && outputPath != "-" && !preservesOutput {
+	if job.RetryCount > 0 && outputPath != "" && outputPath != "-" && !isNetOutput && !preservesOutput {
+		// C-126: a removal derived from the job may only touch the workspace or
+		// the request's pass-through target, never another path.
+		if !pathutil.Within(jobDir, outputPath) && !(directMode && outputPath == plannedOutput.target) {
+			jobFailed = true
+			w.reportFailureWithType(job.ID, 1,
+				fmt.Sprintf("refusing to remove a path outside the job boundary: %s", outputPath),
+				string(protocol.FailureInfra), "workspace boundary violation", flushStderr)
+			return
+		}
 		if info, err := os.Stat(outputPath); err == nil {
 			log.Printf("Job %s: removing output from previous worker (%d bytes, mtime %s): %s",
 				job.ID, info.Size(), info.ModTime().Format(time.RFC3339), outputPath)
@@ -946,14 +960,15 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 	// Direct mode writes into a shared-FS target a client may read at any
 	// moment. ffmpeg creates and grows the output while it encodes, so a
 	// crash, timeout or cancel would leave a truncated file at the final path.
-	// Run ffmpeg in a staging directory beside the target and publish the
-	// result only on success. The staged output keeps its original basename
-	// because ffmpeg derives sibling artifacts from it: an HLS playlist
-	// references "out0.ts" next to "out.m3u8", so publishing unchanged names
-	// keeps the directory layout the client observes.
+	// Run ffmpeg inside the job workspace and publish the result only on
+	// success: the workspace is the only place a job may create files (C-126),
+	// so the staging area lives there rather than beside the target. The staged
+	// output keeps its original basename because ffmpeg derives sibling
+	// artifacts from it: an HLS playlist references "out0.ts" next to
+	// "out.m3u8", so publishing unchanged names keeps the layout a client sees.
 	executionOutputPath := outputPath
 	var stagingDir string
-	if directMode && outputPath != "" && outputPath != "-" && !pathutil.IsRemoteURL(outputPath) {
+	if directMode && outputPath != "" && outputPath != "-" {
 		// The final path is no longer visible to ffmpeg, so its own overwrite
 		// refusal cannot fire. Reproduce it here for -n and for the default
 		// (no -y): the existing output is the user's data and must not be
@@ -966,19 +981,7 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 				return
 			}
 		}
-		stagingDir = directStagingDir(job.ID, outputPath)
-		// A previous attempt of this job (same worker, interrupted before its
-		// deferred cleanup) may have left the staging directory behind. A stale
-		// staging directory or an unwritable output directory is the same
-		// client-visible failure ffmpeg reports for an unopenable output, so
-		// it keeps the FFMPEG_ERROR classification.
-		if err := os.RemoveAll(stagingDir); err != nil {
-			jobFailed = true
-			w.reportFailureWithType(job.ID, 1,
-				fmt.Sprintf("failed to clear output staging directory %s: %v", stagingDir, err),
-				string(protocol.FailureFFmpegError), "output path not writable", flushStderr)
-			return
-		}
+		stagingDir = filepath.Join(jobDir, "output-staging")
 		if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 			jobFailed = true
 			w.reportFailureWithType(job.ID, 1,
@@ -1237,10 +1240,10 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		return
 	}
 
-	// Determine if output is a network URL (RTMP, RTSP, UDP, etc.).
-	// Network outputs do not produce local files, so file existence/size
-	// validation must be skipped to avoid false output_empty classification.
-	networkOutput := isNetworkOutput(outputFilename, args)
+	// A protocol address target does not produce a local file, so the file
+	// existence/size validation and the empty-output heuristics below do not
+	// apply to it (C-125 / C-129).
+	networkOutput := plannedOutput.form == pathutil.OutputTargetProtocolAddress
 
 	// Validate output file for non-streaming jobs: FFmpeg may exit 0 but
 	// produce a 0-byte output (e.g., VAAPI hw encoder falls back to a64multi
@@ -1382,8 +1385,7 @@ uploadOutput:
 		log.Printf("Job %s: staged output published to %s", job.ID, outputPath)
 	}
 
-	// Upload output file (skip for streaming output, direct mode jobs, and network URL outputs)
-	isNetOutput = pathutil.IsRemoteURL(outputPath)
+	// Upload output file (skip for streaming output, direct mode jobs, and protocol address targets)
 	if !job.StreamingOutput && !directMode && !isNetOutput {
 		if _, err := os.Stat(outputPath); err == nil {
 			if err := w.client.UploadOutput(job.ID, outputPath); err != nil {
@@ -1659,54 +1661,59 @@ func (w *Worker) processProbeJob(ctx context.Context, job protocol.JobInfo) {
 		return
 	}
 
-	// Resolve the probe input. Shared-FS direct paths (job.DirectPaths) are
-	// read in place after a traversal/stat check — they must never be
-	// downloaded over HTTP, which would send the absolute path to
-	// GET /api/v1/files/<path> and get rejected by ValidateFileID.
+	// Resolve the probe input through the same whole-string classification the
+	// submission side uses (C-123 / C-124). A shared filesystem path is read in
+	// place; the download forms land as input-0, a name never taken from the
+	// identifier text (C-126).
 	directMode := len(job.DirectPaths) > 0
-	var inputPath string
 	if directMode {
 		for _, path := range job.DirectPaths {
-			if pathutil.ContainsPathTraversal(path) {
-				w.reportFailureWithType(job.ID, 1,
-					fmt.Sprintf("direct path contains '..' traversal: %s", path),
-					string(protocol.FailureInputUnreachable),
-					"path traversal rejected", nil)
-				return
-			}
 			if v := w.validateDirectInputPath(path); v != nil {
+				failureType := protocol.FailureInputUnreachable
+				if v.boundary {
+					failureType = protocol.FailureInfra
+				}
 				w.reportFailureWithType(job.ID, 1, v.msg,
-					string(protocol.FailureInputUnreachable), v.details, nil)
+					string(failureType), v.details, nil)
 				return
 			}
 		}
-		inputPath = job.DirectPaths[0]
-		log.Printf("Probe job %s: direct path mode, probing %s", job.ID, inputPath)
-	} else {
-		if len(job.InputFiles) == 0 {
-			w.reportInfraFailure(job.ID, 1, "no input files for probe job")
+	}
+	if len(job.InputFiles) == 0 {
+		w.reportInfraFailure(job.ID, 1, "no input files for probe job")
+		return
+	}
+	plannedInputs, planFailure := w.planJobInputs(job, directMode)
+	if planFailure != nil {
+		w.reportFailureWithType(job.ID, 1, planFailure.msg,
+			string(protocol.FailureInfra), planFailure.details, nil)
+		return
+	}
+	if len(plannedInputs) == 0 {
+		w.reportInfraFailure(job.ID, 1, "no input files for probe job")
+		return
+	}
+	inputPath := plannedInputs[0].identifier
+	if plannedInputs[0].form != pathutil.InputSharedPath {
+		landing, contained := inputLandingPath(jobDir, 0)
+		if !contained {
+			w.reportFailureWithType(job.ID, 1,
+				fmt.Sprintf("input landing path escapes the job workspace: %s", landing),
+				string(protocol.FailureInfra), "workspace boundary violation", nil)
 			return
 		}
-
-		// Generate a safe filename for the downloaded probe input
-		fileID := job.InputFiles[0]
-		if pathutil.IsRemoteURL(fileID) {
-			// Remote URL: sanitize the last path segment — hostile URLs
-			// must not inject path separators or oversized names.
-			baseName := sanitizeInputBaseName(filepath.Base(fileID))
-			inputPath = filepath.Join(jobDir, "input-"+baseName)
-		} else {
-			inputPath = filepath.Join(jobDir, "input-"+fileID)
-		}
-		if err := w.client.DownloadInput(ctx, fileID, inputPath); err != nil {
+		if err := w.client.DownloadInput(ctx, plannedInputs[0].identifier, landing); err != nil {
 			if ctx.Err() == context.Canceled {
 				w.reportJobCancelled(job.ID)
 				return
 			}
-			w.reportInputDownloadFailure(job.ID, fileID, err)
+			w.reportInputDownloadFailure(job.ID, plannedInputs[0].identifier, err)
 			return
 		}
-		log.Printf("Downloaded probe input file %s to %s", fileID, inputPath)
+		log.Printf("Downloaded probe input %s to %s", plannedInputs[0].identifier, landing)
+		inputPath = landing
+	} else {
+		log.Printf("Probe job %s: shared filesystem path, probing %s", job.ID, inputPath)
 	}
 	// Run ffprobe
 	prober := NewFFprobeExecutor("")
@@ -1900,83 +1907,26 @@ func (w *Worker) cleanupJobDir(dir string) {
 	}
 }
 
-// parseAllowedPrefixes splits a comma-separated allow-list into trimmed,
-// non-empty, cleaned path prefixes. It returns nil when the raw value is
-// empty — nil means "no restriction", matching the documented default.
-func parseAllowedPrefixes(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	prefixes := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		cleaned := filepath.Clean(p)
-		// Resolve symlinks in the configured prefix so a symlinked mount is
-		// compared against the same real path as the resolved candidate path.
-		// A prefix that does not exist can never match an existing path, so
-		// falling back to the cleaned value is safe.
-		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-			cleaned = resolved
-		}
-		prefixes = append(prefixes, cleaned)
-	}
-	if len(prefixes) == 0 {
-		return nil
-	}
-	return prefixes
-}
-
-// pathAllowed reports whether path is inside one of the configured prefixes.
-// A path exactly equal to a prefix is allowed; a sibling sharing the prefix
-// as a bare string (e.g. /data/media2 vs /data/media) is not, thanks to the
-// trailing separator boundary. An empty prefix list means unrestricted.
-func (w *Worker) pathAllowed(path string) bool {
-	if len(w.allowedPrefixes) == 0 {
-		return true
-	}
-	cleaned := filepath.Clean(path)
-	for _, prefix := range w.allowedPrefixes {
-		if cleaned == prefix || strings.HasPrefix(cleaned, prefix+string(os.PathSeparator)) {
-			return true
-		}
-	}
-	return false
-}
-
 // directPathViolation describes a rejected direct input/output path.
 // msg is the user-visible error; details is the machine-readable reason.
 type directPathViolation struct {
 	msg     string
 	details string
+	// boundary marks a violation of the declared path space: it is an
+	// infrastructure failure (C-124 / C-126), not an unreachable input.
+	boundary bool
 }
 
-// validateDirectInputPath resolves symlinks in path and checks it against the
-// allow-list. It must be called only after pathutil.ContainsPathTraversal has
-// cleared the path. The resolved real path is checked, so a symlink inside an
-// allowed prefix pointing outside every prefix is rejected.
+// validateDirectInputPath checks a pass-through input against the declared
+// space and its own reachability. Space membership is judged on the resolved
+// path (C-107), so a symlink inside a root that points outside every root is
+// rejected; a missing input stays an input-unreachable error.
 func (w *Worker) validateDirectInputPath(path string) *directPathViolation {
-	if !filepath.IsAbs(path) {
+	if err := pathutil.ValidateSharedPath(w.pathSpace(), path); err != nil {
 		return &directPathViolation{
-			msg:     fmt.Sprintf("direct path must be absolute: %s", path),
-			details: "non-absolute direct path",
-		}
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return &directPathViolation{
-			msg:     fmt.Sprintf("input path unreachable: %s: %v", path, err),
-			details: err.Error(),
-		}
-	}
-	if !w.pathAllowed(resolved) {
-		return &directPathViolation{
-			msg:     fmt.Sprintf("direct path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s", path),
-			details: "path not in allowed prefix",
+			msg:      fmt.Sprintf("pass-through input is outside the declared shared filesystem space: %s", path),
+			details:  err.Error(),
+			boundary: true,
 		}
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -1988,18 +1938,40 @@ func (w *Worker) validateDirectInputPath(path string) *directPathViolation {
 	return nil
 }
 
-// validateDirectOutputPath resolves symlinks in path (or its parent when the
-// file does not exist yet) and checks it against the allow-list. It must be
-// called only after pathutil.ContainsPathTraversal has cleared the path.
+// validateDirectOutputPath checks a pass-through target against the declared
+// space. A target that only resolves outside the space on this side (a replaced
+// symlink, a differently mounted root) fails the job here instead of writing
+// anywhere (C-125).
 func (w *Worker) validateDirectOutputPath(path string) *directPathViolation {
-	if !filepath.IsAbs(path) {
+	space := w.pathSpace()
+	// Shape first: an absolute, traversal-free path is the precondition for
+	// every later judgement, and nothing on disk can make it true.
+	switch {
+	case path == "":
+		return &directPathViolation{msg: "pass-through target is empty", details: "path is empty", boundary: true}
+	case !filepath.IsAbs(path):
 		return &directPathViolation{
-			msg:     fmt.Sprintf("direct output path must be absolute: %s", path),
-			details: "non-absolute direct output path",
+			msg:      fmt.Sprintf("pass-through target must be an absolute path: %s", path),
+			details:  "path must be absolute",
+			boundary: true,
+		}
+	case pathutil.ContainsPathTraversal(path):
+		return &directPathViolation{
+			msg:      fmt.Sprintf("pass-through target must not contain a '..' component: %s", path),
+			details:  "path contains a '..' component",
+			boundary: true,
+		}
+	case !space.Declared():
+		return &directPathViolation{
+			msg:      fmt.Sprintf("pass-through target has no declared shared filesystem space: %s", path),
+			details:  "no shared filesystem root is declared",
+			boundary: true,
 		}
 	}
-	resolved, err := resolveOutputRealPath(path)
-	if err != nil {
+	// The target's own resolution runs before the membership judgement so a
+	// broken link or a missing parent reports its actual cause instead of
+	// being folded into an out-of-space verdict.
+	if _, err := resolveOutputRealPath(path); err != nil {
 		switch {
 		case errors.Is(err, errOutputParentNotExist):
 			return &directPathViolation{
@@ -2013,15 +1985,16 @@ func (w *Worker) validateDirectOutputPath(path string) *directPathViolation {
 			}
 		default:
 			return &directPathViolation{
-				msg:     fmt.Sprintf("output path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s: %v", path, err),
+				msg:     fmt.Sprintf("output path cannot be resolved: %s: %v", path, err),
 				details: err.Error(),
 			}
 		}
 	}
-	if !w.pathAllowed(resolved) {
+	if !space.Contains(path) {
 		return &directPathViolation{
-			msg:     fmt.Sprintf("output path not allowed by RFFMPEG_SHARED_FS_ALLOWED_PREFIX: %s", path),
-			details: "path not in allowed prefix",
+			msg:      fmt.Sprintf("pass-through target is outside the declared shared filesystem space: %s", path),
+			details:  "path is outside the declared shared filesystem space",
+			boundary: true,
 		}
 	}
 	return nil
@@ -2085,30 +2058,11 @@ func ffmpegStderrIndicatesEmptyOutput(stderr string) bool {
 	return false
 }
 
-// directStagingDir returns the job-private directory beside a direct-mode
-// output where ffmpeg writes before the result is published. Keeping it a
-// directory rather than a renamed file preserves the names ffmpeg derives for
-// sibling artifacts (HLS segments, DASH chunks).
-func directStagingDir(jobID, outputPath string) string {
-	token := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			return r
-		default:
-			return '_'
-		}
-	}, jobID)
-	if token == "" {
-		token = "job"
-	}
-	return filepath.Join(filepath.Dir(outputPath), ".rffmpeg-staging-"+token)
-}
-
-// publishStagedOutput moves every file ffmpeg produced from the staging
-// directory into the target directory, keeping the names ffmpeg chose so a
-// playlist keeps referencing its segments. The main output moves last: until
-// then a client sees either the previous complete result or no playlist at
-// all, never one that points at files still staged.
+// publishStagedOutput moves every file ffmpeg produced from the workspace
+// staging directory into the target directory, keeping the names ffmpeg chose
+// so a playlist keeps referencing its segments. The main output moves last:
+// until then a client sees either the previous complete result or no playlist
+// at all, never one that points at files still staged.
 func publishStagedOutput(stagingDir, targetDir, mainName string) error {
 	entries, err := os.ReadDir(stagingDir)
 	if err != nil {
@@ -2125,9 +2079,30 @@ func publishStagedOutput(stagingDir, targetDir, mainName string) error {
 		return names[i] != mainName && names[j] == mainName
 	})
 	for _, name := range names {
-		if err := os.Rename(filepath.Join(stagingDir, name), filepath.Join(targetDir, name)); err != nil {
+		if err := publishFile(filepath.Join(stagingDir, name), filepath.Join(targetDir, name)); err != nil {
 			return fmt.Errorf("move %s: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// publishFile places one staged file at its final path. A workspace and a
+// shared target may sit on different filesystems, where rename cannot cross the
+// boundary. The copy then writes the target path itself and never a sibling
+// temporary name: C-126's pass-through exception covers the target path only, so
+// a temp file beside it would be exactly the second outside path the exception
+// forbids. A failed publish removes the target, leaving the path untouched.
+func publishFile(stagingPath, targetPath string) error {
+	err := os.Rename(stagingPath, targetPath)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	if err := copyFile(stagingPath, targetPath); err != nil {
+		os.Remove(targetPath)
+		return err
 	}
 	return nil
 }

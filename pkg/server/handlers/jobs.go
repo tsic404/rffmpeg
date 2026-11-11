@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
@@ -43,41 +41,12 @@ func (h *Handler) SubmitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, path := range req.DirectPath {
-		if pathutil.ContainsPathTraversal(path) {
-			writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-				protocol.ErrCodeInvalidRequest,
-				"direct path contains '..' traversal: "+path, nil,
-			))
-			return
-		}
-	}
-
-	if len(req.DirectPath) > 0 && req.OutputFilename != "-" && !pathutil.IsRemoteURL(req.OutputFilename) {
-		if pathutil.ContainsPathTraversal(req.OutputFilename) {
-			writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-				protocol.ErrCodeInvalidRequest,
-				"output filename contains '..' traversal: "+req.OutputFilename, nil,
-			))
-			return
-		}
-	}
-
-	if len(req.DirectPath) == 0 {
-		for _, fileID := range req.InputFiles {
-
-			if strings.Contains(fileID, "://") {
-				continue
-			}
-
-			exists, err := h.storage.TouchFile(fileID)
-			if err != nil || !exists {
-				writeError(w, http.StatusBadRequest, protocol.NewProtocolError(
-					protocol.ErrCodeNotFound, "Input file not found: "+fileID, err,
-				))
-				return
-			}
-		}
+	// Trust boundary: input identifier classification, the pass-through fields,
+	// the output target and the argument surface are judged here, before any
+	// job row exists (C-123, C-125, C-127).
+	if perr := h.validateSubmitRequest(&req); perr != nil {
+		writeError(w, http.StatusBadRequest, perr)
+		return
 	}
 
 	argsJSON, err := json.Marshal(req.Args)

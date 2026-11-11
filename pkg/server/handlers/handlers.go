@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/server/auth"
 	"github.com/tsic404/rffmpeg/pkg/server/db"
@@ -52,6 +53,10 @@ type Handler struct {
 	// follows os.TempDir()/$TMPDIR, which mime/multipart uses directly.
 	// main keeps the two in sync; see SetMultipartTmpDir.
 	multipartTmpDir string
+	// sharedFS is the declared shared filesystem path space (C-107). The
+	// submission side judges absolute-path inputs, pass-through paths and
+	// pass-through targets against it. An empty space has no legal path.
+	sharedFS *pathutil.Space
 }
 
 // New creates a new Handler
@@ -64,6 +69,7 @@ func New(database *db.Database, store *storage.Storage, version string, stateTab
 		rateLimiter:      rateLimiterWithTerminalHook(database),
 		stateTable:       stateTable,
 		maxJobsPerWorker: 1,
+		sharedFS:         pathutil.NewSpace(""),
 	}
 }
 
@@ -77,6 +83,7 @@ func NewWithHub(database *db.Database, store *storage.Storage, version string, h
 		rateLimiter:      rateLimiterWithTerminalHook(database),
 		stateTable:       stateTable,
 		maxJobsPerWorker: 1,
+		sharedFS:         pathutil.NewSpace(""),
 	}
 }
 
@@ -176,6 +183,22 @@ func (h *Handler) SetMaxJobsPerWorker(maxJobs int) {
 // and the real spill silently disagree.
 func (h *Handler) SetMultipartTmpDir(dir string) {
 	h.multipartTmpDir = dir
+}
+
+// SetSharedFSRoots declares the shared filesystem path space (C-107). The
+// declaration must match the workers' one; an empty value leaves the mode with
+// no legal path.
+func (h *Handler) SetSharedFSRoots(raw string) {
+	h.sharedFS = pathutil.NewSpace(raw)
+}
+
+// sharedFSSpace returns the declared space, never nil so callers can ask for
+// membership unconditionally.
+func (h *Handler) sharedFSSpace() *pathutil.Space {
+	if h.sharedFS == nil {
+		return pathutil.NewSpace("")
+	}
+	return h.sharedFS
 }
 
 // SetAuthToken sets the auth token for health check reporting

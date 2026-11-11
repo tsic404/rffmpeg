@@ -158,7 +158,7 @@ func TestProcessJob_PanicReportedWorkerSurvives(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "panic-job",
-		InputFiles: []string{"in"},
+		InputFiles: []string{testUploadID("in")},
 		Args:       []string{"-i", "<INPUT_FILE>", "out.mp4"},
 	}
 

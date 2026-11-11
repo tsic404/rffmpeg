@@ -77,7 +77,7 @@ func TestProcessJob_JobDirWriteFailureReportsInfraFailure(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:             "job-dir-write-failure",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 		OutputFilename: "out.mp4",
 	}

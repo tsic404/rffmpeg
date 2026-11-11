@@ -52,7 +52,7 @@ func TestCacheHitStreamsStderrNotice(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "tsi-2415-first",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
@@ -66,7 +66,7 @@ func TestCacheHitStreamsStderrNotice(t *testing.T) {
 	// cache-hit notice on the job's stderr channel.
 	job2 := protocol.JobInfo{
 		ID:         "tsi-2415-second",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 

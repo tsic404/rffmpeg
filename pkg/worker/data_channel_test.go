@@ -152,6 +152,9 @@ func TestClient_DownloadInput_RemoteURL_InputAuthHeader(t *testing.T) {
 			defer ts.Close()
 
 			client := NewClient(ts.URL, "test-worker", tt.token)
+			// The fixture server listens on loopback, which the C-128 address
+			// policy refuses; this test only exercises header injection.
+			client.remoteClient = client.dataClient
 			client.SetInputAuthHeader(tt.inputHeader)
 
 			remoteURL := ts.URL + "/input.mkv"
@@ -200,12 +203,15 @@ func TestClient_DownloadInput_RemoteURL_NonASCIIFilename(t *testing.T) {
 			defer ts.Close()
 
 			remoteURL := ts.URL + tt.urlPath
-			// Mirror the worker's destination-name derivation (last path
-			// segment, sanitized) so the test exercises the same local path
-			// shape ffmpeg later reads.
-			destPath := filepath.Join(t.TempDir(), "input-"+sanitizeInputBaseName(filepath.Base(remoteURL)))
+			// The landing name is positional, never derived from the identifier
+			// text (C-126); this test only exercises URL path handling.
+			destPath := filepath.Join(t.TempDir(), "input-0")
 
-			if err := NewClient(ts.URL, "test-worker", "").DownloadInput(context.Background(), remoteURL, destPath); err != nil {
+			client := NewClient(ts.URL, "test-worker", "")
+			// The fixture server listens on loopback, which the C-128 address
+			// policy refuses; URL handling is what this test covers.
+			client.remoteClient = client.dataClient
+			if err := client.DownloadInput(context.Background(), remoteURL, destPath); err != nil {
 				t.Fatalf("DownloadInput(%q): %v", remoteURL, err)
 			}
 			if gotPath != tt.wantPath {

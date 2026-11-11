@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
 )
@@ -162,6 +163,7 @@ func TestProcessProbeJob_DirectPathProbesLocally(t *testing.T) {
 		ffprobeExecutor:    NewFFprobeExecutor("/usr/bin/ffprobe"),
 		pixelFormatChecker: nil,
 		gpuDetector:        gpu.NewDetector(),
+		sharedFS:           pathutil.NewSpace(tmpDir),
 	}
 
 	job := protocol.JobInfo{

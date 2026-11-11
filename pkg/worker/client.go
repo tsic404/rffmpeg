@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tsic404/rffmpeg/pkg/addrpolicy"
 	"github.com/tsic404/rffmpeg/pkg/pathutil"
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 	"github.com/tsic404/rffmpeg/pkg/worker/gpu"
@@ -81,9 +82,15 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client // control plane: register/heartbeat/pull/status — short timeout
 	dataClient *http.Client // data plane: file download/upload — long timeout
-	workerID   string
-	workerMu   sync.RWMutex
-	token      string
+	// remoteClient fetches user-provided remote input URLs only. Its transport
+	// judges every resolved target address and pins the connection to a judged
+	// one (C-128), which the shared data client must not do: it also talks to
+	// the operator-configured server, which may legitimately live on a
+	// loopback or private address.
+	remoteClient *http.Client
+	workerID     string
+	workerMu     sync.RWMutex
+	token        string
 	// inputAuthHeader is the raw Authorization value for user-provided remote
 	// input URLs. Kept apart from token so the API-channel PSK can never leak
 	// to an external server.
@@ -107,6 +114,7 @@ func NewClient(baseURL, workerID, token string) *Client {
 		dataClient: &http.Client{
 			Timeout: 30 * time.Minute, // large media transfers need a generous ceiling
 		},
+		remoteClient: addrpolicy.NewRemoteInputClient(30 * time.Minute),
 	}
 }
 
@@ -275,18 +283,21 @@ func (c *Client) PullJobs() ([]protocol.JobInfo, error) {
 	return result.Jobs, nil
 }
 
-// DownloadInput downloads an input file from the server or directly from a remote URL.
-// If fileID is a remote URL per pathutil.IsRemoteURL (scheme-prefixed, excluding the local
-// "file" scheme), it is downloaded directly. Otherwise, it is treated as a
-// server-side file ID and fetched from the server. The context aborts the
-// transfer and the copy when the job is cancelled.
+// DownloadInput downloads an input file from the server or directly from a
+// remote URL.
+// If fileID is an absolute http/https URL it is fetched directly through the
+// address-policy client, whose dialer judges the resolved target and refuses a
+// denied one before any connection exists, and whose redirect hook re-judges
+// every hop (C-128). Otherwise it is treated as a server-side file ID and
+// fetched from the server. The context aborts the transfer and the copy when
+// the job is cancelled.
 func (c *Client) DownloadInput(ctx context.Context, fileID, destPath string) error {
 	var downloadURL string
 	var req *http.Request
 	var err error
+	remote := pathutil.IsHTTPRemoteURL(fileID)
 
-	if pathutil.IsRemoteURL(fileID) {
-		// Remote URL — download directly
+	if remote {
 		downloadURL = fileID
 		req, err = http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 		if err != nil {
@@ -308,7 +319,11 @@ func (c *Client) DownloadInput(ctx context.Context, fileID, destPath string) err
 		}
 		c.setAuthHeader(req)
 	}
-	resp, err := c.dataClient.Do(req)
+	httpClient := c.dataClient
+	if remote {
+		httpClient = c.remoteClient
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return &transportError{err: err}
 	}

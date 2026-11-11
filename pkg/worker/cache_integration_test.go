@@ -166,7 +166,7 @@ func TestCacheIntegration_MissThenHit(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "test-job-001",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
@@ -210,7 +210,7 @@ func TestCacheIntegration_MissThenHit(t *testing.T) {
 
 	job2 := protocol.JobInfo{
 		ID:         "test-job-002",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
@@ -243,7 +243,7 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "test-job-ttl-001",
-		InputFiles: []string{"input-ttl-001"},
+		InputFiles: []string{testUploadID("input-ttl-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
@@ -275,7 +275,7 @@ func TestCacheIntegration_TTLEviction(t *testing.T) {
 
 	job2 := protocol.JobInfo{
 		ID:         "test-job-ttl-002",
-		InputFiles: []string{"input-ttl-001"},
+		InputFiles: []string{testUploadID("input-ttl-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
@@ -305,12 +305,12 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 
 	jobA := protocol.JobInfo{
 		ID:         "test-job-a",
-		InputFiles: []string{"input-a"},
+		InputFiles: []string{testUploadID("input-a")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
 	jobB := protocol.JobInfo{
 		ID:         "test-job-b",
-		InputFiles: []string{"input-a"},
+		InputFiles: []string{testUploadID("input-a")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx265"},
 	}
 
@@ -329,7 +329,7 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 	beforeDownloads := mockSrv.DownloadCount()
 	jobA2 := protocol.JobInfo{
 		ID:         "test-job-a2",
-		InputFiles: []string{"input-a"},
+		InputFiles: []string{testUploadID("input-a")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
 	runJob(t, w, jobA2)
@@ -341,7 +341,7 @@ func TestCacheIntegration_MultipleDifferentJobs(t *testing.T) {
 	beforeDownloads = mockSrv.DownloadCount()
 	jobB2 := protocol.JobInfo{
 		ID:         "test-job-b2",
-		InputFiles: []string{"input-a"},
+		InputFiles: []string{testUploadID("input-a")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx265"},
 	}
 	runJob(t, w, jobB2)
@@ -364,7 +364,7 @@ func TestCacheIntegration_OrderSensitivity(t *testing.T) {
 
 	job1 := protocol.JobInfo{
 		ID:         "test-job-order-1",
-		InputFiles: []string{"input-order"},
+		InputFiles: []string{testUploadID("input-order")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 	runJob(t, w, job1)
@@ -372,7 +372,7 @@ func TestCacheIntegration_OrderSensitivity(t *testing.T) {
 	beforeDownloads := mockSrv.DownloadCount()
 	job2 := protocol.JobInfo{
 		ID:         "test-job-order-2",
-		InputFiles: []string{"input-order"},
+		InputFiles: []string{testUploadID("input-order")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-preset", "fast", "-c:v", "libx264"},
 	}
 	runJob(t, w, job2)
@@ -413,7 +413,7 @@ func TestCacheIntegration_AutoHWMissThenHit(t *testing.T) {
 	makeJob := func(id string) protocol.JobInfo {
 		return protocol.JobInfo{
 			ID:         id,
-			InputFiles: []string{"input-autohw"},
+			InputFiles: []string{testUploadID("input-autohw")},
 			Args:       args,
 			AutoHW:     true,
 		}
@@ -432,7 +432,7 @@ func TestCacheIntegration_AutoHWMissThenHit(t *testing.T) {
 		t.Error("Expected downloads on first run (miss path)")
 	}
 
-	cacheKey := GenerateCacheKey([]string{"input-autohw"}, args, true, "", target)
+	cacheKey := GenerateCacheKey([]string{testUploadID("input-autohw")}, args, true, "", target)
 	if _, hit := w.cache.Check(cacheKey); !hit {
 		t.Fatal("Expected cache entry under rewritten-encoder key after first run")
 	}

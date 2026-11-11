@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,8 +29,15 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/server/workerhealth"
 )
 
-// setupTestServer creates a test server with all handlers
+// setupTestServer creates a test server with all handlers and no declared
+// shared filesystem space (pass-through mode has no legal path there).
 func setupTestServer(t *testing.T) (*httptest.Server, *db.Database, *storage.Storage, func()) {
+	return setupTestServerWithRoots(t, "")
+}
+
+// setupTestServerWithRoots creates a test server whose shared filesystem space
+// is declared as roots, so pass-through requests can name paths under it.
+func setupTestServerWithRoots(t *testing.T, roots string) (*httptest.Server, *db.Database, *storage.Storage, func()) {
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "rffmpeg-client-test-*")
 	if err != nil {
@@ -56,6 +64,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *db.Database, *storage.Sto
 	h := handlers.New(database, store, "test", stateTable)
 	chunkHandler := handlers.NewChunkUploadHandler(database, store, 0) // Uses default chunk size
 	h.SetAuthToken("test-token")
+	h.SetSharedFSRoots(roots)
 	chunkHandler.SetAuthToken("test-token")
 
 	// Setup router
@@ -1281,31 +1290,28 @@ func TestLargeFileUploadIntegration(t *testing.T) {
 // TestSharedFSSubmitJobWithDirectPath tests that DirectPath is sent in the request
 // when shared FS mode is enabled.
 func TestSharedFSSubmitJobWithDirectPath(t *testing.T) {
-	server, _, _, cleanup := setupTestServer(t)
-	defer cleanup()
-
-	c := client.New(server.URL, "test-token")
-
-	// Upload a real file first to get a valid file ID
 	content := []byte("shared fs test content")
 	tmpFile := createTestFile(t, content)
 	defer os.Remove(tmpFile)
 
-	fileID, err := c.UploadFile(tmpFile)
-	if err != nil {
-		t.Fatalf("UploadFile failed: %v", err)
-	}
+	// A pass-through request names shared filesystem paths on both fields and
+	// the deployment declares the root they live under (C-123 / C-125).
+	server, _, _, cleanup := setupTestServerWithRoots(t, filepath.Dir(tmpFile))
+	defer cleanup()
 
-	fileIDs := []string{fileID}
+	c := client.New(server.URL, "test-token")
+
+	fileIDs := []string{tmpFile}
 	directPaths := []string{tmpFile}
-	allArgs := []string{"-c:v", "libx264", "-c:a", "copy", "/tmp/output.mp4"}
+	allArgs := []string{"-c:v", "libx264", "-c:a", "copy"}
+	outputPath := filepath.Join(filepath.Dir(tmpFile), "output.mp4")
 
 	jobID, err := c.SubmitJobWithOptions(
 		context.Background(),
 		fileIDs,
 		directPaths,
 		allArgs,
-		"output.mp4",
+		outputPath,
 		false, // autoHW
 		false, // streamingOutput
 		0,     // timeout
@@ -1345,7 +1351,9 @@ func TestSharedFSSubmitJobWithoutDirectPath(t *testing.T) {
 	}
 
 	fileIDs := []string{fileID1, fileID2}
-	allArgs := []string{"-c:v", "libx264", "-c:a", "copy", "/tmp/output.mp4"}
+	// The output target travels in its own field, never as an ffmpeg argument
+	// (C-7); a bare local path in the argument list is refused (C-127).
+	allArgs := []string{"-c:v", "libx264", "-c:a", "copy"}
 
 	jobID, err := c.SubmitJobWithOptions(
 		context.Background(),

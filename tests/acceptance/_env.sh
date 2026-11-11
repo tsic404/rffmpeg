@@ -284,15 +284,73 @@ make_audio() {
 	printf '%s' "$path"
 }
 
+# private_host_ip prints the host's own RFC1918 IPv4 address, or fails when the
+# host has none. Remote input tests need it: the address policy refuses loopback
+# and link-local targets while private space is explicitly allowed (C-128), so a
+# fixture server reached over 127.0.0.1 would be refused by design.
+private_host_ip() {
+	python3 - "$@" <<'PY'
+import ipaddress, socket, sys
+
+candidates = []
+try:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # TEST-NET-1: connect() only selects a route, no packet is sent.
+    probe.connect(("192.0.2.1", 9))
+    candidates.append(probe.getsockname()[0])
+    probe.close()
+except OSError:
+    pass
+try:
+    for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+        candidates.append(info[4][0])
+except OSError:
+    pass
+
+for raw in candidates:
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        continue
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast:
+        continue
+    if ip.is_private:
+        print(ip)
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
+# media_url_base prints the base URL the Worker fetches the fixture server from:
+# the host's private address, never loopback (C-128).
+media_url_base() {
+	local ip
+	ip="$(private_host_ip)" || fail "no private (RFC1918) host address to serve remote inputs from"
+	printf 'http://%s:%s' "$ip" "${HTTP_PORT:-$((PORT + 1000))}"
+}
+
+# unreachable_input_url prints an input URL that passes the address policy but
+# has no listener behind it. Loopback is refused by policy (C-128) before any
+# connection, so a private host address is preferred when one exists; the
+# loopback form still exercises the same observable outcome — a remote input
+# that never answers is INPUT_UNREACHABLE, never INFRA.
+unreachable_input_url() {
+	local host="127.0.0.1"
+	private_host_ip >/dev/null 2>&1 && host="$(private_host_ip)"
+	printf 'http://%s:9/unreachable.mp4' "$host"
+}
+
 # start_http_fileserver serves MEDIA_DIR (or the given directory) over HTTP so
-# remote-URL input tests exercise the Worker's own download path. Sets
-# HTTP_PORT and records the PID for cleanup. The default port leaves a wide
-# gap from PORT so concurrently running TC scripts (which take consecutive
-# server ports) cannot collide with a neighbour's file server.
+# remote-URL input tests exercise the Worker's own download path. It binds every
+# interface because the remote URL must carry the host's private address
+# (media_url_base), which the Worker accepts while loopback stays refused
+# (C-128). Sets HTTP_PORT and records the PID for cleanup. The default port
+# leaves a wide gap from PORT so concurrently running TC scripts (which take
+# consecutive server ports) cannot collide with a neighbour's file server.
 start_http_fileserver() {
 	local dir="${1:-$MEDIA_DIR}"
 	HTTP_PORT="${HTTP_PORT:-$((PORT + 1000))}"
-	python3 -m http.server "$HTTP_PORT" --bind 127.0.0.1 --directory "$dir" \
+	python3 -m http.server "$HTTP_PORT" --bind 0.0.0.0 --directory "$dir" \
 		>>"$TMP_ROOT/http.log" 2>&1 &
 	HTTP_PID=$!
 	echo "$HTTP_PID" >> "$PIDFILE"

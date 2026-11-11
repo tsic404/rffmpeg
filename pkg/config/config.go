@@ -55,6 +55,13 @@ type ServerConfig struct {
 	InputFileTTL             time.Duration `json:"input_file_ttl" yaml:"input_file_ttl"`
 	InputFileCleanupInterval time.Duration `json:"input_file_cleanup_interval" yaml:"input_file_cleanup_interval"`
 
+	// SharedFSRoots declares the shared filesystem path space this deployment
+	// serves: a comma-separated list of root paths. The same declaration must be
+	// given to the workers. Empty declares nothing, and the pass-through mode
+	// then has no legal path at all — it never falls back to "any absolute
+	// path".
+	SharedFSRoots string `json:"shared_fs_roots" yaml:"shared_fs_roots"`
+
 	// WebSocket settings
 	AllowedOrigins []string `json:"allowed_origins" yaml:"allowed_origins"`
 
@@ -125,6 +132,8 @@ type Flags struct {
 	RateLimitEnabled           *bool
 	MaxConcurrentJobsPerClient int
 	RedisAddr                  string
+	// SharedFSRoots declares the shared filesystem path space (C-107).
+	SharedFSRoots string
 }
 
 // DefaultServerConfig returns a ServerConfig with sensible defaults
@@ -336,6 +345,13 @@ func LoadFromEnv() *ServerConfig {
 		config.TLS.MTLS = true
 	}
 
+	// Shared filesystem path space declaration. The same value must be given to
+	// every worker; an empty value leaves the pass-through mode with no legal
+	// path (fail-closed).
+	if roots := os.Getenv("RFFMPEG_SHARED_FS_ROOTS"); roots != "" {
+		config.SharedFSRoots = roots
+	}
+
 	// WebSocket allowed origins (comma-separated)
 	if origins := os.Getenv("ALLOWED_ORIGINS"); origins != "" {
 		config.AllowedOrigins = strings.Split(origins, ",")
@@ -416,6 +432,9 @@ func (c *ServerConfig) Merge(flags *Flags) {
 	}
 	if flags.RedisAddr != "" {
 		c.RedisAddr = flags.RedisAddr
+	}
+	if flags.SharedFSRoots != "" {
+		c.SharedFSRoots = flags.SharedFSRoots
 	}
 
 	// TLS flags - ensure TLS config exists

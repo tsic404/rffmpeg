@@ -37,7 +37,7 @@ func TestCacheHitMkdirAllFailureDoesNotLeakBatcher(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "tsi-2415-leak",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 
@@ -57,7 +57,7 @@ func TestCacheHitMkdirAllFailureDoesNotLeakBatcher(t *testing.T) {
 
 	job2 := protocol.JobInfo{
 		ID:         "tsi-2415-leak-hit",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264", "-preset", "fast"},
 	}
 	w.processJob(jobCtx, job2, cancel, false)

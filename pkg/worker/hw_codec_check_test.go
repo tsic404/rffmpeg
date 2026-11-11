@@ -309,7 +309,7 @@ func TestProcessJob_HardwareCodecUnsupportedFailsFast(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:             "hw-codec-precheck",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "av1_qsv"},
 		OutputFilename: "out.mp4",
 	}

@@ -9,22 +9,24 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// TestCacheHit_OverwritePolicyDegradesToMiss locks the cache-hit fix: when a
-// cache hit would land on a pre-existing output file and the caller did not
-// opt into -y (or passed -n), the cache-hit copy is skipped and the job
-// degrades to a miss, so ffmpeg applies native overwrite semantics ("Not
-// overwriting - exiting") instead of silently truncating via copyFile's
-// O_TRUNC. The degradation is observable through the download counter: the
-// cache-hit path never downloads inputs, the miss path re-downloads them.
-// (The mock ffmpeg always overwrites, so content is not the signal here.)
+// TestCacheHit_OverwritePolicyDegradesToMiss locks the cache-hit guard: when the
+// target file already exists inside the job workspace and the caller did not opt
+// into -y (or passed -n), the cached copy is skipped and the job degrades to a
+// miss, so ffmpeg applies native overwrite semantics ("Not overwriting -
+// exiting") instead of silently truncating via copyFile's O_TRUNC.
+//
+// A re-dispatched job keeps its job ID, so its workspace can still hold the
+// output of the interrupted attempt — that is exactly the reachable case: the
+// cache-hit path reuses the workspace without clearing it. The degradation is
+// observable through the download counter: the cache-hit path never downloads
+// inputs, the miss path re-downloads them.
 func TestCacheHit_OverwritePolicyDegradesToMiss(t *testing.T) {
 	w, mockSrv := setupTestWorker(t, 24*time.Hour)
 
-	// Prime the cache: a miss run caches the output under key derived from
-	// input files + args + output extension.
+	input := testUploadID("cache-overwrite")
 	prime := protocol.JobInfo{
-		ID:             "tsi-2964-prime",
-		InputFiles:     []string{"input-001"},
+		ID:             "cache-overwrite-prime",
+		InputFiles:     []string{input},
 		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 		OutputFilename: "out.mp4",
 	}
@@ -33,25 +35,27 @@ func TestCacheHit_OverwritePolicyDegradesToMiss(t *testing.T) {
 		t.Fatalf("expected 1 cache entry after prime run, got %d", w.cache.Stats().EntryCount)
 	}
 
-	// Pre-existing absolute output that must not be silently truncated.
-	existingOutput := filepath.Join(t.TempDir(), "out.mp4")
-	if err := os.WriteFile(existingOutput, []byte("existing content"), 0o644); err != nil {
+	// The second job hits the same cache key and finds its own earlier output
+	// still in the workspace (same job ID, re-dispatch), with no -y.
+	hit := protocol.JobInfo{
+		ID:             "cache-overwrite-hit",
+		InputFiles:     []string{input},
+		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
+		OutputFilename: "out.mp4",
+	}
+	jobDir := filepath.Join(w.tempDir, hit.ID)
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		t.Fatalf("mkdir job dir: %v", err)
+	}
+	defer os.RemoveAll(jobDir)
+	if err := os.WriteFile(filepath.Join(jobDir, "out.mp4"), []byte("existing content"), 0o644); err != nil {
 		t.Fatalf("write existing output: %v", err)
 	}
 
-	// Same cache key (same input/args/ext) but an absolute output path that
-	// already exists, with no -y: must degrade to a cache miss.
-	job := protocol.JobInfo{
-		ID:             "tsi-2964-hit",
-		InputFiles:     []string{"input-001"},
-		Args:           []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
-		OutputFilename: existingOutput,
-	}
-
 	beforeDownloads := mockSrv.DownloadCount()
-	runJob(t, w, job)
+	runJob(t, w, hit)
 
 	if mockSrv.DownloadCount() == beforeDownloads {
-		t.Errorf("expected cache hit to degrade to a miss (input re-downloaded) when output exists and overwrite not allowed")
+		t.Errorf("expected cache hit to degrade to a miss (input re-downloaded) when the workspace output exists and overwrite is not allowed")
 	}
 }

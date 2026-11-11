@@ -313,7 +313,7 @@ func TestProcessJobFailureClassificationMatrix(t *testing.T) {
 
 			job := protocol.JobInfo{
 				ID:             "matrix-" + strings.ToLower(tc.name),
-				InputFiles:     []string{"input-001"},
+				InputFiles:     []string{testUploadID("input-001")},
 				Args:           tc.args,
 				OutputFilename: "out.mp4",
 			}

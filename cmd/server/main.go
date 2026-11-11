@@ -185,6 +185,10 @@ func main() {
 	// always agree.
 	h := handlers.New(database, store, cfg.Version, stateTable)
 	h.SetMultipartTmpDir(cfg.MultipartTmpDir)
+	// C-107: the submission side judges pass-through inputs and targets against
+	// the same space declaration the workers use. An empty declaration leaves
+	// the mode with no legal path; it never falls back to any absolute path.
+	h.SetSharedFSRoots(cfg.SharedFSRoots)
 
 	// Fault injection for the slow-worker eviction path: heartbeats from the
 	// listed workers report scaled throughput. A malformed value aborts startup
@@ -584,6 +588,7 @@ func parseFlags() *config.Flags {
 	flag.Var(optionalBoolFlag{target: &flags.RateLimitEnabled}, "rate-limit-enabled", "Enable per-client rate limiting (default: true)")
 	flag.IntVar(&flags.MaxConcurrentJobsPerClient, "max-concurrent-jobs-per-client", 0, "Maximum concurrent jobs per client (default: 10)")
 	flag.StringVar(&flags.RedisAddr, "redis-addr", "", "Redis address for distributed rate limiting (optional)")
+	flag.StringVar(&flags.SharedFSRoots, "shared-fs-roots", "", "Comma-separated roots of the shared filesystem path space; workers must declare the same value (default: none, pass-through mode has no legal path)")
 
 	flag.Parse()
 

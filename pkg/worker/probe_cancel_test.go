@@ -60,7 +60,7 @@ func TestProcessProbeJob_CancelDuringInputDownload(t *testing.T) {
 	defer cancel()
 	job := protocol.JobInfo{
 		ID:         "cancel-probe",
-		InputFiles: []string{"file-1"},
+		InputFiles: []string{testUploadID("file-1")},
 		Args:       []string{"__rffmpeg_probe__", "file-1"},
 	}
 

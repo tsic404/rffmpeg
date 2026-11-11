@@ -162,7 +162,7 @@ func TestProcessJob_ExitZeroWithErrorLikeMetadataCompletes(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:             "exit0-metadata-header-missing",
-		InputFiles:     []string{"input-001"},
+		InputFiles:     []string{testUploadID("input-001")},
 		Args:           []string{"-i", "<INPUT_FILE>", "-metadata", "title=header missing", "-c:v", "libx264"},
 		OutputFilename: "out.mp4",
 	}
@@ -191,7 +191,7 @@ func TestProcessJob_ExitZeroWithRefusalLikeMetadataCompletes(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "exit0-metadata-refusal-phrase",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args: []string{
 			"-i", "<INPUT_FILE>",
 			"-c:v", "libx264", "-preset", "ultrafast",

@@ -19,7 +19,7 @@ func TestProcessJobReleasesJobContext(t *testing.T) {
 
 	job := protocol.JobInfo{
 		ID:         "job-context-release",
-		InputFiles: []string{"input-001"},
+		InputFiles: []string{testUploadID("input-001")},
 		Args:       []string{"-i", "<INPUT_FILE>", "-c:v", "libx264"},
 	}
 
