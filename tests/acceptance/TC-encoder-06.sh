@@ -39,7 +39,7 @@ run_case() {
 	shift 2
 	local log="$TMP_ROOT/$label.log"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$MEDIA" -t 1 "$@" "$out" 2>"$log"
 	local rc=$?
 	set -e

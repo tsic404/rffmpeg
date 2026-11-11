@@ -118,7 +118,7 @@ dev: ## Start development environment
 	@echo "Run 'make run' to start server and worker, or use the following commands:"
 	@echo "  ./bin/rffmpeg-server   - Start the server"
 	@echo "  ./bin/rffmpeg-worker   - Start a worker"
-	@echo "  ./bin/rffmpeg --help   - CLI help"
+	@echo "  ./bin/rffmpeg -h       - CLI help"
 
 run: build ## Run server and worker locally
 	@echo "Starting server and worker..."

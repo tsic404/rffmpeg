@@ -8,22 +8,34 @@ import (
 	"testing"
 )
 
+// TestRedactSecrets pins C-9's token rule: a credential never reaches the
+// diagnostic log, whether it arrived through the configuration plane or was
+// typed inline on the command line. Both masks are asserted separately, and
+// the inline spellings stay in the argument list — masking is log rendering,
+// never argument parsing.
 func TestRedactSecrets(t *testing.T) {
-	tests := []struct {
-		name string
-		in   []string
-		want string
+	orig := os.Args
+	defer func() { os.Args = orig }()
+
+	cases := []struct {
+		name  string
+		argv  []string
+		token string
+		want  string
 	}{
-		{"space token", []string{"rffmpeg", "--token", "SECRET", "-i", "in.mp4"}, "rffmpeg --token <redacted> -i in.mp4"},
-		{"equals token", []string{"rffmpeg", "--token=SECRET", "out.mp4"}, "rffmpeg --token=<redacted> out.mp4"},
-		{"short space token", []string{"rffmpeg", "-token", "SECRET"}, "rffmpeg -token <redacted>"},
-		{"short equals token", []string{"rffmpeg", "-token=SECRET"}, "rffmpeg -token=<redacted>"},
-		{"no token", []string{"rffmpeg", "-i", "in.mp4", "out.mp4"}, "rffmpeg -i in.mp4 out.mp4"},
+		{"config token value absent", []string{"rffmpeg", "-i", "in.mp4", "out.mp4"}, "SECRET", "rffmpeg -i in.mp4 out.mp4"},
+		{"config token value carried", []string{"rffmpeg", "-i", "in.mp4", "SECRET"}, "SECRET", "rffmpeg -i in.mp4 <redacted>"},
+		{"no token configured", []string{"rffmpeg", "-i", "in.mp4", "out.mp4"}, "", "rffmpeg -i in.mp4 out.mp4"},
+		{"inline --token= with a different value", []string{"rffmpeg", "-i", "in.mp4", "--token=OTHER", "out.mp4"}, "CONFIGURED", "rffmpeg -i in.mp4 --token=<redacted> out.mp4"},
+		{"inline --token= with the configured value", []string{"rffmpeg", "-i", "in.mp4", "--token=CONFIGURED", "out.mp4"}, "CONFIGURED", "rffmpeg -i in.mp4 --token=<redacted> out.mp4"},
+		{"inline -token= with no configured token", []string{"rffmpeg", "-i", "in.mp4", "-token=OTHER", "out.mp4"}, "", "rffmpeg -i in.mp4 -token=<redacted> out.mp4"},
+		{"space separated --token", []string{"rffmpeg", "--token", "OTHER", "-i", "in.mp4", "out.mp4"}, "", "rffmpeg --token <redacted> -i in.mp4 out.mp4"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := redactSecrets(tt.in); got != tt.want {
-				t.Errorf("redactSecrets(%v) = %q, want %q", tt.in, got, tt.want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Args = tc.argv
+			if got := redactSecrets(tc.token); got != tc.want {
+				t.Errorf("redactSecrets(%q) = %q, want %q", tc.token, got, tc.want)
 			}
 		})
 	}
@@ -40,8 +52,7 @@ func TestTailBufferRetainsTail(t *testing.T) {
 }
 
 func TestStderrTeeDisabledNoOp(t *testing.T) {
-	t.Setenv(diagLogFileEnv, "")
-	tee := startStderrTee()
+	tee := startStderrTee("", "")
 	orig := os.Stderr
 
 	tee.stop()
@@ -55,9 +66,8 @@ func TestStderrTeeDisabledNoOp(t *testing.T) {
 func TestStderrTeeCaptureAndRecord(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "diag.log")
-	t.Setenv(diagLogFileEnv, logPath)
 
-	tee := startStderrTee()
+	tee := startStderrTee(logPath, "")
 	defer tee.stop()
 
 	fmt.Fprintf(os.Stderr, "boom: transient failure\n")
@@ -94,10 +104,9 @@ func TestStderrTeeCaptureAndRecord(t *testing.T) {
 func TestStderrTeeRealStderr(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "diag.log")
-	t.Setenv(diagLogFileEnv, logPath)
 
 	orig := os.Stderr
-	tee := startStderrTee()
+	tee := startStderrTee(logPath, "")
 	if tee.realStderr() != orig {
 		t.Errorf("active tee realStderr() = %v, want original os.Stderr %v", tee.realStderr(), orig)
 	}
@@ -111,8 +120,7 @@ func TestStderrTeeRealStderr(t *testing.T) {
 }
 
 func TestStderrTeeRealStderrDisabled(t *testing.T) {
-	t.Setenv(diagLogFileEnv, "")
-	tee := startStderrTee()
+	tee := startStderrTee("", "")
 	if tee.realStderr() != os.Stderr {
 		t.Errorf("disabled tee realStderr() = %v, want os.Stderr %v", tee.realStderr(), os.Stderr)
 	}
@@ -124,9 +132,8 @@ func TestStderrTeeRealStderrDisabled(t *testing.T) {
 func TestStderrTeeRecordWithoutStop(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "diag.log")
-	t.Setenv(diagLogFileEnv, logPath)
 
-	tee := startStderrTee()
+	tee := startStderrTee(logPath, "")
 	defer tee.stop()
 
 	fmt.Fprintln(os.Stderr, "interrupt during upload")

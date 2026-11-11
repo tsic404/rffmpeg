@@ -16,7 +16,7 @@ OUT="$TMP_ROOT/quality.mp4"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -preset veryfast -crf 28 -c:a aac -b:a 96k \
 	"$OUT" 2>"$LOG"
 RC=$?

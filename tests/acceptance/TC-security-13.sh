@@ -66,7 +66,7 @@ run_cli() {
 	local url="$1"
 	CLI_LOG="$TMP_ROOT/cli-$(printf '%s' "$url" | sha256sum | cut -c1-8).log"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$url" -c:v libx264 "$TMP_ROOT/out.mp4" 2>"$CLI_LOG"
 	local rc=$?
 	set -e

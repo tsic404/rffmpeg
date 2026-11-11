@@ -17,7 +17,7 @@ LOG="$TMP_ROOT/cli.log"
 
 START=$(now_ns)
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MISSING" "$OUT" >/dev/null 2>"$LOG"
 RC=$?
 set -e

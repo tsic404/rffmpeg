@@ -61,20 +61,20 @@ const (
 
 	// DefaultServerLossTimeout caps how long the CLI keeps waiting for an
 	// already-submitted job once the server stops answering at all
-	// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT): only transport-level
+	// (RFFMPEG_SERVER_LOSS_TIMEOUT): only transport-level
 	// failures count, so an answered request — an error status included — resets
 	// the clock. The cap must outlast a routine server restart, or an ordinary
 	// restart turns into the "gave up waiting" exit code while the job keeps
 	// running server-side; 30s spans the reconnect ramp (0s/1s/3s/7s/15s) and
-	// stays far below the ~5 min retry budget. 0 = --max-retries decides alone.
+	// stays far below the ~5 min retry budget. 0 = RFFMPEG_MAX_RETRIES decides alone.
 	DefaultServerLossTimeout = 30 * time.Second
 
 	// DefaultSubmitRetries bounds the CLI's rate-limit (HTTP 429) resubmission
-	// loop when --retry is enabled. Backoff starts at the server's retry_in
+	// loop when RFFMPEG_RETRY is enabled. Backoff starts at the server's retry_in
 	// hint (or 1s) and doubles per attempt, capped at submitRetryMaxDelay.
 	DefaultSubmitRetries = 5
 
-	// submitRetryMaxDelay caps a single backoff wait so --retry never parks
+	// submitRetryMaxDelay caps a single backoff wait so RFFMPEG_RETRY never parks
 	// the CLI for an unbounded time on a stuck server.
 	submitRetryMaxDelay = 60 * time.Second
 
@@ -106,8 +106,8 @@ type Client struct {
 	submitRetries int
 	// serverLossTimeout caps one continuous silence — requests the server never
 	// answered — while waiting for an already-submitted job
-	// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT). 0 disables the cap:
-	// --max-retries alone decides when to give up.
+	// (RFFMPEG_SERVER_LOSS_TIMEOUT). 0 disables the cap:
+	// RFFMPEG_MAX_RETRIES alone decides when to give up.
 	serverLossTimeout time.Duration
 }
 
@@ -115,7 +115,7 @@ type Client struct {
 type ClientOption func(*Client)
 
 // WithMaxRetries sets the retry budget for the WS reconnect loop and the HTTP
-// status-poll fallback (--max-retries / RFFMPEG_MAX_RETRIES). 0 means "no
+// status-poll fallback (RFFMPEG_MAX_RETRIES). 0 means "no
 // retries" — fail fast after the first failed attempt.
 func WithMaxRetries(n int) ClientOption {
 	return func(c *Client) {
@@ -127,8 +127,8 @@ func WithMaxRetries(n int) ClientOption {
 
 // WithServerLossTimeout caps how long the client keeps waiting for an
 // already-submitted job once the server stops answering
-// (--server-loss-timeout / RFFMPEG_SERVER_LOSS_TIMEOUT). 0 disables the cap and
-// leaves --max-retries in charge.
+// (RFFMPEG_SERVER_LOSS_TIMEOUT). 0 disables the cap and
+// leaves RFFMPEG_MAX_RETRIES in charge.
 func WithServerLossTimeout(d time.Duration) ClientOption {
 	return func(c *Client) {
 		if d >= 0 {

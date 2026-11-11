@@ -186,7 +186,7 @@ expect_in_file "$SECRET" "do-not-leak"
 TARGET="$ROOT/out-target.mp4"
 LOG="$TMP_ROOT/cli.log"
 set +e
-env RFFMPEG_SHARED_FS=1 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+env RFFMPEG_SHARED_FS=1 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$ROOT/input.mp4" -c:v libx264 "$TARGET" 2>"$LOG"
 RC=$?
 set -e

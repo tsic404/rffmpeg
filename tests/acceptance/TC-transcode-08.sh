@@ -18,7 +18,7 @@ OUT="$MEDIA_DIR/output with \"double\" and 'single'.mp4"
 TITLE="a b 'c' \"d\""
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$SRC" -c:v libx264 -metadata "title=$TITLE" "$OUT" 2>"$TMP_ROOT/cli.log"
 RC=$?
 set -e

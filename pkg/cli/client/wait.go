@@ -208,7 +208,7 @@ func (c *Client) WaitForJobWithLogs(ctx context.Context, jobID string, quiet boo
 	// terminalSeen is closed once the WebSocket delivers a terminal status or
 	// complete event. The backup HTTP poll runs on a 2s tick, so without this
 	// the CLI would linger up to a full poll interval after the worker's
-	// terminal report is broadcast (e.g. a --timeout verdict), even though the
+	// terminal report is broadcast (e.g. a RFFMPEG_JOB_TIMEOUT verdict), even though the
 	// job is already done.
 	var terminalOnce sync.Once
 	terminalSeen := make(chan struct{})

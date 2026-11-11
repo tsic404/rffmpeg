@@ -15,7 +15,7 @@ LOG="$TMP_ROOT/probe.log"
 BEFORE="$(api_get /api/v1/jobs | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["jobs"]))')"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	probe "$MEDIA" >/dev/null 2>"$LOG"
 RC=$?
 set -e

@@ -19,7 +19,7 @@ LOG="$TMP_ROOT/cli.log"
 ARGS=(-c:v libx264 -crf 23 -preset veryfast -threads 1 -i_qfactor 0.71)
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" "${ARGS[@]}" "$OUT" 2>"$LOG"
 RC=$?
 set -e

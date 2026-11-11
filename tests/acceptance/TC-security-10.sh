@@ -146,7 +146,8 @@ expect_rejected "empty output name" \
 # 非直通：合法输出名的产物可 ffprobe（CLI 提交的唯一文件名）。
 LOG="$TMP_ROOT/cli-name.log"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$DEPLOY_URL" --token "$AUTH_TOKEN" \
+env RFFMPEG_SERVER_URL="$DEPLOY_URL" RFFMPEG_TOKEN="$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 	-i "$ROOT/input.mp4" -c:v libx264 "$TMP_ROOT/legal-name.mp4" 2>"$LOG"
 RC=$?
 set -e
@@ -177,7 +178,7 @@ TARGET="$ROOT/published.mp4"
 BEFORE="$(snapshot "$ROOT")"
 LOG="$TMP_ROOT/cli-direct.log"
 set +e
-env RFFMPEG_SHARED_FS=1 "$RFFMPEG_BIN/rffmpeg" --server "$DEPLOY_URL" --token "$AUTH_TOKEN" \
+env RFFMPEG_SHARED_FS=1 RFFMPEG_SERVER_URL="$DEPLOY_URL" RFFMPEG_TOKEN="$AUTH_TOKEN" "$RFFMPEG_BIN/rffmpeg" \
 	-i "$ROOT/input.mp4" -c:v libx264 "$TARGET" 2>"$LOG"
 RC=$?
 set -e

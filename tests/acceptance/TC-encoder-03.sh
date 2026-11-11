@@ -16,7 +16,7 @@ MEDIA="$(make_media autohw.mp4 4)"
 
 OFF_LOG="$TMP_ROOT/off.log"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 "$TMP_ROOT/off.mp4" 2>"$OFF_LOG"
 RC=$?
 set -e
@@ -35,8 +35,8 @@ done
 
 ON_LOG="$TMP_ROOT/on.log"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
-	--auto-hw -i "$MEDIA" -c:v libx264 "$TMP_ROOT/on.mp4" 2>"$ON_LOG"
+RFFMPEG_AUTO_HW=1 "$RFFMPEG_BIN/rffmpeg" \
+	-i "$MEDIA" -c:v libx264 "$TMP_ROOT/on.mp4" 2>"$ON_LOG"
 RC=$?
 set -e
 expect_rc "$RC" 0 "auto-hw rc"

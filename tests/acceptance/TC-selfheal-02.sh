@@ -17,7 +17,7 @@ MEDIA="$(make_media migrate.mp4 120 1280x720)"
 LOG="$TMP_ROOT/cli.log"
 OUT="$TMP_ROOT/migrated.mp4"
 
-( timeout 300 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+( timeout 300 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -preset veryslow "$OUT" >/dev/null 2>"$LOG" ) &
 CLI_PID=$!
 trap 'kill "$CLI_PID" 2>/dev/null || true; acceptance_cleanup' EXIT

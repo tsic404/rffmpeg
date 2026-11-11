@@ -16,7 +16,7 @@ OUT="$TMP_ROOT/out.mp4"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
-env -u RFFMPEG_TOKEN "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" \
+env -u RFFMPEG_TOKEN "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" "$OUT" >/dev/null 2>"$LOG"
 RC=$?
 set -e

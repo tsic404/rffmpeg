@@ -15,7 +15,7 @@ import (
 
 // TestWaitForJobWithLogs_TerminalStatusReturnsPromptly is the
 // regression test: when the WebSocket delivers a terminal status (here a
-// --timeout verdict), WaitForJobWithLogs must return immediately — fetching
+// RFFMPEG_JOB_TIMEOUT verdict), WaitForJobWithLogs must return immediately — fetching
 // the terminal job with a single GetJob — instead of waiting out the backup
 // poll's pollInterval tick. pollInterval is set far beyond the test window, so
 // the only path that can return before the context deadline is the terminal

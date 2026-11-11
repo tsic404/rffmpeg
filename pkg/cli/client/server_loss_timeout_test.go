@@ -14,8 +14,8 @@ import (
 )
 
 // TestServerLossBudget pins the effective post-submit contact-loss budget: the
-// tighter of the retry budget (--max-retries) and the server-loss timeout
-// (--server-loss-timeout). A zero timeout disables that cap, while a zero retry
+// tighter of the retry budget (RFFMPEG_MAX_RETRIES) and the server-loss timeout
+// (RFFMPEG_SERVER_LOSS_TIMEOUT). A zero timeout disables that cap, while a zero retry
 // budget ("no retries") stays the tighter bound.
 func TestServerLossBudget(t *testing.T) {
 	cases := []struct {
@@ -180,7 +180,7 @@ func TestWaitForJobWithLogs_ServerLossTimeoutBoundsHTTPPoll(t *testing.T) {
 // regression: a handshake the server answers — 404, the transient
 // job-visibility race right after submit — proves the server is reachable, so
 // it must restart the silence clock instead of burning the budget. Before the
-// fix a 404 retry window longer than --server-loss-timeout ended in a bogus
+// fix a 404 retry window longer than RFFMPEG_SERVER_LOSS_TIMEOUT ended in a bogus
 // "no contact" verdict (exit code 2) instead of the bounded 404 retries that
 // let the caller fall back to HTTP polling.
 func TestConnectWithReconnect_HTTPResponseDoesNotBurnLossBudget(t *testing.T) {

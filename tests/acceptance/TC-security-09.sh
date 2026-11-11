@@ -113,7 +113,8 @@ run_cli() {
 	local log="$1"
 	shift
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$DEPLOY_URL" --token "$AUTH_TOKEN" "$@" 2>"$log"
+	env RFFMPEG_SERVER_URL="$DEPLOY_URL" RFFMPEG_TOKEN="$AUTH_TOKEN" \
+		"$RFFMPEG_BIN/rffmpeg" "$@" 2>"$log"
 	local rc=$?
 	set -e
 	return $rc
@@ -155,7 +156,7 @@ ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$TMP_ROOT/
 PASS_OUT="$SHARED_ROOT/out-passthrough.mp4"
 LOG="$TMP_ROOT/cli-path.log"
 set +e
-env RFFMPEG_SHARED_FS=1 "$RFFMPEG_BIN/rffmpeg" --server "$DEPLOY_URL" --token "$AUTH_TOKEN" \
+env RFFMPEG_SHARED_FS=1 RFFMPEG_SERVER_URL="$DEPLOY_URL" RFFMPEG_TOKEN="$AUTH_TOKEN" "$RFFMPEG_BIN/rffmpeg" \
 	-i "$SHARED_ROOT/input.mp4" -c:v libx264 "$PASS_OUT" 2>"$LOG"
 RC=$?
 set -e

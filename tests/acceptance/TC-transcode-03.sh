@@ -17,11 +17,11 @@ PLAIN="$TMP_ROOT/plain.mp4"
 FILTERED="$TMP_ROOT/filtered.mp4"
 LOG="$TMP_ROOT/cli.log"
 
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -vf "scale=640:480" "$PLAIN" >/dev/null 2>&1
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 \
 	-vf "scale=640:480,drawtext=text='acceptance':fontsize=32:fontcolor=white:x=20:y=20" \
 	"$FILTERED" 2>"$LOG"
@@ -38,7 +38,7 @@ grep -q 'Error initializing filter' "$LOG" && fail "filter initialization error"
 # 判定不得把它拒成 400（C-7 原样透传 / AC-06）。
 COLON="$TMP_ROOT/colon.mp4"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 \
 	-vf "scale=640:480,drawtext=text='Chapter\\: 1':fontsize=32:fontcolor=white:x=20:y=20" \
 	"$COLON" 2>"$LOG"
@@ -51,7 +51,7 @@ grep -q 'Error initializing filter' "$LOG" && fail "filter initialization error 
 # 滤镜实例名（filter@id）是合法 ffmpeg 语法：判据只查滤镜名，实例名原样透传。
 INSTANCE="$TMP_ROOT/instance.mp4"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 \
 	-vf "scale@0=640:480,drawtext@t=text='acceptance':fontsize=32" \
 	"$INSTANCE" 2>"$LOG"

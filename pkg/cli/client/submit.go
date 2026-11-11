@@ -53,7 +53,7 @@ var ErrRetriesExhausted = errors.New("retries exhausted")
 
 // RetriesExhaustedError reports that a job was submitted successfully but the
 // client gave up waiting for it: either the server went silent for longer than
-// the server-loss timeout (--server-loss-timeout), or the retry budget was
+// the server-loss timeout (RFFMPEG_SERVER_LOSS_TIMEOUT), or the retry budget was
 // spent. It must be surfaced as a distinct exit code — never a generic failure
 // — so callers can tell "submitted, then gave up" apart from "submission
 // failed". The cause carries which bound fired and why.
@@ -78,7 +78,7 @@ func (e *RetriesExhaustedError) Unwrap() error {
 // (submit_conflict). It carries the server's suggested backoff so a caller
 // with a retry budget can honor it instead of re-submitting immediately.
 // Error renders the rejection fact without a retry promise; the retry hint
-// is added only once a retry budget was spent, so the default (no --retry)
+// is added only once a retry budget was spent, so the default (no RFFMPEG_RETRY)
 // path never tells the user a retry is coming.
 type RateLimitError struct {
 	Current int

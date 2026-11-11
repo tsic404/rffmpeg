@@ -22,7 +22,7 @@ LOG="$TMP_ROOT/cli.log"
 BEFORE="$(job_count)"
 
 set +e
-(cd "$RUN_DIR" && "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" -q \
+(cd "$RUN_DIR" && RFFMPEG_QUIET=1 "$RFFMPEG_BIN/rffmpeg" \
 	-c:v libx264 in.mp4 >/dev/null 2>"$LOG")
 RC=$?
 set -e

@@ -50,9 +50,7 @@ fi
 OUT="$TMP_ROOT/sec6b.mp4"
 START_NS=$(now_ns)
 set +e
-"$RFFMPEG_BIN/rffmpeg" \
-	--server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
-	--timeout 5s \
+env RFFMPEG_JOB_TIMEOUT=5s "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -preset veryslow \
 	"$OUT" 2> "$TMP_ROOT/cli.log"
 RC=$?
