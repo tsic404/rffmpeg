@@ -17,11 +17,11 @@ PLAIN="$TMP_ROOT/plain.mp4"
 FILTERED="$TMP_ROOT/filtered.mp4"
 LOG="$TMP_ROOT/cli.log"
 
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -vf "scale=640:480" "$PLAIN" >/dev/null 2>&1
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 \
 	-vf "scale=640:480,drawtext=text='acceptance':fontsize=32:fontcolor=white:x=20:y=20" \
 	"$FILTERED" 2>"$LOG"

@@ -13,9 +13,32 @@ import (
 	"github.com/tsic404/rffmpeg/pkg/protocol"
 )
 
-// localFallbackEnv opts into answering a server-backed capability query from
-// local ffmpeg when the server cannot answer it (see localFallbackAllowed).
-const localFallbackEnv = "RFFMPEG_LOCAL_FALLBACK"
+// runCapabilityQuery answers one native capability-query name. The output
+// format and the local-fallback switch come from the configuration plane, so
+// no query takes an option of its own.
+func runCapabilityQuery(cfg *config.Config, flag string) int {
+	switch flag {
+	case "-encoders":
+		return runEncoders(cfg)
+	case "-decoders":
+		return runDecoders(cfg)
+	case "-codecs":
+		return runCodecsFromServer(cfg)
+	case "-hwaccels":
+		return runHwaccels(cfg)
+	case "-filters":
+		return runFilters(cfg)
+	case "-pix_fmts":
+		return runPixFmts(cfg)
+	case "-formats":
+		return runFormats(cfg)
+	case "-buildconf", "-layouts", "-protocols", "-sample_fmts", "-bsfs", "-colors":
+		return runLocalFfmpegInfo(flag)
+	default:
+		fmt.Fprintf(os.Stderr, "Error: unknown capability query: %s\n", flag)
+		return ExitError
+	}
+}
 
 // localFallbackAllowed decides what a server-backed capability query does after
 // the server failed to answer it. The capability list describes the cluster the
@@ -23,22 +46,22 @@ const localFallbackEnv = "RFFMPEG_LOCAL_FALLBACK"
 // the caller must ask for: without the opt-in the query fails, and with it the
 // substitution is announced on stderr. Returns true when the caller should run
 // local ffmpeg.
-func localFallbackAllowed(flag string, serverErr error) bool {
-	switch os.Getenv(localFallbackEnv) {
-	case "1", "true":
+func localFallbackAllowed(cfg *config.Config, flag string, serverErr error) bool {
+	if cfg.LocalFallback {
 		fmt.Fprintf(os.Stderr, "[rffmpeg] local fallback: %s server query failed (%v); listing LOCAL ffmpeg capabilities\n", flag, serverErr)
 		return true
 	}
 	fmt.Fprintf(os.Stderr, "Error: %s server query failed: %v\n", flag, serverErr)
-	fmt.Fprintf(os.Stderr, "Hint: this list comes from the cluster; set %s=1 to list the LOCAL ffmpeg's capabilities instead.\n", localFallbackEnv)
+	fmt.Fprintf(os.Stderr, "Hint: this list comes from the cluster; set %s=1 to list the LOCAL ffmpeg's capabilities instead.\n", config.EnvLocalFallback)
 	return false
 }
 
 // runEncoders queries encoders from the server and prints in ffmpeg-compatible format.
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
-func runEncoders(serverURL, token string, jsonOut bool) int {
-	cli, err := setupClient(serverURL, token)
+// Falls back to local ffmpeg only with the config-plane local-fallback opt-in.
+func runEncoders(cfg *config.Config) int {
+	jsonOut := cfg.IsJSON()
+	cli, err := setupClient(cfg)
 	if err == nil {
 		encoders, apiErr := cli.ListAllEncoders()
 		if apiErr == nil {
@@ -58,7 +81,7 @@ func runEncoders(serverURL, token string, jsonOut bool) int {
 		}
 		err = apiErr
 	}
-	if !localFallbackAllowed("-encoders", err) {
+	if !localFallbackAllowed(cfg, "-encoders", err) {
 		return ExitError
 	}
 	if !jsonOut {
@@ -75,9 +98,10 @@ func runEncoders(serverURL, token string, jsonOut bool) int {
 
 // runDecoders queries decoders from the server and prints in ffmpeg-compatible format.
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
-func runDecoders(serverURL, token string, jsonOut bool) int {
-	cli, err := setupClient(serverURL, token)
+// Falls back to local ffmpeg only with the config-plane local-fallback opt-in.
+func runDecoders(cfg *config.Config) int {
+	jsonOut := cfg.IsJSON()
+	cli, err := setupClient(cfg)
 	if err == nil {
 		decoders, apiErr := cli.ListAllDecoders()
 		if apiErr == nil {
@@ -97,7 +121,7 @@ func runDecoders(serverURL, token string, jsonOut bool) int {
 		}
 		err = apiErr
 	}
-	if !localFallbackAllowed("-decoders", err) {
+	if !localFallbackAllowed(cfg, "-decoders", err) {
 		return ExitError
 	}
 	if !jsonOut {
@@ -124,9 +148,10 @@ func runDecoders(serverURL, token string, jsonOut bool) int {
 // runCodecsFromServer queries both encoders and decoders from the server and prints in
 // ffmpeg-compatible format: encoder list first, then decoder list.
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
-func runCodecsFromServer(serverURL, token string, jsonOut bool) int {
-	cli, err := setupClient(serverURL, token)
+// Falls back to local ffmpeg only with the config-plane local-fallback opt-in.
+func runCodecsFromServer(cfg *config.Config) int {
+	jsonOut := cfg.IsJSON()
+	cli, err := setupClient(cfg)
 	if err == nil {
 		var encoders []protocol.EncoderInfo
 		var decoders []protocol.DecoderInfo
@@ -161,7 +186,7 @@ func runCodecsFromServer(serverURL, token string, jsonOut bool) int {
 		}
 	}
 
-	if !localFallbackAllowed("-codecs", err) {
+	if !localFallbackAllowed(cfg, "-codecs", err) {
 		return ExitError
 	}
 	if !jsonOut {
@@ -422,9 +447,10 @@ func jsonEncodeToStdout(enc *json.Encoder, v interface{}) int {
 
 // runHwaccels queries hwaccels from the server and prints in ffmpeg-compatible format (single-column list).
 // When jsonOut is true, outputs JSON instead of text.
-// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
-func runHwaccels(serverURL, token string, jsonOut bool) int {
-	cli, err := setupClient(serverURL, token)
+// Falls back to local ffmpeg only with the config-plane local-fallback opt-in.
+func runHwaccels(cfg *config.Config) int {
+	jsonOut := cfg.IsJSON()
+	cli, err := setupClient(cfg)
 	if err == nil {
 		hwaccels, apiErr := cli.ListAllHwaccels()
 		if apiErr == nil {
@@ -442,7 +468,7 @@ func runHwaccels(serverURL, token string, jsonOut bool) int {
 		}
 		err = apiErr
 	}
-	if !localFallbackAllowed("-hwaccels", err) {
+	if !localFallbackAllowed(cfg, "-hwaccels", err) {
 		return ExitError
 	}
 	if !jsonOut {
@@ -458,9 +484,10 @@ func runHwaccels(serverURL, token string, jsonOut bool) int {
 }
 
 // runFilters queries filters from the server and prints in ffmpeg-compatible format.
-// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
-func runFilters(serverURL, token string, jsonOut bool) int {
-	cli, err := setupClient(serverURL, token)
+// Falls back to local ffmpeg only with the config-plane local-fallback opt-in.
+func runFilters(cfg *config.Config) int {
+	jsonOut := cfg.IsJSON()
+	cli, err := setupClient(cfg)
 	if err == nil {
 		items, apiErr := cli.ListAllFilters(jsonOut)
 		if apiErr == nil {
@@ -479,7 +506,7 @@ func runFilters(serverURL, token string, jsonOut bool) int {
 		}
 		err = apiErr
 	}
-	if !localFallbackAllowed("-filters", err) {
+	if !localFallbackAllowed(cfg, "-filters", err) {
 		return ExitError
 	}
 	if !jsonOut {
@@ -495,9 +522,10 @@ func runFilters(serverURL, token string, jsonOut bool) int {
 }
 
 // runPixFmts queries pixel formats from the server and prints in ffmpeg-compatible format.
-// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
-func runPixFmts(serverURL, token string, jsonOut bool) int {
-	cli, err := setupClient(serverURL, token)
+// Falls back to local ffmpeg only with the config-plane local-fallback opt-in.
+func runPixFmts(cfg *config.Config) int {
+	jsonOut := cfg.IsJSON()
+	cli, err := setupClient(cfg)
 	if err == nil {
 		items, apiErr := cli.ListAllPixFmts(jsonOut)
 		if apiErr == nil {
@@ -516,7 +544,7 @@ func runPixFmts(serverURL, token string, jsonOut bool) int {
 		}
 		err = apiErr
 	}
-	if !localFallbackAllowed("-pix_fmts", err) {
+	if !localFallbackAllowed(cfg, "-pix_fmts", err) {
 		return ExitError
 	}
 	if !jsonOut {
@@ -532,9 +560,10 @@ func runPixFmts(serverURL, token string, jsonOut bool) int {
 }
 
 // runFormats queries formats from the server and prints in ffmpeg-compatible format.
-// Falls back to local ffmpeg only with the localFallbackEnv opt-in.
-func runFormats(serverURL, token string, jsonOut bool) int {
-	cli, err := setupClient(serverURL, token)
+// Falls back to local ffmpeg only with the config-plane local-fallback opt-in.
+func runFormats(cfg *config.Config) int {
+	jsonOut := cfg.IsJSON()
+	cli, err := setupClient(cfg)
 	if err == nil {
 		items, apiErr := cli.ListAllFormats(jsonOut)
 		if apiErr == nil {
@@ -553,7 +582,7 @@ func runFormats(serverURL, token string, jsonOut bool) int {
 		}
 		err = apiErr
 	}
-	if !localFallbackAllowed("-formats", err) {
+	if !localFallbackAllowed(cfg, "-formats", err) {
 		return ExitError
 	}
 	if !jsonOut {
@@ -568,26 +597,13 @@ func runFormats(serverURL, token string, jsonOut bool) int {
 	return printJSONArray(formats, "formats")
 }
 
-// setupClient loads config, overrides with CLI flags, creates a client, and runs a
-// health check. Returns the initialized client or an error.
-func setupClient(serverURL, token string) (*client.Client, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, fmt.Errorf("loading config: %w", err)
-	}
-	if serverURL != "" {
-		cfg.ServerURL = serverURL
-	}
-	if token != "" {
-		cfg.Token = token
-	}
-	// Capability queries return before the transcode path's banner, so the
-	// transport warning must be emitted here too: these requests carry the
-	// same token over the same connection.
-	if warning := plaintextRemoteServerWarning(cfg.ServerURL); warning != "" {
-		fmt.Fprintln(os.Stderr, warning)
-	}
-	c := client.New(cfg.ServerURL, cfg.Token)
+// setupClient builds a client from the resolved configuration and runs a health
+// check. Returns the initialized client or an error.
+func setupClient(cfg *config.Config) (*client.Client, error) {
+	c := client.New(cfg.ServerURL, cfg.Token,
+		client.WithMaxRetries(maxRetriesBudget(cfg)),
+		client.WithServerLossTimeout(serverLossTimeoutBudget(cfg)),
+		client.WithSubmitRetries(submitRetriesBudget(cfg)))
 	if err := c.HealthCheck(); err != nil {
 		return nil, fmt.Errorf("server health check failed: %w", err)
 	}

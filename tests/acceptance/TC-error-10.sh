@@ -16,7 +16,7 @@ MEDIA="$(make_media restart.mp4 120 1280x720)"
 OUT="$TMP_ROOT/out.mp4"
 LOG="$TMP_ROOT/cli.log"
 
-timeout 200 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+timeout 200 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -preset veryslow -threads 2 "$OUT" >/dev/null 2>"$LOG" &
 CLI_PID=$!
 trap 'kill "$CLI_PID" 2>/dev/null || true; acceptance_cleanup' EXIT

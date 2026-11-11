@@ -10,7 +10,7 @@ build_binaries
 
 LOG="$TMP_ROOT/cli.log"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "http://127.0.0.1:$PORT" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	>/dev/null 2>"$LOG"
 RC=$?
 set -e

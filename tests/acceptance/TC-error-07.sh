@@ -21,7 +21,7 @@ LOG="$TMP_ROOT/cli.log"
 OUT="$TMP_ROOT/out.mp4"
 START=$(now_ns)
 
-timeout 320 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+timeout 320 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -preset veryslow -threads 2 "$OUT" >/dev/null 2>"$LOG" &
 CLI_PID=$!
 trap 'kill "$CLI_PID" 2>/dev/null || true; acceptance_cleanup' EXIT

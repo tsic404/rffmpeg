@@ -1366,7 +1366,7 @@ func TestSharedFSSubmitJobWithoutDirectPath(t *testing.T) {
 }
 
 // TestSubmitJobTimeoutSentAsDuration is the regression test: the CLI
-// must send --timeout as a duration budget (integer nanoseconds), not as an
+// must send RFFMPEG_JOB_TIMEOUT as a duration budget (integer nanoseconds), not as an
 // absolute submit-time deadline. Encoding a deadline here re-introduces the
 // ~2x discrepancy where scheduling/download latency eats the ffmpeg budget.
 func TestSubmitJobTimeoutSentAsDuration(t *testing.T) {
@@ -1469,7 +1469,7 @@ func TestSubmitJobBackwardsCompat(t *testing.T) {
 // TestSubmitJobRateLimitMessage is the regression test: the rate-limit
 // 429 error must render the exact single-line stderr message in the unified
 // classified form — "[rate_limit_exceeded]" on the same line — and without a
-// retry promise: the default path (no --retry) fails fast, so telling the user
+// retry promise: the default path (no RFFMPEG_RETRY) fails fast, so telling the user
 // to "Retry after N seconds" would promise a retry that never happens.
 func TestSubmitJobRateLimitMessage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1495,7 +1495,7 @@ func TestSubmitJobRateLimitMessage(t *testing.T) {
 		t.Errorf("rate-limit error = %q, want %q", got, want)
 	}
 	if strings.Contains(err.Error(), "Retry after") {
-		t.Errorf("rate-limit error = %q, want no retry promise on the default (no --retry) path", err)
+		t.Errorf("rate-limit error = %q, want no retry promise on the default (no RFFMPEG_RETRY) path", err)
 	}
 }
 
@@ -1503,7 +1503,7 @@ func TestSubmitJobRateLimitMessage(t *testing.T) {
 // fallback: a rate-limited response whose body carries no readable code must
 // still render the unified "<op> failed: <message>" shape instead of the bare
 // typed error, and the typed error must stay wrapped so errors.As — and with
-// it the --retry backoff — still sees it.
+// it the RFFMPEG_RETRY backoff — still sees it.
 func TestSubmitJobRateLimitUndecodableBodyKeepsRejectionPrefix(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -1523,7 +1523,7 @@ func TestSubmitJobRateLimitUndecodableBodyKeepsRejectionPrefix(t *testing.T) {
 	}
 	var rl *client.RateLimitError
 	if !errors.As(err, &rl) {
-		t.Errorf("error %v (%T) must still wrap *RateLimitError so the --retry backoff keeps retrying", err, err)
+		t.Errorf("error %v (%T) must still wrap *RateLimitError so the RFFMPEG_RETRY backoff keeps retrying", err, err)
 	}
 }
 

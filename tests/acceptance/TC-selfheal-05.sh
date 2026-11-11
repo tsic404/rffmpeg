@@ -63,7 +63,7 @@ wait_worker fast-node
 # so it needs a registered worker before it can run.
 upload_file_id() {
 	local media="$1" log="$2"
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		probe "$media" >/dev/null 2>"$log"
 	grep -oE 'Uploaded: .* -> [0-9a-f]+' "$log" | awk '{print $NF}' || true
 }
@@ -264,7 +264,7 @@ sys.exit(0 if w.get("active", 0) >= 1 else 1)
 ' "$(worker_stats)" || fail "the peer slot is no longer occupied; the placement check would be ambiguous"
 OUTPUT="$TMP_ROOT/after-clear.mp4"
 RC=0
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$PROBE_MEDIA" -c:v mpeg2video -q:v 4 -y "$OUTPUT" \
 	>/dev/null 2>"$TMP_ROOT/after-clear.log" || RC=$?
 expect_rc "$RC" 0 "post-clear transcode"

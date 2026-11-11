@@ -58,7 +58,7 @@ LONG="$(make_media sel-long.mp4 180 640x480)"
 
 upload_file() {
 	local log="$TMP_ROOT/upload-$(basename "$1").log"
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		probe "$1" >/dev/null 2>"$log"
 	grep -oE 'Uploaded: .* -> [0-9a-f]+' "$log" | awk '{print $NF}' || true
 }

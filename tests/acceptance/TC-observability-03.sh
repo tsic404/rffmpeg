@@ -246,7 +246,6 @@ run_case() {
 	local log="$TMP_ROOT/$name.log" out="$TMP_ROOT/$name-out.mp4" rc=0
 
 	python3 - "$log" "$RFFMPEG_BIN/rffmpeg" \
-		--server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
 		"$@" "$out" <<'PY' || rc=$?
 import subprocess, sys, time
 

@@ -15,7 +15,7 @@ URL="http://127.0.0.1:9/definitely-unreachable.mp4"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$URL" "$TMP_ROOT/out.mp4" 2>"$LOG"
 RC=$?
 set -e

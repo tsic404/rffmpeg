@@ -33,35 +33,35 @@ SHORT="$(make_media short.mp4 2)"
 LONG="$(make_media long.mp4 120 1280x720)"
 
 # --- INPUT_UNREACHABLE
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "http://127.0.0.1:9/unreachable.mp4" "$TMP_ROOT/u.mp4" >/dev/null 2>"$TMP_ROOT/u.log" || true
 fail_job "$(job_id_of "$TMP_ROOT/u.log")" INPUT_UNREACHABLE false
 
 # --- ENCODER_UNAVAILABLE (submission guard)
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$SHORT" -c:v totes_not_a_codec "$TMP_ROOT/e1.mp4" >/dev/null 2>"$TMP_ROOT/e1.log" || true
 fail_job "$(job_id_of "$TMP_ROOT/e1.log")" ENCODER_UNAVAILABLE false
 
 # --- ENCODER_UNSUPPORTED (execution-side rewrite)
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$SHORT" -c:v libsvtav1_nonexist "$TMP_ROOT/e2.mp4" >/dev/null 2>"$TMP_ROOT/e2.log" || true
 fail_job "$(job_id_of "$TMP_ROOT/e2.log")" ENCODER_UNSUPPORTED false
 
 # --- FFMPEG_ERROR (invalid filter makes ffmpeg fail)
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$SHORT" -vf "no_such_filter_xyz=1" "$TMP_ROOT/e3.mp4" >/dev/null 2>"$TMP_ROOT/e3.log" || true
 fail_job "$(job_id_of "$TMP_ROOT/e3.log")" FFMPEG_ERROR false
 
 # --- TIMEOUT (execution budget shorter than the encode)
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
-	--timeout 3s -i "$LONG" -c:v libx264 -preset veryslow "$TMP_ROOT/e4.mp4" \
+RFFMPEG_JOB_TIMEOUT=3s "$RFFMPEG_BIN/rffmpeg" \
+	-i "$LONG" -c:v libx264 -preset veryslow "$TMP_ROOT/e4.mp4" \
 	>/dev/null 2>"$TMP_ROOT/e4.log" || true
 fail_job "$(job_id_of "$TMP_ROOT/e4.log")" TIMEOUT true
 
 # --- WORKER_CRASH, Worker-side branch: kill the ffmpeg child until the
 # retry budget is exhausted; the Worker itself stays alive.
 WPID="$(worker_pid "acceptance-worker-$PORT")"
-( timeout 180 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+( timeout 180 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$LONG" -c:v libx264 -preset veryslow "$TMP_ROOT/e5.mp4" >/dev/null 2>"$TMP_ROOT/e5.log" ) &
 CLI_PID=$!
 trap 'kill "$CLI_PID" 2>/dev/null || true; acceptance_cleanup' EXIT
@@ -92,7 +92,7 @@ start_worker sweep-worker RFFMPEG_HEARTBEAT_INTERVAL=2s
 wait_worker sweep-worker
 SWEEP_PID="$(worker_pid sweep-worker)"
 
-( timeout 150 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+( timeout 150 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$LONG" -c:v libx264 -preset veryslow "$TMP_ROOT/s1.mp4" >/dev/null 2>"$TMP_ROOT/s1.log" ) &
 A_PID=$!
 trap 'kill "$A_PID" 2>/dev/null || true; acceptance_cleanup' EXIT
@@ -107,7 +107,7 @@ done
 wait_job_status "$A_JOB" 30 "running" >/dev/null || fail "crash scenario: long job never ran"
 
 # Only after the worker is busy does the second job stay pending, unclaimed.
-( timeout 150 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+( timeout 150 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$SHORT" -c:v libx264 "$TMP_ROOT/s2.mp4" >/dev/null 2>"$TMP_ROOT/s2.log" ) &
 B_PID=$!
 trap 'kill "$A_PID" "$B_PID" 2>/dev/null || true; acceptance_cleanup' EXIT

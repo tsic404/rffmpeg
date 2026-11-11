@@ -95,60 +95,62 @@ RFFMPEG_WORKER_NAME=worker-1 RFFMPEG_MAX_CONCURRENT=2 ./bin/rffmpeg-worker
 
 ### 使用 CLI 提交任务
 
-**认证前置**：CLI 提交任务前请先 `export RFFMPEG_TOKEN=<T>`（或为命令追加 `--token <T>`），令牌须与 Server 的 `--auth-token <T>` 一致；未设置凭证时会在上传阶段收到 401 并直接退出。
+**认证前置**：CLI 提交任务前请先 `export RFFMPEG_TOKEN=<T>`（令牌只经配置面给出，命令行不承载），令牌须与 Server 的 `--auth-token <T>` 一致；未设置凭证时会在首个业务请求收到 401 并直接退出。
 
 ```bash
 # 基本转码（与原生 ffmpeg 命令兼容）
 ./bin/rffmpeg -i input.mp4 -c:v libx264 -c:a aac output.mp4
 
-# 指定远程 Server
-./bin/rffmpeg --server http://your-server:8080 -i video.mkv output.mp4
+# 指定远程 Server（配置面，不是命令行选项）
+RFFMPEG_SERVER_URL=http://your-server:8080 ./bin/rffmpeg -i video.mkv output.mp4
 
 # 静默模式
-./bin/rffmpeg -q -i input.mp4 -vf scale=1280:720 output.mp4
+RFFMPEG_QUIET=1 ./bin/rffmpeg -i input.mp4 -vf scale=1280:720 output.mp4
 
-# 指定任务超时时间
-./bin/rffmpeg --timeout 30m -i input.mp4 -c:v libx264 output.mp4
+# 指定任务执行预算
+RFFMPEG_JOB_TIMEOUT=30m ./bin/rffmpeg -i input.mp4 -c:v libx264 output.mp4
 
-# 指定等待 Worker 的轮询上限（默认 10m；也可用环境变量 RFFMPEG_POLL_TIMEOUT）
-./bin/rffmpeg --poll-timeout 20m -i input.mp4 -c:v libx264 output.mp4
+# 指定等待 Worker 的轮询上限（默认 10m）
+RFFMPEG_POLL_TIMEOUT=20m ./bin/rffmpeg -i input.mp4 -c:v libx264 output.mp4
 
-# 调整连接中断后的重试次数（默认 14 次，约 5 分钟；也可用环境变量 RFFMPEG_MAX_RETRIES）
-./bin/rffmpeg --max-retries 5 -i input.mp4 -c:v libx264 output.mp4
+# 调整连接中断后的重试次数（默认 14 次，约 5 分钟）
+RFFMPEG_MAX_RETRIES=5 ./bin/rffmpeg -i input.mp4 -c:v libx264 output.mp4
 
 # 调整「已提交任务等待期间」Server 断连的快速失败预算（默认 30s；0 = 关闭该预算）
-./bin/rffmpeg --server-loss-timeout 15s -i input.mp4 -c:v libx264 output.mp4
+RFFMPEG_SERVER_LOSS_TIMEOUT=15s ./bin/rffmpeg -i input.mp4 -c:v libx264 output.mp4
 
 # 提交被限流（429）时自动退避重投（指数退避，默认关闭）
-./bin/rffmpeg --retry -i input.mp4 -c:v libx264 output.mp4
+RFFMPEG_RETRY=1 ./bin/rffmpeg -i input.mp4 -c:v libx264 output.mp4
 
 # 重新附着到此前放弃等待的任务（退出码 2）并取回其输出
-./bin/rffmpeg --resume 3f2a9c1e-4b7d-4f6a-9c21-8d0e5b7a1234 -y
+RFFMPEG_JOB_ID=3f2a9c1e-4b7d-4f6a-9c21-8d0e5b7a1234 ./bin/rffmpeg -y
 ```
 
-**静默模式（`-q` / `--quiet`）**：`--quiet` 抑制进度类输出——banner、上传/下载进度（`Uploading`/`Uploaded`/`Downloading`/`Output saved` 等）、`Job status:` 状态轮询、`Progress: …% | ETA: …` 转码进度行，以及 Worker 实时 stderr 中 ffmpeg 自身的输出（输入头/编码器信息、错误与警告行）。`[rffmpeg]` 前缀的通知行（如 `[rffmpeg] Cache hit: <key>`、编码器改写/回退）不属于进度输出，`--quiet` 下仍写入 stderr；任务终态失败报告（`Job failed:` / `Job timed out:` 等）始终打印、不受 `--quiet` 影响。需要查看 ffmpeg 原始错误/警告时，去掉 `--quiet` 重新运行即可。
+**静默模式（`RFFMPEG_QUIET`）**：配置面开启静默后抑制进度类输出——banner、上传/下载进度（`Uploading`/`Uploaded`/`Downloading`/`Output saved` 等）、`Job status:` 状态轮询、`Progress: …% | ETA: …` 转码进度行，以及 Worker 实时 stderr 中 ffmpeg 自身的输出（输入头/编码器信息、错误与警告行）。`[rffmpeg]` 前缀的通知行（如 `[rffmpeg] Cache hit: <key>`、编码器改写/回退）不属于进度输出，静默下仍写入 stderr；任务终态失败报告（`Job failed:` / `Job timed out:` 等）始终打印、不受静默影响。需要查看 ffmpeg 原始错误/警告时，去掉 `RFFMPEG_QUIET` 重新运行即可。`-q` 是 ffmpeg 自己的固定质量选项，rffmpeg 原样透传、不再把它当静默开关。
 
 **进度行单调不回退**：`Progress: …% | ETA: …` 只增不减，且作业级同样成立。Worker 在 ffmpeg 中途崩溃（OOM、SIGABRT 等）后走多阶段重试、从零重跑时，重试的早期帧被丢弃而不是把已显示的百分比拉回去——stderr 里先出现的 `[RETRY] Initial attempt failed (…)` 行就是这个重跑的信号，进度停在崩溃点直到重试追平。作业被迁移到另一 Worker 重新执行时，Server 按 jobID 拒绝回退的进度上报（既不存储也不广播），因此新 Worker 从 0 重跑的低百分比不会让已显示的进度回退：进度停在迁移前的高点，待新 Worker 追平后继续推进（此时 stderr 中会再次出现 ffmpeg 头与改写通知行）。
 
-**硬件编码升级（`--auto-hw`）与参数去向**：`--auto-hw` 让 Worker 把软件编码升级为本地硬件编码（如 `libx264 → h264_qsv`），改写结果通过 `[rffmpeg]` 行输出：升级/回退行之后紧跟一行「参数去向」，逐个列出用户传入的编码参数在目标编码器上的形态——改名的显示映射关系（`-crf 23 → -global_quality 23`），值被转换的显示新值（`-preset slow → -preset p7`），名字与值都不变的原样列出（`-profile high`）：
+**硬件编码升级（`RFFMPEG_AUTO_HW`）与参数去向**：配置面开启 `RFFMPEG_AUTO_HW` 后，Worker 把软件编码升级为本地硬件编码（如 `libx264 → h264_qsv`），改写结果通过 `[rffmpeg]` 行输出：升级/回退行之后紧跟一行「参数去向」，逐个列出用户传入的编码参数在目标编码器上的形态——改名的显示映射关系（`-crf 23 → -global_quality 23`），值被转换的显示新值（`-preset slow → -preset p7`），名字与值都不变的原样列出（`-profile high`）：
 
 ```bash
-$ rffmpeg --auto-hw -i input.mp4 -c:v libx264 -crf 23 -preset fast output.mp4
+$ RFFMPEG_AUTO_HW=1 rffmpeg -i input.mp4 -c:v libx264 -crf 23 -preset fast output.mp4
 [rffmpeg] upgraded libx264 → h264_qsv
 [rffmpeg] h264_qsv params: -crf 23 → -global_quality 23, -preset fast → -preset 6
 ```
 
-目标编码器不支持的参数（如 h264_qsv 上的 `-tune`）标注为 `(not supported by h264_qsv)`——它们对硬件编码器不生效，日志给出显式提示而不是随升级静默忽略。该行与 `--quiet` 无关（`[rffmpeg]` 行始终打印）；未传编码参数时不输出该行。
+目标编码器不支持的参数（如 h264_qsv 上的 `-tune`）标注为 `(not supported by h264_qsv)`——它们对硬件编码器不生效，日志给出显式提示而不是随升级静默忽略。该行与静默开关无关（`[rffmpeg]` 行始终打印）；未传编码参数时不输出该行。
 
 内联写法（`-preset=fast`）不是合法的 ffmpeg 参数——编码器选项只能写成 `-preset fast`，写成等号形式会被 ffmpeg 硬拒（`Unrecognized option 'preset=fast'`）。rffmpeg 不「修复」这类参数：内联形式的值保持用户原样，交由 ffmpeg 报错，错误信息里出现的是用户自己写的字符串。
 
 **QSV 的 `-preset` 用数值 TargetUsage 表达**：`h264_qsv`/`hevc_qsv` 的 `-preset` 是 TargetUsage 整数（1 = 最重质量，7 = 最快），不是 x264 的档位名。rffmpeg 把 x264 档位名换算成该数值——`ultrafast`/`superfast`/`veryfast` → `7`，`faster`/`fast` → `6`，`medium` → `4`，`slow` → `3`，`slower` → `2`，`veryslow`/`placebo` → `1`；已经是数值的输入原样透传。`fast` 落到 6 而不是 5，是因为 Intel 驱动把 TargetUsage 5 与默认档位 4 渲染成完全相同的码流（实测 `-preset fast` 与不传 preset 的 h264_qsv 输出 md5 一致），映射到 5 等于用户的提速请求被静默忽略；6 是编码器实际会执行的第一档「比默认更快」。
 
-**任务超时（`--timeout`）**：`--timeout` 为每个转码任务的 **ffmpeg 执行预算**（Go duration 格式，如 `30s`/`5m`/`2h`），只约束 ffmpeg 进程本身的运行时长——上传、调度、输入下载、时长探测等执行前阶段不占用该预算。Worker 在 ffmpeg 执行起点开始计时，用完预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过 `--timeout`，例如：
+**任务执行预算（`RFFMPEG_JOB_TIMEOUT` / 配置文件 `job_timeout`）**：该值为每个转码任务的 **ffmpeg 执行预算**（Go duration 格式，如 `30s`/`5m`/`2h`），只约束 ffmpeg 进程本身的运行时长——上传、调度、输入下载、时长探测等执行前阶段不占用该预算。Worker 在 ffmpeg 执行起点开始计时，用完预算即终止进程，作业判为 `timeout`（`failure_type=TIMEOUT`）。短输入（如 <5s 的测试片段）或命中 Worker 缓存的作业会在超时前正常完成（rc=0），**不会触发超时路径**——这是预期行为，不是超时失效。要真正验证超时路径，需用足够大、编码足够慢的输入把执行时长拉到超过预算，例如：
 
 ```bash
-./bin/rffmpeg --timeout 5s -i test-large.mp4 -c:v libx264 -preset veryslow output.mp4
+RFFMPEG_JOB_TIMEOUT=5s ./bin/rffmpeg -i test-large.mp4 -c:v libx264 -preset veryslow output.mp4
 ```
+
+取值必须大于 0；非法取值（如 `0`、`-5m`、非 duration 字符串）在提交前拒绝。未给出时不下发该字段，生效值取 Server 侧作业超时。
 
 `-preset veryslow` 使软件编码耗时远超 5s，作业才会被 Worker 终止并返回 `timeout`。
 
@@ -165,25 +167,25 @@ $ rffmpeg --auto-hw -i input.mp4 -c:v libx264 -crf 23 -preset fast output.mp4
 
 作业超时（或失败/取消、客户端放弃等待）后，CLI 在默认上传/下载模式下会清理输出路径上残留的陈旧产物，避免上一次运行留下的同名文件被误认为本次转码成功。清理遵循覆盖语义：仅当传了 `-y` 时才删除陈旧产物；未传 `-y`（或传 `-n`）时保留既有文件并提示。多输出（`_N` 后缀展开的副本）同样按下载阶段同一套展开逻辑清理。流式输出（`-`）、共享文件系统直写、以及网络 URL 输出没有本地下载路径，不受此清理影响。
 
-> **兼容性说明（破坏性变更）**：本版本的 `--timeout` 语义与线上格式均有变更——job 的 `timeout` 字段由 RFC3339 绝对截止时间改为整数纳秒的执行预算。server、worker、CLI 三个二进制**必须同步升级**，不支持滚动混合部署：旧版 worker/CLI 读取新版 server 下发的整数字段（或新版 server 读取旧版 CLI 上报的 RFC3339 字符串）会在 JSON 解码处直接失败。
+> **兼容性说明（破坏性变更）**：本版本的任务预算语义与线上格式均有变更——job 的 `timeout` 字段由 RFC3339 绝对截止时间改为整数纳秒的执行预算。server、worker、CLI 三个二进制**必须同步升级**，不支持滚动混合部署：旧版 worker/CLI 读取新版 server 下发的整数字段（或新版 server 读取旧版 CLI 上报的 RFC3339 字符串）会在 JSON 解码处直接失败。
 
-**轮询超时（`--poll-timeout`）**：`--poll-timeout`（Go duration 格式）限制 CLI 对「等待 Worker」阶段（作业 `pending`、尚未被任何 Worker 认领）的最长轮询时长，默认 `10m`。当集群 Worker **在线但全部忙碌**时，服务端的无 Worker 判定（NO_WORKER_AVAILABLE）不会触发（饿死扫描的活 Worker 守卫会短路），且用户未设置 `--timeout` 时，旧版 CLI 会无限轮询挂起；现在达到该上限后 CLI 会显式取消作业并以退出码 `1` 报错（stderr 提示「still waiting for a worker」）。`--poll-timeout` 只约束 pending 阶段——作业一旦被认领（`queued`/`running`），改由 Worker 自身超时（及 `--timeout`，若设置）约束，不受该轮询上限影响。三个配置通道（命令行 `--poll-timeout` / 环境变量 `RFFMPEG_POLL_TIMEOUT` / 配置文件 `"poll_timeout"`）优先级：命令行 > 环境变量 > 配置文件 > 默认值；三者均支持 `0` 表示**不设上限**（显式关闭轮询超时，长队列场景按需启用，需自行承担无限挂起风险）。
+**轮询超时（`RFFMPEG_POLL_TIMEOUT` / 配置文件 `poll_timeout`）**：该值（Go duration 格式）限制 CLI 对「等待 Worker」阶段（作业 `pending`、尚未被任何 Worker 认领）的最长轮询时长，默认 `10m`。当集群 Worker **在线但全部忙碌**时，服务端的无 Worker 判定（NO_WORKER_AVAILABLE）不会触发（饿死扫描的活 Worker 守卫会短路），且未配置任务预算时，旧版 CLI 会无限轮询挂起；现在达到该上限后 CLI 会显式取消作业并以退出码 `1` 报错（stderr 提示「still waiting for a worker」）。该上限只约束 pending 阶段——作业一旦被认领（`queued`/`running`），改由 Worker 自身超时（及任务预算，若配置）约束，不受该轮询上限影响。三个配置通道（命令行 `--poll-timeout` / 环境变量 `RFFMPEG_POLL_TIMEOUT` / 配置文件 `"poll_timeout"`）优先级：命令行 > 环境变量 > 配置文件 > 默认值；三者均支持 `0` 表示**不设上限**（显式关闭轮询超时，长队列场景按需启用，需自行承担无限挂起风险）。
 
-**连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。**Server 断连检测预算**（`--server-loss-timeout` / `RFFMPEG_SERVER_LOSS_TIMEOUT` / 配置文件 `"server_loss_timeout"`，默认 `30s`）约束「已提交任务等待期间」**连续失去联系**的最长时间：只有「服务器完全没有响应」的失败（拨号失败、连接被拒、握手无响应）才计入该预算——任何 HTTP 响应（含 4xx/5xx）都说明服务器可达，会重置该预算，这类失败仍由 `--max-retries` 约束。预算耗尽即快速失败，以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。取回该作业的输出无需手工查询 API：`rffmpeg --resume <job-id>` 会重新附着并在任务完成后下载输出（见「任务重连（`--resume`）」）。默认 30s 覆盖完整的前段重连退避爬坡（尝试点 0s→1s→3s→7s→15s），Server 在预算内恢复即自动重连、继续等待，常规重启（含容器编排下重启慢于数秒的场景）不会中断等待——默认值短于重启间隔时，CLI 会对一次正常运行中的重启误报退出码 `2`。取舍是 Server 真死时放弃得更晚（30s，而非数秒），且该等待有界、仍远低于重试次数上限的约 5 分钟；重启更慢的 Server 可调大该值，设为 `0` 则关闭该预算，退回由重试次数上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / `"max_retries"`，默认 14 次、约 5 分钟）决定何时放弃。两个上限都支持 `0` 且不会被静默回落为默认值：`--max-retries 0` 表示**不重试、首次失败即退出**。
+**连接中断与重试**：任务提交成功后，若传输中 Server 或 Worker 断连，CLI 会在 WebSocket 与 HTTP 轮询两条路径上重试。**Server 断连检测预算**（`RFFMPEG_SERVER_LOSS_TIMEOUT` / 配置文件 `"server_loss_timeout"`，默认 `30s`）约束「已提交任务等待期间」**连续失去联系**的最长时间：只有「服务器完全没有响应」的失败（拨号失败、连接被拒、握手无响应）才计入该预算——任何 HTTP 响应（含 4xx/5xx）都说明服务器可达，会重置该预算，这类失败仍由重试预算（`RFFMPEG_MAX_RETRIES`）约束。预算耗尽即快速失败，以独立退出码 `2` 结束，并在 stderr 提示作业已提交、可通过 `GET /api/v1/jobs/{id}` 查询最终状态——此时**作业仍在服务端运行**，不是永久卡死，也不同于提交阶段失败（退出码 `1`，作业未创建）。取回该作业的输出无需手工查询 API：`rffmpeg --resume <job-id>` 会重新附着并在任务完成后下载输出（见「任务重连（`--resume`）」）。默认 30s 覆盖完整的前段重连退避爬坡（尝试点 0s→1s→3s→7s→15s），Server 在预算内恢复即自动重连、继续等待，常规重启（含容器编排下重启慢于数秒的场景）不会中断等待——默认值短于重启间隔时，CLI 会对一次正常运行中的重启误报退出码 `2`。取舍是 Server 真死时放弃得更晚（30s，而非数秒），且该等待有界、仍远低于重试次数上限的约 5 分钟；重启更慢的 Server 可调大该值，设为 `0` 则关闭该预算，退回由重试次数上限（`--max-retries` / `RFFMPEG_MAX_RETRIES` / `"max_retries"`，默认 14 次、约 5 分钟）决定何时放弃。两个上限都支持 `0` 且不会被静默回落为默认值：`--max-retries 0` 表示**不重试、首次失败即退出**。
 
-**限流（429）与 `--retry`**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。并发提交突发时，作业写入还可能因数据库写冲突（SQLITE_BUSY）未落库，此时提交接口返回 HTTP 429（`submit_conflict`，同样不创建作业、同样可被 `--retry` 退避重投；该响应不带 `retry_in`，CLI 以默认 1s 起步）。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。追加 `--retry` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。`submit_conflict` 依赖真实的写锁竞争：默认 5s busy timeout 下并发提交多数会排队成功，该路径难以稳定复现。需要确定性验证它（如 E2E）时用 `--busy-timeout-ms <ms>`（环境变量 `BUSY_TIMEOUT_MS`，配置文件 `"busy_timeout_ms"`）缩短写锁等待窗口——设为 `0` 表示完全不等待，任何写锁竞争立即以 429 `submit_conflict` 失败，而非排队 5s 后成功。该上限只控制**准入**：通过限流不代表作业立刻并行执行，它与 Worker 的 `max_concurrent` 是两级独立上限，分工与叠加效果见「并发上限的两级语义」。
+**限流（429）与重试开关（`RFFMPEG_RETRY`）**：Server 对每个 client 限制并发活跃作业数（`--max-concurrent-jobs-per-client`，默认 10），超出时提交接口立即返回 HTTP 429（`rate_limit_exceeded`），作业**不会被创建、也不会排队**。并发提交突发时，作业写入还可能因数据库写冲突（SQLITE_BUSY）未落库，此时提交接口返回 HTTP 429（`submit_conflict`，同样不创建作业、同样可被重试开关退避重投；该响应不带 `retry_in`，CLI 以默认 1s 起步）。默认情况下 CLI 收到 429 直接以退出码 `1` 失败。开启 `RFFMPEG_RETRY` 后，CLI 会对 429 响应自动退避重投：以服务端返回的 `retry_in`（当前 5s）为初始间隔、逐次翻倍（上限 60s），最多重投 5 次；预算耗尽仍 429 时以退出码 `1` 结束并打印限流详情。429 之外的错误（网络、认证、参数）不受 `--retry` 影响、立即失败。若不使用 `--retry`，调用方需自行处理 429 重试。`submit_conflict` 依赖真实的写锁竞争：默认 5s busy timeout 下并发提交多数会排队成功，该路径难以稳定复现。需要确定性验证它（如 E2E）时用 `--busy-timeout-ms <ms>`（环境变量 `BUSY_TIMEOUT_MS`，配置文件 `"busy_timeout_ms"`）缩短写锁等待窗口——设为 `0` 表示完全不等待，任何写锁竞争立即以 429 `submit_conflict` 失败，而非排队 5s 后成功。该上限只控制**准入**：通过限流不代表作业立刻并行执行，它与 Worker 的 `max_concurrent` 是两级独立上限，分工与叠加效果见「并发上限的两级语义」。
 
 **提交失败的错误包装**：提交类端点（`POST /api/v1/jobs`、`POST /api/v1/probe`）的服务端拒绝统一打印为单行 `<操作> failed [<分类码>]: <消息>`，分类码取自响应体的 `code` 字段、与消息同一行：job 提交为 `Error submitting job: job submission failed [worker_unavailable]: No workers available. …`、`… [rate_limit_exceeded]: rate limit exceeded: 10/10 concurrent jobs`、`… [submit_conflict]: concurrent submission conflict`；probe 提交为 `Error probing file: probe failed [worker_unavailable]: No workers available. …`。服务端未给出分类码（响应体不可解码、或只有一条无 `code` 的消息）时退回 `<操作> failed with status <HTTP 状态码>` 或 `<操作> failed: <消息>`，不会输出空的 `[]`。
 
-**任务重连（`--resume`）**：`--resume <job-id>` 让 CLI 重新附着到此前某个 CLI 进程已提交的任务并取回其输出，无需重新上传输入、重新提交或手工 `curl`。典型场景是 Server 中途重启：原 CLI 在等待期间以退出码 `2` 放弃（`gave up waiting for job …`），任务随后被新 Worker 接管并完成，此时用 `rffmpeg --resume <job-id>` 即可拿到输出文件。行为约定：
+**任务重连（`RFFMPEG_JOB_ID`）**：环境变量给出作业标识时，CLI 重新附着到此前某个 CLI 进程已提交的任务并取回其输出，无需重新上传输入、重新提交或手工 `curl`。典型场景是 Server 中途重启：原 CLI 在等待期间以退出码 `2` 放弃（`gave up waiting for job …`），任务随后被新 Worker 接管并完成，此时用 `RFFMPEG_JOB_ID=<job-id> rffmpeg` 即可拿到输出文件。该标识只由环境变量给出，配置文件层不承载它。行为约定：
 
-- **只读附着，不取消任务**：`--resume` 不会取消服务端任务。本次等待若再次达到上限（`--timeout` / `--poll-timeout`，语义与提交路径一致），CLI 以退出码 `2` 结束并提示任务仍在服务端运行、可再次 `--resume`，任务侧的工作不会被这次放弃毁掉（提交路径的客户端放弃才会取消任务）。
+- **只读附着，不取消任务**：重连不会取消服务端任务。本次等待若再次达到上限（任务预算 / 轮询上限，语义与提交路径一致），CLI 以退出码 `2` 结束并提示任务仍在服务端运行、可再次附着，任务侧的工作不会被这次放弃毁掉（提交路径的客户端放弃才会取消任务）。
 - **已完成立即取回，未完成先等待**：任务已处于终态时直接进入下载阶段，不再等待；仍处于 `pending`/`queued`/`running` 时先等待（含 WebSocket 实时日志），到达终态后再下载。失败/超时/取消的任务按提交路径同一套格式报告（`Job failed:` / `Job timed out:` 等，退出码 `1`），不下载任何文件。
 - **输出路径**：默认写入任务记录的 `output_filename`——上传/下载模式下是提交时送出的文件名（basename，落在当前目录），共享文件系统模式下是该绝对路径；命令行给出的可选 `output-path` 覆盖它。目标为本地路径时 CLI 会解析为绝对路径，`Downloading output to …` / `Output saved: …` 与覆盖拒绝提示都打印该绝对路径，默认落盘位置无需猜测。下载遵循与提交路径相同的 `-y` / `-n` 覆盖语义（默认拒绝覆盖已存在文件），且该判定发生在等待之前，不会等完再报错。
 - **无可下载产物的情况**：流式输出（`-`）任务的字节流已随原进程的 stdout 输出，无法重放，CLI 报错退出（退出码 `1`）；共享文件系统直通任务与网络 URL 输出任务的产物不在服务端（Worker 跳过输出上传），CLI 提示产物所在路径并以退出码 `0` 结束；已完成但服务端没有输出文件记录的任务报错退出（退出码 `1`），不会以「成功」掩盖空结果。
-- **不重跑 ffmpeg**：`--resume` 只接受一个可选输出路径与 `-y` / `-n`，其余 ffmpeg 参数（如 `-i`）一律报错，避免让人误以为任务被重新执行；也不能与 `probe` 子命令或 `-encoders` 等信息查询标志组合。stdout 语义的目标（`-` 与 `pipe:1`，与提交路径同一套归一化）同样被拒绝——重连无法重放字节流，也不应落成一个名为 `pipe:1` 的文件。输出路径位置上的裸 `probe` token（如 `--resume <id> -y probe`）同样报错并提示它是子命令，不会被当成名为 `probe` 的文件下载；确需该文件名时写 `./probe`。
+- **不重跑 ffmpeg**：重连只接受一个可选输出路径与 `-y` / `-n`，其余 ffmpeg 参数（如 `-i`）一律报错，避免让人误以为任务被重新执行；也不能与 `probe` 子命令或 `-encoders` 等信息查询标志组合。stdout 语义的目标（`-`、`pipe:` 与 `pipe:1`，与提交路径同一个判定函数）同样被拒绝——重连无法重放字节流，也不应落成一个名为 `pipe:1` 的文件。输出路径位置上的裸 `probe` token（如 `RFFMPEG_JOB_ID=<id> rffmpeg -y probe`）同样报错并提示它是子命令，不会被当成名为 `probe` 的文件下载；确需该文件名时写 `./probe`。
 
-流式输出到 stdout（`-f <fmt> -`、`-o -`、`-`，或 `pipe:1`——CLI 会将其归一化为 `-`）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）或 `-o <本地路径>`。
+流式输出到 stdout（`-f <fmt> -`、`-`、`pipe:` 或 `pipe:1`——后两者是 ffmpeg 的 stdout 管道别名，CLI 会将其归一化为 `-`；`pipe:0` / `pipe:2` 分别指向 stdin / stderr，不归一）仅支持可流式写入的容器（如 `mpegts`、`matroska`、`flv`；`mp4`/`mov` 由 Worker 自动分片支持，但用户显式指定非碎片化 `-movflags`（如 `+faststart`）时 Worker 不覆盖，管道输出仍会失败；`-f mp4 -`（不加 `-movflags`）可正常流式）。`avif`、`f4v`、`ipod`、`psp`、`3gp`/`3g2`/`tg2` 及纯音频 `m4a` 等需可寻址文件的 muxer，以及未指定 `-f` 的裸 `-`，CLI 会在提交前报错并提示改用 server 可写输出路径（如 `output.mp4`）。
 
 ## 配置说明
 
@@ -454,10 +456,24 @@ Usage of ./bin/rffmpeg-worker:
 
 ### CLI 配置
 
-CLI 配置文件搜索顺序（优先级从高到低）：
-1. `./rffmpeg.json`
-2. `~/.rffmpeg.json`
-3. `/etc/rffmpeg.json`
+CLI **不定义任何自有命令行选项**，server 地址、令牌、静默、自动硬件升级、重试、作业与客户端
+预算、能力查询输出格式与本地回退、重新附着标识全部由**配置面**承载——环境变量与分层配置文件
+（两者合称配置面）。命令行只解释 ffprobe / ffmpeg 本来就有的名字（`-i`、`-y` / `-n`、`-f`、
+编码器名、`-vn` / `-map`），其余 token 原样进入作业参数，由远端 ffmpeg 解释与报错。
+
+配置解析顺序（优先级从高到低，高层只覆盖它自己设置的键）：
+1. 环境变量
+2. `./rffmpeg.json`（当前目录）
+3. `~/.rffmpeg.json`（用户主目录）
+4. `/etc/rffmpeg.json`（系统配置目录）
+5. 内置默认
+
+当前目录层只在文件是常规文件、属主为运行 CLI 的有效用户（effective UID）、且组与其他均不可写
+时被采用；符号链接按解析后的目标文件判定。不满足即跳过该层并继续按序解析，同时在 stderr 打印
+单行 `Warning: ignoring config file ./rffmpeg.json: <reason>`，原因词取 `not a regular file`、
+`owner mismatch`、`writable by group or others` 之一；该告警不受静默开关抑制。banner（非静默时）
+的 `Server: <url> (<来源>)` 中，来源指实际被采用的那一层：`env` / `current directory` /
+`user home` / `system` / `built-in default`。
 
 #### 配置文件示例
 
@@ -465,34 +481,74 @@ CLI 配置文件搜索顺序（优先级从高到低）：
 {
   "server_url": "http://localhost:8080", // /api/v1 suffix is optional
   "token": "your-auth-token",
+  "quiet": false,
+  "auto_hw": false,
+  "retry": false,
+  "job_timeout": "30m",
+  "poll_timeout": "10m",
   "max_retries": 14,
   "server_loss_timeout": "30s",
-  "poll_timeout": "10m"
+  "info_format": "text",
+  "local_fallback": false,
+  "shared_fs": false,
+  "log_file": ""
 }
 ```
 
 #### 环境变量
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `RFFMPEG_SERVER_URL` | Server URL | `http://localhost:8080` |
-| `RFFMPEG_TOKEN` | 认证令牌（server 启用认证时必填） | - |
-| `RFFMPEG_MAX_RETRIES` | WS/HTTP 重试次数上限（连接中断后） | `14`（约 5 分钟） |
-| `RFFMPEG_SERVER_LOSS_TIMEOUT` | 已提交任务等待期间 Server 断连的快速失败预算（`0` = 关闭该预算） | `30s` |
-| `RFFMPEG_POLL_TIMEOUT` | 等待 Worker（pending）阶段的最长轮询时长（`0` = 不设上限） | `10m` |
-| `RFFMPEG_LOCAL_FALLBACK` | 允许能力查询（`-encoders`/`-decoders`/`-codecs`/`-hwaccels`/`-filters`/`-pix_fmts`/`-formats`）在 Server 无法应答时改列本地 ffmpeg 能力（`1`/`true` 开启，并打印 `[rffmpeg] local fallback:` 告警行） | 未设置（Server 无法应答即失败退出） |
-| `RFFMPEG_LOG_FILE` | 提交前失败诊断日志路径（追加写入，未设置则禁用） | - |
+| 变量名 | 配置文件键 | 说明 | 默认值 |
+|--------|-----------|------|--------|
+| `RFFMPEG_SERVER_URL` | `server_url` | Server URL | `http://localhost:8080` |
+| `RFFMPEG_TOKEN` | `token` | 认证令牌（server 启用认证时必填；只用于认证请求头） | - |
+| `RFFMPEG_QUIET` | `quiet` | 静默：抑制 banner、上传进度与提交提示行（错误行照常） | 关闭 |
+| `RFFMPEG_AUTO_HW` | `auto_hw` | 自动把软件编码升级为 Worker 的硬件编码 | 关闭 |
+| `RFFMPEG_RETRY` | `retry` | 限流（429）时按退避重投，最多 5 次 | 关闭 |
+| `RFFMPEG_JOB_TIMEOUT` | `job_timeout` | ffmpeg 执行预算（须 > 0；非法取值在提交前拒绝） | 未设置（取 Server 侧作业超时） |
+| `RFFMPEG_POLL_TIMEOUT` | `poll_timeout` | 等待 Worker（pending）阶段的最长轮询时长（`0` = 不设上限） | `10m` |
+| `RFFMPEG_MAX_RETRIES` | `max_retries` | WS/HTTP 重试次数上限（连接中断后） | `14`（约 5 分钟） |
+| `RFFMPEG_SERVER_LOSS_TIMEOUT` | `server_loss_timeout` | 已提交任务等待期间 Server 断连的快速失败预算（`0` = 关闭该预算） | `30s` |
+| `RFFMPEG_INFO_FORMAT` | `info_format` | 能力查询输出格式：`text` 或 `json` | `text` |
+| `RFFMPEG_LOCAL_FALLBACK` | `local_fallback` | 允许能力查询（`-encoders`/`-decoders`/`-codecs`/`-hwaccels`/`-filters`/`-pix_fmts`/`-formats`）在 Server 无法应答时改列本地 ffmpeg 能力（并打印 `[rffmpeg] local fallback:` 告警行） | 关闭（Server 无法应答即失败退出） |
+| `RFFMPEG_SHARED_FS` | `shared_fs` | 共享文件系统直通模式（跳过上传/下载） | 关闭 |
+| `RFFMPEG_LOG_FILE` | `log_file` | 提交前失败诊断日志路径（追加写入） | - |
+| `RFFMPEG_JOB_ID` | —（仅环境变量） | 重新附着到该作业并下载其输出，不提交新作业 | - |
+
+布尔变量取 `1`/`true` 或 `0`/`false`；非法取值在启动时以单行错误拒绝。
+
+#### 原选项迁移对照
+
+| 原命令行选项 | 环境变量 | 配置文件键 |
+|--------------|----------|------------|
+| `--server <url>` / `-server` | `RFFMPEG_SERVER_URL` | `server_url` |
+| `--token <t>` / `-token` | `RFFMPEG_TOKEN` | `token` |
+| `-q` / `--quiet` / `-quiet` | `RFFMPEG_QUIET` | `quiet` |
+| `--auto-hw[=true\|false]` | `RFFMPEG_AUTO_HW` | `auto_hw` |
+| `--retry` / `-retry` | `RFFMPEG_RETRY` | `retry` |
+| `--timeout <d>` | `RFFMPEG_JOB_TIMEOUT` | `job_timeout` |
+| `--poll-timeout <d>` | `RFFMPEG_POLL_TIMEOUT` | `poll_timeout` |
+| `--max-retries <n>` | `RFFMPEG_MAX_RETRIES` | `max_retries` |
+| `--server-loss-timeout <d>` | `RFFMPEG_SERVER_LOSS_TIMEOUT` | `server_loss_timeout` |
+| `--json` | `RFFMPEG_INFO_FORMAT=json` | `info_format` |
+| 本地回退开关（原 `RFFMPEG_LOCAL_FALLBACK`） | `RFFMPEG_LOCAL_FALLBACK` | `local_fallback` |
+| `--resume <job-id>` | `RFFMPEG_JOB_ID` | 不支持（配置文件层不承载该标识） |
+| `--encoders` / `--decoders` 等双横线别名 | — | —（只认原生单横线名） |
+| `--help` / `--version` | — | —（改用 `-h` / `-help` / `-version`） |
+| `-o <path>` | — | —（输出改用尾部位置参数。`-o` 不是原生名，`-o` 与其后的取值一起进作业参数，因此该路径不再充当输出位置；没有其他位置参数时按缺输出在提交前拒绝） |
+
+`-q` 已回归 ffmpeg 的固定质量语义：`-c:v mjpeg -q 2` 的取值原样进入作业参数并生效，
+不再被当作静默开关。
 
 **能力查询在 Server 无法应答时失败退出**：`-encoders`/`-decoders`/`-codecs`/`-hwaccels`/`-filters`/`-pix_fmts`/`-formats` 回答的是**集群**（Worker）的能力，与 `-buildconf`/`-layouts` 等本地查询标志定位不同。因此当 Server 不可达、令牌错误或返回错误时，CLI 打印错误并以非零码退出，**不会静默改用本地 ffmpeg 的能力列表**——否则用户会把本机能力误当成集群能力（例如据此选定一个集群并不支持的编码器）。确需本机列表时：直接运行 `ffmpeg -encoders` 等本地命令，或设置 `RFFMPEG_LOCAL_FALLBACK=1` 显式开启回退（回退时会打印 `[rffmpeg] local fallback: …; listing LOCAL ffmpeg capabilities` 告警行）。
 
-**未配置 Server URL 时的连接失败提示**：`--server`、`RFFMPEG_SERVER_URL` 与配置文件都没有提供 Server URL 时，CLI 使用默认 `http://localhost:8080`；此时若健康检查失败，除错误信息外会额外打印一行提示（说明当前用的是默认 URL，并提示设置 `RFFMPEG_SERVER_URL` 或 `--server`），避免首次使用只看到 `connection refused` 而无从判断。显式指定过 URL（命令行、环境变量、配置文件任一）时不打印该提示。
+**未配置 Server URL 时的连接失败提示**：环境变量与配置文件都没有提供 Server URL 时，CLI 使用默认 `http://localhost:8080`；此时若健康检查失败，除错误信息外会额外打印一行提示（说明当前用的是默认 URL，并提示设置 `RFFMPEG_SERVER_URL` 或写配置文件），避免首次使用只看到 `connection refused` 而无从判断。配置面给出过 URL 时不打印该提示。
 
 **提交前失败诊断日志（`RFFMPEG_LOG_FILE`）**：设置该变量指向一个可写文件后，CLI 会在「提交作业之前」以非零退出码退出时，把一条诊断记录追加写入该文件——包含时间戳、进程 PID、退出码、Server URL、命令行（令牌已脱敏）以及本次运行捕获的 stderr 内容。这用于诊断「CLI 在提交前即退出、Server 与 Worker 均无对应 job 记录」的偶发故障：此类故障无服务端线索，仅靠 CLI 侧的 stderr 才能定位。默认不设置（零开销、不改动 stderr 与文件系统），仅当需要诊断时按需开启。日志文件以 `0600` 权限创建，避免令牌（若未来扩展写入）被其他用户读取。
 
 #### 认证
 
-- Server 未配置 token 时**拒绝一切请求**（401），并在启动日志打印 WARNING；因此 CLI 必须设置与 Server `--auth-token` 一致的令牌：环境变量 `RFFMPEG_TOKEN`、命令行 `-token <token>` 或配置文件 `"token": "<token>"`。
-- 未设置凭证时，CLI 会在提交/上传阶段收到 401 错误并直接退出，**不会回退到本地 ffmpeg**。
+- Server 未配置 token 时**拒绝一切请求**（401），并在启动日志打印 WARNING；因此 CLI 必须设置与 Server `--auth-token` 一致的令牌，只经配置面给出：环境变量 `RFFMPEG_TOKEN`，或配置文件 `"token": "<token>"`（命令行不承载 rffmpeg 自有配置）。
+- 未设置凭证时，CLI 会在首个业务请求收到 401 错误并直接退出，**不会回退到本地 ffmpeg**。
 
 ### 共享文件系统直通模式
 
@@ -561,7 +617,7 @@ CLI 在机器 A，Worker 在机器 B，两者通过 NFS 共享 `/mnt/media` 目�
 
 # 机器 A (CLI 端)
 export RFFMPEG_SHARED_FS=1
-./bin/rffmpeg --server http://worker-host:8080 \
+RFFMPEG_SERVER_URL=http://worker-host:8080 ./bin/rffmpeg \
   -i /mnt/media/videos/input.mp4 \
   -c:v libx264 \
   /mnt/media/output.mp4
@@ -775,15 +831,15 @@ Response:
 
 最小可复现示例：
 
-以下命令假定已配置认证令牌：先 `export RFFMPEG_TOKEN=<T>`（或为每条命令追加 `--token <T>`），令牌须与 Server 的 `--auth-token <T>` 一致。
+以下命令假定已配置认证令牌：先 `export RFFMPEG_TOKEN=<T>`，令牌须与 Server 的 `--auth-token <T>` 一致。
 
 ```bash
 # 同一内容的两个 byte-identical 副本
 cp input.mp4 copy.mp4
 
 # 两次提交：不同的本地路径，相同的内容
-./bin/rffmpeg --server http://localhost:8080 -i input.mp4 -c:v libx264 out1.mp4
-./bin/rffmpeg --server http://localhost:8080 -i copy.mp4  -c:v libx264 out2.mp4
+./bin/rffmpeg -i input.mp4 -c:v libx264 out1.mp4
+./bin/rffmpeg -i copy.mp4  -c:v libx264 out2.mp4
 ```
 
 第二次提交时 CLI 的 stderr 会出现 `[rffmpeg] Cache hit: <key>`，且该任务 `GET /api/v1/jobs/{jobId}` 的 `cached` 字段为 `true`——两次上传得到相同 `file_id`，转码参数相同，缓存键相同，输出复用第一次的结果。
@@ -1001,7 +1057,7 @@ GET /api/v1/workers/{workerId}/jobs
     将其重排回 pending；每次重排写一条 `job_timeout` 事件（受 `max_timeout_retries` 预算约束，
     默认 2）。
 - 终态 TIMEOUT **不写迁移事件**：scheduler 在 `max_timeout_retries` 预算耗尽后 FAIL
-  （`FailureTimeout`）、以及 CLI `--timeout` 被 worker 按 ffmpeg 执行预算强制终止，两者都是
+  （`FailureTimeout`）、以及 CLI 任务预算（`RFFMPEG_JOB_TIMEOUT`）被 worker 按 ffmpeg 执行预算强制终止，两者都是
   终态 `failure_type=TIMEOUT`，不是迁移，故不写 `migration_events`、也不计入
   `GetJobTimeoutRetryCount`（该计数只统计重排次数，供 `max_timeout_retries` 预算使用）。
   终态超时的可观测入口是 `jobs.status=timeout` + `jobs.failure_type=TIMEOUT`。
@@ -1093,7 +1149,7 @@ RFFMPEG_CACHE_ENABLED=false RFFMPEG_HEARTBEAT_INTERVAL=2s RFFMPEG_WORKER_NAME=sl
 
 ```bash
 export RFFMPEG_TOKEN=dev
-seq 1 200 | xargs -P 4 -I{} ./bin/rffmpeg --server http://localhost:8080 -y -i test.mp4 -c:v libx264 out-{}.mp4
+seq 1 200 | xargs -P 4 -I{} env RFFMPEG_SERVER_URL=http://localhost:8080 ./bin/rffmpeg -y -i test.mp4 -c:v libx264 out-{}.mp4
 ```
 
 **3. 观察驱逐与恢复**：
@@ -1210,18 +1266,14 @@ RFFMPEG_TOKEN=dev ./bin/rffmpeg -i my_video.mp4 \
   output.mp4
 ```
 
-### 多输出转码
+### 多分辨率输出
+
+一个转码调用只承载一个输出（C-6）：位置参数多于一个即拒绝。多分辨率版本按输出逐个提交：
 
 ```bash
-# 生成多个分辨率版本
-./bin/rffmpeg -i source.mp4 \
-  -filter_complex "[0:v]split=3[v1][v2][v3]; \
-   [v1]scale=1920:1080[v1out]; \
-   [v2]scale=1280:720[v2out]; \
-   [v3]scale=640:360[v3out]" \
-  -map "[v1out]" -c:v:0 libx264 output_1080p.mp4 \
-  -map "[v2out]" -c:v:1 libx264 output_720p.mp4 \
-  -map "[v3out]" -c:v:2 libx264 output_360p.mp4
+for spec in "1920:1080" "1280:720" "640:360"; do
+  ./bin/rffmpeg -i source.mp4 -vf "scale=${spec}" -c:v libx264 "output_${spec/:/x}.mp4"
+done
 ```
 
 ### 重连已完成任务取回输出
@@ -1230,22 +1282,24 @@ RFFMPEG_TOKEN=dev ./bin/rffmpeg -i my_video.mp4 \
 # Server 重启期间原 CLI 放弃等待并以退出码 2 结束，任务随后由新 Worker 完成：
 #   Error: gave up waiting for job 3f2a9c1e-...; the job keeps running server-side
 # 服务端恢复后，用同一个 job id 重新附着并下载输出（-y 覆盖已存在的同名文件）
-./bin/rffmpeg --resume 3f2a9c1e-4b7d-4f6a-9c21-8d0e5b7a1234 -y
+RFFMPEG_JOB_ID=3f2a9c1e-4b7d-4f6a-9c21-8d0e5b7a1234 ./bin/rffmpeg -y
 
 # 任务仍在运行时先等待其完成，再把输出写到指定路径
-./bin/rffmpeg --resume 3f2a9c1e-4b7d-4f6a-9c21-8d0e5b7a1234 /data/output.mp4
+RFFMPEG_JOB_ID=3f2a9c1e-4b7d-4f6a-9c21-8d0e5b7a1234 ./bin/rffmpeg /data/output.mp4
 ```
 
 ### 使用配置文件
 
 ```bash
-# 创建 CLI 配置
+# 创建 CLI 配置（当前目录层；须为常规文件、属主为运行用户且组/其他不可写）
 cat > rffmpeg.json << EOF
 {
   "server_url": "https://rffmpeg.example.com", // /api/v1 suffix is optional
-  "token": "your-api-token"
+  "token": "your-api-token",
+  "job_timeout": "30m"
 }
 EOF
+chmod 644 rffmpeg.json
 
 # 直接使用（自动读取配置）
 ./bin/rffmpeg -i video.mp4 -c:v libx264 output.mp4

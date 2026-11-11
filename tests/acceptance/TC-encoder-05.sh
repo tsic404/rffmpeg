@@ -28,7 +28,7 @@ assert w["last_heartbeat"], "last_heartbeat missing at the worker top level"
 MEDIA="$(make_media caps.mp4 2)"
 LOG="$TMP_ROOT/cli.log"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" "$TMP_ROOT/out.mp4" 2>"$LOG"
 RC=$?
 set -e

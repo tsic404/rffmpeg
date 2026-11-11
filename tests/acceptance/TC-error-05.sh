@@ -13,7 +13,7 @@ LOG="$TMP_ROOT/cli.log"
 # No server is started: the port stays closed for the whole probe.
 START=$(now_ns)
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "http://127.0.0.1:$PORT" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" "$TMP_ROOT/out.mp4" >/dev/null 2>"$LOG"
 RC=$?
 set -e

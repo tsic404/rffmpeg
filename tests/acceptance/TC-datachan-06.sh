@@ -18,7 +18,7 @@ wait_worker ttl-worker
 
 run_crf() {
 	local crf="$1" out="$2" log="$3"
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$MEDIA" -c:v libx264 -crf "$crf" "$out" >/dev/null 2>"$log"
 }
 
@@ -38,7 +38,7 @@ LRU_MEDIA="$(make_media evict-lru.mp4 8 1280x720)"
 
 run_lru() {
 	local run="$1" out="$2" log="$3"
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$LRU_MEDIA" -c:v libx264 -preset ultrafast -crf 0 \
 		-metadata "comment=$run" \
 		"$out" >/dev/null 2>"$log"

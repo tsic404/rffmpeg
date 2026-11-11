@@ -22,8 +22,8 @@ CLI_PIDS=()
 for i in $(seq 1 "$N"); do
 	(
 		set +e
-		timeout 600 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
-			--retry -i "$MEDIA" -c:v libx264 -preset veryslow "$TMP_ROOT/out-$i.mp4" \
+		timeout 600 env RFFMPEG_RETRY=1 "$RFFMPEG_BIN/rffmpeg" \
+			-i "$MEDIA" -c:v libx264 -preset veryslow "$TMP_ROOT/out-$i.mp4" \
 			>/dev/null 2>"$TMP_ROOT/cli-$i.log"
 		echo "$? $i" >>"$RC_FILE"
 	) &

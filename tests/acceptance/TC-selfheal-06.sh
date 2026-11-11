@@ -47,7 +47,7 @@ wait_worker fast-node
 
 # The CLI probe uploads the input and dispatches the ffprobe work to a worker,
 # so it needs a registered worker before it can run.
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	probe "$PROBE_MEDIA" >/dev/null 2>"$TMP_ROOT/probe.log"
 FILE_ID="$(grep -oE 'Uploaded: .* -> [0-9a-f]+' "$TMP_ROOT/probe.log" | awk '{print $NF}' || true)"
 [[ -n "$FILE_ID" ]] || fail "probe input file id not captured"

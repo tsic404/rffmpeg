@@ -27,7 +27,7 @@ LOG="$TMP_ROOT/cli.log"
 OUT="$TMP_ROOT/big-out.mp4"
 START=$(now_ns)
 set +e
-timeout 900 "$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+timeout 900 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$BIG" -c:v libx264 -preset veryfast "$OUT" 2>"$LOG"
 RC=$?
 set -e

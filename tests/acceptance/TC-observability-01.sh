@@ -17,7 +17,7 @@ LOG="$TMP_ROOT/probe.log"
 
 START=$(now_ns)
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	probe "$MEDIA" >"$OUT" 2>"$LOG"
 RC=$?
 set -e
