@@ -170,10 +170,12 @@ const etaRateTolerance = 0.25
 
 // etaSample is one progress observation: the wall clock and the percentage
 // at the rendered grid (one decimal), so the rate judged is the rate a reader
-// of the progress line sees (C-122).
+// of the progress line sees (C-122). The percentage is kept in tenths of a
+// point so a block's increment is an exact integer and the interval endpoints
+// below compare without float rounding.
 type etaSample struct {
-	wall time.Time
-	pct  float64
+	wall      time.Time
+	pctTenths int64
 }
 
 func NewProgressParser() *ProgressParser {
@@ -310,6 +312,18 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		}
 	}
 
+	// A job's percent never goes backward, so a restarted attempt's frames are
+	// dropped instead of rewinding progress the CLI already displayed. The drop
+	// happens before the ETA evidence below: a row the CLI never renders is not
+	// rate evidence either (C-122, ADR-016). Frames with an unknown duration
+	// (-1) carry no percent to compare against and pass through untouched.
+	if frame.Percent >= 0 {
+		if p.maxPercent >= 0 && frame.Percent < p.maxPercent {
+			return nil
+		}
+		p.maxPercent = frame.Percent
+	}
+
 	// ETA from wall-clock throughput: remaining media time divided by the
 	// recent encode rate (media encoded per wall second). The rate comes from
 	// a rolling window so a drifting pace is not averaged into an outdated
@@ -329,20 +343,6 @@ func (p *ProgressParser) ParseLine(line string) *ProgressFrame {
 		}
 	}
 
-	// A job's percent never goes backward, so a restarted attempt's frames are
-	// dropped instead of rewinding progress the CLI already displayed. The
-	// drop suppresses the push only: every frame still updated the attempt
-	// state above, so the displayed speed and the ETA stay live while the
-	// restarted attempt climbs back to the mark. Frames with an unknown
-	// duration (-1) carry no percent to compare against and pass through
-	// untouched.
-	if frame.Percent >= 0 {
-		if p.maxPercent >= 0 && frame.Percent < p.maxPercent {
-			return nil
-		}
-		p.maxPercent = frame.Percent
-	}
-
 	return frame
 }
 
@@ -360,8 +360,8 @@ func (p *ProgressParser) ShouldPush() bool {
 // than the rate window plus one block edge: nothing older can enter a block.
 // At least two samples are kept: a sparse stream still needs a span.
 func (p *ProgressParser) recordETASample(now time.Time, pct float64) {
-	rendered := math.Round(pct*10) / 10
-	p.etaSamples = append(p.etaSamples, etaSample{wall: now, pct: rendered})
+	rendered := int64(math.Round(pct * 10))
+	p.etaSamples = append(p.etaSamples, etaSample{wall: now, pctTenths: rendered})
 	keep := etaRateWindowSeconds + etaRateChunkSeconds
 	cutoff := now.Add(-time.Duration(keep * float64(time.Second)))
 	for len(p.etaSamples) > 2 && p.etaSamples[0].wall.Before(cutoff) {
@@ -415,28 +415,28 @@ func (p *ProgressParser) etaRateRange(now time.Time) (etaRates, bool) {
 	// One rate per row: the row's own block. A window with fewer than two
 	// measurable blocks carries no dispersion, so it certifies nothing
 	// (C-122 threshold clause).
-	blockRates := p.blockRatesFrom(base)
+	blocks := p.blocksFrom(base)
 	positive, low, high := 0, 0.0, 0.0
 	stepped := false
-	lastRate := 0.0
-	for _, r := range blockRates {
-		if r <= 0 {
+	var last etaBlock
+	for _, b := range blocks {
+		if b.dpTenths == 0 {
 			continue
 		}
 		positive++
-		if low == 0 || r < low {
-			low = r
+		if low == 0 || b.rate < low {
+			low = b.rate
 		}
-		if r > high {
-			high = r
+		if b.rate > high {
+			high = b.rate
 		}
-		// A block without progress produces no rate and is not a rate
-		// block, so it does not break the adjacency: the step is judged
-		// between the consecutive measurable blocks on either side of it.
-		if lastRate > 0 && math.Abs(r/lastRate-1) > etaRateTolerance {
+		// A block without progress produces no rate and is not a rate block,
+		// so it does not break the adjacency: the step is judged between the
+		// consecutive measurable blocks on either side of it (C-122).
+		if last.dpTenths > 0 && paceStep(last, b) {
 			stepped = true
 		}
-		lastRate = r
+		last = b
 	}
 	if positive < 2 {
 		return etaRates{}, false
@@ -444,7 +444,7 @@ func (p *ProgressParser) etaRateRange(now time.Time) (etaRates, bool) {
 	// The window's whole throughput counts the time the measurable blocks
 	// skipped (a stall). It is the floor a future that repeats the stall
 	// would run at; a window that advanced no media bounds nothing.
-	windowRate := (p.etaSamples[len(p.etaSamples)-1].pct - p.etaSamples[base].pct) / 100.0 * duration / span.Seconds()
+	windowRate := float64(p.etaSamples[len(p.etaSamples)-1].pctTenths-p.etaSamples[base].pctTenths) / 1000.0 * duration / span.Seconds()
 	if windowRate <= 0 {
 		return etaRates{}, false
 	}
@@ -455,9 +455,9 @@ func (p *ProgressParser) etaRateRange(now time.Time) (etaRates, bool) {
 		p.startupStepSeen = true
 	}
 	sum := 0.0
-	for _, r := range blockRates {
-		if r > 0 {
-			sum += r
+	for _, b := range blocks {
+		if b.dpTenths > 0 {
+			sum += b.rate
 		}
 	}
 	rates := etaRates{
@@ -472,16 +472,25 @@ func (p *ProgressParser) etaRateRange(now time.Time) (etaRates, bool) {
 	return rates, true
 }
 
-// blockRatesFrom returns the block rate of every progress row in [base, last],
-// in row order. A row's block ends at that row and starts etaRateChunkSeconds
+// etaBlock is one rate observation: the block ending at one progress row.
+// dpTenths is the progress increment in tenths of a percentage point; zero
+// means the block measured no rate and is not a rate block (C-122).
+type etaBlock struct {
+	rate     float64
+	dpTenths int64
+	span     time.Duration
+}
+
+// blocksFrom returns the block of every progress row in [base, last], in row
+// order. A row's block ends at that row and starts etaRateChunkSeconds
 // earlier; its first row is the sample nearest that start, which may fall
 // before the start by one sampling interval (C-122). A block without progress,
 // with fewer than two rows, or shorter than 1s of measured wall time produces
-// no rate (zero); a zero is not a rate block, so a step is judged between the
+// no rate; the zero block is not a rate block, so a step is judged between the
 // consecutive measurable blocks on either side of it.
-func (p *ProgressParser) blockRatesFrom(base int) []float64 {
+func (p *ProgressParser) blocksFrom(base int) []etaBlock {
 	last := len(p.etaSamples) - 1
-	rates := make([]float64, last-base+1)
+	blocks := make([]etaBlock, last-base+1)
 	duration := float64(p.durationUs) / 1_000_000.0
 	if duration <= 0 {
 		return nil
@@ -502,13 +511,40 @@ func (p *ProgressParser) blockRatesFrom(base int) []float64 {
 			}
 		}
 		span := p.etaSamples[i].wall.Sub(p.etaSamples[j].wall)
-		dp := p.etaSamples[i].pct - p.etaSamples[j].pct
+		dp := p.etaSamples[i].pctTenths - p.etaSamples[j].pctTenths
 		if span < minSpan || dp <= 0 {
 			continue
 		}
-		rates[i-base] = dp / 100.0 * duration / span.Seconds()
+		blocks[i-base] = etaBlock{
+			rate:     float64(dp) / 1000.0 * duration / span.Seconds(),
+			dpTenths: dp,
+			span:     span,
+		}
 	}
-	return rates
+	return blocks
+}
+
+// paceStep reports whether two consecutive rate blocks are separated by a pace
+// step under C-122: the quantized rate intervals of the two blocks, taken as
+// closed intervals, are disjoint, and the point estimates still differ by more
+// than etaRateTolerance.
+//
+// One grid step is 0.1 of a percentage point, so block i's interval is
+// r_i × (1 ± 1/dp_i) = (dp_i ± 1) / span_i in common units. With the increment
+// in integer tenths and the span in integer nanoseconds, both tests are exact
+// integer comparisons: endpoint touching means the intervals intersect, and
+// float rounding cannot move either boundary.
+func paceStep(prev, cur etaBlock) bool {
+	pdp, cdp := prev.dpTenths, cur.dpTenths
+	pspan, cspan := int64(prev.span), int64(cur.span)
+	disjoint := (pdp+1)*cspan < (cdp-1)*pspan || (cdp+1)*pspan < (pdp-1)*cspan
+	if !disjoint {
+		return false
+	}
+	// |cur/prev - 1| > tolerance  <=>  4·cdp·pspan > 5·pdp·cspan or 4·cdp·pspan < 3·pdp·cspan.
+	lhs := 4 * cdp * pspan
+	rhs := 5 * pdp * cspan
+	return lhs > rhs || lhs*5 < rhs*3
 }
 
 // absDuration is time.Duration's absolute value.
