@@ -18,13 +18,13 @@ LOG1="$TMP_ROOT/first.log"
 LOG2="$TMP_ROOT/second.log"
 LOG3="$TMP_ROOT/third.log"
 
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -crf 21 "$TMP_ROOT/a1.mp4" >/dev/null 2>"$LOG1"
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -crf 21 "$TMP_ROOT/a2.mp4" >/dev/null 2>"$LOG2"
 grep -qF '[rffmpeg] Cache hit:' "$LOG2" || fail "second identical submission did not hit the cache"
 
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -crf 22 "$TMP_ROOT/b1.mp4" >/dev/null 2>"$LOG3"
 grep -qF '[rffmpeg] Cache hit:' "$LOG3" && fail "different parameters (-crf 22) hit the cache"
 

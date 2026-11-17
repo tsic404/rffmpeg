@@ -20,7 +20,7 @@ CLI_PIDS=()
 for i in $(seq 1 "$N"); do
 	(
 		set +e
-		"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+		"$RFFMPEG_BIN/rffmpeg" \
 			-i "$MEDIA" -c:v libx264 -preset veryfast "$TMP_ROOT/out-$i.mp4" \
 			>/dev/null 2>"$TMP_ROOT/cli-$i.log"
 		echo "$? $i" >>"$RC_FILE"

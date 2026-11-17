@@ -31,7 +31,7 @@ H264_MISSING="$(pick_missing h264_nvenc h264_qsv h264_amf h264_vulkan h264_vaapi
 
 LOG="$TMP_ROOT/fallback.log"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v "$H264_MISSING" "$TMP_ROOT/fallback.mp4" 2>"$LOG"
 RC=$?
 set -e
@@ -46,7 +46,7 @@ AV1_MISSING="$(pick_missing av1_nvenc av1_qsv av1_amf av1_vaapi av1_vulkan)" || 
 if [[ -n "$AV1_MISSING" ]]; then
 	LOG2="$TMP_ROOT/av1.log"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$MEDIA" -c:v "$AV1_MISSING" "$TMP_ROOT/av1.mp4" 2>"$LOG2"
 	RC2=$?
 	set -e

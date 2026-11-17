@@ -73,7 +73,7 @@ func StreamingOutputError(r *ParseResult) string {
 	}
 
 	if format == "" {
-		return `Error: output to stdout ("-") is not supported: remote transcoding stores output on server storage and ffmpeg cannot auto-detect a muxer for a pipe. Use a server-writable output path (e.g. output.mp4) or -o <local path>.`
+		return `Error: output to stdout ("-") is not supported: remote transcoding stores output on server storage and ffmpeg cannot auto-detect a muxer for a pipe. Use a server-writable output path (e.g. output.mp4) as the trailing positional argument.`
 	}
-	return fmt.Sprintf(`Error: output to stdout ("-") is not supported for format %s: remote transcoding stores output on server storage and this muxer cannot write to a pipe. Use a server-writable output path (e.g. output.mp4) or -o <local path>.`, format)
+	return fmt.Sprintf(`Error: output to stdout ("-") is not supported for format %s: remote transcoding stores output on server storage and this muxer cannot write to a pipe. Use a server-writable output path (e.g. output.mp4) as the trailing positional argument.`, format)
 }

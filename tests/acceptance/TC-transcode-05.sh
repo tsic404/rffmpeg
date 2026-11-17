@@ -15,7 +15,7 @@ MEDIA="$(make_media source10.mp4 10)"
 OUT="$TMP_ROOT/trimmed.mp4"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-ss 4 -t 3 -i "$MEDIA" -c:v libx264 -preset veryfast "$OUT" \
 	2>"$TMP_ROOT/cli.log"
 RC=$?

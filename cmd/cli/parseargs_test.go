@@ -1,1079 +1,343 @@
 package main
 
 import (
-	"encoding/json"
+	"os"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/tsic404/rffmpeg/pkg/protocol"
+	"github.com/tsic404/rffmpeg/pkg/cli/config"
 )
 
-func TestParseArgs_SingleDashOptions(t *testing.T) {
-	tests := []struct {
-		name            string
-		args            []string
-		wantServerURL   string
-		wantToken       string
-		wantQuiet       bool
-		wantShowHelp    bool
-		wantShowVersion bool
-		wantAutoHW      bool
-		wantFfmpegArgs  []string
-	}{
-		{
-			name:           "-server with value",
-			args:           []string{"-server", "http://localhost:8080", "-i", "video.mp4", "output.mp4"},
-			wantServerURL:  "http://localhost:8080",
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-token with value",
-			args:           []string{"-token", "mytoken", "-i", "video.mp4", "output.mp4"},
-			wantToken:      "mytoken",
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-quiet flag",
-			args:           []string{"-quiet", "-i", "video.mp4", "output.mp4"},
-			wantQuiet:      true,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-auto-hw flag",
-			args:           []string{"-auto-hw", "-i", "video.mp4", "output.mp4"},
-			wantAutoHW:     true,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-auto-hw with -c:v libx264",
-			args:           []string{"-auto-hw", "-i", "video.mp4", "-c:v", "libx264", "output.mp4"},
-			wantAutoHW:     true,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "-c:v", "libx264", "output.mp4"},
-		},
-		{
-			name:           "--auto-hw with -c:v libx264",
-			args:           []string{"--auto-hw", "-i", "video.mp4", "-c:v", "libx264", "output.mp4"},
-			wantAutoHW:     true,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "-c:v", "libx264", "output.mp4"},
-		},
-		{
-			name:           "-auto-hw=true",
-			args:           []string{"-auto-hw=true", "-i", "video.mp4", "output.mp4"},
-			wantAutoHW:     true,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-auto-hw=false",
-			args:           []string{"-auto-hw=false", "-i", "video.mp4", "output.mp4"},
-			wantAutoHW:     false,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-help flag",
-			args:           []string{"-help"},
-			wantShowHelp:   true,
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:            "-version flag",
-			args:            []string{"-version"},
-			wantShowVersion: true,
-			wantFfmpegArgs:  []string{},
-		},
-		{
-			name:           "mixed single-dash and double-dash options",
-			args:           []string{"-server", "http://localhost:8080", "-quiet", "--token", "mytoken", "-i", "video.mp4", "output.mp4"},
-			wantServerURL:  "http://localhost:8080",
-			wantToken:      "mytoken",
-			wantQuiet:      true,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-server with missing value (not consumed)",
-			args:           []string{"-i", "video.mp4", "output.mp4"},
-			wantServerURL:  "",
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-		{
-			name:           "-server without value consumes next arg (consistent with --server)",
-			args:           []string{"-server", "-i", "video.mp4", "output.mp4"},
-			wantServerURL:  "-i",
-			wantFfmpegArgs: []string{"video.mp4", "output.mp4"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts, err := parseArgs(tt.args)
-			if err != nil {
-				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
-			}
-			if opts.ServerURL != tt.wantServerURL {
-				t.Errorf("serverURL = %q, want %q", opts.ServerURL, tt.wantServerURL)
-			}
-			if opts.Token != tt.wantToken {
-				t.Errorf("token = %q, want %q", opts.Token, tt.wantToken)
-			}
-			if opts.Quiet != tt.wantQuiet {
-				t.Errorf("quiet = %v, want %v", opts.Quiet, tt.wantQuiet)
-			}
-			if opts.ShowHelp != tt.wantShowHelp {
-				t.Errorf("showHelp = %v, want %v", opts.ShowHelp, tt.wantShowHelp)
-			}
-			if opts.ShowVersion != tt.wantShowVersion {
-				t.Errorf("showVersion = %v, want %v", opts.ShowVersion, tt.wantShowVersion)
-			}
-			if opts.AutoHW != tt.wantAutoHW {
-				t.Errorf("autoHW = %v, want %v", opts.AutoHW, tt.wantAutoHW)
-			}
-			if len(opts.FmpegArgs) != len(tt.wantFfmpegArgs) {
-				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(opts.FmpegArgs), len(tt.wantFfmpegArgs), opts.FmpegArgs)
-			} else {
-				for i := range opts.FmpegArgs {
-					if opts.FmpegArgs[i] != tt.wantFfmpegArgs[i] {
-						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], tt.wantFfmpegArgs[i])
-					}
-				}
-			}
-		})
+// isolateParseEnv blanks every configuration-plane variable so a parsing case
+// is decided by its arguments alone.
+func isolateParseEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		config.EnvServerURL, config.EnvToken, config.EnvSharedFS, config.EnvQuiet,
+		config.EnvAutoHW, config.EnvRetry, config.EnvJobTimeout, config.EnvPollTimeout,
+		config.EnvMaxRetries, config.EnvServerLossTimeout, config.EnvInfoFormat,
+		config.EnvLocalFallback, config.EnvLogFile, config.EnvJobID,
+	} {
+		t.Setenv(name, "")
 	}
 }
 
-func TestParseArgs_CodecsFlag(t *testing.T) {
-	tests := []struct {
-		name           string
-		args           []string
-		wantShowCodecs bool
-		wantFfmpegArgs []string
-	}{
-		{
-			name:           "-codecs alone",
-			args:           []string{"-codecs"},
-			wantShowCodecs: true,
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "--codecs alone",
-			args:           []string{"--codecs"},
-			wantShowCodecs: true,
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "-encoders only (codecs not set)",
-			args:           []string{"-encoders"},
-			wantShowCodecs: false,
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "normal ffmpeg args (codecs not set)",
-			args:           []string{"-i", "video.mp4", "output.mp4"},
-			wantShowCodecs: false,
-			wantFfmpegArgs: []string{"-i", "video.mp4", "output.mp4"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts, err := parseArgs(tt.args)
-			if err != nil {
-				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
-			}
-			if opts.ShowCodecs != tt.wantShowCodecs {
-				t.Errorf("showCodecs = %v, want %v", opts.ShowCodecs, tt.wantShowCodecs)
-			}
-			if len(opts.FmpegArgs) != len(tt.wantFfmpegArgs) {
-				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(opts.FmpegArgs), len(tt.wantFfmpegArgs), opts.FmpegArgs)
-			} else {
-				for i := range opts.FmpegArgs {
-					if opts.FmpegArgs[i] != tt.wantFfmpegArgs[i] {
-						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], tt.wantFfmpegArgs[i])
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestParseArgs_ProbeSubcommand(t *testing.T) {
-	tests := []struct {
-		name           string
-		args           []string
-		wantErr        bool
-		wantIsProbe    bool
-		wantProbeInput string
-		wantFfmpegArgs []string
-		wantServerURL  string
-		wantQuiet      bool
-	}{
-		{
-			name:           "probe with file",
-			args:           []string{"probe", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "probe with options before",
-			args:           []string{"--server", "http://localhost:8080", "probe", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-			wantServerURL:  "http://localhost:8080",
-		},
-		{
-			name:           "probe with -q before",
-			args:           []string{"-q", "probe", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-			wantQuiet:      true,
-		},
-		{
-			name:           "probe with --quiet before",
-			args:           []string{"--quiet", "probe", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-			wantQuiet:      true,
-		},
-		{
-			name:           "probe alone",
-			args:           []string{"probe"},
-			wantIsProbe:    true,
-			wantProbeInput: "",
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "probe with remote URL",
-			args:           []string{"probe", "https://example.com/video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "https://example.com/video.mp4",
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "normal ffmpeg command",
-			args:           []string{"-i", "video.mp4", "-c:v", "libx264", "output.mp4"},
-			wantIsProbe:    false,
-			wantProbeInput: "",
-			wantFfmpegArgs: []string{"-i", "video.mp4", "-c:v", "libx264", "output.mp4"},
-		},
-		{
-			name:           "probe with -i flag",
-			args:           []string{"probe", "-i", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "probe with -i flag and rffmpeg option before",
-			args:           []string{"-q", "probe", "-i", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-			wantQuiet:      true,
-		},
-		{
-			name:    "probe with -i flag but no value",
-			args:    []string{"probe", "-i"},
-			wantErr: true,
-		},
-		{
-			name:    "probe rejects duplicate -i flag",
-			args:    []string{"probe", "-i", "a.mp4", "-i", "b.mp4"},
-			wantErr: true,
-		},
-		{
-			name:    "probe rejects flag-like value after -i",
-			args:    []string{"probe", "-i", "-show_streams", "video.mp4"},
-			wantErr: true,
-		},
-		{
-			name:           "probe with -show_streams and -of json",
-			args:           []string{"probe", "video.mp4", "-show_streams", "-of", "json"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "probe with -i and trailing ffprobe flags",
-			args:           []string{"probe", "-i", "video.mp4", "-show_format", "-print_format", "json"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:           "probe with ffprobe flags before -i",
-			args:           []string{"probe", "-show_streams", "-of", "json", "-i", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-		},
-		{
-			name:    "probe rejects non-json output format",
-			args:    []string{"probe", "video.mp4", "-of", "xml"},
-			wantErr: true,
-		},
-		{
-			name:    "probe rejects unknown option",
-			args:    []string{"probe", "video.mp4", "-show_entries", "stream=codec_name"},
-			wantErr: true,
-		},
-		{
-			name:           "probe as filename (not subcommand, after -i)",
-			args:           []string{"-i", "probe", "output.mp4"},
-			wantIsProbe:    false,
-			wantProbeInput: "",
-			wantFfmpegArgs: []string{"-i", "probe", "output.mp4"},
-		},
-		{
-			name:           "probe with --server and --token before",
-			args:           []string{"--server", "http://example.com", "--token", "mytoken", "probe", "video.mp4"},
-			wantIsProbe:    true,
-			wantProbeInput: "video.mp4",
-			wantFfmpegArgs: []string{},
-			wantServerURL:  "http://example.com",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts, err := parseArgs(tt.args)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("parseArgs(%v) expected error, got opts=%+v", tt.args, opts)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
-			}
-			if opts.IsProbe != tt.wantIsProbe {
-				t.Errorf("isProbe = %v, want %v", opts.IsProbe, tt.wantIsProbe)
-			}
-			if opts.ProbeInput != tt.wantProbeInput {
-				t.Errorf("probeInput = %q, want %q", opts.ProbeInput, tt.wantProbeInput)
-			}
-			if len(opts.FmpegArgs) != len(tt.wantFfmpegArgs) {
-				t.Errorf("ffmpegArgs length = %d, want %d; got %v", len(opts.FmpegArgs), len(tt.wantFfmpegArgs), opts.FmpegArgs)
-			} else {
-				for i := range opts.FmpegArgs {
-					if opts.FmpegArgs[i] != tt.wantFfmpegArgs[i] {
-						t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], tt.wantFfmpegArgs[i])
-					}
-				}
-			}
-			if opts.ServerURL != tt.wantServerURL {
-				t.Errorf("serverURL = %q, want %q", opts.ServerURL, tt.wantServerURL)
-			}
-			if opts.Quiet != tt.wantQuiet {
-				t.Errorf("quiet = %v, want %v", opts.Quiet, tt.wantQuiet)
-			}
-		})
-	}
-}
-
-// TestParseArgs_NewInfoFlags tests the new P0/P1/P2 info flag parsing.
-func TestParseArgs_NewInfoFlags(t *testing.T) {
-	tests := []struct {
-		name           string
-		args           []string
-		wantEncoders   bool
-		wantDecoders   bool
-		wantHwaccels   bool
-		wantFilters    bool
-		wantPixFmts    bool
-		wantFormats    bool
-		wantBuildconf  bool
-		wantLayouts    bool
-		wantProtocols  bool
-		wantSampleFmts bool
-		wantBsfs       bool
-		wantColors     bool
-		wantJSON       bool
-	}{
-		{
-			name:         "-encoders flag",
-			args:         []string{"-encoders"},
-			wantEncoders: true,
-		},
-		{
-			name:         "--encoders flag",
-			args:         []string{"--encoders"},
-			wantEncoders: true,
-		},
-		{
-			name:         "-decoders flag",
-			args:         []string{"-decoders"},
-			wantDecoders: true,
-		},
-		{
-			name:         "-hwaccels flag",
-			args:         []string{"-hwaccels"},
-			wantHwaccels: true,
-		},
-		{
-			name:        "-filters flag",
-			args:        []string{"-filters"},
-			wantFilters: true,
-		},
-		{
-			name:        "--filters flag",
-			args:        []string{"--filters"},
-			wantFilters: true,
-		},
-		{
-			name:        "-pix_fmts flag",
-			args:        []string{"-pix_fmts"},
-			wantPixFmts: true,
-		},
-		{
-			name:        "--pix_fmts flag",
-			args:        []string{"--pix_fmts"},
-			wantPixFmts: true,
-		},
-		{
-			name:        "-formats flag",
-			args:        []string{"-formats"},
-			wantFormats: true,
-		},
-		{
-			name:        "--formats flag",
-			args:        []string{"--formats"},
-			wantFormats: true,
-		},
-		{
-			name:          "-buildconf flag",
-			args:          []string{"-buildconf"},
-			wantBuildconf: true,
-		},
-		{
-			name:          "--buildconf flag",
-			args:          []string{"--buildconf"},
-			wantBuildconf: true,
-		},
-		{
-			name:        "-layouts flag",
-			args:        []string{"-layouts"},
-			wantLayouts: true,
-		},
-		{
-			name:          "-protocols flag",
-			args:          []string{"-protocols"},
-			wantProtocols: true,
-		},
-		{
-			name:           "-sample_fmts flag",
-			args:           []string{"-sample_fmts"},
-			wantSampleFmts: true,
-		},
-		{
-			name:     "-bsfs flag",
-			args:     []string{"-bsfs"},
-			wantBsfs: true,
-		},
-		{
-			name:       "-colors flag",
-			args:       []string{"-colors"},
-			wantColors: true,
-		},
-		{
-			name:     "--json flag",
-			args:     []string{"--json"},
-			wantJSON: true,
-		},
-		{
-			name:        "combined -filters --json",
-			args:        []string{"-filters", "--json"},
-			wantFilters: true,
-			wantJSON:    true,
-		},
-		{
-			name:        "--json before -filters",
-			args:        []string{"--json", "-filters"},
-			wantFilters: true,
-			wantJSON:    true,
-		},
-		{
-			name: "info flags not set in normal transcode command",
-			args: []string{"-i", "video.mp4", "output.mp4"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts, err := parseArgs(tt.args)
-			if err != nil {
-				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
-			}
-			if opts.ShowEncoders != tt.wantEncoders {
-				t.Errorf("showEncoders = %v, want %v", opts.ShowEncoders, tt.wantEncoders)
-			}
-			if opts.ShowDecoders != tt.wantDecoders {
-				t.Errorf("showDecoders = %v, want %v", opts.ShowDecoders, tt.wantDecoders)
-			}
-			if opts.ShowHwaccels != tt.wantHwaccels {
-				t.Errorf("showHwaccels = %v, want %v", opts.ShowHwaccels, tt.wantHwaccels)
-			}
-			if opts.ShowFilters != tt.wantFilters {
-				t.Errorf("showFilters = %v, want %v", opts.ShowFilters, tt.wantFilters)
-			}
-			if opts.ShowPixFmts != tt.wantPixFmts {
-				t.Errorf("showPixFmts = %v, want %v", opts.ShowPixFmts, tt.wantPixFmts)
-			}
-			if opts.ShowFormats != tt.wantFormats {
-				t.Errorf("showFormats = %v, want %v", opts.ShowFormats, tt.wantFormats)
-			}
-			if opts.ShowBuildconf != tt.wantBuildconf {
-				t.Errorf("showBuildconf = %v, want %v", opts.ShowBuildconf, tt.wantBuildconf)
-			}
-			if opts.ShowLayouts != tt.wantLayouts {
-				t.Errorf("showLayouts = %v, want %v", opts.ShowLayouts, tt.wantLayouts)
-			}
-			if opts.ShowProtocols != tt.wantProtocols {
-				t.Errorf("showProtocols = %v, want %v", opts.ShowProtocols, tt.wantProtocols)
-			}
-			if opts.ShowSampleFmts != tt.wantSampleFmts {
-				t.Errorf("showSampleFmts = %v, want %v", opts.ShowSampleFmts, tt.wantSampleFmts)
-			}
-			if opts.ShowBsfs != tt.wantBsfs {
-				t.Errorf("showBsfs = %v, want %v", opts.ShowBsfs, tt.wantBsfs)
-			}
-			if opts.ShowColors != tt.wantColors {
-				t.Errorf("showColors = %v, want %v", opts.ShowColors, tt.wantColors)
-			}
-			if opts.ShowJSON != tt.wantJSON {
-				t.Errorf("showJSON = %v, want %v", opts.ShowJSON, tt.wantJSON)
-			}
-		})
-	}
-}
-
-func TestOutputInfoFlagJSON(t *testing.T) {
-	encoders := []protocol.EncoderInfo{
-		{Name: "libx264", Description: "H.264 encoder", Type: "video"},
-		{Name: "aac", Description: "AAC encoder", Type: "audio"},
-	}
-	decoders := []protocol.DecoderInfo{
-		{Name: "h264", Description: "H.264 decoder", Type: "video"},
-	}
-
-	output := captureStdout(func() {
-		exitCode := outputInfoFlagJSON("codecs", encoders, decoders)
-		if exitCode != ExitSuccess {
-			t.Errorf("outputInfoFlagJSON returned %d, want %d", exitCode, ExitSuccess)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-
-	entries, ok := result["codecs"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'codecs' key with array, got %T", result["codecs"])
-	}
-	if len(entries) != 3 {
-		t.Errorf("expected 3 entries (2 encoders + 1 decoder), got %d", len(entries))
-	}
-}
-
-func TestPrintJSONEncoderInfo(t *testing.T) {
-	encoders := []protocol.EncoderInfo{
-		{Name: "libx264", Description: "H.264 encoder", Type: "video"},
-	}
-
-	output := captureStdout(func() {
-		exitCode := printJSONEncoderInfo(encoders, "encoders")
-		if exitCode != ExitSuccess {
-			t.Errorf("printJSONEncoderInfo returned %d, want %d", exitCode, ExitSuccess)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-
-	entries, ok := result["encoders"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'encoders' key with array, got %T", result["encoders"])
-	}
-	if len(entries) != 1 {
-		t.Errorf("expected 1 entry, got %d", len(entries))
-	}
-}
-
-func TestPrintJSONDecoderInfo(t *testing.T) {
-	decoders := []protocol.DecoderInfo{
-		{Name: "h264", Description: "H.264 decoder", Type: "video"},
-	}
-
-	output := captureStdout(func() {
-		exitCode := printJSONDecoderInfo(decoders, "decoders")
-		if exitCode != ExitSuccess {
-			t.Errorf("printJSONDecoderInfo returned %d, want %d", exitCode, ExitSuccess)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-
-	entries, ok := result["decoders"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'decoders' key with array, got %T", result["decoders"])
-	}
-	if len(entries) != 1 {
-		t.Errorf("expected 1 entry, got %d", len(entries))
-	}
-}
-
-func TestPrintJSONArray(t *testing.T) {
-	items := []string{"nvenc_h264", "nvenc_hevc", "aac"}
-
-	output := captureStdout(func() {
-		exitCode := printJSONArray(items, "filters")
-		if exitCode != ExitSuccess {
-			t.Errorf("printJSONArray returned %d, want %d", exitCode, ExitSuccess)
-		}
-	})
-
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to parse JSON output: %v\nOutput: %s", err, output)
-	}
-
-	arr, ok := result["filters"].([]interface{})
-	if !ok {
-		t.Fatalf("expected 'filters' key with array, got %T", result["filters"])
-	}
-	if len(arr) != 3 {
-		t.Errorf("expected 3 items, got %d", len(arr))
-	}
-}
-
-// TestParseArgsTimeout tests the --timeout flag parsing
-func TestParseArgsTimeout(t *testing.T) {
-	tests := []struct {
-		name        string
-		args        []string
-		wantTimeout time.Duration
-		wantError   bool
-	}{
-		{
-			name:        "no timeout",
-			args:        []string{"-i", "input.mp4", "output.mp4"},
-			wantTimeout: 0,
-			wantError:   false,
-		},
-		{
-			name:        "timeout in seconds",
-			args:        []string{"--timeout", "300s", "-i", "input.mp4", "output.mp4"},
-			wantTimeout: 300 * time.Second,
-			wantError:   false,
-		},
-		{
-			name:        "timeout in minutes",
-			args:        []string{"--timeout", "5m", "-i", "input.mp4", "output.mp4"},
-			wantTimeout: 5 * time.Minute,
-			wantError:   false,
-		},
-		{
-			name:        "timeout in hours",
-			args:        []string{"--timeout", "2h", "-i", "input.mp4", "output.mp4"},
-			wantTimeout: 2 * time.Hour,
-			wantError:   false,
-		},
-		{
-			name:        "combined timeout",
-			args:        []string{"--timeout", "1h30m", "-i", "input.mp4", "output.mp4"},
-			wantTimeout: 90 * time.Minute,
-			wantError:   false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts, err := parseArgs(tt.args)
-			if tt.wantError {
-				if err == nil {
-					t.Fatalf("parseArgs(%v) expected error, got nil", tt.args)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
-			}
-			if opts.Timeout != tt.wantTimeout {
-				t.Errorf("timeout = %v, want %v", opts.Timeout, tt.wantTimeout)
-			}
-		})
-	}
-}
-
-// TestParseArgs_MissingValue verifies that value-taking flags without a value
-// are a hard error instead of silently falling back to defaults.
-func TestParseArgs_MissingValue(t *testing.T) {
-	for _, flag := range []string{"--server", "-server", "--token", "-token", "--timeout", "--poll-timeout", "-poll-timeout", "--max-retries", "-max-retries", "--server-loss-timeout", "-server-loss-timeout"} {
-		if _, err := parseArgs([]string{flag}); err == nil {
-			t.Errorf("parseArgs(%q) expected error for missing value, got nil", flag)
-		}
-	}
-}
-
-// TestParseArgs_SingleDashTimeoutIsFfmpegOption pins the fix: "-timeout" is
-// ffmpeg's own protocol option (rtsp/http), not rffmpeg's job budget, so the
-// single-dash spelling must reach ffmpeg verbatim. Only "--timeout" configures
-// rffmpeg.
-func TestParseArgs_SingleDashTimeoutIsFfmpegOption(t *testing.T) {
-	args := []string{"-timeout", "5000000", "-i", "rtsp://example/stream", "out.mp4"}
-	opts, err := parseArgs(args)
-	if err != nil {
-		t.Fatalf("parseArgs(%v) unexpected error: %v", args, err)
-	}
-	if opts.Timeout != 0 {
-		t.Errorf("--timeout was set from the single-dash option: %v", opts.Timeout)
-	}
-	if len(opts.FmpegArgs) != len(args) {
-		t.Fatalf("FmpegArgs = %v, want the ffmpeg arguments verbatim %v", opts.FmpegArgs, args)
-	}
-	for i := range args {
-		if opts.FmpegArgs[i] != args[i] {
-			t.Errorf("FmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], args[i])
-		}
-	}
-}
-
-// TestParseArgsPollTimeout verifies --poll-timeout parsing: it is a Go
-// duration, non-negative (0 = opt out of the cap), and unset (0, wantSet
-// false) when omitted so the caller can fall back to config/env/default.
-func TestParseArgsPollTimeout(t *testing.T) {
-	tests := []struct {
-		name      string
-		args      []string
-		want      time.Duration
-		wantSet   bool
-		wantError bool
-	}{
-		{
-			name:      "unset by default",
-			args:      []string{"-i", "input.mp4", "output.mp4"},
-			want:      0,
-			wantSet:   false,
-			wantError: false,
-		},
-		{
-			name:      "poll timeout in minutes",
-			args:      []string{"--poll-timeout", "5m", "-i", "input.mp4", "output.mp4"},
-			want:      5 * time.Minute,
-			wantSet:   true,
-			wantError: false,
-		},
-		{
-			name:      "poll timeout short flag",
-			args:      []string{"-poll-timeout", "1h30m", "-i", "input.mp4", "output.mp4"},
-			want:      90 * time.Minute,
-			wantSet:   true,
-			wantError: false,
-		},
-		{
-			name:      "zero opts out of the cap",
-			args:      []string{"--poll-timeout", "0s", "-i", "input.mp4", "output.mp4"},
-			want:      0,
-			wantSet:   true,
-			wantError: false,
-		},
-		{
-			name:      "negative is invalid",
-			args:      []string{"--poll-timeout", "-5m", "-i", "input.mp4", "output.mp4"},
-			wantError: true,
-		},
-		{
-			name:      "malformed is invalid",
-			args:      []string{"--poll-timeout", "ten", "-i", "input.mp4", "output.mp4"},
-			wantError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts, err := parseArgs(tt.args)
-			if tt.wantError {
-				if err == nil {
-					t.Fatalf("parseArgs(%v) expected error, got nil", tt.args)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
-			}
-			if opts.PollTimeout != tt.want {
-				t.Errorf("PollTimeout = %v, want %v", opts.PollTimeout, tt.want)
-			}
-			if opts.PollTimeoutSet != tt.wantSet {
-				t.Errorf("PollTimeoutSet = %v, want %v", opts.PollTimeoutSet, tt.wantSet)
-			}
-		})
-	}
-}
-
-// TestParseArgs_ServerLossTimeout verifies --server-loss-timeout parsing: a Go
-// duration, non-negative (0 = disable the cap), and unset (0, wantSet false)
-// when omitted so the caller can fall back to config/env/default.
-func TestParseArgs_ServerLossTimeout(t *testing.T) {
-	tests := []struct {
-		name      string
-		args      []string
-		want      time.Duration
-		wantSet   bool
-		wantError bool
-	}{
-		{
-			name:    "unset by default",
-			args:    []string{"-i", "input.mp4", "output.mp4"},
-			wantSet: false,
-		},
-		{
-			name:    "loss timeout in seconds",
-			args:    []string{"--server-loss-timeout", "30s", "-i", "input.mp4", "output.mp4"},
-			want:    30 * time.Second,
-			wantSet: true,
-		},
-		{
-			name:    "loss timeout short flag",
-			args:    []string{"-server-loss-timeout", "2m", "-i", "input.mp4", "output.mp4"},
-			want:    2 * time.Minute,
-			wantSet: true,
-		},
-		{
-			name:    "zero disables the cap",
-			args:    []string{"--server-loss-timeout", "0s", "-i", "input.mp4", "output.mp4"},
-			want:    0,
-			wantSet: true,
-		},
-		{
-			name:      "negative is invalid",
-			args:      []string{"--server-loss-timeout", "-5s", "-i", "input.mp4", "output.mp4"},
-			wantError: true,
-		},
-		{
-			name:      "malformed is invalid",
-			args:      []string{"--server-loss-timeout", "soon", "-i", "input.mp4", "output.mp4"},
-			wantError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opts, err := parseArgs(tt.args)
-			if tt.wantError {
-				if err == nil {
-					t.Fatalf("parseArgs(%v) expected error, got nil", tt.args)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseArgs(%v) unexpected error: %v", tt.args, err)
-			}
-			if opts.ServerLossTimeout != tt.want {
-				t.Errorf("ServerLossTimeout = %v, want %v", opts.ServerLossTimeout, tt.want)
-			}
-			if opts.ServerLossTimeoutSet != tt.wantSet {
-				t.Errorf("ServerLossTimeoutSet = %v, want %v", opts.ServerLossTimeoutSet, tt.wantSet)
-			}
-		})
-	}
-}
-
-// TestParseArgs_MaxRetries verifies --max-retries parsing and validation.
-func TestParseArgs_MaxRetries(t *testing.T) {
-	opts, err := parseArgs([]string{"--max-retries", "7", "-i", "in.mp4", "out.mp4"})
-	if err != nil {
-		t.Fatalf("parseArgs unexpected error: %v", err)
-	}
-	if opts.MaxRetries != 7 {
-		t.Errorf("MaxRetries = %d, want 7", opts.MaxRetries)
-	}
-	if !opts.MaxRetriesSet {
-		t.Errorf("MaxRetriesSet = false, want true when flag present")
-	}
-
-	opts, err = parseArgs([]string{"-max-retries", "3", "-i", "in.mp4", "out.mp4"})
-	if err != nil {
-		t.Fatalf("parseArgs(-max-retries) unexpected error: %v", err)
-	}
-	if opts.MaxRetries != 3 {
-		t.Errorf("MaxRetries = %d, want 3", opts.MaxRetries)
-	}
-
-	// 0 = no retries, and must be distinguishable from "flag absent".
-	opts, err = parseArgs([]string{"--max-retries", "0", "-i", "in.mp4", "out.mp4"})
-	if err != nil {
-		t.Fatalf("parseArgs(--max-retries 0) unexpected error: %v", err)
-	}
-	if opts.MaxRetries != 0 || !opts.MaxRetriesSet {
-		t.Errorf("MaxRetries = %d (set=%v), want 0 (set=true)", opts.MaxRetries, opts.MaxRetriesSet)
-	}
-
-	for _, bad := range []string{"-1", "abc"} {
-		if _, err := parseArgs([]string{"--max-retries", bad}); err == nil {
-			t.Errorf("parseArgs(--max-retries %s) expected error, got nil", bad)
-		}
-	}
-}
-
-// TestParseArgs_Retry verifies --retry is a boolean opt-in (default false)
-// that does not consume the next argument.
-func TestParseArgs_Retry(t *testing.T) {
-	opts, err := parseArgs([]string{"--retry", "-i", "in.mp4", "out.mp4"})
-	if err != nil {
-		t.Fatalf("parseArgs(--retry) unexpected error: %v", err)
-	}
-	if !opts.Retry {
-		t.Errorf("Retry = false, want true when --retry present")
-	}
-	if want := []string{"-i", "in.mp4", "out.mp4"}; len(opts.FmpegArgs) != len(want) {
-		t.Fatalf("FmpegArgs = %v, want %v", opts.FmpegArgs, want)
-	}
-
-	opts, err = parseArgs([]string{"-retry", "-i", "in.mp4", "out.mp4"})
-	if err != nil {
-		t.Fatalf("parseArgs(-retry) unexpected error: %v", err)
-	}
-	if !opts.Retry {
-		t.Errorf("Retry = false, want true when -retry present")
-	}
-
-	opts, err = parseArgs([]string{"-i", "in.mp4", "out.mp4"})
-	if err != nil {
-		t.Fatalf("parseArgs(default) unexpected error: %v", err)
-	}
-	if opts.Retry {
-		t.Errorf("Retry = true, want false by default")
-	}
-}
-
-// TestParseArgs_DashDashSeparator verifies that everything after "--" is
-// passed through to ffmpeg verbatim.
-func TestParseArgs_DashDashSeparator(t *testing.T) {
-	opts, err := parseArgs([]string{"-q", "--", "-i", "a.mp4", "--server", "b.mp4"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := []string{"-i", "a.mp4", "--server", "b.mp4"}
-	if len(opts.FmpegArgs) != len(want) {
-		t.Fatalf("ffmpegArgs = %v, want %v", opts.FmpegArgs, want)
-	}
-	for i := range want {
-		if opts.FmpegArgs[i] != want[i] {
-			t.Errorf("ffmpegArgs[%d] = %q, want %q", i, opts.FmpegArgs[i], want[i])
-		}
-	}
-}
-
-// TestParseArgs_InvalidTimeout verifies bad timeout values error out instead
-// of os.Exit mid-parse.
-func TestParseArgs_InvalidTimeout(t *testing.T) {
-	if _, err := parseArgs([]string{"--timeout", "abc"}); err == nil {
-		t.Error("parseArgs(--timeout abc) expected error, got nil")
-	}
-	if _, err := parseArgs([]string{"--timeout", "-5m"}); err == nil {
-		t.Error("parseArgs(--timeout -5m) expected error, got nil")
-	}
-}
-
-// TestParseArgs_Resume verifies the --resume grammar: a job id, an optional
-// output path, and ffmpeg's -y / -n. Everything else is rejected — the flag
-// re-attaches to an existing job and never re-runs ffmpeg.
-func TestParseArgs_Resume(t *testing.T) {
-	jobID := "3f2a9c1e-0000-4000-8000-000000000001"
-
-	t.Run("job id only", func(t *testing.T) {
-		opts, err := parseArgs([]string{"--resume", jobID})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if opts.ResumeJobID != jobID {
-			t.Errorf("ResumeJobID = %q, want %q", opts.ResumeJobID, jobID)
-		}
-		if opts.ResumeOutput != "" {
-			t.Errorf("ResumeOutput = %q, want empty", opts.ResumeOutput)
-		}
-		if len(opts.FmpegArgs) != 0 {
-			t.Errorf("FmpegArgs = %v, want empty", opts.FmpegArgs)
-		}
-	})
-
-	t.Run("output path and overwrite flag", func(t *testing.T) {
-		opts, err := parseArgs([]string{"-resume", jobID, "out.mp4", "-y"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if opts.ResumeJobID != jobID || opts.ResumeOutput != "out.mp4" {
-			t.Errorf("resume = (%q, %q), want (%q, %q)", opts.ResumeJobID, opts.ResumeOutput, jobID, "out.mp4")
-		}
-		if len(opts.FmpegArgs) != 1 || opts.FmpegArgs[0] != "-y" {
-			t.Errorf("FmpegArgs = %v, want [-y]", opts.FmpegArgs)
-		}
-	})
-
-	t.Run("connection flags still apply", func(t *testing.T) {
-		opts, err := parseArgs([]string{"--resume", jobID, "--server", "http://s:8080", "--timeout", "5m"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if opts.ServerURL != "http://s:8080" || opts.Timeout != 5*time.Minute {
-			t.Errorf("server = %q, timeout = %v", opts.ServerURL, opts.Timeout)
-		}
-	})
-
-	rejected := []struct {
+// TestParseArgs_ModeOrder pins the fixed mode order (C-6): the probe word
+// first, then a job id from the environment, then the local answers, then the
+// capability queries, and transcode last. A token a later stage would have
+// consumed must not change an earlier stage's decision.
+func TestParseArgs_ModeOrder(t *testing.T) {
+	cases := []struct {
 		name string
 		args []string
-		// want is a substring the error must carry; "" accepts any error.
-		want string
+		job  string
+		want Mode
 	}{
-		{"missing job id", []string{"--resume"}, ""},
-		{"flag as job id", []string{"--resume", "-y"}, ""},
-		{"two output paths", []string{"--resume", jobID, "a.mp4", "b.mp4"}, ""},
-		{"ffmpeg option", []string{"--resume", jobID, "-i", "in.mp4", "out.mp4"}, ""},
-		{"stdout target", []string{"--resume", jobID, "-"}, ""},
-		{"stdout target pipe:1", []string{"--resume", jobID, "pipe:1"}, ""},
-		{"stdout target PIPE:1", []string{"--resume", jobID, "PIPE:1"}, ""},
-		{"remote URL target", []string{"--resume", jobID, "rtmp://host/app/key"}, ""},
-		{"dash-dash separator", []string{"--resume", jobID, "--", "out.mp4"}, ""},
-		// "probe" in the first positional slot is read as the subcommand, so the
-		// conflict with --resume is what gets reported.
-		{"probe subcommand", []string{"--resume", jobID, "probe", "in.mp4"}, "cannot be combined with the probe subcommand"},
-		{"probe subcommand with -y", []string{"--resume", jobID, "probe", "-y"}, "cannot be combined with the probe subcommand"},
-		// The reported misreading: -y puts "probe" behind the first positional
-		// slot, so it used to be taken as the download target.
-		{"bare probe token after -y", []string{"--resume", jobID, "-y", "probe"}, `"probe" is rffmpeg's subcommand`},
-		{"capability query", []string{"--resume", jobID, "-encoders"}, ""},
+		{"probe first", []string{"probe", "in.mp4"}, "", ModeProbe},
+		{"probe wins over -h", []string{"probe", "-h"}, "", ModeProbe},
+		{"probe wins over a query", []string{"probe", "-encoders"}, "", ModeProbe},
+		{"probe wins over a job id", []string{"probe", "in.mp4"}, "job-1", ModeProbe},
+		{"job id before -h", []string{"-h"}, "job-1", ModeResume},
+		{"job id before a query", []string{"-encoders"}, "job-1", ModeResume},
+		{"job id before transcode", []string{"-i", "in.mp4", "out.mp4"}, "job-1", ModeResume},
+		{"-h alone", []string{"-h"}, "", ModeHelp},
+		{"-h last of two", []string{"in.mp4", "-h"}, "", ModeHelp},
+		{"-help anywhere", []string{"-i", "in.mp4", "-help"}, "", ModeHelp},
+		{"-help beats a query", []string{"-encoders", "-help"}, "", ModeHelp},
+		{"-version anywhere", []string{"-i", "in.mp4", "-version"}, "", ModeVersion},
+		{"-version beats a query", []string{"-filters", "-version"}, "", ModeVersion},
+		{"query", []string{"-encoders"}, "", ModeCapability},
+		{"query after ffmpeg tokens", []string{"-hide_banner", "-pix_fmts"}, "", ModeCapability},
+		{"transcode", []string{"-i", "in.mp4", "out.mp4"}, "", ModeTranscode},
+		{"-h after the separator", []string{"-i", "in.mp4", "--", "-h"}, "", ModeTranscode},
+		{"-help after the separator", []string{"-i", "in.mp4", "--", "-help"}, "", ModeTranscode},
 	}
-	for _, tc := range rejected {
+
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			opts, err := parseArgs(tc.args)
-			if err == nil {
-				t.Fatalf("parseArgs(%v) = %+v, want error", tc.args, opts)
+			isolateParseEnv(t)
+			if tc.job != "" {
+				t.Setenv(config.EnvJobID, tc.job)
 			}
-			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("parseArgs(%v) error = %q, want it to mention %q", tc.args, err, tc.want)
+			// The selected mode's own argument parser may reject its
+			// arguments (probe with -h, re-attach with -i); the mode decision
+			// is what this test pins, so an error is only fatal for the modes
+			// that must accept their argument list.
+			opts, _ := parseArgs(tc.args)
+			if opts == nil {
+				t.Fatalf("parseArgs(%v) returned no options", tc.args)
+			}
+			if opts.Mode != tc.want {
+				t.Errorf("parseArgs(%v).Mode = %v, want %v", tc.args, opts.Mode, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseArgs_ModeSignalsAfterSeparator pins C-6's "only tokens before --":
+// a mode signal after the native separator neither selects that mode nor
+// disappears from the argument list.
+func TestParseArgs_ModeSignalsAfterSeparator(t *testing.T) {
+	isolateParseEnv(t)
+	args := []string{"-i", "in.mp4", "--", "-encoders"}
+	opts, err := parseArgs(args)
+	if err != nil {
+		t.Fatalf("parseArgs(%v) error = %v", args, err)
+	}
+	if opts.Mode != ModeTranscode {
+		t.Errorf("Mode = %v, want ModeTranscode: %q sits after the separator", opts.Mode, "-encoders")
+	}
+	if got := strings.Join(opts.FmpegArgs, " "); got != strings.Join(args, " ") {
+		t.Errorf("FmpegArgs = %q, want the command line verbatim %q", got, strings.Join(args, " "))
+	}
+}
+
+// TestParseArgs_FormerPrivateOptionsPassThrough pins C-6 / C-17 for the
+// invocation shape: rffmpeg defines no option of its own, so every name it used
+// to interpret now reaches the native tool as an ordinary token. None may select
+// a mode, consume a value, or vanish from the argument list.
+func TestParseArgs_FormerPrivateOptionsPassThrough(t *testing.T) {
+	former := [][]string{
+		{"--server", "http://other:9000"},
+		{"-server", "http://other:9000"},
+		{"--token", "SECRET"},
+		{"-token", "SECRET"},
+		{"--token=SECRET"},
+		{"--quiet"},
+		{"-quiet"},
+		{"-q", "2"},
+		{"--auto-hw"},
+		{"--auto-hw=false"},
+		{"-auto-hw=true"},
+		{"--timeout", "30m"},
+		{"--poll-timeout", "20m"},
+		{"--max-retries", "5"},
+		{"--server-loss-timeout", "15s"},
+		{"--retry"},
+		{"-retry"},
+		{"--json"},
+		{"--resume", "job-1"},
+		{"-resume", "job-1"},
+		{"--encoders"},
+		{"--filters"},
+		{"--help"},
+		{"--version"},
+		{"-show_streams"},
+	}
+
+	for _, extra := range former {
+		t.Run(strings.Join(extra, " "), func(t *testing.T) {
+			isolateParseEnv(t)
+			args := append([]string{"-i", "in.mp4"}, extra...)
+			args = append(args, "out.mp4")
+
+			opts, err := parseArgs(args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) error = %v, want it passed through", args, err)
+			}
+			if opts.Mode != ModeTranscode {
+				t.Errorf("Mode = %v, want ModeTranscode: %q is not an rffmpeg option", opts.Mode, strings.Join(extra, " "))
+			}
+			if got, want := strings.Join(opts.FmpegArgs, " "), strings.Join(args, " "); got != want {
+				t.Errorf("FmpegArgs = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestParseArgs_CapabilityNames pins C-16's name set: the thirteen native
+// single-dash names select the query mode, and the double-dash spellings do not.
+func TestParseArgs_CapabilityNames(t *testing.T) {
+	native := []string{
+		"-encoders", "-decoders", "-codecs", "-hwaccels", "-filters", "-pix_fmts",
+		"-formats", "-buildconf", "-layouts", "-protocols", "-sample_fmts", "-bsfs",
+		"-colors",
+	}
+	for _, name := range native {
+		t.Run(name, func(t *testing.T) {
+			isolateParseEnv(t)
+			opts, err := parseArgs([]string{name})
+			if err != nil {
+				t.Fatalf("parseArgs(%s) error = %v", name, err)
+			}
+			if opts.Mode != ModeCapability || opts.InfoFlag != name {
+				t.Errorf("parseArgs(%s) = %v/%q, want ModeCapability/%q", name, opts.Mode, opts.InfoFlag, name)
 			}
 		})
 	}
 
-	// Only the bare token is refused, so the error's "./probe" advice holds.
-	t.Run("dotted probe is an output path", func(t *testing.T) {
-		opts, err := parseArgs([]string{"--resume", jobID, "./probe"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if opts.ResumeOutput != "./probe" {
-			t.Errorf("ResumeOutput = %q, want %q", opts.ResumeOutput, "./probe")
-		}
-	})
+	for _, name := range native {
+		t.Run("double-dash "+name, func(t *testing.T) {
+			isolateParseEnv(t)
+			opts, err := parseArgs([]string{"-" + name})
+			if err != nil {
+				t.Fatalf("parseArgs(-%s) error = %v", name, err)
+			}
+			if opts.Mode != ModeTranscode {
+				t.Errorf("Mode = %v for the double-dash spelling %q, want ModeTranscode", opts.Mode, "-"+name)
+			}
+		})
+	}
+}
+
+// TestParseArgs_NoArgs pins C-7's empty invocation: no mode signal and no
+// arguments leaves the transcode mode with nothing to run, which the caller
+// answers with the help text and a non-zero exit.
+func TestParseArgs_NoArgs(t *testing.T) {
+	isolateParseEnv(t)
+	opts, err := parseArgs(nil)
+	if err != nil {
+		t.Fatalf("parseArgs(nil) error = %v", err)
+	}
+	if opts.Mode != ModeTranscode || len(opts.FmpegArgs) != 0 {
+		t.Errorf("parseArgs(nil) = %v/%v, want ModeTranscode with no arguments", opts.Mode, opts.FmpegArgs)
+	}
+}
+
+// TestParseProbeArgs covers C-18's probe acceptance surface: one input
+// identifier, the two -show_* switches, and a json output format; everything
+// else is rejected naming the token.
+func TestParseProbeArgs(t *testing.T) {
+	isolateParseEnv(t)
+
+	accept := []struct {
+		name  string
+		args  []string
+		input string
+	}{
+		{"positional", []string{"probe", "in.mp4"}, "in.mp4"},
+		{"-i", []string{"probe", "-i", "in.mp4"}, "in.mp4"},
+		{"show_streams", []string{"probe", "in.mp4", "-show_streams"}, "in.mp4"},
+		{"show_format", []string{"probe", "-show_format", "in.mp4"}, "in.mp4"},
+		{"of json", []string{"probe", "in.mp4", "-of", "json"}, "in.mp4"},
+		{"print_format json", []string{"probe", "in.mp4", "-print_format", "json"}, "in.mp4"},
+		{"remote URL", []string{"probe", "https://example.test/a.mp4"}, "https://example.test/a.mp4"},
+	}
+	for _, tc := range accept {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) error = %v", tc.args, err)
+			}
+			if opts.ProbeInput != tc.input {
+				t.Errorf("ProbeInput = %q, want %q", opts.ProbeInput, tc.input)
+			}
+		})
+	}
+
+	reject := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no input", []string{"probe"}, "requires an input"},
+		{"duplicate -i", []string{"probe", "-i", "a.mp4", "-i", "b.mp4"}, "duplicate -i"},
+		{"two positionals", []string{"probe", "a.mp4", "b.mp4"}, "unexpected probe argument"},
+		{"unknown option", []string{"probe", "in.mp4", "-show_private"}, "unknown probe option"},
+		{"non-json format", []string{"probe", "in.mp4", "-of", "ini"}, "only supports json"},
+		{"-i without value", []string{"probe", "-i"}, "requires a value"},
+		{"ffmpeg option", []string{"probe", "-i", "in.mp4", "-y"}, "unknown probe option"},
+	}
+	for _, tc := range reject {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseArgs(%v) accepted an invalid probe call", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseResumeArgs covers C-15's argument surface: at most one output path
+// plus -y / -n; anything else is rejected naming the token rather than dropped.
+func TestParseResumeArgs(t *testing.T) {
+	isolateParseEnv(t)
+	t.Setenv(config.EnvJobID, "job-1")
+
+	accept := []struct {
+		name  string
+		args  []string
+		want  string
+		flags []string
+	}{
+		{"no positional", nil, "", nil},
+		{"one positional", []string{"out.mp4"}, "out.mp4", nil},
+		{"with -y", []string{"out.mp4", "-y"}, "out.mp4", []string{"-y"}},
+		{"with -n", []string{"-n", "out.mp4"}, "out.mp4", []string{"-n"}},
+	}
+	for _, tc := range accept {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, err := parseArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseArgs(%v) error = %v", tc.args, err)
+			}
+			if opts.Mode != ModeResume || opts.ResumeJobID != "job-1" {
+				t.Fatalf("parseArgs(%v) = %v/%q, want ModeResume/job-1", tc.args, opts.Mode, opts.ResumeJobID)
+			}
+			if opts.ResumeOutput != tc.want {
+				t.Errorf("ResumeOutput = %q, want %q", opts.ResumeOutput, tc.want)
+			}
+			if got := strings.Join(opts.FmpegArgs, " "); got != strings.Join(tc.flags, " ") {
+				t.Errorf("FmpegArgs = %q, want %q", got, strings.Join(tc.flags, " "))
+			}
+		})
+	}
+
+	reject := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"two positionals", []string{"a.mp4", "b.mp4"}, "at most one output path"},
+		{"ffmpeg option", []string{"-i", "in.mp4"}, `got "-i"`},
+		{"capability query", []string{"-encoders"}, `got "-encoders"`},
+		{"help", []string{"-help"}, `got "-help"`},
+		{"version", []string{"-version"}, `got "-version"`},
+		{"probe word", []string{"out.mp4", "probe"}, "is rffmpeg's subcommand"},
+		{"stdout target", []string{"-"}, "stdout"},
+		{"bare pipe", []string{"pipe:"}, "stdout"},
+		{"pipe fd 1", []string{"pipe:1"}, "stdout"},
+		{"remote URL", []string{"https://example.test/out.mp4"}, "remote URL"},
+	}
+	for _, tc := range reject {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseArgs(%v) accepted an out-of-surface re-attach call", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseArgs_JobIDFromEnvironmentOnly pins C-15's trigger: only the
+// environment variable selects re-attach; a config file carrying the key does
+// not, and neither does any command-line spelling.
+func TestParseArgs_JobIDFromEnvironmentOnly(t *testing.T) {
+	isolateParseEnv(t)
+	opts, err := parseArgs([]string{"--resume", "job-1"})
+	if err != nil {
+		t.Fatalf("parseArgs error = %v", err)
+	}
+	if opts.Mode != ModeTranscode {
+		t.Errorf("Mode = %v, want ModeTranscode: --resume is not a trigger", opts.Mode)
+	}
+
+	// The identifier is never read from os.Args, so an empty environment leaves
+	// the re-attach path unselected even when the token looks like a job id.
+	opts, err = parseArgs([]string{"job-1"})
+	if err != nil {
+		t.Fatalf("parseArgs error = %v", err)
+	}
+	if opts.Mode != ModeTranscode {
+		t.Errorf("Mode = %v, want ModeTranscode: a positional never selects re-attach", opts.Mode)
+	}
+	if _, err := os.Stat("job-1"); err == nil {
+		t.Fatalf("test fixture wrote %q into the working directory", "job-1")
+	}
 }

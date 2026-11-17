@@ -43,22 +43,22 @@ SHORT="$(make_media sel-short.mp4 1 320x240)"
 BLOCK="$(make_media sel-block.mp4 20 640x480)"
 FILLER="$(make_media sel-filler.mp4 180 640x480)"
 LONG="$(make_media sel-long.mp4 180 1280x720)"
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$SHORT" -c:v libx264 "$TMP_ROOT/warm0.mp4" >/dev/null 2>"$TMP_ROOT/warm0.log"
 FILE_ID="$(grep -oE 'Uploaded: .* -> [0-9a-f]+' "$TMP_ROOT/warm0.log" | awk '{print $NF}' || true)"
 [[ -n "$FILE_ID" ]] || fail "short input file id not captured"
 
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	probe "$LONG" >/dev/null 2>"$TMP_ROOT/long.log"
 FILE_ID_LONG="$(grep -oE 'Uploaded: .* -> [0-9a-f]+' "$TMP_ROOT/long.log" | awk '{print $NF}' || true)"
 [[ -n "$FILE_ID_LONG" ]] || fail "long input file id not captured"
 
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	probe "$BLOCK" >/dev/null 2>"$TMP_ROOT/block.log"
 FILE_ID_BLOCK="$(grep -oE 'Uploaded: .* -> [0-9a-f]+' "$TMP_ROOT/block.log" | awk '{print $NF}' || true)"
 [[ -n "$FILE_ID_BLOCK" ]] || fail "probe input file id not captured"
 
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	probe "$FILLER" >/dev/null 2>"$TMP_ROOT/filler.log"
 FILE_ID_FILLER="$(grep -oE 'Uploaded: .* -> [0-9a-f]+' "$TMP_ROOT/filler.log" | awk '{print $NF}' || true)"
 [[ -n "$FILE_ID_FILLER" ]] || fail "hold input file id not captured"

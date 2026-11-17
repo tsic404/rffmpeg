@@ -18,7 +18,7 @@ LOG="$TMP_ROOT/cli.log"
 OUT="$TMP_ROOT/remote-out.mp4"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$URL" -c:v libx264 "$OUT" 2>"$LOG"
 RC=$?
 set -e

@@ -15,7 +15,7 @@ MEDIA="$(make_media_av av.mp4 4)"
 OUT="$TMP_ROOT/extracted.mp3"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -vn -c:a libmp3lame -b:a 128k "$OUT" 2>"$TMP_ROOT/cli.log"
 RC=$?
 set -e

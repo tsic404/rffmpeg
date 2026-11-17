@@ -41,7 +41,7 @@ run_inline() {
 	local label="$1" arg="$2"
 	local log="$TMP_ROOT/$label.log"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$MEDIA" -t 1 "$arg" "$TMP_ROOT/$label.mp4" 2>"$log"
 	local rc=$?
 	set -e
@@ -55,7 +55,7 @@ run_inline vcodec-equals "-vcodec=libx264"
 LOG="$TMP_ROOT/last-wins.log"
 OUT="$TMP_ROOT/last-wins.mp4"
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -t 1 -c:v libx264 -c:v libx265 "$OUT" 2>"$LOG"
 RC=$?
 set -e

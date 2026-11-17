@@ -187,8 +187,8 @@ func TestStreamingOutputError(t *testing.T) {
 			wantSubstr: `ffmpeg cannot auto-detect a muxer`,
 		},
 		{
-			name:       "dash via -o reports no muxer",
-			args:       []string{"-i", "input.mp4", "-o", "-"},
+			name:       "dash after the separator reports no muxer",
+			args:       []string{"-i", "input.mp4", "--", "-"},
 			wantSubstr: `ffmpeg cannot auto-detect a muxer`,
 		},
 		{
@@ -205,6 +205,18 @@ func TestStreamingOutputError(t *testing.T) {
 			name:       "input-section -f alone reports no muxer",
 			args:       []string{"-f", "lavfi", "-i", "testsrc", "-"},
 			wantSubstr: `ffmpeg cannot auto-detect a muxer`,
+		},
+		{
+			// The fd-less pipe spelling is normalized to the same streaming
+			// target, so it reaches the same rejection.
+			name:       "bare pipe: reports no muxer",
+			args:       []string{"-i", "input.mp4", "pipe:"},
+			wantSubstr: `ffmpeg cannot auto-detect a muxer`,
+		},
+		{
+			name:       "pipe: with a non-streamable muxer reports format",
+			args:       []string{"-i", "input.mp4", "-f", "avif", "pipe:"},
+			wantSubstr: "format avif",
 		},
 	}
 
@@ -228,5 +240,34 @@ func TestStreamingOutputError(t *testing.T) {
 				t.Errorf("StreamingOutputError() = %q, want containing %q", msg, tt.wantSubstr)
 			}
 		})
+	}
+}
+
+// TestStreamingOutputErrorOffersOnlyPositionalOutput pins the repair advice:
+// after this change the CLI interprets no option of its own, so recommending
+// "-o <path>" would send the user to a spelling that is merely passed through
+// (and whose value the native tool consumes). Only the positional output form
+// is offered.
+func TestStreamingOutputErrorOffersOnlyPositionalOutput(t *testing.T) {
+	p := NewParser()
+	for _, args := range [][]string{
+		{"-i", "input.mp4", "-"},
+		{"-i", "input.mp4", "-f", "avif", "-"},
+		{"-i", "input.mp4", "pipe:"},
+	} {
+		result, err := p.Parse(args)
+		if err != nil {
+			t.Fatalf("Parse(%v) error = %v", args, err)
+		}
+		msg := StreamingOutputError(result)
+		if msg == "" {
+			t.Fatalf("StreamingOutputError(%v) = empty, want a rejection message", args)
+		}
+		if strings.Contains(msg, "-o ") || strings.Contains(msg, "-o <") {
+			t.Errorf("StreamingOutputError(%v) recommends -o: %q", args, msg)
+		}
+		if !strings.Contains(msg, "positional") {
+			t.Errorf("StreamingOutputError(%v) lacks the positional-output repair action: %q", args, msg)
+		}
 	}
 }

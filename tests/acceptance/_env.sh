@@ -51,6 +51,13 @@ mkdir -p "$DATA_DIR" "$WORK_DIR" "$MEDIA_DIR"
 
 acceptance_server_url() { printf 'http://127.0.0.1:%s' "$PORT"; }
 
+# The CLI's configuration plane carries the run's endpoint and credential: the
+# CLI defines no option of its own, so a case that needs another value overrides
+# these variables in front of the invocation, and one that needs "nothing
+# configured" unsets them (env -u).
+export RFFMPEG_SERVER_URL="$(acceptance_server_url)"
+export RFFMPEG_TOKEN="$AUTH_TOKEN"
+
 # build_binaries produces the three contract-named binaries. An explicit
 # RFFMPEG_BIN is authoritative and reused as-is (it may point at a build
 # produced elsewhere); without one, the repo is always rebuilt so a stale

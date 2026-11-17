@@ -18,7 +18,7 @@ OUT="$TMP_ROOT/anim.gif"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -t 1 "$OUT" 2>"$LOG"
 RC=$?
 set -e

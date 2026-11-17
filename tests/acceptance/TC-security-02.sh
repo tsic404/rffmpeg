@@ -19,7 +19,7 @@ OUT="$TMP_ROOT/out.mp4"
 LOG="$TMP_ROOT/cli.log"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "definitely-wrong" \
+RFFMPEG_TOKEN="definitely-wrong" "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" "$OUT" >/dev/null 2>"$LOG"
 RC=$?
 set -e

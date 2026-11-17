@@ -74,7 +74,7 @@ run_cli() {
 	local target="$1"
 	CLI_LOG="$TMP_ROOT/cli-$(printf '%s' "$target" | sha256sum | cut -c1-8).log"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+	"$RFFMPEG_BIN/rffmpeg" \
 		-i "$MEDIA" -c:v libx264 -preset ultrafast -t 1 -f mpegts "$target" 2>"$CLI_LOG"
 	local rc=$?
 	set -e

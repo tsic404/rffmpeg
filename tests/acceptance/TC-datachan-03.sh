@@ -16,7 +16,7 @@ OUT="$TMP_ROOT/stream.mp4"
 LOG="$TMP_ROOT/stream.log"
 
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" -c:v libx264 -f mp4 - >"$OUT" 2>"$LOG"
 RC=$?
 set -e
@@ -33,7 +33,7 @@ python3 -c 'import sys; sys.exit(0 if abs(float(sys.argv[1]) - 4.0) <= 0.1 else 
 LONG="$(make_media stream-long.mp4 120 1280x720)"
 INT_OUT="$TMP_ROOT/interrupted.mp4"
 INT_LOG="$TMP_ROOT/interrupted.log"
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" \
+"$RFFMPEG_BIN/rffmpeg" \
 	-i "$LONG" -c:v libx264 -preset veryslow -f mp4 - >"$INT_OUT" 2>"$INT_LOG" &
 CLI_PID=$!
 trap 'kill "$CLI_PID" 2>/dev/null || true; acceptance_cleanup' EXIT

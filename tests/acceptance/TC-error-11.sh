@@ -21,7 +21,7 @@ OK_OUT="$TMP_ROOT/ok.mp4"
 
 # 成功面：位置参数就是输出，-i 给出唯一输入。
 set +e
-"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" -q \
+RFFMPEG_QUIET=1 "$RFFMPEG_BIN/rffmpeg" \
 	-i "$MEDIA" "$OK_OUT" >/dev/null 2>"$TMP_ROOT/cli-ok.log"
 RC=$?
 set -e
@@ -38,7 +38,7 @@ reject() {
 	log="$TMP_ROOT/cli-reject-$label.log"
 	before="$(job_count)"
 	set +e
-	"$RFFMPEG_BIN/rffmpeg" --server "$(acceptance_server_url)" --token "$AUTH_TOKEN" -q \
+	RFFMPEG_QUIET=1 "$RFFMPEG_BIN/rffmpeg" \
 		"$@" >/dev/null 2>"$log"
 	rc=$?
 	set -e

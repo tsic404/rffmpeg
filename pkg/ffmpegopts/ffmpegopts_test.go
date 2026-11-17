@@ -50,6 +50,29 @@ func TestIsBoolean_Regression(t *testing.T) {
 	}
 }
 
+// TestIsBoolean_NativeValuelessShortNames pins the third row of the native
+// arity table: -L prints the license and consumes nothing. The other help
+// short names are the opposite case and stay value-taking — measured on
+// n9.0.2, `ffmpeg -h /dev/null` and `ffmpeg -? /dev/null` both answer
+// "Unknown help option '/dev/null'", and the help face prints them as
+// `-h <topic>`.
+func TestIsBoolean_NativeValuelessShortNames(t *testing.T) {
+	if !IsBoolean("-L") {
+		t.Error("IsBoolean(\"-L\") = false, want true")
+	}
+	for _, flag := range []string{"-h", "-?", "-help"} {
+		if IsBoolean(flag) {
+			t.Errorf("IsBoolean(%q) = true, want false: it consumes a help topic", flag)
+		}
+	}
+	// Single-dash native names that do take a value stay value-taking.
+	for _, flag := range []string{"-q", "-b", "-v", "-c", "-f", "-r", "-s", "-t"} {
+		if IsBoolean(flag) {
+			t.Errorf("IsBoolean(%q) = true, want false", flag)
+		}
+	}
+}
+
 func TestOverwritePolicy(t *testing.T) {
 	cases := []struct {
 		name string

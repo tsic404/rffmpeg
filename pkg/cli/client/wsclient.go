@@ -85,12 +85,12 @@ type WSClient struct {
 	onError      func(errMsg string)
 	connected    bool
 	reconnecting bool
-	// maxRetries bounds the reconnect loop (--max-retries / RFFMPEG_MAX_RETRIES).
+	// maxRetries bounds the reconnect loop (RFFMPEG_MAX_RETRIES).
 	// NewWSClient defaults it to DefaultMaxRetries; WithWSMaxRetries(0) means
 	// "no retries" — fail fast after the first failed attempt.
 	maxRetries int
 	// serverLossTimeout caps one continuous silence — attempts that got no HTTP
-	// response at all — in wall-clock time (--server-loss-timeout /
+	// response at all — in wall-clock time (RFFMPEG_SERVER_LOSS_TIMEOUT /
 	// RFFMPEG_SERVER_LOSS_TIMEOUT). It bounds the reconnect loop by elapsed
 	// time, not attempt count: a job that was already submitted must not stay
 	// silent for the full attempt budget while the server is gone. An answered
@@ -169,7 +169,7 @@ func WithOnError(handler func(errMsg string)) WSClientOption {
 	}
 }
 
-// WithWSMaxRetries bounds the WebSocket reconnect loop (--max-retries /
+// WithWSMaxRetries bounds the WebSocket reconnect loop (RFFMPEG_MAX_RETRIES /
 // RFFMPEG_MAX_RETRIES). 0 means "no retries" — fail fast after the first
 // failed attempt.
 func WithWSMaxRetries(n int) WSClientOption {
@@ -181,7 +181,7 @@ func WithWSMaxRetries(n int) WSClientOption {
 }
 
 // WithWSServerLossTimeout sets the wall-clock cap on one continuous silence —
-// attempts the server never answered (--server-loss-timeout). 0 disables the
+// attempts the server never answered (RFFMPEG_SERVER_LOSS_TIMEOUT). 0 disables the
 // cap — the attempt budget alone decides when to give up.
 func WithWSServerLossTimeout(d time.Duration) WSClientOption {
 	return func(c *WSClient) {
@@ -298,7 +298,7 @@ func (e *HandshakeError) Error() string {
 
 // ConnectWithReconnect establishes a WebSocket connection with automatic reconnection.
 // Transient failures retry with exponential backoff up to maxRetries attempts
-// (--max-retries / RFFMPEG_MAX_RETRIES). A 4xx handshake rejection is normally
+// (RFFMPEG_MAX_RETRIES). A 4xx handshake rejection is normally
 // permanent and aborts immediately — no retry interval can fix a bad token or
 // a forbidden route. A 404 (unknown job) is the one exception: it is retried a
 // bounded number of times (wsNotFoundRetries) because right after submit it is
@@ -308,7 +308,7 @@ func (e *HandshakeError) Error() string {
 // never wrapped as ErrRetriesExhausted ("gave up waiting").
 //
 // A contact-loss episode is additionally bounded in wall-clock time by the
-// server-loss timeout (--server-loss-timeout): once the server has been silent
+// server-loss timeout (RFFMPEG_SERVER_LOSS_TIMEOUT): once the server has been silent
 // for that long — no HTTP response at all — the loop gives up with
 // ErrRetriesExhausted instead of spending the whole attempt budget in backoff.
 // A successful connect returns, and every answered handshake restarts the
@@ -318,7 +318,7 @@ func (c *WSClient) ConnectWithReconnect(ctx context.Context) error {
 	maxRetries := c.maxRetries
 
 	// lossBudget caps one continuous silence — no HTTP response at all. It is
-	// armed only when --server-loss-timeout enables the cap: with 0 the attempt
+	// armed only when RFFMPEG_SERVER_LOSS_TIMEOUT enables the cap: with 0 the attempt
 	// count alone decides when to give up, exactly as it did before the cap
 	// existed.
 	lossBudget := c.serverLossTimeout
@@ -446,8 +446,8 @@ func retryBudget(maxRetries int) time.Duration {
 
 // serverLossBudget returns the wall-clock budget one continuous silence — the
 // server never answering — may last while the client waits for an
-// already-submitted job: the tighter of the retry budget (--max-retries) and
-// the server-loss timeout (--server-loss-timeout). A zero loss timeout disables
+// already-submitted job: the tighter of the retry budget (RFFMPEG_MAX_RETRIES) and
+// the server-loss timeout (RFFMPEG_SERVER_LOSS_TIMEOUT). A zero loss timeout disables
 // that cap and leaves the retry budget in charge; a zero retry budget means "no
 // retries" and stays the tighter bound (fail fast on the first loss).
 func serverLossBudget(maxRetries int, lossTimeout time.Duration) time.Duration {
