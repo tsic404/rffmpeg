@@ -185,10 +185,14 @@ func validDigit(c byte, base int) bool {
 // Resolve resolves a target host and rejects the whole target when any resolved
 // address is denied: a literal address is judged as itself, a host name by its
 // resolution, and one denied address among several is enough to refuse. It
-// returns the addresses so a caller that dials itself never resolves a second
-// time (no rebinding window).
+// returns the addresses in resolution order, canonicalised and deduplicated, so
+// a caller that dials itself never resolves a second time (no rebinding
+// window).
 func Resolve(ctx context.Context, target, host string) ([]netip.Addr, error) {
 	if addr, ok := literalAddr(host); ok {
+		if addr.Is4In6() {
+			addr = addr.Unmap()
+		}
 		if class := DeniedClass(addr); class != "" {
 			return nil, &DeniedError{Target: target, Addr: addr.String(), Class: class}
 		}
@@ -201,12 +205,22 @@ func Resolve(ctx context.Context, target, host string) ([]netip.Addr, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("target host %q resolved to no address", host)
 	}
+	normalized := make([]netip.Addr, 0, len(addrs))
+	seen := make(map[netip.Addr]struct{}, len(addrs))
 	for _, addr := range addrs {
+		if addr.Is4In6() {
+			addr = addr.Unmap()
+		}
 		if class := DeniedClass(addr); class != "" {
 			return nil, &DeniedError{Target: target, Addr: addr.String(), Class: class}
 		}
+		if _, duplicate := seen[addr]; duplicate {
+			continue
+		}
+		seen[addr] = struct{}{}
+		normalized = append(normalized, addr)
 	}
-	return addrs, nil
+	return normalized, nil
 }
 
 // CheckInputURL judges a remote input URL before any request is made: only
@@ -230,19 +244,19 @@ func CheckInputURL(ctx context.Context, rawURL string) error {
 }
 
 // CheckOutputTarget judges a protocol-address output target before ffmpeg
-// starts (C-129). A target that cannot be parsed carries no host of its own and
-// is left to the caller; a denied address class is reported so the job fails
-// without the target receiving a connection.
-func CheckOutputTarget(ctx context.Context, rawURL string) error {
+// starts (C-129) and returns the addresses the connection may use, in
+// resolution order. A denied address class is reported so the job fails without
+// the target receiving a connection; an unparseable target or a host that
+// resolves to nothing is refused as well (fail-closed).
+func CheckOutputTarget(ctx context.Context, rawURL string) ([]netip.Addr, error) {
 	target, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid output target %q: %w", rawURL, err)
+		return nil, fmt.Errorf("invalid output target %q: %w", rawURL, err)
 	}
 	if target.Hostname() == "" {
-		return fmt.Errorf("output target %q carries no host", rawURL)
+		return nil, fmt.Errorf("output target %q carries no host", rawURL)
 	}
-	_, err = Resolve(ctx, rawURL, target.Hostname())
-	return err
+	return Resolve(ctx, rawURL, target.Hostname())
 }
 
 // CheckOutputLiteral judges the submission side of a protocol-address output

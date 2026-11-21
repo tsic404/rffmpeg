@@ -167,6 +167,9 @@ func TestPlanJobOutputNames(t *testing.T) {
 		got.form != pathutil.OutputTargetProtocolAddress {
 		t.Errorf("planJobOutput(private protocol target) = %+v, %v; want the address kept verbatim", got, failure)
 	}
+	if len(got.addresses) != 1 || got.addresses[0] != netip.MustParseAddr("10.20.30.40") {
+		t.Errorf("planJobOutput(private protocol target) addresses = %v, want [10.20.30.40]", got.addresses)
+	}
 	// A denied class fails the job before ffmpeg starts.
 	for _, name := range []string{
 		"rtmp://127.0.0.1:1935/live/x",   // loopback literal
@@ -185,6 +188,212 @@ func TestPlanJobOutputNames(t *testing.T) {
 		if _, failure := w.planJobOutput(ctx, protocol.JobInfo{OutputFilename: name}, false); failure == nil {
 			t.Errorf("planJobOutput(%q) accepted a denied push target", name)
 		}
+	}
+}
+
+// TestJobOutputTargetAtPinsJudgedAddress locks the C-129 landing handed to
+// ffmpeg: the judged address replaces the host name, and everything else in the
+// target (user info, port, path, query) survives.
+func TestJobOutputTargetAtPinsJudgedAddress(t *testing.T) {
+	out := jobOutput{
+		target: "rtmp://publisher:pw@stream.example.test:1935/live/x?token=abc",
+		form:   pathutil.OutputTargetProtocolAddress,
+	}
+	got, err := out.targetAt(netip.MustParseAddr("10.20.30.40"))
+	if err != nil {
+		t.Fatalf("targetAt: %v", err)
+	}
+	want := "rtmp://publisher:pw@10.20.30.40:1935/live/x?token=abc"
+	if got != want {
+		t.Errorf("targetAt = %q, want %q", got, want)
+	}
+
+	ipv6 := jobOutput{target: "srt://stream.example.test:9000?mode=caller", form: pathutil.OutputTargetProtocolAddress}
+	got, err = ipv6.targetAt(netip.MustParseAddr("fd00::7"))
+	if err != nil {
+		t.Fatalf("targetAt ipv6: %v", err)
+	}
+	want = "srt://[fd00::7]:9000?mode=caller"
+	if got != want {
+		t.Errorf("targetAt ipv6 = %q, want %q", got, want)
+	}
+}
+
+// TestJobOutputTargetAtHostKeepsRequestShape locks the relay landing: only the
+// host changes, while user info, port, path and query survive.
+func TestJobOutputTargetAtHostKeepsRequestShape(t *testing.T) {
+	out := jobOutput{target: "rtmp://publisher:pw@stream.example.test:1935/live/x?token=abc"}
+	got, err := out.targetAtHost("127.0.0.1:41234")
+	if err != nil {
+		t.Fatalf("targetAtHost: %v", err)
+	}
+	want := "rtmp://publisher:pw@127.0.0.1:41234/live/x?token=abc"
+	if got != want {
+		t.Errorf("targetAtHost = %q, want %q", got, want)
+	}
+}
+
+// TestRewriteOutputTargetArgReplacesOnlyTheOutputPosition proves a URL repeated
+// earlier in the request (a filter value, say) is not mistaken for the output.
+func TestRewriteOutputTargetArgReplacesOnlyTheOutputPosition(t *testing.T) {
+	original := "tcp://stream.example.test:9000/live"
+	args := []string{"-i", "in.mp4", "-metadata", "comment=" + original, "-f", "mpegts", original}
+	replaced, ok := rewriteOutputTargetArg(args, original, "tcp://10.0.0.7:9000/live", nil)
+	if !ok {
+		t.Fatal("rewriteOutputTargetArg did not find the output target")
+	}
+	if replaced[len(replaced)-1] != "tcp://10.0.0.7:9000/live" {
+		t.Errorf("output argument = %q, want the judged address", replaced[len(replaced)-1])
+	}
+	if replaced[3] != "comment="+original {
+		t.Errorf("earlier argument = %q, want it untouched", replaced[3])
+	}
+	if args[len(args)-1] != original {
+		t.Error("rewriteOutputTargetArg mutated the caller's slice")
+	}
+}
+
+// TestRewriteOutputTargetArgKeepsOptionsBeforeSeparator proves protocol options
+// remain options when the request used "--" to end option parsing.
+func TestRewriteOutputTargetArgKeepsOptionsBeforeSeparator(t *testing.T) {
+	original := "http://stream.example.test:8080/live"
+	args := []string{"-i", "in.mp4", "-f", "mpegts", "--", original}
+	replaced, ok := rewriteOutputTargetArg(args, original,
+		"http://10.0.0.7:8080/live", []string{"-max_redirects", "0"})
+	if !ok {
+		t.Fatal("rewriteOutputTargetArg did not find the output target")
+	}
+	want := []string{"-i", "in.mp4", "-f", "mpegts", "-max_redirects", "0", "--", "http://10.0.0.7:8080/live"}
+	if strings.Join(replaced, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("rewritten args = %q, want %q", replaced, want)
+	}
+}
+
+// TestPushOutputOptions locks the protocol-level carriers C-129 needs: HTTP
+// redirects are refused so no second connection leaves the judged set, and RTMP
+// keeps the requested host name in tcUrl while the URL carries the judged IP.
+func TestPushOutputOptions(t *testing.T) {
+	httpOut := jobOutput{target: "https://stream.example.test:8443/live"}
+	wantHost := "-max_redirects 0 -headers Host: stream.example.test:8443\r\n"
+	if got := strings.Join(httpOut.ffmpegOutputOptions(nil), " "); got != wantHost {
+		t.Errorf("https output options = %q, want %q", got, wantHost)
+	}
+	// A request-supplied redirect budget must not survive: the option inserted
+	// at the output position is the last one, so redirects stay refused.
+	if got := strings.Join(httpOut.ffmpegOutputOptions([]string{"-max_redirects", "8"}), " "); got != wantHost {
+		t.Errorf("https output options with request redirects = %q, want %q", got, wantHost)
+	}
+	// A request that already carries custom headers keeps them in full; the
+	// worker's -headers value is the last one ffmpeg sees, so it repeats them
+	// and adds the request Host.
+	customHeaders := []string{"-headers", "X-Test: 1\r\n"}
+	wantCustom := "-max_redirects 0 -headers X-Test: 1\r\nHost: stream.example.test:8443\r\n"
+	if got := strings.Join(httpOut.ffmpegOutputOptions(customHeaders), " "); got != wantCustom {
+		t.Errorf("https output options with custom headers = %q, want %q", got, wantCustom)
+	}
+	// An explicit Host chosen by the request is not overridden.
+	explicitHost := []string{"-headers", "X-Test: 1\r\nHost: edge.example.test\r\n"}
+	if got := strings.Join(httpOut.ffmpegOutputOptions(explicitHost), " "); got != "-max_redirects 0" {
+		t.Errorf("https output options with an explicit Host = %q, want only the redirect refusal", got)
+	}
+	explicitHostNoSpace := []string{"-headers", "X-Test: 1\r\nHost:edge.example.test\r\n"}
+	if got := strings.Join(httpOut.ffmpegOutputOptions(explicitHostNoSpace), " "); got != "-max_redirects 0" {
+		t.Errorf("https output options with a compact Host = %q, want only the redirect refusal", got)
+	}
+	// Headers set before the last input belong to the input, not the output.
+	inputHeaders := []string{"-headers", "X-Input: 1\r\n", "-i", "https://input.example.test/live"}
+	if got := strings.Join(httpOut.ffmpegOutputOptions(inputHeaders), " "); got != wantHost {
+		t.Errorf("https output options with input-side headers = %q, want %q", got, wantHost)
+	}
+
+	rtmpOut := jobOutput{target: "rtmp://stream.example.test:1935/live/key"}
+	if got := strings.Join(rtmpOut.ffmpegOutputOptions(nil), " "); got != "-rtmp_tcurl rtmp://stream.example.test:1935/live" {
+		t.Errorf("rtmp output options = %q, want the requested host in tcUrl", got)
+	}
+
+	instanceOut := jobOutput{target: "rtmp://stream.example.test:1935/live/instance/key"}
+	if got := strings.Join(instanceOut.ffmpegOutputOptions(nil), " "); got != "-rtmp_tcurl rtmp://stream.example.test:1935/live/instance" {
+		t.Errorf("rtmp instance output options = %q, want app live/instance in tcUrl", got)
+	}
+
+	explicit := []string{"-rtmp_tcurl", "rtmp://explicit.example.test/app"}
+	if got := rtmpOut.ffmpegOutputOptions(explicit); got != nil {
+		t.Errorf("explicit -rtmp_tcurl was duplicated: %q", got)
+	}
+
+	inputOnly := []string{"-rtmp_tcurl", "rtmp://source.example.test/live", "-i", "rtmp://source.example.test/live"}
+	if got := strings.Join(rtmpOut.ffmpegOutputOptions(inputOnly), " "); got != "-rtmp_tcurl rtmp://stream.example.test:1935/live" {
+		t.Errorf("input-side -rtmp_tcurl suppressed the output default: %q", got)
+	}
+
+	appOverride := []string{"-rtmp_app", "live2"}
+	if got := strings.Join(rtmpOut.ffmpegOutputOptions(appOverride), " "); got != "-rtmp_tcurl rtmp://stream.example.test:1935/live2" {
+		t.Errorf("rtmp output options with -rtmp_app = %q, want app live2", got)
+	}
+
+	// Plain RTSP keeps the request's transport choice: the control relay
+	// rewrites SETUP so negotiated UDP media still lands on the judged IP.
+	rtspOut := jobOutput{target: "rtsp://stream.example.test:8554/live"}
+	if got := rtspOut.ffmpegOutputOptions([]string{"-rtsp_transport", "udp"}); got != nil {
+		t.Errorf("explicit RTSP UDP was overridden: %q", got)
+	}
+	if got := rtspOut.ffmpegOutputOptions(nil); got != nil {
+		t.Errorf("RTSP output options = %q, want the request's default transport", got)
+	}
+	// TLS hides SETUP from the relay, so encrypted RTSP keeps interleaved TCP.
+	rtspsOut := jobOutput{target: "rtsps://stream.example.test:322/live"}
+	if got := strings.Join(rtspsOut.ffmpegOutputOptions(nil), " "); got != "-rtsp_transport tcp" {
+		t.Errorf("rtsps output options = %q, want forced TCP interleaved", got)
+	}
+	if got := rtspsOut.ffmpegOutputOptions([]string{"-rtsp_transport", "udp"}); got != nil {
+		t.Errorf("explicit rtsps transport was duplicated: %q", got)
+	}
+	if err := rtspsOut.pushOptionError([]string{"-rtsp_transport", "udp"}); err == nil {
+		t.Error("rtsps explicit UDP must fail closed instead of leaving the judged set")
+	}
+	if err := rtspsOut.pushOptionError([]string{"-rtsp_transport", "tcp"}); err != nil {
+		t.Errorf("rtsps explicit TCP was refused: %v", err)
+	}
+	if err := rtspOut.pushOptionError([]string{"-rtsp_transport", "udp"}); err != nil {
+		t.Errorf("plain RTSP explicit UDP was refused: %v", err)
+	}
+
+	tcpOut := jobOutput{target: "tcp://stream.example.test:9000/live"}
+	if got := tcpOut.ffmpegOutputOptions(nil); got != nil {
+		t.Errorf("tcp output options = %q, want none", got)
+	}
+}
+
+// TestRTMPAppFromPath mirrors the native app/playpath split: the segment
+// before the last slash is part of the app, while a colon marks a playpath.
+func TestRTMPAppFromPath(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/live/key", "live"},
+		{"/live/instance/key", "live/instance"},
+		{"/live/instance", "live"},
+		{"/live/instance/key/", "live/instance"},
+		{"/live/instance:key", "live"},
+		{"/live/instance/key:foo", "live/instance"},
+		{"/live/", "live"},
+		{"/key", "key"},
+		{"/onnection", "onnection"},
+		{"/ondemand/movie", "ondemand"},
+		{"/app?token=x&slist=stream", "app?token=x&slist=stream"},
+		{"", ""},
+	} {
+		if got := rtmpAppFromPath(tc.path); got != tc.want {
+			t.Errorf("rtmpAppFromPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestJobOutputRequestHost(t *testing.T) {
+	out := jobOutput{target: "rtmpt://tc15-rtmpt-host.test:8080/live/key"}
+	if got := out.requestHost(); got != "tc15-rtmpt-host.test:8080" {
+		t.Fatalf("requestHost = %q", got)
 	}
 }
 
