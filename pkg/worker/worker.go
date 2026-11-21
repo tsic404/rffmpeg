@@ -1204,12 +1204,6 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		defer execCancel()
 	}
 
-	// This attempt launches a fresh ffmpeg process: re-base the ETA baseline
-	// before any of its stderr reaches the parser. Retries report the same
-	// boundary through ExecuteWithRetry.
-	progressRouter.StartAttempt()
-
-	// Execute with appropriate handlers
 	var result ExecResult
 	var stdoutHandler StdoutHandler
 	var stdoutBatcher *StdoutBatcher
@@ -1218,12 +1212,190 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		// is also passed to ExecuteWithRetry so retried attempts keep streaming.
 		stdoutBatcher = NewStdoutBatcher(job.ID, w.client, DefaultStdoutBatcherConfig())
 		defer stdoutBatcher.Close()
-
 		stdoutHandler = stdoutBatcher.StdoutHandler()
-		result = w.executor.ExecuteWithHandlers(execCtx, args, stdoutHandler, progressRouter.Handler())
+	}
+
+	networkOutput := plannedOutput.form == pathutil.OutputTargetProtocolAddress
+
+	// C-129: a push connection either leaves through a worker relay/proxy that
+	// dials the judged address, or — for RTSP UDP — the relay rewrites the
+	// SETUP reply so ffmpeg's RTP/RTCP sockets use the judged IP literal. In
+	// both forms the judged address is the only destination. Whether a dial
+	// established and which address it reached are worker observations, never
+	// inferences from ffmpeg's exit status, progress stream or log text. No
+	// pre-flight probe exists: the relay's dial is the real connection, so a
+	// single-accept receiver keeps its only accept.
+	execArgs := args
+	pushArgs := args
+	pushMode := pushTransportTCP
+	var pushProxy *judgedHTTPProxy
+	if networkOutput && len(plannedOutput.addresses) > 0 {
+		if optionErr := plannedOutput.pushOptionError(args); optionErr != nil {
+			jobFailed = true
+			w.reportInfraFailure(job.ID, 1, optionErr.Error())
+			return
+		}
+		pushMode = plannedOutput.pushTransport()
+		if pushMode == pushTransportProxy {
+			var proxyErr error
+			pushProxy, proxyErr = startJudgedHTTPProxy(plannedOutput.addresses, plannedOutput.requestHost())
+			if proxyErr != nil {
+				jobFailed = true
+				w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to start push proxy: %v", proxyErr))
+				return
+			}
+			defer pushProxy.Close()
+		}
+	}
+
+	// Every attempt launches a fresh ffmpeg process: re-base the ETA baseline
+	// before any of its stderr reaches the parser. Retries report the same
+	// boundary through ExecuteWithRetry.
+	execute := func(attemptCtx context.Context, attemptArgs []string) ExecResult {
+		progressRouter.StartAttempt()
+		if job.StreamingOutput {
+			return w.executor.ExecuteWithHandlers(attemptCtx, attemptArgs, stdoutHandler, progressRouter.Handler())
+		}
+		return w.executor.ExecuteWithStderrHandler(attemptCtx, attemptArgs, progressRouter.Handler())
+	}
+	var pushAttempted, pushEstablished bool
+	if networkOutput && len(plannedOutput.addresses) > 0 {
+		for attempt, addr := range plannedOutput.addresses {
+			var observer pushDialObserver
+			var attemptClose func()
+			var target string
+			var targetErr error
+			switch pushMode {
+			case pushTransportProxy:
+				judged, hostErr := plannedOutput.judgedHostPort(addr)
+				if hostErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, hostErr.Error())
+					return
+				}
+				pushProxy.BeginAttempt()
+				pushProxy.SetAttemptTarget(judged)
+				observer = pushProxy
+				// The URL keeps the request host: the proxy dials the judged
+				// address, while TLS SNI, certificate verification and HTTP
+				// Host all see the name the request used.
+				target = plannedOutput.target
+			case pushTransportUDP:
+				if plannedOutput.isRTP() {
+					rtpPort, rtcpPort, portErr := plannedOutput.rtpPorts()
+					if portErr != nil {
+						jobFailed = true
+						w.reportInfraFailure(job.ID, 1, portErr.Error())
+						return
+					}
+					relays, relayErr := startJudgedRTPRelays(addr.String(), rtpPort, rtcpPort)
+					if relayErr != nil {
+						jobFailed = true
+						w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to start RTP/RTCP relays: %v", relayErr))
+						return
+					}
+					defer relays.Close()
+					attemptClose = relays.Close
+					observer = relays
+					target, targetErr = plannedOutput.rtpTargetAtHost(relays.rtp.Addr(), relays.rtcp.Addr())
+					break
+				}
+				judged, hostErr := plannedOutput.judgedHostPort(addr)
+				if hostErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, hostErr.Error())
+					return
+				}
+				relay, relayErr := startJudgedUDPRelay(judged, plannedOutput.srtHandshake())
+				if relayErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to start push relay: %v", relayErr))
+					return
+				}
+				defer relay.Close()
+				attemptClose = relay.Close
+				observer = relay
+				target, targetErr = plannedOutput.targetAtHost(relay.Addr())
+			case pushTransportRTSP:
+				judged, hostErr := plannedOutput.judgedHostPort(addr)
+				if hostErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, hostErr.Error())
+					return
+				}
+				relay, relayErr := startJudgedRTSPRelay(judged, addr)
+				if relayErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to start RTSP relay: %v", relayErr))
+					return
+				}
+				defer relay.Close()
+				attemptClose = relay.Close
+				observer = relay
+				target, targetErr = plannedOutput.targetAtHost(relay.Addr())
+			case pushTransportDirect:
+				target, targetErr = plannedOutput.targetAt(addr)
+			default:
+				judged, hostErr := plannedOutput.judgedHostPort(addr)
+				if hostErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, hostErr.Error())
+					return
+				}
+				relay, relayErr := startJudgedTCPRelay(judged)
+				if relayErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to start push relay: %v", relayErr))
+					return
+				}
+				defer relay.Close()
+				attemptClose = relay.Close
+				observer = relay
+				target, targetErr = plannedOutput.targetAtHost(relay.Addr())
+			}
+			if targetErr != nil {
+				jobFailed = true
+				w.reportInfraFailure(job.ID, 1, targetErr.Error())
+				return
+			}
+			options := plannedOutput.ffmpegOutputOptions(args)
+			replaced, ok := rewriteOutputTargetArg(pushArgs, plannedOutput.target, target, options)
+			if !ok {
+				jobFailed = true
+				w.reportInfraFailure(job.ID, 1,
+					fmt.Sprintf("push target %q is not present in the ffmpeg argument list", plannedOutput.target))
+				return
+			}
+			attemptEnv := []string{}
+			if pushProxy != nil {
+				attemptEnv = append(attemptEnv, "http_proxy="+pushProxy.URL(), "no_proxy=")
+			}
+			log.Printf("Job %s: push attempt %d uses judged address %s", job.ID, attempt+1, addr)
+			result = execute(WithExecEnv(execCtx, attemptEnv), replaced)
+			execArgs = replaced
+			if observer != nil {
+				attempted, established := observer.Observed()
+				pushAttempted = pushAttempted || attempted
+				pushEstablished = pushEstablished || established
+			}
+			// Release the attempt's listener before a fallback starts: a relay
+			// left open could otherwise forward queued bytes to the first
+			// address while the next attempt sends the same media again.
+			if attemptClose != nil {
+				attemptClose()
+				attemptClose = nil
+			}
+			if attempt+1 >= len(plannedOutput.addresses) || jobCtx.Err() != nil || result.IsTimeout {
+				break
+			}
+			if pushMode == pushTransportDirect || observer == nil || !shouldRetryPush(observer) {
+				break
+			}
+			log.Printf("Job %s: judged address %s was unreachable; trying %s",
+				job.ID, addr, plannedOutput.addresses[attempt+1])
+		}
 	} else {
-		// Normal mode: stdout goes to file
-		result = w.executor.ExecuteWithStderrHandler(execCtx, args, progressRouter.Handler())
+		result = execute(execCtx, execArgs)
 	}
 
 	// Check for context cancellation
@@ -1239,11 +1411,6 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		jobFailed = true
 		return
 	}
-
-	// A protocol address target does not produce a local file, so the file
-	// existence/size validation and the empty-output heuristics below do not
-	// apply to it (C-125 / C-129).
-	networkOutput := plannedOutput.form == pathutil.OutputTargetProtocolAddress
 
 	// Validate output file for non-streaming jobs: FFmpeg may exit 0 but
 	// produce a 0-byte output (e.g., VAAPI hw encoder falls back to a64multi
@@ -1286,6 +1453,21 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	}
 
+	// AC-61: a push whose every judged address failed to establish a
+	// connection is an FFMPEG_ERROR. The relay/proxy observed each dial, so
+	// ClassifyFailure cannot read connection text as an input-unreachable
+	// failure and no exit code or progress echo participates in the decision.
+	pushAllUnreachable := networkOutput && len(plannedOutput.addresses) > 0 &&
+		result.Error != nil && pushAttempted && !pushEstablished
+	if pushAllUnreachable {
+		jobFailed = true
+		errMsg := fmt.Sprintf("push target %s: all judged addresses failed before the connection was established",
+			plannedOutput.target)
+		w.reportFailureWithType(job.ID, result.ExitCode, errMsg,
+			string(protocol.FailureFFmpegError), result.Stderr, batcher.FlushAndWait)
+		return
+	}
+
 	// Handle execution result
 	if result.Error != nil {
 		log.Printf("Job %s failed: %v", job.ID, result.Error)
@@ -1314,7 +1496,11 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// the same path the retry attempts write to — the staged path —
 			// so on success the publish step below moves the final artifacts
 			// into place exactly once.
-			retryResult := w.retryExecutor.ExecuteWithRetry(execCtx, args, executionOutputPath, networkOutput, stdoutHandler, progressRouter.Handler(), progressRouter.StartAttempt)
+			retryCtx := execCtx
+			if networkOutput && len(plannedOutput.addresses) > 0 && pushProxy != nil {
+				retryCtx = WithExecEnv(execCtx, []string{"http_proxy=" + pushProxy.URL(), "no_proxy="})
+			}
+			retryResult := w.retryExecutor.ExecuteWithRetry(retryCtx, execArgs, executionOutputPath, networkOutput, stdoutHandler, progressRouter.Handler(), progressRouter.StartAttempt)
 
 			if retryResult.Success {
 				// Retry succeeded — use the final result
