@@ -9,6 +9,10 @@
 # - 吞吐注入把 slow-node 的上报吞吐压到 2%，两个 worker 都过 warmup 门槛后，
 #   比值口径必然命中；清除后的重新驱逐仍由同一开关驱动。
 # - 驱逐后先排空队列再重启，避免重启把在跑作业重置回 pending、干扰后续落点判定。
+# - 驱逐标记的保持判据是「窗口外」（C-118）：排空后必须等 slow-node 连续两次
+#   零吞吐心跳、退出中位数样本池，再重启。仍在池内时，作业结束后的完成样本可能
+#   与 fast-node 衰减后的 EWMA 构成一次合法的窗口内恢复，标记会在重启前消失，
+#   让重启断言变成假失败；样本池不足两个样本后不再有恢复判定。
 # - 重启后 evicted worker 的心跳与拉取都被拒（C-79），它不会重新注册；另一个
 #   worker 会自己回到池子。此时提交一条长作业：慢节点还处于驱逐，唯一可调度的
 #   fast-node 必然接住它，从而在「清除后新作业落点」阶段占住自己的唯一槽位。
@@ -83,8 +87,10 @@ for w in data["workers"]:
         "id": w["id"],
         "evicted": w.get("evicted"),
         "status": w.get("status"),
+        "last_heartbeat": w.get("last_heartbeat"),
         "completed": health.get("completed_jobs", 0),
         "jobs_per_sec": health.get("jobs_per_sec", 0),
+        "ewma": health.get("ewma_jobs_per_sec", 0),
         "active": len(health.get("active_jobs") or []),
     }
 print(json.dumps(out))
@@ -146,6 +152,34 @@ recovered_rows() {
 	audit_rows "SELECT COUNT(*) FROM worker_eviction_events WHERE worker_id = ? AND event_type = 'recovered'" "$1"
 }
 
+recovery_audit_seq() {
+	audit_rows "SELECT COALESCE(MAX(rowid), 0) FROM worker_eviction_events WHERE worker_id = ? AND event_type = 'recovered'" "$1"
+}
+
+drain_inflight() {
+	local budget="$1"
+	local deadline=$((SECONDS + budget))
+	until [[ "$(inflight_jobs)" == "0" ]]; do
+		(( SECONDS < deadline )) || return 1
+		sleep 1
+	done
+}
+
+dump_restart_state() {
+	local label="$1" stats="$2"
+	{
+		echo "=== $label ==="
+		echo "--- panel ---"
+		printf '%s\n' "$stats"
+		echo "--- workers ---"
+		audit_rows "SELECT id, name, status, evicted, evicted_at, last_heartbeat FROM workers ORDER BY created_at" || true
+		echo "--- eviction events (slow-node) ---"
+		audit_rows "SELECT timestamp, event_type, current_throughput, cluster_median, decision_reason FROM worker_eviction_events WHERE worker_id = ? ORDER BY timestamp" "$SLOW_ID" || true
+		echo "--- server log tail ---"
+		tail -30 "$SERVER_LOG" || true
+	} >&2
+}
+
 pump_until_evicted() {
 	local target="$1" budget="$2"
 	local deadline=$((SECONDS + budget)) stats n=0
@@ -171,6 +205,113 @@ sys.exit(0 if target.get("evicted") is True and peer.get("evicted") is False els
 	done
 }
 
+# wait_slow_out_of_sample_pool blocks until slow-node has reported two
+# consecutive zero-throughput heartbeats with no active job and no completion
+# count change. At that point it is out of the median sample pool (C-82), so the
+# health monitor cannot run a recovery judgement on it (C-118). A legitimate
+# in-window recovery is handled by re-pumping only when a recovery audit row
+# appears after the last observation of the mark. The heartbeat boundary is
+# updated before that decision, so the second zero sample makes any loss
+# out-of-window; historical, unaudited and out-of-pool losses all fail.
+wait_slow_out_of_sample_pool() {
+	local budget="$1"
+	local deadline=$((SECONDS + budget))
+	local stats="" hb="" jps="" active="" completed="" baseline_completed=""
+	local zero_hbs=0 last_hb=""
+	local baseline_recovery_seq="" seq_before="" seq_after=""
+	baseline_recovery_seq="$(recovery_audit_seq "$SLOW_ID" 2>/dev/null || true)"
+	if [[ ! "$baseline_recovery_seq" =~ ^[0-9]+$ ]]; then
+		echo "FAIL: the recovery audit sequence was not readable before the sample-pool wait" >&2
+		return 1
+	fi
+	while :; do
+		seq_before="$(recovery_audit_seq "$SLOW_ID" 2>/dev/null || true)"
+		if [[ ! "$seq_before" =~ ^[0-9]+$ ]]; then
+			echo "FAIL: the recovery audit sequence was not readable while waiting for slow-node to leave the median sample pool" >&2
+			return 1
+		fi
+		stats="$(worker_stats 2>/dev/null || true)"
+		if [[ -z "$stats" ]]; then
+			(( SECONDS < deadline )) || {
+				echo "FAIL: the workers panel did not answer while waiting for slow-node to leave the median sample pool" >&2
+				return 1
+			}
+			sleep 0.5
+			continue
+		fi
+		if [[ -z "$(panel_field "$stats" slow-node id)" ]]; then
+			dump_restart_state "the slow-node row disappeared while waiting for it to leave the median sample pool" "$stats"
+			echo "FAIL: the slow-node row disappeared while waiting for it to leave the median sample pool" >&2
+			return 1
+		fi
+		hb="$(panel_field "$stats" slow-node last_heartbeat)"
+		jps="$(panel_field "$stats" slow-node jobs_per_sec)"
+		active="$(panel_field "$stats" slow-node active)"
+		completed="$(panel_field "$stats" slow-node completed)"
+		if [[ "$active" == "0" ]] &&
+			python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) == 0 else 1)' "$jps"; then
+			if [[ -z "$baseline_completed" || "$completed" != "$baseline_completed" ]]; then
+				# A late completion may still produce one non-zero throughput
+				# sample on its next heartbeat; restart the observation.
+				baseline_completed="$completed"
+				last_hb="$hb"
+				zero_hbs=1
+			elif [[ "$hb" != "$last_hb" ]]; then
+				last_hb="$hb"
+				zero_hbs=$((zero_hbs + 1))
+			fi
+		else
+			baseline_completed="" last_hb="" zero_hbs=0
+		fi
+		if [[ "$(panel_field "$stats" slow-node evicted)" != "True" ]]; then
+			seq_after="$(recovery_audit_seq "$SLOW_ID" 2>/dev/null || true)"
+			if [[ ! "$seq_after" =~ ^[0-9]+$ ]]; then
+				echo "FAIL: the recovery audit sequence was not readable after the eviction mark disappeared" >&2
+				return 1
+			fi
+			if (( zero_hbs < 2 )) && (( seq_after > baseline_recovery_seq )); then
+				echo "slow-node recovered in-window with a new audit row (seq ${baseline_recovery_seq}->${seq_after}); re-pumping to re-establish the mark" >&2
+				pump_until_evicted slow-node 240 || return 1
+				drain_inflight 180 || return 1
+				deadline=$((SECONDS + budget))
+				baseline_completed="" last_hb="" zero_hbs=0
+				baseline_recovery_seq="$seq_after"
+				continue
+			fi
+			dump_restart_state "the eviction mark disappeared before slow-node left the median sample pool" "$stats"
+			if (( zero_hbs >= 2 )); then
+				echo "FAIL: the eviction mark disappeared after slow-node left the median sample pool" >&2
+			else
+				echo "FAIL: the eviction mark disappeared without a new recovery audit (seq ${baseline_recovery_seq}->${seq_after})" >&2
+			fi
+			return 1
+		fi
+		baseline_recovery_seq="$seq_before"
+		if (( zero_hbs >= 2 )); then
+			# One health tick after the second zero sample proves the pool
+			# has fewer than two samples; no recovery judgement can run.
+			sleep 2.5
+			stats="$(worker_stats 2>/dev/null || true)"
+			if [[ -z "$stats" ]]; then
+				echo "FAIL: the workers panel did not answer after slow-node left the median sample pool" >&2
+				return 1
+			fi
+			if [[ "$(panel_field "$stats" slow-node evicted)" != "True" ]]; then
+				dump_restart_state "the eviction mark disappeared after slow-node left the median sample pool" "$stats"
+				echo "FAIL: the eviction mark did not survive the health tick after slow-node left the median sample pool" >&2
+				return 1
+			fi
+			echo "slow-node is out of the median sample pool (evicted=True, active=0, jobs_per_sec=0)" >&2
+			return 0
+		fi
+		(( SECONDS < deadline )) || {
+			dump_restart_state "slow-node did not leave the median sample pool within ${budget}s" "$stats"
+			return 1
+		}
+		sleep 0.25
+	done
+}
+
 # Phase 1: drive the slow worker out of the scheduling pool.
 pump_until_evicted slow-node 240 || fail "slow-node was never evicted"
 STATS="$(worker_stats)"
@@ -181,18 +322,42 @@ PRE_COMPLETED="$(panel_field "$STATS" slow-node completed)"
 
 # Phase 2: drain the pump queue before the restart so the restarted server has
 # no inherited backlog; the hold job below is submitted only after the restart.
-deadline=$((SECONDS + 180))
-until [[ "$(inflight_jobs)" == "0" ]]; do
-	(( SECONDS < deadline )) || fail "pump jobs never drained before the restart"
-	sleep 1
-done
+drain_inflight 180 || fail "pump jobs never drained before the restart"
+
+# The eviction mark must be tested out-of-window (C-118): while slow-node is
+# still in the median sample pool, a completion burst can legitimately recover
+# it, and the restart assertion would misread that as a restart loss. Wait for
+# two zero-throughput heartbeats with no active job first.
+wait_slow_out_of_sample_pool 120 ||
+	fail "could not establish the out-of-window eviction precondition"
+STATS="$(worker_stats)"
+[[ "$(panel_field "$STATS" slow-node evicted)" == "True" ]] ||
+	fail "the eviction mark was not set immediately before the restart"
+AUDIT_PRE="$(recovered_rows "$SLOW_ID")"
 
 # Phase 3: the mark must survive a Server restart — and no automatic recovery may
 # run while it does. The restarted server has an empty state table, so the evicted
-# worker cannot produce a recovery sample; its row must still carry the mark.
+# worker cannot produce a recovery sample; its row must still carry the mark. The
+# worker has also left the pre-restart sample pool, so the old server cannot judge
+# it during the restart window either.
 stop_server
 start_server
 wait_server_ready
+
+# Wait for the slow-node row to reappear in the panel. A missing row and a false
+# mark are different failures; report which one happened.
+deadline=$((SECONDS + 30))
+until stats="$(worker_stats 2>/dev/null)" &&
+	python3 -c '
+import json, sys
+sys.exit(0 if "slow-node" in json.loads(sys.argv[1])["workers"] else 1)
+' "$stats"; do
+	(( SECONDS < deadline )) || {
+		dump_restart_state "the slow-node row disappeared after the restart" "$stats"
+		fail "the slow-node row disappeared after the Server restart"
+	}
+	sleep 0.25
+done
 
 # The peer must come back online before it can hold a slot; the evicted worker
 # must not (C-79 keeps it out until the manual clear).
@@ -205,15 +370,27 @@ sys.exit(0 if w.get("status") != "offline" else 1)
 	(( SECONDS < deadline )) || fail "fast-node never re-registered after the restart"
 done
 
-# Two health-check ticks plus one heartbeat period is the window in which an
-# automatic clear would have to show up if it existed.
-sleep 8
-STATS="$(worker_stats)"
-[[ "$(panel_field "$STATS" slow-node evicted)" == "True" ]] ||
-	fail "the eviction mark did not survive the Server restart"
+# Observe continuously for at least three health-check ticks (2s each) plus one
+# heartbeat period (2s). A single delayed read could miss a transient clear.
+OBSERVE_START=$SECONDS
+while (( SECONDS - OBSERVE_START < 12 )); do
+	STATS="$(worker_stats 2>/dev/null || true)"
+	[[ -n "$STATS" ]] || { sleep 0.5; continue; }
+	if [[ "$(panel_field "$STATS" slow-node evicted)" != "True" ]]; then
+		dump_restart_state "the eviction mark did not survive the restart observation window" "$STATS"
+		fail "the eviction mark did not survive the Server restart"
+	fi
+	sleep 0.5
+done
+STATS="$(worker_stats 2>/dev/null || true)"
+[[ -n "$STATS" && "$(panel_field "$STATS" slow-node evicted)" == "True" ]] ||
+	{
+		dump_restart_state "the eviction mark was not readable at the end of the restart window" "$STATS"
+		fail "the eviction mark did not survive the Server restart"
+	}
 AUDIT_BEFORE="$(recovered_rows "$SLOW_ID")"
-[[ "$AUDIT_BEFORE" == "0" ]] ||
-	fail "an automatic recovery was audited while the mark was supposed to hold ($AUDIT_BEFORE)"
+[[ "$AUDIT_BEFORE" == "$AUDIT_PRE" ]] ||
+	fail "an automatic recovery was audited during the restart window ($AUDIT_PRE -> $AUDIT_BEFORE)"
 
 # Phase 4: park a long job on the only schedulable worker (fast-node) so its
 # single slot stays occupied through the post-clear placement check. The evicted
