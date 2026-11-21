@@ -410,7 +410,7 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 		var err error
 		if protocol.IsTerminalStatus(req.Status) {
 
-			err = h.db.UpdateJobTerminalStatusWithOwnerAndCache(jobID, workerID, req.Status, exitCode, errMsg, failureType, failureDetails, req.Cached)
+			err = h.db.UpdateJobTerminalStatusWithOwnerAndConnections(jobID, workerID, req.Status, exitCode, errMsg, failureType, failureDetails, encodePushConnections(req.PushConnections), req.Cached)
 		} else {
 
 			err = h.db.UpdateJobRunningStatusWithOwner(jobID, workerID, exitCode, errMsg, failureType, failureDetails)
@@ -566,6 +566,7 @@ func (h *Handler) jobRetryCounts(jobIDs []string) map[string]int {
 // map (lookup failure) leaves the count at its zero value.
 func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map[string]int) protocol.JobInfo {
 	var inputFiles, args, outputFiles, directPaths []string
+	var pushConnections []protocol.PushConnection
 	if err := json.Unmarshal([]byte(job.InputFiles), &inputFiles); err != nil {
 		log.Printf("Failed to unmarshal input files for job %s: %v", job.ID, err)
 	}
@@ -577,6 +578,11 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map
 	}
 	if err := json.Unmarshal([]byte(job.DirectPaths), &directPaths); err != nil {
 		log.Printf("Failed to unmarshal direct paths for job %s: %v", job.ID, err)
+	}
+	if job.PushConnections != "" {
+		if err := json.Unmarshal([]byte(job.PushConnections), &pushConnections); err != nil {
+			log.Printf("Failed to unmarshal push connections for job %s: %v", job.ID, err)
+		}
 	}
 
 	info := protocol.JobInfo{
@@ -593,6 +599,7 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map
 		FailureDetails:  job.FailureDetails,
 		Retryable:       protocol.FailureType(job.FailureType).Retryable(),
 		DirectPaths:     directPaths,
+		PushConnections: pushConnections,
 		ProgressPercent: job.ProgressPercent,
 		EtaSeconds:      job.EtaSeconds,
 		CreatedAt:       job.CreatedAt,
@@ -638,6 +645,22 @@ func (h *Handler) dbJobToJobInfo(job *db.Job, noLiveWorker bool, retryCounts map
 	}
 
 	return info
+}
+
+// encodePushConnections renders a reported connection list for storage. An
+// empty list yields nil rather than "[]": the terminal write takes a nil list
+// as "not reported" and keeps whatever an earlier report stored.
+func encodePushConnections(conns []protocol.PushConnection) *string {
+	if len(conns) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(conns)
+	if err != nil {
+		log.Printf("Failed to marshal push connections: %v", err)
+		return nil
+	}
+	value := string(encoded)
+	return &value
 }
 
 // GetJobLogWS handles WebSocket connections for real-time job log streaming

@@ -365,15 +365,20 @@ func (c *Client) UpdateJob(jobID string, status protocol.JobStatus, exitCode int
 }
 
 // UpdateJobWithFailure updates the job status with optional failure classification.
-func (c *Client) UpdateJobWithFailure(jobID string, status protocol.JobStatus, exitCode int, errMsg string, cached bool, failureType, failureDetails string) error {
+//
+// pushConnections is the optional terminal connection list of a push job. It is
+// variadic so reports that carry no list send none at all: the server keeps the
+// stored list instead of clearing it.
+func (c *Client) UpdateJobWithFailure(jobID string, status protocol.JobStatus, exitCode int, errMsg string, cached bool, failureType, failureDetails string, pushConnections ...protocol.PushConnection) error {
 	req := protocol.JobUpdateRequest{
-		Status:         status,
-		ExitCode:       exitCode,
-		Error:          errMsg,
-		Cached:         cached,
-		FailureType:    failureType,
-		FailureDetails: failureDetails,
-		WorkerID:       c.getWorkerID(), // ownership guard: server rejects stale reports from a worker that lost the job
+		Status:          status,
+		ExitCode:        exitCode,
+		Error:           errMsg,
+		Cached:          cached,
+		FailureType:     failureType,
+		FailureDetails:  failureDetails,
+		WorkerID:        c.getWorkerID(), // ownership guard: server rejects stale reports from a worker that lost the job
+		PushConnections: pushConnections,
 	}
 
 	url := fmt.Sprintf("%s%s/jobs/%s", c.baseURL, apiSuffix, jobID)

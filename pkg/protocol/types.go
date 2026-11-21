@@ -72,6 +72,20 @@ type JobInfo struct {
 	FinishedAt      *time.Time `json:"finished_at,omitempty"`
 	ProgressPercent float64    `json:"progress_percent,omitempty"` // Current progress 0-100
 	EtaSeconds      int        `json:"eta_seconds,omitempty"`      // Estimated time remaining in seconds
+	// PushConnections records each connection attempt and datagram flow of a
+	// protocol-address output job. File and pass-through targets omit the key.
+	PushConnections []PushConnection `json:"push_connections,omitempty"`
+}
+
+// PushConnection is one connection attempt or one datagram flow of a push
+// job. Family and Purpose only take the defined push connection combinations;
+// Target is address:port with IPv6 addresses bracketed.
+type PushConnection struct {
+	Family  string `json:"family"`
+	Purpose string `json:"purpose"`
+	Target  string `json:"target"`
+	Origin  string `json:"origin"`
+	Result  string `json:"result"`
 }
 
 type JobStatusResponse struct {
@@ -265,6 +279,10 @@ type JobUpdateRequest struct {
 	FailureType    string    `json:"failure_type,omitempty"`    // Machine-readable failure category
 	FailureDetails string    `json:"failure_details,omitempty"` // Human-readable failure details
 	WorkerID       string    `json:"worker_id,omitempty"`       // Reporting worker; terminal updates are rejected unless this still owns the job
+	// PushConnections is the full connection list of a push job, sent with the
+	// terminal update. Omitted by reports that carry no list, so the stored
+	// value survives a non-terminal or list-less report.
+	PushConnections []PushConnection `json:"push_connections,omitempty"`
 }
 
 type JobUpdateResponse struct {

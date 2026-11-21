@@ -2,6 +2,7 @@ package addrpolicy
 
 import (
 	"context"
+	"net/netip"
 	"testing"
 )
 
@@ -90,11 +91,16 @@ func TestCheckOutputTargetFailsClosed(t *testing.T) {
 		"udp://no-such-host.invalid:9000/stream",
 		"udp://:9000/stream",
 	} {
-		if err := CheckOutputTarget(context.Background(), target); err == nil {
+		if _, err := CheckOutputTarget(context.Background(), target); err == nil {
 			t.Errorf("CheckOutputTarget(%q) = nil, want a refusal", target)
 		}
 	}
-	if err := CheckOutputTarget(context.Background(), "udp://10.20.30.40:9000/stream"); err != nil {
+	addrs, err := CheckOutputTarget(context.Background(), "udp://10.20.30.40:9000/stream")
+	if err != nil {
 		t.Errorf("CheckOutputTarget(private address) = %v, want allowed", err)
+	}
+	want := []netip.Addr{netip.MustParseAddr("10.20.30.40")}
+	if len(addrs) != 1 || addrs[0] != want[0] {
+		t.Errorf("CheckOutputTarget(private address) = %v, want %v", addrs, want)
 	}
 }
