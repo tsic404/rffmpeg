@@ -13,6 +13,7 @@ package jobargs
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -85,6 +86,15 @@ var fileValuedOptions = map[string]bool{
 	"hls_subtitle_path":      true,
 	"stats_file":             true,
 	"mbtree_file":            true,
+}
+
+// proxyOptions name a proxy the request may choose (C-140). A proxy is a
+// destination of the push, not a resource the job reads: its value is a
+// protocol address that the execution side judges against the target's address
+// set, so the blanket refusal of protocol addresses in option values does not
+// apply to it. Every local-path rule still does.
+var proxyOptions = map[string]bool{
+	"http_proxy": true,
 }
 
 // filterOptions carry a filter graph. Their values are parsed as graphs, not
@@ -325,7 +335,7 @@ func Check(args []string, p Policy) *Violation {
 			// An option value is not a file position, so only the shapes that
 			// are a filesystem reference in any context are judged here; the
 			// options that do carry a path were handled above.
-			if reason := valueReferenceReason(value, p); reason != "" {
+			if reason := valueReferenceReasonFor(name, value, p); reason != "" {
 				return &Violation{Arg: value, Reason: reason}
 			}
 			i++
@@ -426,6 +436,33 @@ func localPathForm(arg string, p Policy) string {
 		return ""
 	}
 	return "is a local path outside the job workspace"
+}
+
+// valueReferenceReasonFor judges an option value, except that a proxy option
+// may carry a protocol address by design (C-140): that address is a push
+// destination the execution side judges against the target's address set, not
+// a resource the job reads. The other reference shapes are still refused, so a
+// proxy value cannot smuggle a local path through.
+func valueReferenceReasonFor(option, value string, p Policy) string {
+	if proxyOptions[option] && isHTTPProxyURL(value) {
+		return ""
+	}
+	return valueReferenceReason(value, p)
+}
+
+// isHTTPProxyURL reports whether a proxy option names an HTTP(S) proxy
+// endpoint. Only that shape is exempt: any other protocol spelling stays a
+// reference the job may not reach.
+func isHTTPProxyURL(value string) bool {
+	trimmed := strings.Trim(strings.TrimSpace(value), `"'`)
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	return parsed.Host != ""
 }
 
 // valueReferenceReason judges an arbitrary option value: an absolute host path,

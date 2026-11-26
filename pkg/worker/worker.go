@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -87,6 +88,11 @@ type Worker struct {
 	// in-flight jobs so Stop can wait for their upload/cleanup to finish.
 	stopCh chan struct{}
 	jobsWG sync.WaitGroup
+
+	// pushLedgers holds the connection list of a running push job until its
+	// terminal report consumes it (C-134). Keyed by job ID: jobs run
+	// concurrently, so the list cannot live on the Worker itself.
+	pushLedgers sync.Map
 }
 
 // Config holds worker configuration
@@ -1204,12 +1210,6 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		defer execCancel()
 	}
 
-	// This attempt launches a fresh ffmpeg process: re-base the ETA baseline
-	// before any of its stderr reaches the parser. Retries report the same
-	// boundary through ExecuteWithRetry.
-	progressRouter.StartAttempt()
-
-	// Execute with appropriate handlers
 	var result ExecResult
 	var stdoutHandler StdoutHandler
 	var stdoutBatcher *StdoutBatcher
@@ -1218,12 +1218,133 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		// is also passed to ExecuteWithRetry so retried attempts keep streaming.
 		stdoutBatcher = NewStdoutBatcher(job.ID, w.client, DefaultStdoutBatcherConfig())
 		defer stdoutBatcher.Close()
-
 		stdoutHandler = stdoutBatcher.StdoutHandler()
-		result = w.executor.ExecuteWithHandlers(execCtx, args, stdoutHandler, progressRouter.Handler())
+	}
+
+	networkOutput := plannedOutput.form == pathutil.OutputTargetProtocolAddress
+
+	// C-129: a push connection either leaves through a worker relay/proxy that
+	// dials the judged address, or — for RTSP UDP — the relay rewrites the
+	// SETUP reply so ffmpeg's RTP/RTCP sockets use the judged IP literal. In
+	// both forms the judged address is the only destination. Whether a dial
+	// established and which address it reached are worker observations, never
+	// inferences from ffmpeg's exit status, progress stream or log text. No
+	// pre-flight probe exists: the relay's dial is the real connection, so a
+	// single-accept receiver keeps its only accept.
+	execArgs := args
+	pushArgs := args
+	pushMode := pushTransportTCP
+	var pushProxy *judgedHTTPProxy
+	var pushLedger *pushLedger
+	if networkOutput && len(plannedOutput.addresses) > 0 {
+		// C-133/C-138: a protocol family or connection kind outside the C-141
+		// table (and RTSP asking for a transport the table does not list) fails
+		// before any connection, with an empty connection list.
+		if kindErr := plannedOutput.pushKindError(args); kindErr != nil {
+			jobFailed = true
+			w.reportInfraFailure(job.ID, 1, kindErr.Error())
+			return
+		}
+		pushLedger = newPushLedger()
+		w.rememberPushLedger(job.ID, pushLedger)
+		pushMode = plannedOutput.pushTransport()
+		if pushMode == pushTransportProxy {
+			var proxyErr error
+			pushProxy, proxyErr = startJudgedHTTPProxy(plannedOutput.addresses, plannedOutput.requestHost(), pushLedger)
+			if proxyErr != nil {
+				jobFailed = true
+				w.reportInfraFailure(job.ID, 1, fmt.Sprintf("failed to start push proxy: %v", proxyErr))
+				return
+			}
+			defer pushProxy.Close()
+		}
+	}
+
+	// Every attempt launches a fresh ffmpeg process: re-base the ETA baseline
+	// before any of its stderr reaches the parser. Retries report the same
+	// boundary through ExecuteWithRetry.
+	execute := func(attemptCtx context.Context, attemptArgs []string) ExecResult {
+		progressRouter.StartAttempt()
+		if job.StreamingOutput {
+			return w.executor.ExecuteWithHandlers(attemptCtx, attemptArgs, stdoutHandler, progressRouter.Handler())
+		}
+		return w.executor.ExecuteWithStderrHandler(attemptCtx, attemptArgs, progressRouter.Handler())
+	}
+	var lastPushAddr netip.Addr
+	var havePushAddr bool
+	// A skipped attempt never ran ffmpeg: the address needed a destination
+	// outside the judged set. Retrying would not change that, so the retry
+	// path stays off for it.
+	lastPushSkipped := false
+	if networkOutput && len(plannedOutput.addresses) > 0 {
+		for attempt, addr := range plannedOutput.addresses {
+			attemptMark := pushLedger.mark()
+			attemptSetup, setupErr := w.openPushAttempt(plannedOutput, pushMode, addr, pushProxy, pushLedger, args)
+			if setupErr != nil {
+				jobFailed = true
+				w.reportInfraFailure(job.ID, 1, setupErr.Error())
+				return
+			}
+			attemptClose := attemptSetup.close
+			defer attemptClose()
+			options := plannedOutput.ffmpegOutputOptions(args)
+			replaced, ok := rewriteOutputTargetArg(pushArgs, plannedOutput.target, attemptSetup.target, options)
+			if !ok {
+				jobFailed = true
+				w.reportInfraFailure(job.ID, 1,
+					fmt.Sprintf("push target %q is not present in the ffmpeg argument list", plannedOutput.target))
+				return
+			}
+			if attemptSetup.rewriteArgs != nil {
+				replaced = attemptSetup.rewriteArgs(replaced)
+			}
+			// A push may only use a proxy the request named (C-140), so an
+			// inherited proxy configuration is cleared before every execution
+			// of it; the judged proxy, when this transport uses one, is then
+			// set explicitly.
+			attemptEnv := []string(nil)
+			if networkOutput {
+				attemptEnv = clearedPushProxyEnv()
+			}
+			if pushProxy != nil {
+				attemptEnv = append(attemptEnv, "http_proxy="+pushProxy.URL(), "no_proxy=")
+			}
+			log.Printf("Job %s: push attempt %d uses judged address %s", job.ID, attempt+1, addr)
+			if attemptSetup.skipExecution {
+				// The address needs a destination outside the judged set, so
+				// no execution runs for it. The recorded blocked element is
+				// what makes it unusable (C-140, C-137).
+				result = ExecResult{Error: fmt.Errorf("push target %s needs a connection outside the judged address set", plannedOutput.target), ExitCode: 1}
+			} else {
+				result = execute(WithExecEnv(execCtx, attemptEnv), replaced)
+			}
+			execArgs = replaced
+			lastPushAddr, havePushAddr = addr, true
+			lastPushSkipped = attemptSetup.skipExecution
+			if attemptSetup.collect != nil {
+				attemptSetup.collect()
+			}
+			// The address decision reads this attempt's own elements, not a
+			// second aggregation of relay counters (C-135): a session that
+			// connected or a datagram flow that was sent makes the address
+			// usable, and an element that needed a destination outside the
+			// judged set makes it unusable.
+			addressUnusable := pushLedger.attemptedSince(attemptMark) && !pushLedger.usableSince(attemptMark)
+			// Release the attempt's listener before a fallback starts: a relay
+			// left open could otherwise forward queued bytes to the first
+			// address while the next attempt sends the same media again.
+			attemptClose()
+			if attempt+1 >= len(plannedOutput.addresses) || jobCtx.Err() != nil || result.IsTimeout {
+				break
+			}
+			if pushMode == pushTransportDirect || attemptSetup.collect == nil || !addressUnusable {
+				break
+			}
+			log.Printf("Job %s: judged address %s was unreachable; trying %s",
+				job.ID, addr, plannedOutput.addresses[attempt+1])
+		}
 	} else {
-		// Normal mode: stdout goes to file
-		result = w.executor.ExecuteWithStderrHandler(execCtx, args, progressRouter.Handler())
+		result = execute(execCtx, execArgs)
 	}
 
 	// Check for context cancellation
@@ -1239,11 +1360,6 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		jobFailed = true
 		return
 	}
-
-	// A protocol address target does not produce a local file, so the file
-	// existence/size validation and the empty-output heuristics below do not
-	// apply to it (C-125 / C-129).
-	networkOutput := plannedOutput.form == pathutil.OutputTargetProtocolAddress
 
 	// Validate output file for non-streaming jobs: FFmpeg may exit 0 but
 	// produce a 0-byte output (e.g., VAAPI hw encoder falls back to a64multi
@@ -1286,6 +1402,21 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 		}
 	}
 
+	// AC-61: a push whose every judged address turned out unusable is an
+	// FFMPEG_ERROR. The verdict comes from the connection list — the record of
+	// what the worker actually attempted (C-135) — not from an exit code or
+	// progress echo, and not from a second aggregation of relay counters.
+	pushAllUnreachable := networkOutput && len(plannedOutput.addresses) > 0 &&
+		result.Error != nil && pushLedger != nil && pushLedger.attempted() && !pushLedger.usable()
+	if pushAllUnreachable {
+		jobFailed = true
+		errMsg := fmt.Sprintf("push target %s: all judged addresses failed before the connection was established",
+			plannedOutput.target)
+		w.reportFailureWithType(job.ID, result.ExitCode, errMsg,
+			string(protocol.FailureFFmpegError), result.Stderr, batcher.FlushAndWait)
+		return
+	}
+
 	// Handle execution result
 	if result.Error != nil {
 		log.Printf("Job %s failed: %v", job.ID, result.Error)
@@ -1314,7 +1445,41 @@ func (w *Worker) processJob(ctx context.Context, job protocol.JobInfo, cancel co
 			// the same path the retry attempts write to — the staged path —
 			// so on success the publish step below moves the final artifacts
 			// into place exactly once.
-			retryResult := w.retryExecutor.ExecuteWithRetry(execCtx, args, executionOutputPath, networkOutput, stdoutHandler, progressRouter.Handler(), progressRouter.StartAttempt)
+			// The last attempt's listeners are released once its address
+			// decision is made, so its arguments point at a closed loopback
+			// endpoint. A retry re-executes ffmpeg against the same judged
+			// address, so reopen that attempt's relay first; otherwise the
+			// retry dials a dead port and never reaches the receiver.
+			retryArgs := execArgs
+			var retryAttempt *pushAttempt
+			if networkOutput && havePushAddr && !lastPushSkipped && pushMode != pushTransportDirect && pushMode != pushTransportProxy {
+				opened, openErr := w.openPushAttempt(plannedOutput, pushMode, lastPushAddr, pushProxy, pushLedger, args)
+				if openErr != nil {
+					jobFailed = true
+					w.reportInfraFailure(job.ID, 1, openErr.Error())
+					return
+				}
+				retryAttempt = opened
+				defer retryAttempt.close()
+				if replaced, ok := rewriteOutputTargetArg(pushArgs, plannedOutput.target, retryAttempt.target, plannedOutput.ffmpegOutputOptions(args)); ok {
+					retryArgs = replaced
+				}
+				if retryAttempt.rewriteArgs != nil {
+					retryArgs = retryAttempt.rewriteArgs(retryArgs)
+				}
+			}
+			retryCtx := execCtx
+			if networkOutput {
+				retryEnv := clearedPushProxyEnv()
+				if len(plannedOutput.addresses) > 0 && pushProxy != nil {
+					retryEnv = append(retryEnv, "http_proxy="+pushProxy.URL(), "no_proxy=")
+				}
+				retryCtx = WithExecEnv(execCtx, retryEnv)
+			}
+			retryResult := w.retryExecutor.ExecuteWithRetry(retryCtx, retryArgs, executionOutputPath, networkOutput, stdoutHandler, progressRouter.Handler(), progressRouter.StartAttempt)
+			if retryAttempt != nil && retryAttempt.collect != nil {
+				retryAttempt.collect()
+			}
 
 			if retryResult.Success {
 				// Retry succeeded — use the final result
@@ -1443,7 +1608,7 @@ uploadOutput:
 	progressRouter.SendFinal()
 
 	// Report success
-	if err := w.client.UpdateJob(job.ID, protocol.JobStatusCompleted, result.ExitCode, "", cached); err != nil {
+	if err := w.client.UpdateJobWithFailure(job.ID, protocol.JobStatusCompleted, result.ExitCode, "", cached, "", "", w.takePushList(job.ID)...); err != nil {
 		logTerminalReportError(job.ID, "report completed", err)
 	} else {
 		log.Printf("Job %s completed successfully", job.ID)
@@ -1455,7 +1620,7 @@ uploadOutput:
 func (w *Worker) reportJobCancelled(jobID string) {
 	log.Printf("Job %s was cancelled", jobID)
 	// Use -1 for cancelled jobs as the exit code may not be meaningful.
-	if err := w.client.UpdateJob(jobID, protocol.JobStatusCancelled, -1, "Job cancelled", false); err != nil {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusCancelled, -1, "Job cancelled", false, "", "", w.takePushList(jobID)...); err != nil {
 		logTerminalReportError(jobID, "report cancelled", err)
 	}
 }
@@ -1492,7 +1657,7 @@ func (w *Worker) reportFailure(jobID string, exitCode int, errMsg string, cached
 		}
 	}
 	failureType, failureDetails := ClassifyFailure(exitCode, errMsg, errMsg, false, false)
-	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, failureDetails, cached, string(failureType), failureDetails); err != nil {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, failureDetails, cached, string(failureType), failureDetails, w.takePushList(jobID)...); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
 	}
 }
@@ -1516,7 +1681,7 @@ func (w *Worker) reportJobTimeout(jobID string, result ExecResult, flush ...func
 		errMsg = result.Error.Error()
 	}
 	failureType, details := ClassifyFailure(result.ExitCode, result.Stderr, errMsg, true, false)
-	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusTimeout, result.ExitCode, errMsg, false, string(failureType), details); err != nil {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusTimeout, result.ExitCode, errMsg, false, string(failureType), details, w.takePushList(jobID)...); err != nil {
 		logTerminalReportError(jobID, "report timeout", err)
 	}
 }
@@ -1527,7 +1692,7 @@ func (w *Worker) reportJobTimeout(jobID string, result ExecResult, flush ...func
 // it as INPUT_UNREACHABLE etc., so it uses the dedicated INFRA bucket —
 // FFMPEG_ERROR is reserved for actual ffmpeg execution failures.
 func (w *Worker) reportInfraFailure(jobID string, exitCode int, errMsg string) {
-	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, string(protocol.FailureInfra), errMsg); err != nil {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, string(protocol.FailureInfra), errMsg, w.takePushList(jobID)...); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
 	}
 }
@@ -1567,7 +1732,7 @@ func (w *Worker) reportFailureWithType(jobID string, exitCode int, errMsg, failu
 			f()
 		}
 	}
-	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, failureType, failureDetails); err != nil {
+	if err := w.client.UpdateJobWithFailure(jobID, protocol.JobStatusFailed, exitCode, errMsg, false, failureType, failureDetails, w.takePushList(jobID)...); err != nil {
 		logTerminalReportError(jobID, "report failure", err)
 	}
 }

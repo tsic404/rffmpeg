@@ -35,6 +35,50 @@ type ExecResult struct {
 	IsTimeout bool
 }
 
+// execEnvKey carries per-execution environment overrides. A worker may run
+// several jobs concurrently, so protocol helpers such as a judged HTTP proxy
+// cannot live in the process environment.
+type execEnvKey struct{}
+
+// WithExecEnv returns a context whose ffmpeg subprocess receives env in
+// addition to the worker's environment. Values in env replace inherited keys.
+func WithExecEnv(ctx context.Context, env []string) context.Context {
+	if len(env) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, execEnvKey{}, env)
+}
+
+func execEnvFrom(ctx context.Context) []string {
+	env, _ := ctx.Value(execEnvKey{}).([]string)
+	return env
+}
+
+// mergeExecEnv replaces inherited keys with the execution's own values. Go's
+// os/exec passes the slice to execve as-is, and duplicate keys would let the
+// inherited value win in libc's getenv.
+func mergeExecEnv(base, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	replaced := make(map[string]struct{}, len(extra))
+	for _, entry := range extra {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			replaced[key] = struct{}{}
+		}
+	}
+	merged := make([]string, 0, len(base)+len(extra))
+	for _, entry := range base {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			if _, override := replaced[key]; override {
+				continue
+			}
+		}
+		merged = append(merged, entry)
+	}
+	return append(merged, extra...)
+}
+
 // Executor runs ffmpeg commands
 type Executor struct {
 	ffmpegPath  string
@@ -159,6 +203,7 @@ func (e *Executor) ExecuteWithHandlers(ctx context.Context, args []string, stdou
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, e.ffmpegPath, args...)
+	cmd.Env = mergeExecEnv(os.Environ(), execEnvFrom(ctx))
 	// Run ffmpeg with the job workspace as its working directory: a relative
 	// path in the request's argument list then resolves inside the workspace
 	// instead of the worker process' own directory (C-126 / C-127).

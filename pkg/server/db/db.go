@@ -153,7 +153,7 @@ var requiredTables = []tableSpec{
 		"worker_name", "exit_code", "error", "failure_type", "failure_details",
 		"retryable", "auto_hw", "cached", "timeout", "direct_paths",
 		"progress_percent", "eta_seconds", "created_at", "updated_at",
-		"claimed_at", "started_at", "finished_at",
+		"claimed_at", "started_at", "finished_at", "push_connections",
 	}},
 	{name: "files", pk: "id", core: true, columns: []string{
 		"id", "filename", "path", "size", "checksum", "created_at",
@@ -363,6 +363,7 @@ func (d *Database) initTables() error {
 			error TEXT,
 			failure_type TEXT DEFAULT '',
 			failure_details TEXT DEFAULT '',
+			push_connections TEXT DEFAULT '',
 			retryable INTEGER DEFAULT 0,
 			auto_hw INTEGER DEFAULT 0,
 			cached INTEGER DEFAULT 0,
@@ -516,6 +517,7 @@ func (d *Database) initTables() error {
 	for _, stmt := range []string{
 		`ALTER TABLE jobs ADD COLUMN failure_type TEXT DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN failure_details TEXT DEFAULT ''`,
+		`ALTER TABLE jobs ADD COLUMN push_connections TEXT DEFAULT ''`,
 		`ALTER TABLE jobs ADD COLUMN retryable INTEGER DEFAULT 0`,
 		`ALTER TABLE jobs ADD COLUMN timeout INTEGER`,
 		`ALTER TABLE jobs ADD COLUMN claimed_at DATETIME`,

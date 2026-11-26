@@ -291,6 +291,17 @@ func TestCheckStructuredBoundaries(t *testing.T) {
 		{"drawtext text with an unescaped colon", []string{"-i", InputPlaceholder, "-vf", `drawtext=text='Clock: 00:00':fontsize=32`}, false},
 		{"drawtext chapter text with an escaped colon", []string{"-i", InputPlaceholder, "-vf", `drawtext=text='Chapter\: 1':fontsize=32`}, false},
 		{"relative output name", []string{"-i", InputPlaceholder, "-c", "copy", "out.mp4"}, false},
+
+		// A request-named push proxy is a destination of the push, not a
+		// resource the job reads: the execution side judges it against the
+		// target's address set (C-140), so its value may be an HTTP(S)
+		// address. Every other protocol spelling stays refused, and so does
+		// a local path.
+		{"request HTTP proxy", []string{"-i", InputPlaceholder, "-http_proxy", "http://192.0.2.88:3128", "out.mp4"}, false},
+		{"request HTTPS proxy", []string{"-i", InputPlaceholder, "-http_proxy", "https://proxy.example:8443", "out.mp4"}, false},
+		{"request proxy with a file scheme", []string{"-i", InputPlaceholder, "-http_proxy", "file:///etc/passwd", "out.mp4"}, true},
+		{"request proxy with a local path", []string{"-i", InputPlaceholder, "-http_proxy", "/etc/passwd", "out.mp4"}, true},
+		{"protocol address in another option value", []string{"-i", InputPlaceholder, "-user_agent", "http://169.254.169.254/x", "out.mp4"}, true},
 	}
 
 	for _, tc := range cases {
